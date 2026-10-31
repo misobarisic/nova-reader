@@ -8,7 +8,7 @@ export struct SettingRow { key: string, name: string, kind: string, value: strin
 
 component NavButton inherits Rectangle {
     in property <string> label;
-    in property <string> glyph;
+    in property <image> icon;
     in property <bool> active;
     callback clicked;
     min-height: 48px;
@@ -16,7 +16,17 @@ component NavButton inherits Rectangle {
     background: root.active ? #aca0ff18 : touch.has-hover ? #ffffff08 : transparent;
     HorizontalLayout {
         padding-left: 14px; spacing: 12px;
-        Text { text: root.glyph; color: root.active ? #c1b5ff : #84858e; font-size: 20px; width: 24px; vertical-alignment: center; }
+        Rectangle {
+            width: 24px;
+            Image {
+                source: root.icon;
+                width: 22px; height: 22px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                image-fit: contain;
+                colorize: root.active ? #c1b5ff : #84858e;
+            }
+        }
         Text { text: root.label; color: root.active ? #ede8ff : #a9aab3; font-size: 14px; font-weight: root.active ? 600 : 400; vertical-alignment: center; }
     }
     touch := TouchArea { clicked => { root.clicked(); } }
@@ -102,15 +112,14 @@ export component AppWindow inherits Window {
             width: root.navigation-width; background: #131317;
             VerticalLayout {
                 padding: 16px; spacing: 6px;
-                NavButton { label: @tr("Library"); glyph: "▤"; active: root.section == 0; clicked => { root.navigate(0); } }
-                NavButton { label: @tr("Updates"); glyph: "↻"; active: root.section == 1; clicked => { root.navigate(1); } }
-                NavButton { label: @tr("History"); glyph: "◷"; active: root.section == 2; clicked => { root.navigate(2); } }
-                NavButton { label: @tr("Browse"); glyph: "⌕"; active: root.section == 3; clicked => { root.navigate(3); } }
+                NavButton { label: @tr("Library"); icon: @image-url("../../assets/icons/navigation/library.svg"); active: root.section == 0; clicked => { root.navigate(0); } }
+                NavButton { label: @tr("Updates"); icon: @image-url("../../assets/icons/navigation/updates.svg"); active: root.section == 1; clicked => { root.navigate(1); } }
+                NavButton { label: @tr("History"); icon: @image-url("../../assets/icons/navigation/history.svg"); active: root.section == 2; clicked => { root.navigate(2); } }
+                NavButton { label: @tr("Browse"); icon: @image-url("../../assets/icons/navigation/browse.svg"); active: root.section == 3; clicked => { root.navigate(3); } }
                 Rectangle { height: 1px; background: #ffffff0c; }
-                NavButton { label: @tr("Downloads"); glyph: "↓"; active: root.section == 7; clicked => { root.navigate(7); } }
-                NavButton { label: @tr("More"); glyph: "···"; active: root.section == 4; clicked => { root.navigate(4); } }
+                NavButton { label: @tr("Downloads"); icon: @image-url("../../assets/icons/navigation/downloads.svg"); active: root.section == 7; clicked => { root.navigate(7); } }
+                NavButton { label: @tr("More"); icon: @image-url("../../assets/icons/navigation/more.svg"); active: root.section == 4; clicked => { root.navigate(4); } }
                 Rectangle { vertical-stretch: 1; }
-                Text { text: @tr("Read at your own pace."); color: #666671; font-size: 11px; }
                 Text { text: root.app-version + " · GPL-3.0+"; color: #53535e; font-size: 10px; }
             }
         }
@@ -200,7 +209,15 @@ export component AppWindow inherits Window {
                         min-height: 220px;
                         VerticalLayout {
                             alignment: center; spacing: 12px;
-                            Text { text: "▱"; color: #655b83; font-size: 48px; horizontal-alignment: center; }
+                            Rectangle {
+                                height: 56px;
+                                Image {
+                                    source: @image-url("../../assets/icons/navigation/library.svg");
+                                    width: 48px; height: 48px;
+                                    x: (parent.width - self.width) / 2; y: 4px;
+                                    image-fit: contain; colorize: #655b83;
+                                }
+                            }
                             Text { text: root.section == 0 ? @tr("Your next story starts here") : @tr("Nothing here yet"); color: #d0c9de; font-size: 19px; horizontal-alignment: center; }
                             Text { text: root.section == 0 ? @tr("Install a source in Browse, or import a local chapter in More.") : @tr("Try refreshing or choosing another source."); color: #777181; wrap: word-wrap; horizontal-alignment: center; }
                         }

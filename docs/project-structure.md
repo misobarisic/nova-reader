@@ -13,6 +13,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `src/android_documents.rs`, `android/java/dev/misob/nova/reader/ReaderActivity.java` | Android SAF document/tree import, staged backup export and JNI callbacks |
 | `src/updates.rs` | Optional reader application release discovery |
 | `crates/ui` | Slint application window, responsive navigation, reader/page models, application version binding and translated text |
+| `assets/icons/navigation` | Embedded SVG sidebar icons, independent of system font glyph coverage |
 | `crates/reader-domain` | Source-local identities, schema-1 state, library/categories, progress/history/bookmarks, backup/restore |
 | `crates/reader-sources` | Reader v2 ZIP validation, durable registry, typed profile settings, QuickJS host, HTML/URL capabilities and checked source HTTP |
 | `crates/reader-engine` | Dimension probing, bounded PNG/JPEG/WebP decode, display downscale, geometry, resume anchors and decoded cache utility |

@@ -5,6 +5,7 @@ fn main() {
         slint_build::CompilerConfiguration::new()
             .with_include_paths(vec![shared])
             .with_style("fluent-dark".into())
+            .embed_resources(slint_build::EmbedResourcesKind::EmbedFiles)
             .with_default_translation_context(slint_build::DefaultTranslationContext::None),
     )
     .expect("compile Nova Reader UI");
