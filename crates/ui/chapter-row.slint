@@ -1,0 +1,53 @@
+// Compact chapter list requested from the Mihon reference; Nova Kit controls.
+import { Theme, SettingsStyle } from "@NovaUiShared";
+import { ItemRow } from "media-models.slint";
+import { IconAction, ActionButton } from "controls.slint";
+export component ChapterRow inherits Rectangle {
+    in property <ItemRow> chapter;
+    callback picked;
+    callback action(string);
+    height: 80px; min-width: 0px;
+    background: touch.has-hover ? Theme.current.control_hover : transparent;
+    border-radius: Theme.card_corner_radius;
+    accessible-role: button; accessible-label: root.chapter.title;
+    accessible-action-default => { root.picked(); }
+    Rectangle { x: 4px; y: 25px; width: 7px; height: 7px; border-radius: 4px; background: root.chapter.read ? transparent : Theme.current.accent_soft; }
+    VerticalLayout {
+        x: 20px; y: 16px; width: max(1px, root.width - 128px); height: 48px;
+        spacing: 6px; alignment: start;
+        Text { text: root.chapter.title; color: root.chapter.read ? Theme.current.text_muted : Theme.current.text_bright; font-size: 16px; min-width: 0px; overflow: elide; }
+        Text { text: root.chapter.chapter-meta; color: Theme.current.text_secondary; font-size: 12px; min-width: 0px; overflow: elide; }
+    }
+    scope := FocusScope {
+        changed has-focus => { if self.has-focus { SettingsStyle.reveal_control(root.absolute-position.y, root.height, false); } }
+        key-pressed(e) => { if e.text == Key.Menu || (e.text == Key.F10 && e.modifiers.shift) { actions.show(); return accept; } if e.text == Key.Return || e.text == " " { if !e.repeat { root.picked(); } return accept; } return reject; }
+    }
+    touch := TouchArea {
+        private property <bool> held: false;
+        mouse-cursor: pointer;
+        clicked => { if !self.held { root.picked(); } self.held = false; }
+        pointer-event(e) => {
+            if e.button == PointerEventButton.right && e.kind == PointerEventKind.up { self.held = true; actions.show(); }
+            else if e.kind == PointerEventKind.down { self.held = false; hold.start(); }
+            else if e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel { hold.stop(); }
+        }
+        moved => { if Math.abs(self.mouse-y - self.pressed-y) + Math.abs(self.mouse-x - self.pressed-x) > 24px { hold.stop(); } }
+    }
+    actions := PopupWindow {
+        x: max(0px, root.width - self.width); y: root.height - 8px;
+        width: min(240px,root.width); height: 156px;
+        Rectangle {
+            background: Theme.current.popup; border-width: 1px; border-color: Theme.current.border_soft;
+            border-radius: Theme.card_corner_radius;
+            VerticalLayout {
+                padding: 8px; spacing: 4px;
+                ActionButton { text: @tr("Read / unread"); clicked => { actions.close(); root.action("read"); } }
+                ActionButton { text: root.chapter.bookmarked ? @tr("Unbookmark") : @tr("Bookmark"); clicked => { actions.close(); root.action("bookmark"); } }
+                ActionButton { text: @tr("Download"); clicked => { actions.close(); root.action("download"); } }
+            }
+        }
+    }
+    hold := Timer { interval: 600ms; running: false; triggered => { self.stop(); touch.held = true; actions.show(); } }
+    IconAction { x: root.width - 100px; y: 18px; width: 44px; text: @tr("Download"); icon: @image-url("../../assets/icons/navigation/downloads.svg"); clicked => { root.action("download"); } }
+    IconAction { x: root.width - 48px; y: 18px; width: 44px; text: @tr("Chapter options"); icon: @image-url("../../assets/icons/navigation/more.svg"); clicked => { actions.show(); } }
+}

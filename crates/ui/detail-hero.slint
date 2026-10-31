@@ -1,0 +1,120 @@
+// Nova b69a1e5 detail.slint: edge-to-edge artwork, baked scrims, title,
+// metadata, expandable synopsis and primary/library action geometry.
+import { Theme, Anim, SettingsStyle } from "@NovaUiShared";
+import { IcPlay, IcAdd, IcBookmark } from "@NovaUiBase/icons.slint";
+import { TitleArtwork } from "title-artwork.slint";
+
+export component HeroAction inherits Rectangle {
+    in property <string> label;
+    in property <bool> primary;
+    in property <bool> saved;
+    in property <bool> narrow;
+    callback clicked;
+    height: root.narrow ? 56px : 62px;
+    min-width: 0px;
+    border-radius: root.primary ? (root.narrow ? 22px : 26px) : self.height / 2;
+    background: root.primary ? (touch.has-hover ? Theme.current.primary_button_hover : Theme.current.primary_button) : (touch.has-hover ? Theme.current.hero_library_hover : Theme.current.hero_library);
+    border-width: 1px; border-color: scope.has-focus ? Theme.current.focus_ring : root.primary ? Theme.current.primary_button_border : Theme.current.border_overlay;
+    accessible-role: button; accessible-label: root.label;
+    accessible-action-default => { root.clicked(); }
+    HorizontalLayout {
+        padding-left: root.primary ? 16px : 0px; padding-right: root.primary ? 16px : 0px;
+        spacing: root.primary ? 8px : 0px; alignment: center;
+        Rectangle {
+            width: root.primary ? 20px : 26px; height: 100%; horizontal-stretch: 0;
+            if root.primary: IcPlay { y: (parent.height - self.height) / 2; width: 20px; height: 20px; fill: Theme.current.on_accent; }
+            if !root.primary && !root.saved: IcAdd { y: (parent.height - self.height) / 2; width: 26px; height: 26px; fill: Theme.current.text_hero_icon; }
+            if !root.primary && root.saved: IcBookmark { y: (parent.height - self.height) / 2; width: 26px; height: 26px; fill: Theme.current.accent_vivid; }
+        }
+        if root.primary: Text { text: root.label; color: Theme.current.on_accent; font-size: root.narrow ? 14px : 18px; font-weight: 600; min-width: 0px; wrap: word-wrap; max-lines: 2; overflow: elide; vertical-alignment: center; horizontal-alignment: center; }
+    }
+    scope := FocusScope {
+        changed has-focus => { if self.has-focus { SettingsStyle.reveal_control(root.absolute-position.y, root.height, false); } }
+        key-pressed(e) => { if e.text == Key.Return || e.text == " " { if !e.repeat { root.clicked(); } return accept; } return reject; }
+    }
+    touch := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+export component DetailHero inherits Rectangle {
+    min-width: 0px;
+    in property <length> viewport-width;
+    in property <string> title;
+    in property <string> description;
+    in property <string> resume-chapter;
+    in property <string> metadata;
+    in property <[string]> genres;
+    in property <image> poster;
+    in property <bool> in-library;
+    in property <bool> narrow;
+    in property <length> scroll-y;
+    callback resume;
+    callback toggle-library;
+    callback request-artwork;
+    private property <bool> expanded: false;
+    changed title => { root.expanded = false; }
+    private property <length> gutter: root.narrow ? 20px : 64px;
+    private property <length> overview-width: max(1px, root.viewport-width - 2 * root.gutter);
+    private property <length> text-width: root.narrow ? root.overview-width : min(650px, root.overview-width * 0.55);
+    private property <length> backdrop-height: root.narrow ? 560px : 740px;
+    height: body.preferred-height;
+    Rectangle {
+        x: 0px; y: 0px; width: root.width; height: min(root.height, root.backdrop-height + 60px); clip: true;
+        background: Theme.current.artwork_backdrop;
+        if root.poster.width > 0: Image {
+            y: max(root.narrow ? -56px : -80px, min(0px, root.scroll-y * 0.12));
+            source: root.poster; image-fit: cover; width: 100%; height: root.backdrop-height;
+        }
+        Image { source: Theme.detail_bottom_scrim; width: 100%; height: root.backdrop-height + 60px; image-fit: fill; }
+        if !root.narrow: Image { source: Theme.detail_side_scrim; width: 100%; height: root.backdrop-height + 60px; image-fit: fill; }
+    }
+    body := VerticalLayout {
+        width: root.width;
+        padding-left: root.gutter; padding-right: root.gutter;
+        padding-top: root.narrow ? 250px : 100px; padding-bottom: 16px;
+        spacing: root.narrow ? 14px : 18px; alignment: start;
+        HorizontalLayout {
+            VerticalLayout {
+                width: root.text-width; horizontal-stretch: 0;
+                spacing: root.narrow ? 14px : 18px; alignment: start;
+                TitleArtwork { title: root.title; reserve-logo-space: true; width: 100%; logo-height: root.narrow ? 88px : 136px; font-size: root.narrow ? 34px : root.width >= 1200px ? 64px : 44px; max-lines: 3; }
+                Text { text: root.metadata; color: Theme.current.text_hero_metadata; font-size: root.narrow ? 16px : 21px; min-width: 0px; wrap: word-wrap; }
+                GridLayout {
+                    spacing: 8px;
+                    for genre[i] in root.genres: Rectangle {
+                        row: Math.floor(i / (root.narrow ? 3 : 4)); col: Math.mod(i, root.narrow ? 3 : 4);
+                        height: root.narrow ? 34px : 42px; min-width: 0px;
+                        border-radius: self.height / 2; background: Theme.current.hero_metadata_badge;
+                        border-width: 1px; border-color: Theme.current.border_overlay;
+                        Text { x: 10px; width: max(0px, parent.width - 20px); text: genre; color: Theme.current.text_hero_badge; font-size: root.narrow ? 12px : 16px; vertical-alignment: center; overflow: elide; }
+                    }
+                }
+                if root.description != "": synopsis := Rectangle {
+                    height: root.expanded ? measure.preferred-height + 1px : min(measure.preferred-height + 1px, root.narrow ? 66px : 84px);
+                    animate height { duration: Anim.transition_slide; easing: ease-in-out; }
+                    clip: true;
+                    measure := Text { width: root.text-width; text: root.description; font-size: root.narrow ? 15px : 19px; wrap: word-wrap; visible: false; }
+                    Text { text: root.description; width: 100%; height: 100%; color: Theme.current.text_description; font-size: root.narrow ? 15px : 19px; wrap: word-wrap; overflow: elide; vertical-alignment: top; }
+                    TouchArea {
+                        enabled: measure.preferred-height > (root.narrow ? 66px : 84px);
+                        accessible-role: button; accessible-label: root.expanded ? @tr("Show less") : @tr("Read more");
+                        accessible-action-default => { if self.enabled { root.expanded = !root.expanded; } }
+                        clicked => { root.expanded = !root.expanded; }
+                    }
+                    synopsis-focus := FocusScope {
+                        enabled: measure.preferred-height > (root.narrow ? 66px : 84px);
+                        changed has-focus => { if self.has-focus { SettingsStyle.reveal_control(synopsis.absolute-position.y,synopsis.height,false); } }
+                        key-pressed(e) => { if e.text == Key.Return || e.text == " " { if !e.repeat { root.expanded = !root.expanded; } return accept; } return reject; }
+                    }
+                    Rectangle { width: parent.width; height: parent.height; background: transparent; border-width: synopsis-focus.has-focus ? 2px : 0px; border-color: Theme.current.focus_ring; }
+                }
+                HorizontalLayout {
+                    spacing: 12px;
+                    HeroAction { horizontal-stretch: 1; primary: true; narrow: root.narrow; label: root.resume-chapter == "" ? @tr("Continue") : @tr("Continue chapter {}",root.resume-chapter); clicked => { root.resume(); } }
+                    HeroAction { width: root.narrow ? 56px : 62px; narrow: root.narrow; saved: root.in-library; label: root.in-library ? @tr("Remove from library") : @tr("Add to library"); clicked => { root.toggle-library(); } }
+                }
+            }
+            if !root.narrow: Rectangle { horizontal-stretch: 1; }
+        }
+    }
+    Timer { interval: 150ms; running: root.visible && root.poster.width == 0; triggered => { root.request-artwork(); } }
+}

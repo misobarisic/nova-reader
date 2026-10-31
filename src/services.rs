@@ -16,6 +16,27 @@ pub fn now() -> i64 {
         .as_secs() as i64
 }
 
+pub(crate) fn chapter_from_source(
+    series: &SeriesId,
+    chapter: reader_sources::Chapter,
+) -> Result<Chapter> {
+    if chapter.series_id != series.local_id {
+        return Err("Source returned a chapter for another series".into());
+    }
+    let uploaded_at = crate::timeline::parse_source_date(chapter.uploaded_at.as_deref());
+    Ok(Chapter {
+        id: ChapterId::new(series.clone(), chapter.id),
+        title: chapter.title.clone(),
+        label: chapter.title,
+        number: chapter.number,
+        volume: None,
+        source_order: chapter.source_order as i64,
+        language: chapter.language,
+        scanlator: chapter.scanlator,
+        uploaded_at,
+    })
+}
+
 #[derive(Clone)]
 pub struct Services {
     pub domain: DomainStore,
@@ -123,22 +144,7 @@ impl Services {
         let chapters = list
             .chapters
             .into_iter()
-            .map(|c| {
-                if c.series_id != series.id.local_id {
-                    return Err("Source returned a chapter for another series".into());
-                }
-                Ok(Chapter {
-                    id: ChapterId::new(series.id.clone(), c.id),
-                    title: c.title.clone(),
-                    label: c.title,
-                    number: c.number,
-                    volume: None,
-                    source_order: c.source_order as i64,
-                    language: c.language,
-                    scanlator: c.scanlator,
-                    uploaded_at: None,
-                })
-            })
+            .map(|chapter| chapter_from_source(&series.id, chapter))
             .collect::<Result<Vec<_>>>()?;
         self.save_details(series.clone(), chapters.clone())?;
         Ok((series, chapters))
@@ -214,11 +220,31 @@ impl Services {
             return Ok(());
         }
         let source = self.source(&chapter.series.source_id)?;
+        // Snapshot once per transfer. Verified pages are skipped by the store,
+        // so changing compression never rewrites existing downloads.
+        let compression = crate::image_storage::load().downloads;
         self.downloads
             .run(chapter, |page| {
-                source
+                let original = source
                     .fetch_page(&page.url, &page.headers, cancel)
-                    .map_err(error)
+                    .map_err(error)?;
+                cancel.check().map_err(error)?;
+                let bytes = if compression.enabled {
+                    // Some tall pages exceed a codec's dimensional limit.
+                    // Preserve the original rather than resizing or losing it;
+                    // the download store still validates all committed bytes.
+                    crate::reader_export::reencode_image(
+                        &original,
+                        compression.format,
+                        compression.quality,
+                        reader_engine::DecodeLimits::default(),
+                    )
+                    .unwrap_or(original)
+                } else {
+                    original
+                };
+                cancel.check().map_err(error)?;
+                Ok(bytes)
             })
             .map_err(error)
     }
@@ -274,5 +300,89 @@ impl Services {
         self.save_details(series.clone(), vec![chapter])?;
         self.add_library(&series.id)?;
         Ok(series.id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use time::{Date, Month, OffsetDateTime, UtcOffset};
+
+    fn provider_chapter(uploaded_at: Option<&str>) -> reader_sources::Chapter {
+        // Mirrors the YiiMadara synthetic chapter fixture's fractional chapter
+        // and date-only uploadedAt, with optional scanlator metadata.
+        serde_json::from_value(json!({
+            "id":"/webtoon/clockwork/chapter-2.5",
+            "seriesId":"/webtoon/clockwork",
+            "title":"Chapter 2.5",
+            "number":"2.5",
+            "sourceOrder":0,
+            "url":"https://manhwa18.cc/webtoon/clockwork/chapter-2.5",
+            "language":"en",
+            "scanlator":"Clockwork Scans",
+            "uploadedAt":uploaded_at
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn provider_date_reaches_domain_without_changing_chapter_metadata() {
+        let series = SeriesId::new("manhwa18cc.en", "/webtoon/clockwork");
+        let chapter = chapter_from_source(&series, provider_chapter(Some("2026-10-09"))).unwrap();
+        assert_eq!(
+            chapter.id,
+            ChapterId::new(series, "/webtoon/clockwork/chapter-2.5")
+        );
+        assert_eq!(chapter.title, "Chapter 2.5");
+        assert_eq!(chapter.label, "Chapter 2.5");
+        assert_eq!(chapter.number.as_deref(), Some("2.5"));
+        assert_eq!(chapter.source_order, 0);
+        assert_eq!(chapter.language.as_deref(), Some("en"));
+        assert_eq!(chapter.scanlator.as_deref(), Some("Clockwork Scans"));
+        let utc = OffsetDateTime::from_unix_timestamp(chapter.uploaded_at.unwrap()).unwrap();
+        let offset = UtcOffset::local_offset_at(utc).unwrap_or(UtcOffset::UTC);
+        assert_eq!(
+            utc.to_offset(offset).date(),
+            Date::from_calendar_date(2026, Month::October, 9).unwrap()
+        );
+    }
+
+    #[test]
+    fn absent_and_invalid_provider_dates_remain_unknown() {
+        let series = SeriesId::new("manhwa18cc.en", "/webtoon/clockwork");
+        for date in [
+            None,
+            Some(""),
+            Some("2026-02-30"),
+            Some("unknown"),
+            Some("2026-10-09T12:00:00"),
+        ] {
+            let chapter = chapter_from_source(&series, provider_chapter(date)).unwrap();
+            assert_eq!(chapter.uploaded_at, None, "date: {date:?}");
+        }
+    }
+
+    #[test]
+    fn provider_datetime_keeps_its_instant_across_utc_day_boundary() {
+        let series = SeriesId::new("manhwa18cc.en", "/webtoon/clockwork");
+        let chapter =
+            chapter_from_source(&series, provider_chapter(Some("2026-10-09T00:30:00+02:00")))
+                .unwrap();
+        let expected = Date::from_calendar_date(2026, Month::October, 8)
+            .unwrap()
+            .with_hms(22, 30, 0)
+            .unwrap()
+            .assume_utc()
+            .unix_timestamp();
+        assert_eq!(chapter.uploaded_at, Some(expected));
+    }
+
+    #[test]
+    fn chapter_conversion_keeps_the_series_identity_guard() {
+        let series = SeriesId::new("manhwa18cc.en", "/webtoon/another-series");
+        assert_eq!(
+            chapter_from_source(&series, provider_chapter(Some("2026-10-09"))).unwrap_err(),
+            "Source returned a chapter for another series"
+        );
     }
 }

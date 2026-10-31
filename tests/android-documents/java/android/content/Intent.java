@@ -12,13 +12,16 @@ public class Intent {
     public static final int FLAG_GRANT_PERSISTABLE_URI_PERMISSION=64;
     public final String action;
     public String type;
+    public String title;
+    private Uri data;
     private int flags;
     public Intent(String action) { this.action=action; }
     public Intent setType(String type) { this.type=type; return this; }
     public Intent addFlags(int flags) { this.flags|=flags; return this; }
     public Intent addCategory(String category) { return this; }
-    public Intent putExtra(String key,String value) { return this; }
+    public Intent putExtra(String key,String value) { if (EXTRA_TITLE.equals(key)) title=value;return this; }
     public Intent putExtra(String key,String[] value) { return this; }
     public int getFlags() { return flags; }
-    public Uri getData() { return null; }
+    public Intent setData(Uri data) { this.data=data;return this; }
+    public Uri getData() { return data; }
 }

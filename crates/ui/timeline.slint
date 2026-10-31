@@ -1,0 +1,151 @@
+// Mihon's dated reading/release rows, painted with Nova's shared palette and
+// Kit actions. Only lightweight layout slots remain outside the viewport.
+import { Theme, SettingsStyle } from "@NovaUiShared";
+import { ItemRow } from "media-models.slint";
+import { IconAction } from "controls.slint";
+
+component TimelineRow inherits Rectangle {
+    in property <ItemRow> item;
+    in property <bool> history;
+    callback picked;
+    callback series-picked;
+    callback action(string);
+    min-width: 0px;
+    height: root.history ? 110px : 80px;
+    background: touch.has-hover ? Theme.current.control_hover : transparent;
+    border-radius: Theme.card_corner_radius;
+    border-width: scope.has-focus ? 2px : 0px;
+    border-color: Theme.current.focus_ring;
+    accessible-role: button;
+    accessible-label: root.item.title + ", " + root.item.subtitle + (root.history ? ", " + root.item.timestamp : "");
+    accessible-action-default => { root.picked(); }
+
+    cover := Rectangle {
+        x: 0px; y: (root.height - self.height) / 2;
+        width: root.history ? 64px : 48px;
+        height: root.history ? 96px : 72px;
+        border-radius: min(Theme.card_corner_radius, 8px);
+        background: Theme.current.home_artwork_placeholder;
+        clip: true;
+        if root.item.poster.width > 0: Image {
+            width: 100%; height: 100%; source: root.item.poster; image-fit: ImageFit.cover;
+        }
+        if root.item.poster.width == 0: Image {
+            width: 24px; height: 24px;
+            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+            source: @image-url("../../assets/icons/navigation/library.svg");
+            image-fit: contain; colorize: Theme.current.text_muted;
+        }
+        if root.history: Rectangle {
+            width: parent.width; height: parent.height;
+            accessible-role: button; accessible-label: @tr("Open series details: {}",root.item.title);
+            accessible-action-default => { root.series-picked(); }
+            border-width: poster-focus.has-focus ? 2px : 0px; border-color: Theme.current.focus_ring;
+            poster-focus := FocusScope {
+                changed has-focus => { if self.has-focus { SettingsStyle.reveal_control(root.absolute-position.y,root.height,false); } }
+                key-pressed(e) => { if e.text == Key.Return || e.text == " " { if !e.repeat { root.series-picked(); } return accept; } return reject; }
+            }
+            poster-touch := TouchArea { x: 0px; y: 0px; width: parent.width; height: parent.height; mouse-cursor: pointer; clicked => { root.series-picked(); } }
+        }
+    }
+    VerticalLayout {
+        x: cover.width + 16px;
+        y: (root.height - self.height) / 2;
+        width: max(1px, root.width - self.x - 56px);
+        height: root.history ? 58px : 48px;
+        alignment: center; spacing: 6px;
+        Text {
+            text: root.item.title; font-size: 16px; font-weight: 600;
+            color: Theme.current.text_bright;
+            min-width: 0px; overflow: elide;
+        }
+        HorizontalLayout {
+            spacing: 6px; min-width: 0px;
+            if !root.history && !root.item.read: Rectangle {
+                width: 6px;
+                Rectangle {
+                    y: (parent.height - self.height) / 2;
+                    width: 6px; height: 6px; border-radius: 3px;
+                    background: Theme.current.accent_soft;
+                }
+            }
+            Text {
+                text: root.item.subtitle + (root.history && root.item.timestamp != "" ? " · " + root.item.timestamp : "");
+                color: Theme.current.text_secondary; font-size: 13px;
+                min-width: 0px; overflow: elide;
+            }
+        }
+    }
+    scope := FocusScope {
+        x: root.history ? cover.width + 16px : 0px;
+        width: root.width - self.x; height: root.height;
+        changed has-focus => {
+            if self.has-focus { SettingsStyle.reveal_control(root.absolute-position.y, root.height, false); }
+        }
+        key-pressed(e) => {
+            if e.text == Key.Return || e.text == " " {
+                if !e.repeat { root.picked(); }
+                return accept;
+            }
+            return reject;
+        }
+    }
+    touch := TouchArea {
+        x: root.history ? cover.width + 16px : 0px;
+        width: root.width - self.x;
+        mouse-cursor: pointer; clicked => { root.picked(); }
+    }
+    IconAction {
+        x: root.width - 44px; y: (root.height - self.height) / 2; width: 44px;
+        text: root.history ? @tr("Remove from history") : @tr("Download");
+        icon: root.history ? @image-url("../../assets/icons/navigation/delete.svg") : @image-url("../../assets/icons/navigation/downloads.svg");
+        clicked => { root.action(root.history ? "remove-history" : "download"); }
+    }
+}
+
+export component TimelineList inherits VerticalLayout {
+    min-width: 0px;
+    in property <[ItemRow]> items;
+    in property <bool> history;
+    // Window-space bounds, matching SeriesGrid and the enclosing scroll view.
+    in property <length> viewport-top;
+    in property <length> viewport-height;
+    callback picked(int);
+    callback series-picked(int);
+    callback action(int, string);
+    callback request-artwork(int, int);
+    spacing: 0px; alignment: start; vertical-stretch: 0;
+
+    for item[i] in root.items: slot := Rectangle {
+        min-width: 0px;
+        private property <bool> group-start: i == 0 || item.group != root.items[i - 1].group;
+        private property <length> heading-height: self.group-start ? 40px : 0px;
+        private property <length> row-height: root.history ? 110px : 80px;
+        // Keep two rows around each edge, including their full date headers.
+        private property <bool> near-viewport: root.visible
+            && self.absolute-position.y + self.height >= root.viewport-top - 2 * (self.row-height + 40px)
+            && self.absolute-position.y <= root.viewport-top + root.viewport-height + 2 * (self.row-height + 40px);
+        height: self.row-height + self.heading-height;
+        if slot.near-viewport: Rectangle {
+            width: 100%; height: 100%; min-width: 0px;
+            // Wait for layout before requesting. Repeat while admitted so a
+            // busy, bounded artwork queue can retry a previously rejected row.
+            Timer {
+                interval: 150ms; running: true;
+                triggered => { root.request-artwork(i, i + 1); }
+            }
+            if slot.group-start: Text {
+                x: 0px; y: 10px; width: 100%; height: 24px;
+                text: item.group; color: Theme.current.text_secondary;
+                font-size: 14px; font-weight: 600; overflow: elide;
+            }
+            TimelineRow {
+                y: slot.heading-height; width: 100%;
+                item: item; history: root.history;
+                picked => { root.picked(i); }
+                series-picked => { root.series-picked(i); }
+                action(value) => { root.action(i, value); }
+            }
+        }
+    }
+}

@@ -1,4 +1,4 @@
-//! Android SAF bridge. Payloads cross JNI as app-private file paths, never as
+//! Android window and SAF bridge. Payloads cross JNI as app-private file paths, never as
 //! large Java byte arrays. Callbacks run on the result/copy thread; UI callers
 //! must hop back through Slint's event loop. Only use after Android startup.
 #![cfg(target_os = "android")]
@@ -185,8 +185,105 @@ pub fn pick_import(
 pub fn export_backup(staged: PathBuf, callback: impl FnOnce(Result<(), String>) + Send + 'static) {
     launch(4, Some(&staged), Callback::Export(Box::new(callback)));
 }
-/// Cache directory accepted by export_backup. Stage only validated backup JSON
-/// here; delete staging/import files after the receiving service consumes them.
+fn image_action(
+    kind: i32,
+    staged: PathBuf,
+    suggested_name: &str,
+    mime: &str,
+    series_folder: Option<&str>,
+    callback: impl FnOnce(Result<(), String>) + Send + 'static,
+) {
+    let id = match reserve(Callback::Export(Box::new(callback))) {
+        Ok(id) => id,
+        Err((callback, message)) => {
+            invoke(callback, Err(message.into()));
+            return;
+        }
+    };
+    let result = with_context(|env, _, class| {
+        let path = env.new_string(staged.to_string_lossy())?;
+        let name = env.new_string(suggested_name)?;
+        let mime = env.new_string(mime)?;
+        if kind == 7 {
+            let folder = env.new_string(series_folder.unwrap_or_default())?;
+            env.call_static_method(
+                class,
+                "publishImage",
+                "(JLjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+                &[
+                    JValue::Long(id),
+                    JValue::Object(&path),
+                    JValue::Object(&name),
+                    JValue::Object(&mime),
+                    JValue::Object(&folder),
+                ],
+            )?;
+            return Ok(());
+        }
+        env.call_static_method(
+            class,
+            "requestImage",
+            "(IJLjava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+            &[
+                JValue::Int(kind),
+                JValue::Long(id),
+                JValue::Object(&path),
+                JValue::Object(&name),
+                JValue::Object(&mime),
+            ],
+        )?;
+        Ok(())
+    });
+    if let Err(error) = result {
+        finish(id, Err(error));
+    }
+}
+/// Save an encoded image staged inside the app cache using Android's picker.
+/// The caller owns staging cleanup after the callback, including failures.
+pub fn export_image(
+    staged: PathBuf,
+    suggested_name: &str,
+    mime: &str,
+    callback: impl FnOnce(Result<(), String>) + Send + 'static,
+) {
+    image_action(5, staged, suggested_name, mime, None, callback);
+}
+/// Save an image under Pictures/Nova Reader[/series] using MediaStore on API 29+.
+/// Earlier Android versions ask for a destination through SAF. The caller owns
+/// staging cleanup after the callback; a series folder is one safe UTF-8 component.
+pub fn publish_image(
+    staged: PathBuf,
+    suggested_name: &str,
+    mime: &str,
+    series_folder: Option<&str>,
+    callback: impl FnOnce(Result<(), String>) + Send + 'static,
+) {
+    image_action(7, staged, suggested_name, mime, series_folder, callback);
+}
+/// Copy an encoded image to Android's clipboard as a grant-readable content URI.
+/// Java retains an independent bounded cache copy; the caller owns staging cleanup.
+pub fn copy_image(
+    staged: PathBuf,
+    mime: &str,
+    callback: impl FnOnce(Result<(), String>) + Send + 'static,
+) {
+    image_action(6, staged, "Reader image", mime, None, callback);
+}
+/// Hide the Android status bar while reader controls are hidden, or restore it
+/// with the controls. Java applies this on main and retains it across recreation.
+pub fn set_reader_immersive(immersive: bool) -> Result<(), String> {
+    with_context(|env, _, class| {
+        env.call_static_method(
+            class,
+            "setReaderImmersive",
+            "(Z)V",
+            &[JValue::Bool(immersive.into())],
+        )?;
+        Ok(())
+    })
+}
+/// Android's application cache root. Document staging is removed after use;
+/// disposable artwork uses its own `posters` subdirectory under this root.
 pub fn cache_dir() -> Result<PathBuf, String> {
     with_context(|env, application, _| {
         let file = env

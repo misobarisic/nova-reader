@@ -1,0 +1,123 @@
+// Nova's compression controls, applied independently to new artwork and pages.
+import { InterfaceStyle } from "@NovaUiShared";
+import { SettingsCard, SectionHeader, ToggleSwitch, PillButton, MiniSlider, ValueBox } from "@NovaUiBase/settings-controls.slint";
+import { Segmented } from "@ReaderSegmented";
+import { SettingsRow } from "settings-row.slint";
+
+export global ImageStorageSettings {
+    in-out property <bool> cache-enabled: true;
+    in-out property <int> cache-format: 1;
+    in-out property <float> cache-quality: 85;
+    in-out property <bool> downloads-enabled: false;
+    in-out property <int> downloads-format: 1;
+    in-out property <float> downloads-quality: 85;
+    callback settings-changed(string, int);
+}
+
+component CompressionQuality inherits Rectangle {
+    in-out property <float> value;
+    in property <bool> enabled: true;
+    in property <string> name;
+    in property <string> increase-label;
+    in property <string> decrease-label;
+    callback changed(float);
+    preferred-width: InterfaceStyle.tv ? 320px : 252px;
+    min-width: 0px; height: InterfaceStyle.tv ? 56px : 44px;
+    function adjust(v: float) { root.value = Math.clamp(v, 1, 100); root.changed(root.value); }
+    value-measure := Text { text: Math.round(root.value); font-size: 20px; visible: false; }
+    HorizontalLayout {
+        spacing: 4px;
+        PillButton {
+            label: "−"; enabled: root.enabled && root.value > 1;
+            compact: true; btn-min-width: 44px;
+            accessible-label: root.decrease-label;
+            accessible-action-default => { if self.enabled { root.adjust(root.value - 1); } }
+            clicked => { root.adjust(root.value - 1); }
+        }
+        MiniSlider {
+            min-width: 36px; horizontal-stretch: 1; enabled: root.enabled; name: root.name;
+            value <=> root.value; minimum: 1; maximum: 100; step: 1;
+            changed(v) => { root.changed(v); }
+        }
+        ValueBox {
+            width: InterfaceStyle.tv ? Math.max(64px, value-measure.preferred-width + 24px) : 36px;
+            height: InterfaceStyle.tv ? 56px : 44px; text: Math.round(root.value);
+        }
+        PillButton {
+            label: "+"; enabled: root.enabled && root.value < 100;
+            compact: true; btn-min-width: 44px;
+            accessible-label: root.increase-label;
+            accessible-action-default => { if self.enabled { root.adjust(root.value + 1); } }
+            clicked => { root.adjust(root.value + 1); }
+        }
+    }
+}
+
+export component ImageStorageSettingsPage inherits VerticalLayout {
+    in property <bool> interactive: true;
+    spacing: 16px; alignment: start;
+    SectionHeader { label: @tr("Cache compression"); }
+    SettingsCard {
+        SettingsRow {
+            row-title: @tr("Compress new cached images");
+            row-desc: @tr("Compress new artwork at its original dimensions. Existing cached images stay unchanged; unsupported images keep their original encoding.");
+            ToggleSwitch {
+                name: @tr("Compress new cached images");
+                enabled: root.interactive; checked <=> ImageStorageSettings.cache-enabled;
+                accessible-action-default => { if self.enabled { self.checked = !self.checked; self.toggled(); } }
+                toggled => { ImageStorageSettings.settings-changed("cache_enabled", self.checked ? 1 : 0); }
+            }
+        }
+        SettingsRow {
+            row-title: @tr("Cache format"); row-desc: @tr("JPEG or WebP for newly cached artwork.");
+            Segmented {
+                labels: [@tr("JPEG"), @tr("WebP")];
+                enabled: root.interactive && ImageStorageSettings.cache-enabled;
+                current-index: ImageStorageSettings.cache-format;
+                picked(i) => { ImageStorageSettings.settings-changed("cache_format", i); }
+            }
+        }
+        SettingsRow {
+            row-title: @tr("Cache quality"); row-desc: @tr("Higher values retain more detail and use more disk space.");
+            CompressionQuality {
+                width: Math.min(InterfaceStyle.tv ? 320px : 252px, Math.max(0px, root.width - 32px));
+                enabled: root.interactive && ImageStorageSettings.cache-enabled;
+                name: @tr("Cache quality"); increase-label: @tr("Increase cache quality"); decrease-label: @tr("Decrease cache quality");
+                value <=> ImageStorageSettings.cache-quality;
+                changed(v) => { ImageStorageSettings.settings-changed("cache_quality", Math.round(v)); }
+            }
+        }
+    }
+    SectionHeader { label: @tr("Download compression"); }
+    SettingsCard {
+        SettingsRow {
+            row-title: @tr("Compress new chapter downloads");
+            row-desc: @tr("Re-encode new chapter pages at their original dimensions before saving. Existing downloads stay unchanged; unsupported images keep their original encoding.");
+            ToggleSwitch {
+                name: @tr("Compress new chapter downloads");
+                enabled: root.interactive; checked <=> ImageStorageSettings.downloads-enabled;
+                accessible-action-default => { if self.enabled { self.checked = !self.checked; self.toggled(); } }
+                toggled => { ImageStorageSettings.settings-changed("downloads_enabled", self.checked ? 1 : 0); }
+            }
+        }
+        SettingsRow {
+            row-title: @tr("Download format"); row-desc: @tr("JPEG or WebP for new offline chapter pages.");
+            Segmented {
+                labels: [@tr("JPEG"), @tr("WebP")];
+                enabled: root.interactive && ImageStorageSettings.downloads-enabled;
+                current-index: ImageStorageSettings.downloads-format;
+                picked(i) => { ImageStorageSettings.settings-changed("downloads_format", i); }
+            }
+        }
+        SettingsRow {
+            row-title: @tr("Download quality"); row-desc: @tr("Higher values retain more detail and use more disk space.");
+            CompressionQuality {
+                width: Math.min(InterfaceStyle.tv ? 320px : 252px, Math.max(0px, root.width - 32px));
+                enabled: root.interactive && ImageStorageSettings.downloads-enabled;
+                name: @tr("Download quality"); increase-label: @tr("Increase download quality"); decrease-label: @tr("Decrease download quality");
+                value <=> ImageStorageSettings.downloads-quality;
+                changed(v) => { ImageStorageSettings.settings-changed("downloads_quality", Math.round(v)); }
+            }
+        }
+    }
+}

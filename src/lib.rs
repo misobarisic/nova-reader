@@ -4,9 +4,16 @@ pub use nova_reader_ui::*;
 pub mod android_documents;
 mod app;
 pub mod appearance;
+mod artwork;
+pub mod capture_settings;
 mod cli;
+pub mod image_storage;
 mod paths;
+mod reader_export;
 pub mod services;
+mod source_browser;
+mod source_filters;
+mod timeline;
 mod updates;
 
 pub fn main_entry() -> Result<(), Box<dyn std::error::Error>> {

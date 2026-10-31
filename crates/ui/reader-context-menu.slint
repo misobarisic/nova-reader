@@ -1,0 +1,164 @@
+import { Theme, SettingsStyle } from "@NovaUiShared";
+import { Spinner } from "std-widgets.slint";
+
+// TouchArea remains inside the reader's Flickable: a pan cancels its pointer
+// grab, while only a stationary press can become an image context request.
+export component ReaderImageInteraction inherits TouchArea {
+    in property <bool> context-enabled: true;
+    callback tapped;
+    callback context-requested(length, length);
+    private property <bool> suppress-tap;
+    private property <bool> dragged;
+    private property <length> press-window-x;
+    private property <length> press-window-y;
+    mouse-cursor: pointer;
+    clicked => { if !root.suppress-tap { root.tapped(); } }
+    pointer-event(event) => {
+        if event.kind == PointerEventKind.down {
+            root.dragged = false;
+            root.suppress-tap = event.button != PointerEventButton.left;
+            root.press-window-x = root.absolute-position.x + root.mouse-x;
+            root.press-window-y = root.absolute-position.y + root.mouse-y;
+            hold.stop();
+            if event.button == PointerEventButton.left && root.context-enabled { hold.start(); }
+        } else if event.kind == PointerEventKind.up {
+            hold.stop();
+            if event.button == PointerEventButton.right && !root.dragged && root.context-enabled {
+                root.suppress-tap = true;
+                SettingsStyle.keyboard-mode = false;
+                root.context-requested(root.absolute-position.x + root.mouse-x, root.absolute-position.y + root.mouse-y);
+            }
+        } else if event.kind == PointerEventKind.cancel {
+            hold.stop(); root.dragged = true; root.suppress-tap = true;
+        }
+    }
+    moved => {
+        if Math.abs(root.absolute-position.x + root.mouse-x - root.press-window-x)
+            + Math.abs(root.absolute-position.y + root.mouse-y - root.press-window-y) > 12px {
+            hold.stop(); root.dragged = true; root.suppress-tap = true;
+        }
+    }
+    hold := Timer {
+        interval: 600ms; running: false;
+        triggered => {
+            self.stop();
+            if root.pressed && !root.dragged && root.context-enabled {
+                root.suppress-tap = true;
+                SettingsStyle.keyboard-mode = false;
+                root.context-requested(root.absolute-position.x + root.mouse-x, root.absolute-position.y + root.mouse-y);
+            }
+        }
+    }
+}
+
+struct ReaderImageAction { label: string, id: string }
+
+export component ReaderContextMenu inherits Rectangle {
+    in property <length> viewport-left;
+    in property <length> viewport-top;
+    in property <length> viewport-width;
+    in property <length> viewport-height;
+    in property <length> anchor-x;
+    in property <length> anchor-y;
+    in property <bool> busy;
+    callback picked(string);
+    callback dismissed;
+    private property <int> selected: 0;
+    private property <[ReaderImageAction]> actions: [
+        { label: @tr("Save image"), id: "save-image" },
+        { label: @tr("Save screencap"), id: "save-screencap" },
+        { label: @tr("Copy image to clipboard"), id: "copy-image" },
+        { label: @tr("Copy screencap to clipboard"), id: "copy-screencap" },
+    ];
+    init => { scope.focus(); }
+    function reveal-selected() {
+        let top = 8px + root.selected * 54px + (root.selected >= 2 ? 9px : 0px);
+        if top < -menu-scroll.content-y { menu-scroll.content-y = -top; }
+        else if top + 54px > -menu-scroll.content-y + menu-scroll.height {
+            menu-scroll.content-y = menu-scroll.height - top - 54px;
+        }
+    }
+    TouchArea {
+        width: 100%; height: 100%;
+        clicked => { root.dismissed(); }
+    }
+    menu-panel := Rectangle {
+        width: min(340px, max(1px, root.viewport-width - 24px));
+        height: min(241px, max(1px, root.viewport-height - 24px));
+        x: Math.clamp(root.anchor-x, root.viewport-left + 12px,
+            root.viewport-left + max(12px, root.viewport-width - self.width - 12px));
+        y: Math.clamp(root.anchor-y, root.viewport-top + 12px,
+            root.viewport-top + max(12px, root.viewport-height - self.height - 12px));
+        background: Theme.current.popup;
+        border-radius: max(12px, Theme.card_corner_radius);
+        border-width: 1px; border-color: Theme.current.border_medium;
+        drop-shadow-blur: 20px; drop-shadow-color: #00000060;
+        clip: true;
+        accessible-role: groupbox; accessible-label: @tr("Image actions");
+        TouchArea { width: 100%; height: 100%; }
+        menu-scroll := Flickable {
+            width: 100%; height: 100%;
+            content-width: self.width; content-height: 241px;
+            interactive: self.height < self.content-height;
+            for action[index] in root.actions: Rectangle {
+                x: 8px; y: 8px + index * 54px + (index >= 2 ? 9px : 0px);
+                width: max(1px, menu-scroll.width - 16px); height: 54px;
+                border-radius: max(6px, min(12px, Theme.button_corner_radius));
+                background: !root.busy && (touch.has-hover || (scope.has-focus && SettingsStyle.keyboard-mode && root.selected == index))
+                    ? Theme.current.settings_control_hover : transparent;
+                opacity: root.busy ? 0.45 : 1;
+                accessible-role: button; accessible-label: action.label;
+                accessible-enabled: !root.busy;
+                accessible-action-default => { if !root.busy { root.picked(action.id); } }
+                Path {
+                    x: 14px; y: 17px; width: 20px; height: 20px;
+                    viewbox-width: 24; viewbox-height: 24;
+                    stroke: Theme.current.accent_soft; stroke-width: 1.5px; fill: transparent;
+                    commands: index == 0 ? "M4 4h11l5 4v12H4zM15 4v4h5M7 17l4-5 3 3 2-2 3 4"
+                        : index == 1 ? "M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5M12 8v8M9 13l3 3 3-3"
+                        : index == 2 ? "M8 8h12v12H8zM4 16V4h12M10 17l3-4 3 3 2-2 2 3"
+                        : "M9 5H5v16h15V5h-4M9 3h7v4H9zM8 11h3M14 11h3M8 15h3M14 15h3";
+                }
+                Text {
+                    x: 48px; y: 0px; width: max(1px, parent.width - 60px); height: 100%;
+                    text: action.label; color: Theme.current.text_bright;
+                    font-size: 14px; wrap: word-wrap; vertical-alignment: center;
+                }
+                if root.busy && index == 0: Spinner {
+                    x: parent.width - 30px; y: 17px; width: 20px; height: 20px;
+                    accessible-label: @tr("Preparing image…");
+                }
+                touch := TouchArea {
+                    enabled: !root.busy; mouse-cursor: pointer;
+                    clicked => { root.picked(action.id); }
+                    moved => { root.selected = index; SettingsStyle.keyboard-mode = false; }
+                }
+            }
+            Rectangle {
+                x: 16px; y: 120px; width: max(1px, parent.width - 32px); height: 1px;
+                background: Theme.current.border_medium;
+            }
+        }
+    }
+    scope := FocusScope {
+        // Keyboard ownership must not cover pointer targets in the panel.
+        width: 0px; height: 0px;
+        key-pressed(event) => {
+            if event.text == Key.Escape || event.text == Key.Back || event.text == Key.Backspace || event.text == Key.Menu {
+                root.dismissed(); return accept;
+            }
+            if event.text == Key.UpArrow || event.text == Key.DownArrow || event.text == Key.Tab {
+                SettingsStyle.keyboard-mode = true;
+                root.selected = Math.mod(root.selected + (event.text == Key.UpArrow || (event.text == Key.Tab && event.modifiers.shift) ? 3 : 1), 4);
+                root.reveal-selected(); return accept;
+            }
+            if event.text == Key.Return || event.text == " " {
+                if !event.repeat && !root.busy { root.picked(root.actions[root.selected].id); }
+                return accept;
+            }
+            // Page navigation must never run underneath the open menu.
+            return accept;
+        }
+    }
+    forward-focus: scope;
+}

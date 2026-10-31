@@ -1,0 +1,22 @@
+diff --git a/ndk-build2/src/manifest.rs b/ndk-build2/src/manifest.rs
+--- a/ndk-build2/src/manifest.rs
++++ b/ndk-build2/src/manifest.rs
+@@ -179,2 +179,18 @@ pub struct Application {
+     pub services: Vec<Service>,
++    #[serde(rename = "provider")]
++    #[serde(default)]
++    pub providers: Vec<Provider>,
++}
++
++/// Application content providers, including private per-URI grant providers.
++#[derive(Clone, Debug, Deserialize, Serialize)]
++pub struct Provider {
++    #[serde(rename(serialize = "@android:name"))]
++    pub name: String,
++    #[serde(rename(serialize = "@android:authorities"))]
++    pub authorities: String,
++    #[serde(rename(serialize = "@android:exported"))]
++    pub exported: bool,
++    #[serde(rename(serialize = "@android:grantUriPermissions"))]
++    pub grant_uri_permissions: bool,
+ }

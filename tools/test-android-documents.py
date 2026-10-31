@@ -29,8 +29,16 @@ def main():
         classes, cache = work / 'classes', work / 'cache'
         classes.mkdir()
         cache.mkdir()
+        production_classes = work / 'production-classes'
+        production_classes.mkdir()
+        production_sources = sorted((ROOT / 'android/java').rglob('*.java'))
+        # Compile against real API classes as well as the runtime fixtures, so
+        # fixture signatures cannot accidentally conceal an Android API mismatch.
+        subprocess.run([*compiler, '-source', '8', '-target', '8', '-Xlint:-options',
+                        '-cp', str(android_jar), '-d', str(production_classes),
+                        *map(str, production_sources)], check=True)
         sources = sorted((ROOT / 'tests/android-documents/java').rglob('*.java'))
-        sources.append(ROOT / 'android/java/dev/misob/nova/reader/ReaderActivity.java')
+        sources.extend(production_sources)
         subprocess.run([*compiler, '-source', '8', '-target', '8', '-Xlint:-options',
                         '-cp', str(android_jar), '-d', str(classes), *map(str, sources)], check=True)
         (work / 'src').mkdir()

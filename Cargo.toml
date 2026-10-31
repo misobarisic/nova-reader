@@ -13,7 +13,7 @@ slint-build = "=1.18.0"
 
 [package]
 name = "nova-reader"
-version = "0.1.11"
+version = "0.1.12"
 edition = "2024"
 license.workspace = true
 description = "A source-based manga and webtoon reader for desktop and Android"
@@ -30,6 +30,8 @@ android = ["slint/backend-android-activity-06"]
 update-check = ["dep:reqwest", "dep:semver"]
 
 [dependencies]
+sha2 = "0.10"
+time = { version = "0.3", features = ["formatting", "local-offset", "parsing"] }
 nova-storage = { workspace = true }
 slint = { workspace = true }
 nova-reader-ui = { path = "crates/ui" }
@@ -44,9 +46,13 @@ directories = "6"
 url = "2"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"], optional = true }
 semver = { version = "1", optional = true }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+webp = { version = "=0.3.1", default-features = false }
+tempfile = "3"
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal", "wayland"] }
+arboard = { version = "3.7", default-features = false, features = ["image-data", "wayland-data-control"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21"
@@ -55,9 +61,7 @@ rustls = { version = "0.23", default-features = false, features = ["std", "tls12
 webpki-roots = "1"
 
 [dev-dependencies]
-tempfile = "3"
 i-slint-backend-testing = "=1.18.0"
-image = { version = "0.25", default-features = false, features = ["png"] }
 zip = { version = "2.4", default-features = false, features = ["deflate"] }
 
 [profile.dev]
@@ -94,6 +98,12 @@ has_code = true
 extract_native_libs = false
 label = "Nova Reader"
 icon = "@mipmap/ic_launcher"
+
+[[package.metadata.android.application.provider]]
+name = "dev.misob.nova.reader.ReaderImageProvider"
+authorities = "dev.misob.nova.reader.images"
+exported = false
+grant_uri_permissions = true
 
 [[package.metadata.android.application.activity]]
 name = "dev.misob.nova.reader.ReaderActivity"

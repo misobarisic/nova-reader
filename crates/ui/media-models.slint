@@ -1,0 +1,9 @@
+export struct ItemRow {
+    title: string, subtitle: string, badge: string, bookmarked: bool,
+    artwork-key: string, poster: image, completed: int, total: int, read: bool,
+    chapter-meta: string, group: string, timestamp: string
+}
+
+export struct SettingRow { key: string, name: string, kind: string, value: string, checked: bool, options: [string], selected: int }
+export struct SourceRow { id:string, name:string, language:string, group:string, pinned:bool, enabled:bool, latest:bool, index:int }
+export struct ExtensionRow { id:string, name:string, version:string, language:string, enabled:bool }

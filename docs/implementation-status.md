@@ -8,10 +8,10 @@ the presence of a test or workflow does not establish that it passed on a device
 | Plan phase | Implemented foundation | Outstanding acceptance/work |
 | --- | --- | --- |
 | 0 — Prove risky assumptions | Source API/permissions/errors documented; neutral dimensions and 320-page fixtures; bounded dimension-first decode and host source contracts | Live Manhwa catalogue/chapter/image/session smoke; agreed desktop/Android measurements and budgets; true oversized-image streaming/tiled decode |
-| 1 — Bootstrap | Independent Reader IDs, Nova’s adaptive rail/bottom tabs, retained More/settings transitions, persisted Theme/Look and feel pages, safe-area layout and shared Kit controls, pinned kit storage/UI, adapted flake/Makefile/CI/platform packaging | Linux/Android device launch and Windows execution acceptance; complete release artifact smoke and production signing setup |
+| 1 — Bootstrap | Independent Reader IDs, Nova’s adaptive rail/bottom tabs, retained More/settings transitions, persisted Theme/Display/Screenshots/Look and feel/Cache pages, safe-area layout and shared Kit controls, pinned kit storage/UI, adapted flake/Makefile/CI/platform packaging | Linux/Android device launch and Windows execution acceptance; complete release artifact smoke and production signing setup |
 | 2 — Share addon foundation | Reader-native v2 package/registry, deterministic packaging, bounded QuickJS/HTTP/HTML, typed profile settings/UI, reader DTOs and actual-host fixture tests | Generic kit extraction and shared package tooling; unchanged Nova v1 runtime/package consumer gate; publishing a kit revision before pin updates |
 | 3 — Reference reading flow | YiiMadara/Manhwa18 parser and explicit language/NSFW capabilities; neutral install/browse/details/chapters/pages; library, reading modes and persisted logical resume | Live source availability; device interaction/resume checks; independently published native source package in nova-addons |
-| 4 — Usable alpha | Categories/bookmarks/history models and UI actions; manual updates; ordered checksummed bundles; queue pause/resume/cancel/retry, recovery and queued-job startup resume; local folder/CBZ/ZIP imports; validated metadata backup/restore | Target-platform process-kill/offline/restore acceptance, Android SAF device validation, selectable durable external download destination, configurable quota/retention and source concurrency policies |
+| 4 — Usable alpha | Categories/bookmarks, dated History/Updates, compact chapter actions, source pins/last-used grouping, Sources/Extensions management, source filters and cover cache; manual updates; ordered checksummed bundles; queue pause/resume/cancel/retry, recovery and queued-job startup resume; local folder/CBZ/ZIP imports; validated metadata backup/restore | Target-platform process-kill/offline/restore acceptance, Android SAF device validation, selectable durable external download destination, configurable quota/retention and source concurrency policies |
 | 5 — Discovery/distribution | Bounded gzip/protobuf catalogue adapter, live-derived exact upstream IDs, native port mapping, Ed25519 verification/trust API and sequence floors, discovery states | Published signed catalogue/ZIPs; trust/key-management UI and durable policy; automated download/hash-check/review/activation lifecycle and permission-change UX |
 | 6 — Beta/v1 | Platform CI/release scaffolding and focused regression tests | Scheduled Android updates/download policy, background/reboot behavior, sync, external tracking, migration UX, device performance budgets, accessibility and full release rehearsal |
 
@@ -22,7 +22,7 @@ visible page window plus one prefetch page on each side. Obsolete image fetches
 are cancelled; failed pages wait for an explicit Retry. It persists logical page
 ID/index plus an intra-page fraction and flushes progress at lifecycle boundaries.
 Source list edits resolve a saved page ID first, with a clamped index fallback.
-Reflow does not define a new identity. Completion and prefetch are separate.
+Reflow does not define a new identity. Retained previews upgrade automatically when physical display width grows, including an undersized initial decode; no scroll is required. Reader controls start hidden and tap/click toggles them; Android status-bar visibility follows the OSD. Completion and prefetch are separate.
 
 PNG, JPEG and WebP originals are supported within explicit limits: default
 32 MiB encoded input, width 16,384, height 65,536, 32 million pixels and 128 MiB
@@ -40,9 +40,17 @@ bounded full CPU decode. Actual GPU residency/frame times and total process
 memory still need target-device measurement. Some oversized images deliberately fail rather than exhausting
 memory.
 
+Right-click and stationary hold open original-image and viewport-screencap
+save/clipboard actions. Capture format, quality and series-folder preferences
+follow Nova. Android 29+ saves use MediaStore; older Android uses the document
+picker. Screencaps exclude the menu/OSD and are bounded to eight million pixels.
+
 Chapter downloads use verified individual pages and atomic completion manifests.
 The store recovers interrupted jobs, retries missing/corrupt pages and refuses
-false completion. Queued jobs automatically resume on app startup; paused and
+false completion. Optional JPEG/WebP compression applies only to newly fetched
+pages, preserves dimensions and keeps original bytes when the chosen codec
+cannot preserve the image. Existing verified pages remain unchanged.
+Queued jobs automatically resume on app startup; paused and
 cancelled jobs do not. The application serializes transfers, while the store
 retains a two-active-jobs-per-source cap. Unix stores use private 0700 directories
 and 0600 files, repairing existing store permissions on open. Completed bundles open without a source installed. Changing

@@ -230,3 +230,87 @@ Final local formatting, all-target Clippy with warnings denied, workspace check
 and workspace tests passed. The packaging suite passed with 28 tests reported
 and one platform-specific skip. These checks precede the release tag; tag builds
 retain Nova's existing compile/package-only workflow.
+
+## Collection, chapter and cache redesign for 0.1.12
+
+The user requested Nova's library cards/display and detail header, plus the
+supplied Mihon chapter, History, Updates and Browse structures. Reader now
+adapts Nova's poster/list geometry, progress/captions, responsive sizing and
+artwork/title/synopsis/action presentation. Source rows group last-used, pinned
+and language variants; Extensions manages packages. Provider-defined filters
+keep labels separate from actual request values. Detail catalogue Back retains
+source ownership, query/filter/pagination and scroll; a new source invalidates
+old requests and snapshots before any unavailable-source early return.
+
+Chapter OSD starts hidden and overlays the unchanged viewport on tap/click;
+dragging remains scrolling. Android status-bar visibility follows the OSD,
+including focus/recreation and API 29/35 paths. The first-image blur investigation
+found that a small initial decode was permanently considered retained. Requested
+physical-pixel quality is now tracked separately, stale previews upgrade without
+scrolling in all modes, and replacement accounting excludes the previous image.
+The detail header action says `Continue chapter X`; label and action share the same
+resume target selection and preserve fractional chapter strings.
+History poster clicks open series details, while the title/chapter text opens
+the recorded chapter. Pointer regressions cover both targets; chapter download
+and options controls have separate touch targets with an 8px gap.
+
+Series posters use the independent platform cache on desktop and Android,
+never application data. The bounded worker handles source checks, viewport
+cancellation, hashed encoded files, CPU/UI limits, usage and serialized clearing.
+Cache maintenance only removes owned poster files and leaves downloads/imports
+and metadata intact. A running Linux fixture created its poster under
+`XDG_CACHE_HOME/nova-reader/posters`, with none under its separate data directory.
+
+Astra 6 medium independently reviewed the production changes and follow-up
+fixes. Findings included discarded provider dates, catalogue ownership/failed
+pagination, keyboard access and obsolete cover work. The final recheck found no
+residual P1/P2 issue. Source/date/value tests, cache limits/clear/cancellation,
+same-anchor quality upgrades, source/extension actions, catalogue return/scroll,
+responsive layouts and OSD tap-versus-pan regressions cover the changes.
+Host JNI tests and Clippy pass; full workspace tests, formatting, all-target
+Clippy, workspace check and packaging regressions pass. Phone/desktop renders
+with neutral sample covers are preview artifacts, not Android device captures.
+Android APK/device performance and release assembly remain separate CI/device
+results. Release workflow retains Nova's copied tag build behavior.
+
+
+### Reader image context menu
+
+Right-click and stationary long-press open the four requested image actions.
+Short taps still toggle the OSD, and dragging cancels the hold gesture. Original
+image actions preserve the source encoding; screencaps use a bounded clean
+viewport snapshot taken before the menu appears. Encoding, source fetches,
+saving and clipboard delivery run off the UI thread, with visible results.
+Desktop clipboard ownership remains alive for subsequent paste requests.
+Saved captures use Pictures/Nova Reader, with optional series folders. Android
+29+ uses MediaStore; older Android versions use the document picker. The image
+clipboard uses a private,
+read-only content provider with per-URI grants and bounded cache retention.
+The pinned cargo-apk2 manifest schema is extended to emit this provider; the
+release workflow conditions and job dependencies are unchanged.
+
+Screenshot settings adapt Nova's format/quality/folder controls. PNG and lossless
+WebP preserve pixels; JPEG and lossy WebP use separate quality values. Original
+chapter image saves retain their source format; generated screencaps use the
+selected encoder. Folder grouping applies to both save actions. Clipboard actions
+do not create an additional saved gallery image.
+
+Cache and offline-download compression have independent JPEG/WebP and quality
+choices copied from Nova's image-cache controls. They affect future writes only:
+cache hits and verified partial/completed download pages retain their exact
+bytes. Encoding preserves source dimensions. Images outside the selected
+codec's limits retain their source encoding and still pass the normal image
+validation before download publication. Defaults match Nova's WebP85 cache
+compression; offline download compression is opt-in.
+
+Final local verification passed workspace tests, formatting, all-target Clippy
+with warnings denied, workspace check, root regressions for direct-History
+capture naming, and packaging regressions (28 reported, one platform skip).
+The running Linux/Xvfb app also exercised all four context actions: original
+600x900 PNG bytes were saved unchanged, a clean 390x844 WebP screencap honored
+format/series-folder preferences, and separate clipboard clients read the
+original and viewport image dimensions after the callbacks completed. Android
+JNI/Clippy, production Java against API35, MediaStore rollback/legacy picker
+fixtures, and real patched manifest serialization passed. Astra 6 medium's final
+static recheck reported no remaining P1/P2 findings. APK assembly and physical
+Android interaction remain separate CI/device validation.

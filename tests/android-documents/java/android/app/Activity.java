@@ -1,6 +1,7 @@
 package android.app;
 import android.content.Intent;
 import android.os.Bundle;
+import android.view.Window;
 public class Activity extends android.content.Context {
     public static final int RESULT_OK=-1;
     public static Activity launchedBy;
@@ -8,6 +9,9 @@ public class Activity extends android.content.Context {
     public static int launchedRequest;
     public boolean changing;
     private boolean destroyed;
+    private final Window window=new Window();
+    public Window getWindow() { return window; }
+    public void onWindowFocusChanged(boolean hasFocus) { }
     public boolean isFinishing() { return false; }
     public boolean isDestroyed() { return destroyed; }
     public boolean isChangingConfigurations() { return changing; }

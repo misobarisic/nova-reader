@@ -10,6 +10,7 @@ fn responsive_navigation_and_virtual_reader_models() {
         subtitle: "Six pages".into(),
         badge: "Unread".into(),
         bookmarked: false,
+        ..ItemRow::default()
     }])));
     ui.on_navigate({
         let weak = ui.as_weak();

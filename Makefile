@@ -62,4 +62,4 @@ check-addons:
 
 check-android-java:
 	mkdir -p target/android-java-check
-	javac -source 8 -target 8 -Xlint:-options -cp "$(ANDROID_HOME)/platforms/android-35/android.jar" -d target/android-java-check android/java/dev/misob/nova/reader/ReaderActivity.java
+	javac -source 8 -target 8 -Xlint:-options -cp "$(ANDROID_HOME)/platforms/android-35/android.jar" -d target/android-java-check android/java/dev/misob/nova/reader/*.java

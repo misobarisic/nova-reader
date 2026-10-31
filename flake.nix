@@ -24,7 +24,7 @@
         };
         # NativeActivity requires neither the Nova PiP/receiver patches nor its
         # migration epoch. Keep upstream's independent epoch-1 version mapping.
-        patches = [ ./android/cargo-apk2-readonly-libs.patch ./android/cargo-apk2-uncompressed-libs.patch ];
+        patches = [ ./android/cargo-apk2-readonly-libs.patch ./android/cargo-apk2-uncompressed-libs.patch ./android/cargo-apk2-image-provider.patch ];
         cargoLock.lockFile = ./android/cargo-apk2-Cargo.lock;
         postPatch = ''
           sed -i '/^    ".*-examples",$/d' Cargo.toml

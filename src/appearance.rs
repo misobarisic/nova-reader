@@ -19,6 +19,10 @@ struct Preferences {
     transitions: bool,
     hover: bool,
     navigation_feedback: bool,
+    library_list_view: bool,
+    library_min_cols: i32,
+    browse_min_cols: i32,
+    library_sort: i32,
 }
 
 impl Default for Preferences {
@@ -34,6 +38,10 @@ impl Default for Preferences {
             transitions: true,
             hover: true,
             navigation_feedback: true,
+            library_list_view: false,
+            library_min_cols: 2,
+            browse_min_cols: 3,
+            library_sort: 0,
         }
     }
 }
@@ -51,6 +59,10 @@ impl Preferences {
         appearance.set_transitions(self.transitions);
         appearance.set_hover(self.hover);
         appearance.set_navigation_feedback(self.navigation_feedback);
+        appearance.set_library_list_view(self.library_list_view);
+        appearance.set_library_min_cols(self.library_min_cols.clamp(2, 6));
+        appearance.set_browse_min_cols(self.browse_min_cols.clamp(2, 6));
+        appearance.set_library_sort(self.library_sort.clamp(0, 2));
         let anim = ui.global::<Anim>();
         anim.set_enabled(self.animations);
         anim.set_transitions(self.transitions);
@@ -75,6 +87,10 @@ impl Preferences {
             "navigation_feedback" if value == 0 || value == 1 => {
                 self.navigation_feedback = value == 1
             }
+            "library_list_view" if value == 0 || value == 1 => self.library_list_view = value == 1,
+            "library_min_cols" if (2..=6).contains(&value) => self.library_min_cols = value,
+            "browse_min_cols" if (2..=6).contains(&value) => self.browse_min_cols = value,
+            "library_sort" if (0..=2).contains(&value) => self.library_sort = value,
             _ => return false,
         }
         true
@@ -149,6 +165,10 @@ pub fn init(ui: &AppWindow) -> Result<(), String> {
                 transitions: current.transitions,
                 hover: current.hover,
                 navigation_feedback: current.navigation_feedback,
+                library_list_view: current.library_list_view,
+                library_min_cols: current.library_min_cols,
+                browse_min_cols: current.browse_min_cols,
+                library_sort: current.library_sort,
                 ..Preferences::default()
             };
             drop(current);

@@ -11,8 +11,19 @@ The interface follows Nova's design: an adaptive icon rail or five-tab bottom
 bar, shared Nova Kit controls, and More/settings cards. Local imports are under
 **More → Local chapters**; categories and backups are under **More → Settings**.
 **More → Settings → Theme** offers Nova's accents, background styles, card/button
-styling and transparent bottom bar. **Look and feel** controls animations.
+styling and transparent bottom bar. **Display** controls poster/list layouts and
+grid columns; **Look and feel** controls animations. **Cache** shows usage and
+clears temporary poster images without deleting downloaded chapters. It also controls
+JPEG/WebP compression of newly cached artwork and new offline downloads;
+existing files stay unchanged. **Screenshots** controls capture format, quality
+and optional series folders.
 These device preferences are saved separately from library backups.
+Browse groups sources by last used, pins and language; Extensions manages installed
+packages. Chapters open with controls hidden; tap or click to show them.
+Right-click or hold an image to save/copy its original or the visible screencap.
+Saved images go to Pictures/Nova Reader; Android 26–28 uses a destination picker.
+Series posters use the platform cache directory on desktop and Android, separately
+from library data and explicit downloads. `NOVA_READER_CACHE_DIR` can override it.
 See [UI design reuse](docs/ui-design.md) for the source/component mapping.
 
 ## Run a neutral reading flow

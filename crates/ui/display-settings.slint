@@ -1,0 +1,21 @@
+// Nova's Display library-grid settings and shared segmented controls.
+import { SettingsCard } from "@NovaUiBase/settings-controls.slint";
+import { Segmented } from "@ReaderSegmented";
+import { SettingsRow } from "settings-row.slint";
+import { Appearance } from "appearance.slint";
+export component DisplaySettings inherits VerticalLayout {
+    in property <bool> interactive;
+    spacing: 16px; alignment: start;
+    SettingsCard { SettingsRow {
+        row-title: @tr("Library layout"); row-desc: @tr("Choose a poster grid or a list with artwork.");
+        Segmented { enabled: root.interactive; labels: [@tr("Grid"),@tr("List")]; current-index: Appearance.library-list-view ? 1 : 0; picked(i) => { Appearance.setting-changed("library_list_view",i); } }
+    } }
+    SettingsCard { SettingsRow {
+        row-title: @tr("Library grid columns"); row-desc: @tr("Minimum columns in My Library. Applies automatically.");
+        Segmented { enabled: root.interactive; labels: ["2","3","4","5","6"]; current-index: Appearance.library-min-cols - 2; picked(i) => { Appearance.setting-changed("library_min_cols",i + 2); } }
+    } }
+    SettingsCard { SettingsRow {
+        row-title: @tr("Browse grid columns"); row-desc: @tr("Minimum columns when browsing a source.");
+        Segmented { enabled: root.interactive; labels: ["2","3","4","5","6"]; current-index: Appearance.browse-min-cols - 2; picked(i) => { Appearance.setting-changed("browse_min_cols",i + 2); } }
+    } }
+}

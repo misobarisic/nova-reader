@@ -39,6 +39,10 @@ fn appearance_survives_restart_and_theme_reset_preserves_motion() {
                     ("transitions", 0),
                     ("hover", 0),
                     ("navigation_feedback", 0),
+                    ("library_list_view", 1),
+                    ("library_min_cols", 3),
+                    ("browse_min_cols", 4),
+                    ("library_sort", 2),
                 ] {
                     prefs.invoke_setting_changed(key.into(), value);
                 }
@@ -59,6 +63,10 @@ fn appearance_survives_restart_and_theme_reset_preserves_motion() {
                 assert_eq!(theme.get_card_corner_radius(), 24.);
             }
             "reload" => {
+                assert!(prefs.get_library_list_view());
+                assert_eq!(prefs.get_library_min_cols(), 3);
+                assert_eq!(prefs.get_browse_min_cols(), 4);
+                assert_eq!(prefs.get_library_sort(), 2);
                 assert_eq!(prefs.get_accent_color(), 2);
                 assert_eq!(prefs.get_background_style(), 1);
                 assert_eq!(theme.get_card_corner_radius(), 24.);
@@ -83,6 +91,10 @@ fn appearance_survives_restart_and_theme_reset_preserves_motion() {
                 prefs.invoke_restore_theme();
             }
             "reset" => {
+                assert!(prefs.get_library_list_view());
+                assert_eq!(prefs.get_library_min_cols(), 3);
+                assert_eq!(prefs.get_browse_min_cols(), 4);
+                assert_eq!(prefs.get_library_sort(), 2);
                 assert_eq!(theme.get_current(), theme.get_standard());
                 assert_eq!(theme.get_card_corner_radius(), 10.);
                 assert_eq!(theme.get_button_corner_radius(), 8.);

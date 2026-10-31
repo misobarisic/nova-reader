@@ -1,7 +1,7 @@
 use std::{cell::Cell, rc::Rc, time::Duration};
 
 use i_slint_backend_testing::ElementHandle;
-use nova_reader::{Anim, AppWindow, ItemRow, Theme};
+use nova_reader::{Anim, AppWindow, ItemRow, SourceRow, Theme};
 use slint::platform::{PointerEventButton, WindowEvent};
 use slint::{ComponentHandle, LogicalSize, ModelRc, VecModel};
 
@@ -38,7 +38,7 @@ fn action(ui: &AppWindow, label: &str) -> ElementHandle {
         }
         let id = if ui.get_section() == 4 {
             "MorePage::landing-scroll"
-        } else if [11, 12, 14, 15].contains(&ui.get_section()) {
+        } else if [11, 12, 14, 15, 16].contains(&ui.get_section()) {
             "MorePage::detail-scroll"
         } else if ui.get_section() >= 9 {
             "MorePage::child-scroll"
@@ -115,6 +115,7 @@ fn nova_navigation_more_and_responsive_controls() {
         subtitle: "A long subtitle with source and chapter information".into(),
         badge: "Unread".into(),
         bookmarked: false,
+        ..ItemRow::default()
     }])));
     ui.show().unwrap();
     for (width, height) in [
@@ -133,7 +134,7 @@ fn nova_navigation_more_and_responsive_controls() {
             narrow,
             "use Nova's breakpoint on Android too"
         );
-        for section in [0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15] {
+        for section in [0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16] {
             ui.set_section(section);
             settle();
             let bottom = narrow && [0, 1, 2, 3, 4].contains(&section);
@@ -229,6 +230,9 @@ fn nova_navigation_more_and_responsive_controls() {
             .unwrap();
         assert!(reader.size().height >= 48.);
         assert_controls_fit(&ui, width);
+        assert!(!ui.get_reader_osd(), "chapters open with controls hidden");
+        action(&ui, "Toggle reader controls").invoke_accessible_default_action();
+        settle();
         action(&ui, "Options").invoke_accessible_default_action();
         settle();
         assert_controls_fit(&ui, width);
@@ -260,8 +264,24 @@ fn nova_navigation_more_and_responsive_controls() {
             .map(|i| format!("Source {i}").into())
             .collect::<Vec<_>>(),
     )));
+    ui.set_source_rows(ModelRc::new(VecModel::from(
+        (0..20)
+            .map(|i| SourceRow {
+                id: format!("source-{i}").into(),
+                name: format!("Source {}", i + 1).into(),
+                language: "English".into(),
+                group: "English".into(),
+                enabled: true,
+                latest: true,
+                index: i,
+                ..Default::default()
+            })
+            .collect::<Vec<_>>(),
+    )));
     ui.set_source_index(0);
     settle();
+    tap(&ui, "Source 1");
+    tap(&ui, "Source options");
     let selector = ElementHandle::find_by_element_type_name(&ui, "ReaderSelect")
         .next()
         .unwrap();
@@ -318,6 +338,7 @@ fn nova_navigation_more_and_responsive_controls() {
         19,
         "long dropdowns must scroll by touch"
     );
+    back(&ui);
 
     // A retained More scroller restores its landing position on child return.
     ui.window().set_size(LogicalSize::new(390., 400.));

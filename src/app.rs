@@ -1,5 +1,5 @@
 use crate::{
-    AppWindow, ItemRow, PageRow, SettingRow, TileRow,
+    AppWindow, Appearance, ExtensionRow, ItemRow, PageRow, SettingRow, TileRow,
     services::{Result, Services, error, now},
 };
 use nova_reader_ui::backend_text as text;
@@ -14,7 +14,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex, OnceLock, Weak,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
 };
@@ -33,6 +33,9 @@ struct Choice {
     id: String,
     name: String,
     enabled: bool,
+    filters: bool,
+    language: String,
+    latest: bool,
 }
 #[derive(Clone)]
 enum Row {
@@ -44,6 +47,34 @@ enum Row {
 enum PageInput {
     Local { path: PathBuf, id: String },
     Remote(reader_sources::Page),
+}
+impl PageInput {
+    fn read(&self, source: Option<&Source>, cancel: &CancelToken) -> Result<Vec<u8>> {
+        cancel.check().map_err(error)?;
+        let bytes = match self {
+            Self::Local { path, .. } => {
+                use std::io::Read;
+                let file = std::fs::File::open(path).map_err(error)?;
+                if file.metadata().map_err(error)?.len() > 32 * 1024 * 1024 {
+                    return Err(text::tr("Image exceeds byte limit"));
+                }
+                let mut bytes = Vec::new();
+                file.take(32 * 1024 * 1024 + 1)
+                    .read_to_end(&mut bytes)
+                    .map_err(error)?;
+                bytes
+            }
+            Self::Remote(page) => source
+                .ok_or_else(|| text::tr("Source unavailable"))?
+                .fetch_page(&page.url, &page.headers, cancel)
+                .map_err(error)?,
+        };
+        cancel.check().map_err(error)?;
+        if bytes.len() > 32 * 1024 * 1024 {
+            return Err(text::tr("Image exceeds byte limit"));
+        }
+        Ok(bytes)
+    }
 }
 struct Reader {
     chapter: ChapterId,
@@ -57,6 +88,10 @@ struct Reader {
     budget_blocked: BTreeSet<usize>,
     desired_anchor: usize,
     decoded_bytes: BTreeMap<usize, usize>,
+    // Track the requested quality, since source dimensions and the display
+    // pixel limit can produce a texture narrower than that request.
+    decoded_widths: BTreeMap<usize, u32>,
+    target_width: u32,
     viewport_width: f32,
     viewport_height: f32,
     anchor: ResumeAnchor,
@@ -64,12 +99,67 @@ struct Reader {
     completed: bool,
 }
 impl Reader {
+    fn decode_width(width: f32, scale_factor: f32) -> u32 {
+        // Small layout changes share a decode, while high-density screens get
+        // physical-pixel detail within a bounded display allocation.
+        let physical = (width * scale_factor).clamp(128., 2048.);
+        ((physical / 128.).ceil() as u32 * 128).clamp(128, 2048)
+    }
+
+    fn retained_bytes_without(&self, index: usize) -> usize {
+        self.decoded_bytes
+            .iter()
+            .filter(|(page, _)| **page != index)
+            .map(|(_, bytes)| *bytes)
+            .sum()
+    }
+
     fn page_id(&self, index: usize) -> String {
         match &self.pages[index] {
             PageInput::Local { id, .. } => id.clone(),
             PageInput::Remote(p) => p.id.clone(),
         }
     }
+}
+fn resume_chapter<'a>(
+    chapters: &'a [Chapter],
+    progress: &[ReadingProgress],
+) -> Option<&'a Chapter> {
+    progress
+        .iter()
+        .filter(|p| !p.completed)
+        .filter_map(|p| {
+            chapters
+                .iter()
+                .find(|c| c.id == p.chapter)
+                .map(|c| (p.last_read_at, c))
+        })
+        .max_by_key(|(read_at, _)| *read_at)
+        .map(|(_, c)| c)
+        .or_else(|| {
+            chapters
+                .iter()
+                .find(|c| !progress.iter().any(|p| p.chapter == c.id && p.completed))
+        })
+        .or_else(|| chapters.first())
+}
+fn resume_label(chapter: &Chapter) -> String {
+    chapter
+        .number
+        .as_deref()
+        .filter(|n| !n.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| chapter.title.clone())
+}
+struct CatalogueState {
+    source_id: String,
+    rows: Vec<Series>,
+    query: String,
+    catalogue: String,
+    page: usize,
+    has_more: bool,
+    selected: usize,
+    filters_active: bool,
 }
 #[derive(Default)]
 struct View {
@@ -88,6 +178,21 @@ struct View {
     category: usize,
     category_target: usize,
     settings_package: Option<String>,
+    source_filters: crate::source_filters::FilterSet,
+    source_browser: crate::source_browser::SourceBrowser,
+    source_filters_loaded: bool,
+    filters_active: bool,
+    saved_catalogue: Option<CatalogueState>,
+    artwork_rows: Vec<Option<Series>>,
+    artwork_seen: BTreeMap<usize, std::time::Instant>,
+    artwork_pruned: Option<std::time::Instant>,
+}
+fn reader_series_title(view: &View) -> Option<&str> {
+    let reader = view.reader.as_ref()?;
+    view.series
+        .as_ref()
+        .filter(|series| series.id == reader.chapter.series)
+        .map(|series| series.title.as_str())
 }
 struct ImageTask {
     generation: u64,
@@ -95,6 +200,7 @@ struct ImageTask {
 }
 struct Controller {
     services: Services,
+    artwork: crate::artwork::ArtworkLoader,
     view: Mutex<View>,
     generation: AtomicU64,
     cancel: Mutex<CancelToken>,
@@ -107,6 +213,7 @@ impl Controller {
         self.view.lock().unwrap_or_else(|e| e.into_inner())
     }
     fn invalidate(&self) -> (u64, CancelToken) {
+        self.artwork.invalidate();
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
         let mut current = self.cancel.lock().unwrap_or_else(|e| e.into_inner());
         current.cancel();
@@ -188,6 +295,9 @@ impl Controller {
                         if package.enabled { "" } else { " (disabled)" }
                     ),
                     enabled: package.enabled,
+                    filters: false,
+                    language: package.language.clone(),
+                    latest: false,
                 });
             } else {
                 for variant in variants {
@@ -211,6 +321,19 @@ impl Controller {
                                 .unwrap_or(&package.language)
                         ),
                         enabled: package.enabled,
+                        language: variant
+                            .get("language")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(&package.language)
+                            .to_owned(),
+                        latest: variant
+                            .get("operations")
+                            .and_then(|v| v.as_array())
+                            .is_some_and(|v| v.iter().any(|op| op.as_str() == Some("browse"))),
+                        filters: variant
+                            .get("operations")
+                            .and_then(|v| v.as_array())
+                            .is_some_and(|v| v.iter().any(|op| op.as_str() == Some("filters"))),
                     });
                 }
             }
@@ -227,6 +350,9 @@ impl Controller {
         };
         let mut view = self.view();
         ui.set_section(view.section);
+        if view.section == 6 {
+            ui.set_series_title(reader_series_title(&view).unwrap_or("Series").into());
+        }
         let category_id = snapshot
             .categories
             .get(view.category.saturating_sub(1))
@@ -238,16 +364,16 @@ impl Controller {
                 .collect::<Vec<_>>(),
         )));
         let (heading, caption) = match view.section {
-            0 => ("Your library", "A home for your next chapter."),
+            0 => (
+                "My Library",
+                "Your saved titles, reading progress and downloads.",
+            ),
             1 => (
                 "Updates",
                 "Unread chapters from your library. Refresh to look for new releases.",
             ),
             2 => ("History", "Pick up where you left off."),
-            3 => (
-                "Find your next story",
-                "Choose a source and explore its collection.",
-            ),
+            3 => ("Browse", ""),
             4 => ("More", "Make this reading space your own."),
             5 => (
                 "Chapters",
@@ -282,7 +408,34 @@ impl Controller {
                     .filter(|s| s.title.to_lowercase().contains(&query))
                     .cloned()
                     .collect();
-                series.sort_by_key(|a| a.title.to_lowercase());
+                match ui.global::<Appearance>().get_library_sort() {
+                    0 => series.sort_by_key(|s| {
+                        std::cmp::Reverse(
+                            snapshot
+                                .library
+                                .iter()
+                                .find(|l| l.series == s.id)
+                                .map(|l| l.added_at)
+                                .unwrap_or(0),
+                        )
+                    }),
+                    2 => series.sort_by_key(|s| {
+                        std::cmp::Reverse(
+                            snapshot
+                                .chapters
+                                .iter()
+                                .filter(|c| {
+                                    c.id.series == s.id
+                                        && !snapshot
+                                            .progress
+                                            .iter()
+                                            .any(|p| p.chapter == c.id && p.completed)
+                                })
+                                .count(),
+                        )
+                    }),
+                    _ => series.sort_by_key(|s| s.title.to_lowercase()),
+                }
                 view.rows = series.into_iter().map(Row::Series).collect();
             }
             1 => {
@@ -316,6 +469,26 @@ impl Controller {
                     ui.set_heading(series.title.clone().into());
                     ui.set_series_title(series.title.clone().into());
                     ui.set_series_description(series.description.clone().into());
+                    ui.set_series_metadata(
+                        std::iter::once(series.authors.join(", "))
+                            .filter(|s| !s.is_empty())
+                            .chain(std::iter::once(series.id.source_id.clone()))
+                            .collect::<Vec<_>>()
+                            .join(" · ")
+                            .into(),
+                    );
+                    ui.set_series_genres(ModelRc::new(VecModel::from(
+                        series
+                            .genres
+                            .iter()
+                            .map(|s| s.clone().into())
+                            .collect::<Vec<_>>(),
+                    )));
+                    let key = crate::artwork::key(series);
+                    if ui.get_series_artwork_key().as_str() != key {
+                        ui.set_series_poster(slint::Image::default());
+                    }
+                    ui.set_series_artwork_key(key.into());
                     ui.set_in_library(snapshot.library.iter().any(|l| l.series == series.id));
                     view.chapters = snapshot
                         .chapters
@@ -324,11 +497,90 @@ impl Controller {
                         .cloned()
                         .collect();
                     view.chapters.sort_by_key(|c| c.source_order);
+                    ui.set_resume_chapter(
+                        resume_chapter(&view.chapters, &snapshot.progress)
+                            .map(resume_label)
+                            .unwrap_or_default()
+                            .into(),
+                    );
                     view.rows = view.chapters.iter().cloned().map(Row::Chapter).collect();
                 }
             }
             _ => {}
         }
+        if view.section == 1 {
+            view.rows.sort_by_key(|row| match row {
+                Row::Chapter(c) => (
+                    std::cmp::Reverse(c.uploaded_at.unwrap_or(0)),
+                    std::cmp::Reverse(c.source_order),
+                ),
+                _ => (std::cmp::Reverse(0), std::cmp::Reverse(0)),
+            });
+            let label = nova_storage::get_str("reader:last-update")
+                .and_then(|s| s.parse::<i64>().ok())
+                .map(|t| {
+                    let stamp = crate::timeline::TimelineClock::now().history(t);
+                    format!(
+                        "{}: {} {}",
+                        text::tr("Library last checked"),
+                        stamp.group,
+                        stamp.timestamp
+                    )
+                })
+                .unwrap_or_else(|| text::tr("Refresh your library to check for new chapters."));
+            ui.set_caption(label.into());
+        }
+        if view.section == 2 {
+            view.rows.sort_by_key(|row| match row {
+                Row::Chapter(c) => std::cmp::Reverse(
+                    snapshot
+                        .history
+                        .iter()
+                        .find(|h| h.chapter == c.id)
+                        .map(|h| h.read_at)
+                        .unwrap_or(0),
+                ),
+                _ => std::cmp::Reverse(0),
+            });
+            let query = view.query.to_lowercase();
+            if !query.is_empty() {
+                view.rows.retain(|row| match row {
+                    Row::Chapter(c) => {
+                        c.title.to_lowercase().contains(&query)
+                            || snapshot
+                                .series
+                                .iter()
+                                .find(|s| s.id == c.id.series)
+                                .is_some_and(|s| s.title.to_lowercase().contains(&query))
+                    }
+                    _ => false,
+                });
+            }
+        }
+        if view.section == 5 && ui.get_chapters_descending() {
+            view.rows.reverse();
+        }
+        let previous_posters = ui
+            .get_items()
+            .iter()
+            .filter(|r| r.poster.size().width > 0)
+            .map(|r| (r.artwork_key.to_string(), r.poster))
+            .collect::<BTreeMap<_, _>>();
+        let clock = crate::timeline::TimelineClock::now();
+        view.artwork_rows = view
+            .rows
+            .iter()
+            .map(|row| match row {
+                Row::Series(s) => Some(s.clone()),
+                Row::Chapter(c) => snapshot
+                    .series
+                    .iter()
+                    .find(|s| s.id == c.id.series)
+                    .cloned(),
+                Row::Download(c) => snapshot.series.iter().find(|s| s.id == c.series).cloned(),
+            })
+            .collect();
+        view.artwork_seen.clear();
         let items: Vec<_> = view
             .rows
             .iter()
@@ -348,38 +600,74 @@ impl Controller {
                                 .any(|p| p.chapter == c.id && p.completed)
                         })
                         .count();
+                    let key = crate::artwork::key(s);
                     ItemRow {
                         title: s.title.clone().into(),
                         subtitle: text::chapter_count(unread, chapters.len()).into(),
                         badge: s.id.source_id.clone().into(),
                         bookmarked: snapshot.library.iter().any(|l| l.series == s.id),
+                        poster: previous_posters.get(&key).cloned().unwrap_or_default(),
+                        artwork_key: key.into(),
+                        completed: (chapters.len() - unread) as i32,
+                        total: chapters.len() as i32,
+                        ..ItemRow::default()
                     }
                 }
-                Row::Chapter(c) => ItemRow {
-                    title: c.title.clone().into(),
-                    subtitle: if view.section == 5 {
-                        String::new()
-                    } else {
-                        snapshot
-                            .series
-                            .iter()
-                            .find(|s| s.id == c.id.series)
-                            .map(|s| s.title.clone())
-                            .unwrap_or_default()
-                    }
-                    .into(),
-                    badge: if snapshot
+                Row::Chapter(c) => {
+                    let series = snapshot.series.iter().find(|s| s.id == c.id.series);
+                    let key = series.map(crate::artwork::key).unwrap_or_default();
+                    let read = snapshot
                         .progress
                         .iter()
-                        .any(|p| p.chapter == c.id && p.completed)
-                    {
-                        text::tr("Read")
+                        .any(|p| p.chapter == c.id && p.completed);
+                    let stamp = if view.section == 2 {
+                        clock.history(
+                            snapshot
+                                .history
+                                .iter()
+                                .find(|h| h.chapter == c.id)
+                                .map(|h| h.read_at)
+                                .unwrap_or(0),
+                        )
                     } else {
-                        text::tr("Unread")
+                        clock.release(c.uploaded_at)
+                    };
+                    let mut meta = Vec::new();
+                    if c.uploaded_at.is_some() {
+                        meta.push(clock.release_date(c.uploaded_at));
                     }
-                    .into(),
-                    bookmarked: snapshot.bookmarks.iter().any(|b| b.chapter == c.id),
-                },
+                    if let Some(scanlator) = &c.scanlator {
+                        meta.push(scanlator.clone());
+                    }
+                    if let Some(language) = &c.language {
+                        meta.push(language.clone());
+                    }
+                    ItemRow {
+                        title: if view.section == 1 || view.section == 2 {
+                            series
+                                .map(|s| s.title.clone())
+                                .unwrap_or_else(|| c.title.clone())
+                        } else {
+                            c.title.clone()
+                        }
+                        .into(),
+                        subtitle: if view.section == 1 || view.section == 2 {
+                            c.title.clone()
+                        } else {
+                            String::new()
+                        }
+                        .into(),
+                        badge: text::tr(if read { "Read" } else { "Unread" }).into(),
+                        read,
+                        chapter_meta: meta.join(" · ").into(),
+                        group: stamp.group.into(),
+                        timestamp: stamp.timestamp.into(),
+                        bookmarked: snapshot.bookmarks.iter().any(|b| b.chapter == c.id),
+                        poster: previous_posters.get(&key).cloned().unwrap_or_default(),
+                        artwork_key: key.into(),
+                        ..ItemRow::default()
+                    }
+                }
                 Row::Download(c) => ItemRow {
                     title: snapshot
                         .chapters
@@ -391,6 +679,7 @@ impl Controller {
                     subtitle: "".into(),
                     badge: "".into(),
                     bookmarked: false,
+                    ..ItemRow::default()
                 },
             })
             .collect();
@@ -404,13 +693,225 @@ impl Controller {
                 .map(|c| c.name.clone().into())
                 .collect::<Vec<_>>(),
         )));
+        let source_choices = view
+            .choices
+            .iter()
+            .enumerate()
+            .map(|(i, c)| crate::source_browser::SourceChoice {
+                id: c.id.clone(),
+                name: c
+                    .name
+                    .strip_suffix(&format!(" · {}", c.language))
+                    .unwrap_or(&c.name)
+                    .to_owned(),
+                language: c.language.clone(),
+                enabled: c.enabled,
+                latest: c.latest,
+                index: i as i32,
+            })
+            .collect::<Vec<_>>();
+        ui.set_source_rows(ModelRc::new(VecModel::from(
+            view.source_browser.rows(&source_choices),
+        )));
         ui.set_source_index(if view.choices.is_empty() {
             -1
         } else {
             view.selected.min(view.choices.len() - 1) as i32
         });
+        if let Some(choice) = view.choices.get(view.selected) {
+            ui.set_source_title(choice.name.clone().into());
+            ui.set_source_has_filters(choice.filters && choice.enabled);
+        }
+        if view.section == 3 && ui.get_source_catalog_open() {
+            ui.set_source_query(view.query.clone().into());
+            ui.set_source_catalogue_kind(if !view.query.is_empty() {
+                "search".into()
+            } else if view.catalogue.is_empty() {
+                "popular".into()
+            } else {
+                view.catalogue.clone().into()
+            });
+        }
+    }
+    fn extension_action(self: &Arc<Self>, ui: &AppWindow, package: &str, action: &str) {
+        if action == "settings" {
+            let package = package.to_owned();
+            self.task(
+                ui,
+                move |app, _| {
+                    let schema = app
+                        .services
+                        .sources
+                        .settings_schema(&package)
+                        .map_err(error)?;
+                    let values = app.services.sources.settings(&package).map_err(error)?;
+                    Ok((package, schema, values))
+                },
+                |app, ui, (package, schema, values)| {
+                    {
+                        let mut view = app.view();
+                        view.section = 8;
+                        view.settings_package = Some(package);
+                    }
+                    let rows = schema
+                        .into_iter()
+                        .map(|f| {
+                            let value = values
+                                .get(&f.key)
+                                .cloned()
+                                .unwrap_or(serde_json::Value::Null);
+                            let selected = f
+                                .options
+                                .iter()
+                                .position(|o| Some(o.as_str()) == value.as_str())
+                                .unwrap_or(0) as i32;
+                            SettingRow {
+                                key: f.key.into(),
+                                name: f.name.into(),
+                                kind: match f.kind {
+                                    reader_sources::SettingKind::Bool => "bool",
+                                    reader_sources::SettingKind::Select => "select",
+                                    reader_sources::SettingKind::Secret => "secret",
+                                    reader_sources::SettingKind::Text => "text",
+                                }
+                                .into(),
+                                value: value.as_str().unwrap_or_default().into(),
+                                checked: value.as_bool().unwrap_or(false),
+                                options: ModelRc::new(VecModel::from(
+                                    f.options.into_iter().map(Into::into).collect::<Vec<_>>(),
+                                )),
+                                selected,
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    ui.set_settings(ModelRc::new(VecModel::from(rows)));
+                    app.render(ui);
+                },
+            );
+            return;
+        }
+        let current = self
+            .services
+            .sources
+            .list()
+            .ok()
+            .and_then(|items| items.into_iter().find(|e| e.id == package));
+        let Some(current) = current else {
+            ui.set_status(text::tr("Source unavailable").into());
+            return;
+        };
+        let result = match action {
+            "remove" => self.services.sources.remove(package),
+            "toggle" => self.services.sources.set_enabled(package, !current.enabled),
+            _ => return,
+        };
+        if let Err(e) = result {
+            ui.set_status(error(e).into());
+        } else {
+            self.navigate(ui, 3);
+        }
+    }
+    fn select_source(self: &Arc<Self>, ui: &AppWindow, index: i32, kind: &str) {
+        // Cancel before an unavailable/disabled choice can return early.
+        self.flush();
+        self.invalidate();
+        ui.set_busy(false);
+        ui.set_status("".into());
+        ui.invoke_reset_catalogue_scroll();
+        ui.set_source_query("".into());
+        {
+            let mut view = self.view();
+            let index = index.max(0) as usize;
+            let Some(choice) = view.choices.get(index).cloned() else {
+                return;
+            };
+            view.selected = index;
+            if let Err(e) = view.source_browser.used(&choice.id) {
+                eprintln!("Nova Reader: {e}");
+            }
+            view.source_filters = crate::source_filters::FilterSet::default();
+            view.source_filters_loaded = false;
+            view.filters_active = false;
+            view.query.clear();
+            view.page = 0;
+            view.has_more = false;
+            view.saved_catalogue = None;
+            view.rows.clear();
+            ui.set_source_title(choice.name.into());
+            ui.set_source_has_filters(choice.filters && choice.enabled);
+        }
+        ui.set_items(ModelRc::default());
+        ui.set_has_more(false);
+        ui.set_source_catalog_open(true);
+        ui.set_source_filters_open(false);
+        self.browse(ui, kind, Some(String::new()), false);
+    }
+    fn request_artwork(&self, ui: &AppWindow, first: i32, last: i32) {
+        let mut view = self.view();
+        if view.section == 5 {
+            let series = view.series.clone();
+            drop(view);
+            if ui.get_series_poster().size().width == 0
+                && let Some(series) = series
+            {
+                self.artwork.request(&series);
+            }
+            return;
+        }
+        if ![0, 1, 2, 3].contains(&view.section) {
+            return;
+        }
+        let first = (first.max(0) as usize).min(view.artwork_rows.len());
+        let last = (last.max(0) as usize).min(view.artwork_rows.len());
+        let now = std::time::Instant::now();
+        let model = ui.get_items();
+        let mut requests = Vec::new();
+        for i in first..last {
+            view.artwork_seen.insert(i, now);
+            if model
+                .row_data(i)
+                .is_some_and(|r| r.poster.size().width == 0)
+                && let Some(s) = view.artwork_rows[i].clone()
+            {
+                requests.push(s);
+            }
+        }
+        if view
+            .artwork_pruned
+            .is_none_or(|t| now.duration_since(t).as_secs() >= 1)
+        {
+            let desired = view
+                .artwork_seen
+                .iter()
+                .filter(|(_, t)| now.duration_since(**t).as_millis() <= 600)
+                .filter_map(|(i, _)| view.artwork_rows.get(*i).and_then(|s| s.as_ref()))
+                .map(crate::artwork::key)
+                .filter(|key| !key.is_empty())
+                .collect::<BTreeSet<_>>();
+            self.artwork.retain(&desired);
+            for i in 0..model.row_count() {
+                if view
+                    .artwork_seen
+                    .get(&i)
+                    .is_none_or(|t| now.duration_since(*t).as_millis() > 600)
+                    && let Some(mut row) = model.row_data(i)
+                    && row.poster.size().width > 0
+                {
+                    row.poster = slint::Image::default();
+                    model.set_row_data(i, row);
+                }
+            }
+            view.artwork_pruned = Some(now);
+        }
+        drop(view);
+        for series in requests {
+            self.artwork.request(&series);
+        }
     }
     fn navigate(self: &Arc<Self>, ui: &AppWindow, section: i32) {
+        if section == 3 {
+            ui.set_source_catalog_open(false);
+        }
         self.flush();
         self.invalidate();
         ui.set_busy(false);
@@ -432,8 +933,25 @@ impl Controller {
             let adult = ui.get_show_adult();
             self.task(
                 ui,
-                move |app, _| app.sources(adult),
-                |app, ui, choices| {
+                move |app, _| {
+                    Ok((
+                        app.sources(adult)?,
+                        app.services.sources.list().map_err(error)?,
+                    ))
+                },
+                |app, ui, (choices, extensions)| {
+                    ui.set_extensions(ModelRc::new(VecModel::from(
+                        extensions
+                            .into_iter()
+                            .map(|e| ExtensionRow {
+                                id: e.id.into(),
+                                name: e.name.into(),
+                                version: e.version.into(),
+                                language: e.language.into(),
+                                enabled: e.enabled,
+                            })
+                            .collect::<Vec<_>>(),
+                    )));
                     let mut view = app.view();
                     view.choices = choices;
                     view.rows.clear();
@@ -452,7 +970,42 @@ impl Controller {
             self.render(ui);
         }
     }
+    fn return_to_catalogue(&self, ui: &AppWindow) {
+        ui.invoke_prepare_catalogue_return();
+        self.flush();
+        self.invalidate();
+        {
+            let mut view = self.view();
+            view.rows.clear();
+            view.has_more = false;
+            view.page = 0;
+            if let Some(mut saved) = view.saved_catalogue.take()
+                && let Some(selected) = view.choices.iter().position(|c| c.id == saved.source_id)
+            {
+                saved.selected = selected;
+                view.rows = saved.rows.iter().cloned().map(Row::Series).collect();
+                view.query = saved.query.clone();
+                view.catalogue = saved.catalogue.clone();
+                view.page = saved.page;
+                view.has_more = saved.has_more;
+                view.selected = saved.selected;
+                view.filters_active = saved.filters_active;
+                view.saved_catalogue = Some(saved);
+            }
+            view.section = 3;
+            view.reader = None;
+        }
+        ui.set_pages(ModelRc::default());
+        ui.set_total_ratio(0.);
+        ui.set_busy(false);
+        ui.set_status("".into());
+        ui.set_source_catalog_open(true);
+        self.render(ui);
+    }
     fn browse(self: &Arc<Self>, ui: &AppWindow, kind: &str, query: Option<String>, next: bool) {
+        if next && ui.get_busy() {
+            return;
+        }
         let choice = {
             let view = self.view();
             view.choices.get(view.selected).cloned()
@@ -465,34 +1018,48 @@ impl Controller {
             ui.set_status(text::tr("Enable this source to browse it.").into());
             return;
         }
-        let (op, query, page, catalogue) = {
+        let (op, query, page, catalogue, filters) = {
             let mut view = self.view();
             view.section = 3;
             if let Some(query) = query {
                 view.query = query;
             }
             if !next {
-                view.page = 1;
+                view.page = 0;
+                view.has_more = false;
+                ui.set_has_more(false);
+                ui.set_catalogue_scroll_y(0.);
+                view.rows.clear();
+                ui.set_items(ModelRc::default());
                 if !kind.is_empty() {
                     view.catalogue = kind.into();
+                    view.filters_active = kind == "filtered";
                 }
-            } else {
-                view.page += 1;
             }
             (
-                if view.query.is_empty() {
+                if view.query.is_empty() && !view.filters_active {
                     "browse"
                 } else {
                     "search"
                 },
                 view.query.clone(),
-                view.page.max(1),
+                if next {
+                    view.page.saturating_add(1).max(1)
+                } else {
+                    1
+                },
                 view.catalogue.clone(),
+                if view.filters_active {
+                    view.source_filters.values()
+                } else {
+                    json!({})
+                },
             )
         };
+        let source_id = choice.id.clone();
         self.task(ui, move |app,cancel| {
             let source=app.services.sources.source(&choice.package).map_err(error)?;
-            let response=source.call_cancelled(op,&json!({"sourceId":choice.id,"catalogue":catalogue,"query":query,"page":page}),cancel).map_err(error)?;
+            let response=source.call_cancelled(op,&json!({"sourceId":choice.id,"catalogue":catalogue,"query":query,"page":page,"filters":filters}),cancel).map_err(error)?;
             let listing:reader_sources::Listing=serde_json::from_value(response).map_err(error)?;
             let series=listing.items.into_iter().map(|s|app.services.series(&choice.id,s)).collect::<Vec<_>>();
             Ok((series,listing.has_next_page))
@@ -500,7 +1067,14 @@ impl Controller {
             let mut view=app.view();
             if !next {view.rows.clear();}
             for series in series {if !view.rows.iter().any(|r|matches!(r,Row::Series(s) if s.id == series.id)){view.rows.push(Row::Series(series));}}
-            view.has_more=more;drop(view);app.render(ui);
+            view.has_more=more;view.page=page;
+            view.saved_catalogue=Some(CatalogueState {
+                source_id,
+                rows:view.rows.iter().filter_map(|r|if let Row::Series(s)=r {Some(s.clone())}else{None}).collect(),
+                query:view.query.clone(),catalogue:view.catalogue.clone(),page:view.page,
+                has_more:more,selected:view.selected,filters_active:view.filters_active,
+            });
+            drop(view);app.render(ui);
         });
     }
     fn open_series(self: &Arc<Self>, ui: &AppWindow, series: Series) {
@@ -536,6 +1110,7 @@ impl Controller {
         );
     }
     fn open_chapter(self: &Arc<Self>, ui: &AppWindow, chapter: ChapterId) {
+        ui.set_reader_osd(false);
         let origin = self.view().section;
         if origin != 5 && origin != 6 {
             ui.set_detail_origin(origin);
@@ -599,6 +1174,8 @@ impl Controller {
                         budget_blocked: BTreeSet::new(),
                         desired_anchor: usize::MAX,
                         decoded_bytes: BTreeMap::new(),
+                        decoded_widths: BTreeMap::new(),
+                        target_width: 0,
                         viewport_width: 0.,
                         viewport_height: 0.,
                         anchor,
@@ -629,6 +1206,8 @@ impl Controller {
                         budget_blocked: BTreeSet::new(),
                         desired_anchor: usize::MAX,
                         decoded_bytes: BTreeMap::new(),
+                        decoded_widths: BTreeMap::new(),
+                        target_width: 0,
                         viewport_width: 0.,
                         viewport_height: 0.,
                         anchor,
@@ -787,9 +1366,14 @@ impl Controller {
             return;
         };
         let index = index.min(reader.pages.len().saturating_sub(1));
-        if reader.desired_anchor != index {
+        let target_width = Reader::decode_width(
+            reader.viewport_width.max(ui.get_reader_width()),
+            ui.window().scale_factor(),
+        );
+        if reader.desired_anchor != index || reader.target_width != target_width {
             reader.budget_blocked.clear();
             reader.desired_anchor = index;
+            reader.target_width = target_width;
         }
         let mut end = index;
         if reader.mode == ReadingMode::Webtoon && reader.viewport_width > 0. {
@@ -826,12 +1410,14 @@ impl Controller {
                 model.set_row_data(old, row);
             }
             reader.decoded_bytes.remove(&old);
+            reader.decoded_widths.remove(&old);
         }
         reader.retained.retain(|i| keep.contains(i));
         // Visible images precede the one-page prefetch window.
         for target in (index..=end).chain(keep.iter().copied().filter(|i| *i < index || *i > end)) {
             if !reader.requested.contains(&target)
-                && !reader.retained.contains(&target)
+                && (!reader.retained.contains(&target)
+                    || reader.decoded_widths.get(&target).copied().unwrap_or(0) < target_width)
                 && !reader.failed.contains(&target)
                 && !reader.budget_blocked.contains(&target)
             {
@@ -866,13 +1452,10 @@ impl Controller {
                         r.requested.remove(&task.index);
                         return None;
                     }
-                    r.pages.get(task.index).cloned().map(|p| {
-                        (
-                            p,
-                            r.source.clone(),
-                            r.viewport_width.clamp(100., 1024.) as u32,
-                        )
-                    })
+                    r.pages
+                        .get(task.index)
+                        .cloned()
+                        .map(|p| (p, r.source.clone(), r.target_width))
                 })
             };
             let Some((input, source, display_width)) = input else {
@@ -884,26 +1467,8 @@ impl Controller {
             if app.generation.load(Ordering::Acquire) != task.generation {
                 cancel.cancel();
             }
-            let result = (|| {
-                let bytes = match input {
-                    PageInput::Local { path, .. } => {
-                        let file = std::fs::File::open(path).map_err(error)?;
-                        if file.metadata().map_err(error)?.len() > 32 * 1024 * 1024 {
-                            return Err("Image exceeds byte limit".to_string());
-                        }
-                        use std::io::Read;
-                        let mut bytes = Vec::new();
-                        file.take(32 * 1024 * 1024 + 1)
-                            .read_to_end(&mut bytes)
-                            .map_err(error)?;
-                        bytes
-                    }
-                    PageInput::Remote(p) => source
-                        .ok_or_else(|| "Source unavailable".to_string())?
-                        .fetch_page(&p.url, &p.headers, &cancel)
-                        .map_err(error)?,
-                };
-                cancel.check().map_err(error)?;
+            let result: Result<_> = (|| {
+                let bytes = input.read(source.as_ref(), &cancel)?;
                 let dimensions =
                     reader_engine::inspect_image(&bytes, reader_engine::DecodeLimits::default())
                         .map_err(error)?;
@@ -935,7 +1500,9 @@ impl Controller {
                 let mut loaded = false;
                 match result {
                     Ok((dimensions, image)) => {
-                        let mut used: usize = reader.decoded_bytes.values().sum();
+                        // Replacing a retained preview consumes only the new
+                        // image's accounting slot, not both versions' slots.
+                        let mut used = reader.retained_bytes_without(task.index);
                         if task.index == reader.anchor.page_index {
                             let mut victims = reader
                                 .retained
@@ -952,6 +1519,7 @@ impl Controller {
                                     reader.decoded_bytes.remove(&victim).unwrap_or(0),
                                 );
                                 reader.retained.remove(&victim);
+                                reader.decoded_widths.remove(&victim);
                                 reader.budget_blocked.insert(victim);
                                 if let Some(mut old) = model.row_data(victim) {
                                     old.tiles = ModelRc::default();
@@ -969,6 +1537,7 @@ impl Controller {
                         reader
                             .decoded_bytes
                             .insert(task.index, image.as_raw().len());
+                        reader.decoded_widths.insert(task.index, display_width);
                         reader.ratios[task.index] =
                             dimensions.height as f32 / dimensions.width as f32;
                         row.tiles = ModelRc::new(VecModel::from(display_tiles(
@@ -1030,6 +1599,13 @@ impl Controller {
                             view.pending = Some(progress);
                         }
                     }
+                    // Geometry can grow while a fetch/decode is in flight.
+                    // Keep its preview and immediately queue the new quality
+                    // in paged modes as well as Webtoon, without a scroll.
+                    let index = { app.view().reader.as_ref().map(|r| r.anchor.page_index) };
+                    if let Some(index) = index {
+                        app.request_images(&ui, index);
+                    }
                 }
             });
         }
@@ -1073,25 +1649,7 @@ impl Controller {
             let view = self.view();
             if step == 0 {
                 let state = self.services.domain.snapshot().unwrap_or_default();
-                let recent = state
-                    .progress
-                    .iter()
-                    .filter(|p| !p.completed && view.chapters.iter().any(|c| c.id == p.chapter))
-                    .max_by_key(|p| p.last_read_at)
-                    .and_then(|p| view.chapters.iter().find(|c| c.id == p.chapter));
-                recent
-                    .or_else(|| {
-                        view.chapters
-                            .iter()
-                            .find(|c| {
-                                !state
-                                    .progress
-                                    .iter()
-                                    .any(|p| p.chapter == c.id && p.completed)
-                            })
-                            .or_else(|| view.chapters.first())
-                    })
-                    .map(|c| c.id.clone())
+                resume_chapter(&view.chapters, &state.progress).map(|c| c.id.clone())
             } else {
                 view.reader
                     .as_ref()
@@ -1130,6 +1688,7 @@ impl Controller {
                         )
                         .into(),
                         bookmarked: job.status == reader_downloads::JobStatus::Complete,
+                        ..ItemRow::default()
                     })
                     .collect::<Vec<_>>();
                 app.view().rows = jobs.into_iter().map(|j| Row::Download(j.chapter)).collect();
@@ -1171,7 +1730,29 @@ impl Controller {
         });
     }
     fn item_action(self: &Arc<Self>, ui: &AppWindow, index: usize, action: &str) {
+        if action == "clear-history" {
+            if let Err(e) = self.services.domain.update(|state| {
+                state.history.clear();
+                Ok(())
+            }) {
+                ui.set_status(error(e).into());
+            }
+            self.render(ui);
+            return;
+        }
         let row = self.view().rows.get(index).cloned();
+        if action == "remove-history" {
+            if let Some(Row::Chapter(chapter)) = row {
+                if let Err(e) = self.services.domain.update(|state| {
+                    state.history.retain(|h| h.chapter != chapter.id);
+                    Ok(())
+                }) {
+                    ui.set_status(error(e).into());
+                }
+                self.render(ui);
+            }
+            return;
+        }
         if action == "category" {
             if let Some(Row::Series(series)) = row {
                 let category = self.view().category_target;
@@ -1334,14 +1915,166 @@ fn reading_mode(index: i32) -> ReadingMode {
     }
 }
 
+struct ReaderScreencap {
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+}
+fn capture_reader(ui: &AppWindow) -> Result<ReaderScreencap> {
+    let size = ui.window().size();
+    if u64::from(size.width) * u64::from(size.height) > 8_000_000 {
+        return Err(text::tr("Reader screencap exceeds the image size limit"));
+    }
+    // Called before the context menu becomes visible. FemtoVG renders the
+    // current scene offscreen, so neither the menu nor hidden OSD is captured.
+    let image = ui.window().take_snapshot().map_err(error)?;
+    Ok(ReaderScreencap {
+        width: image.width(),
+        height: image.height(),
+        pixels: image.as_bytes().to_vec(),
+    })
+}
+fn wire_reader_context(app: &Arc<Controller>, ui: &AppWindow) {
+    use std::{cell::RefCell, rc::Rc};
+    let screencap = Rc::new(RefCell::new(None));
+    let exporting = Arc::new(AtomicBool::new(false));
+    ui.on_reader_context_opening({
+        let weak = ui.as_weak();
+        let screencap = screencap.clone();
+        move |_| {
+            if let Some(ui) = weak.upgrade() {
+                *screencap.borrow_mut() = Some(capture_reader(&ui));
+            }
+        }
+    });
+    ui.on_reader_context_closed({
+        let screencap = screencap.clone();
+        move || {
+            screencap.borrow_mut().take();
+        }
+    });
+    ui.on_reader_context_action({
+        let app = app.clone();
+        let weak = ui.as_weak();
+        move |index, action| {
+            let Some(ui) = weak.upgrade() else { return };
+            let (screen, clipboard) = match action.as_str() {
+                "save-image" => (false, false),
+                "save-screencap" => (true, false),
+                "copy-image" => (false, true),
+                "copy-screencap" => (true, true),
+                _ => return,
+            };
+            if exporting.swap(true, Ordering::AcqRel) {
+                ui.set_reader_context_status(text::tr("Another image action is active").into());
+                return;
+            }
+            ui.set_reader_context_busy(true);
+            ui.set_reader_context_status(text::tr("Preparing image…").into());
+            let snapshot = screencap.borrow_mut().take();
+            let preferences = crate::capture_settings::preferences(&ui);
+            // History/Updates can open a chapter without mounting its detail
+            // page first. Use the active reader's series, never stale hero UI.
+            let series_title = reader_series_title(&app.view())
+                .unwrap_or("Series")
+                .to_owned();
+            let generation = app.generation.load(Ordering::Acquire);
+            let cancel = app.cancel.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let input = {
+                let view = app.view();
+                view.reader.as_ref().and_then(|reader| {
+                    usize::try_from(index)
+                        .ok()
+                        .and_then(|i| reader.pages.get(i))
+                        .cloned()
+                        .map(|page| (page, reader.source.clone()))
+                })
+            };
+            let done = {
+                let weak = weak.clone();
+                let exporting = exporting.clone();
+                let app = app.clone();
+                move |result: Result<()>| {
+                    exporting.store(false, Ordering::Release);
+                    let _ = weak.upgrade_in_event_loop(move |ui| {
+                        ui.set_reader_context_busy(false);
+                        if app.generation.load(Ordering::Acquire) == generation
+                            && ui.get_section() == 6
+                        {
+                            ui.set_reader_context_status(
+                                match result {
+                                    Ok(()) => text::tr(if clipboard {
+                                        "Image copied to clipboard."
+                                    } else {
+                                        "Image saved."
+                                    }),
+                                    Err(message) => text::tr(&message),
+                                }
+                                .into(),
+                            );
+                        }
+                    });
+                }
+            };
+            std::thread::spawn(move || {
+                let image = (|| {
+                    cancel.check().map_err(error)?;
+                    if screen {
+                        let capture = snapshot
+                            .ok_or_else(|| text::tr("Reader screencap is unavailable"))??;
+                        crate::reader_export::ExportImage::from_rgba_with_preferences(
+                            capture.width,
+                            capture.height,
+                            &capture.pixels,
+                            &preferences,
+                        )
+                    } else {
+                        let (page, source) =
+                            input.ok_or_else(|| text::tr("Chapter image is unavailable"))?;
+                        let bytes = page.read(source.as_ref(), &cancel)?;
+                        crate::reader_export::ExportImage::original(
+                            bytes,
+                            &format!("nova-reader-page-{}", index + 1),
+                        )
+                    }
+                })();
+                match image {
+                    Ok(image) if !cancel.is_cancelled() => {
+                        crate::reader_export::deliver_with_context(
+                            image,
+                            clipboard,
+                            &series_title,
+                            &preferences,
+                            done,
+                        )
+                    }
+                    Ok(_) => done(Err(text::tr("Image action cancelled"))),
+                    Err(message) => done(Err(message)),
+                }
+            });
+        }
+    });
+}
+
 pub fn run(services: Services) -> Result<()> {
     let ui = AppWindow::new().map_err(error)?;
     ui.set_app_version(env!("CARGO_PKG_VERSION").into());
     crate::appearance::init(&ui)?;
+    crate::capture_settings::init(&ui)?;
+    crate::image_storage::init(&ui)?;
     let (sender, receiver) = mpsc::channel();
+    let artwork = crate::artwork::ArtworkLoader::new(
+        services.clone(),
+        ui.as_weak(),
+        crate::paths::cache_dir()?.join("posters"),
+    );
     let app = Arc::new(Controller {
         services,
-        view: Mutex::new(View::default()),
+        artwork,
+        view: Mutex::new(View {
+            source_browser: crate::source_browser::SourceBrowser::load(),
+            ..View::default()
+        }),
         generation: AtomicU64::new(0),
         cancel: Mutex::new(CancelToken::default()),
         images: sender,
@@ -1349,11 +2082,42 @@ pub fn run(services: Services) -> Result<()> {
         active_image: Mutex::new(None),
     });
     let _ = LIFECYCLE.set(Arc::downgrade(&app));
+    wire_reader_context(&app, &ui);
     let worker = Arc::downgrade(&app);
     let weak = ui.as_weak();
     std::thread::spawn(move || Controller::image_worker(worker, receiver, weak));
     macro_rules! wire { ($method:ident, |$this:ident,$window:ident $(,$arg:ident)*| $body:expr) => {{let $this=app.clone();let weak=ui.as_weak();ui.$method(move |$($arg),*|{if let Some($window)=weak.upgrade(){$body}});}}; }
+    #[cfg(target_os = "android")]
+    ui.on_immersive_changed(|immersive| {
+        if let Err(e) = crate::android_documents::set_reader_immersive(immersive) {
+            eprintln!("Nova Reader: {e}");
+        }
+    });
+    wire!(on_request_artwork, |app, ui, first, last| app
+        .request_artwork(&ui, first, last));
+    wire!(on_image_cache_refresh, |app, ui| {
+        let _ = ui;
+        app.artwork.refresh_usage();
+    });
+    wire!(on_image_cache_clear, |app, ui| {
+        app.artwork.clear();
+        let model = ui.get_items();
+        for i in 0..model.row_count() {
+            if let Some(mut row) = model.row_data(i) {
+                row.poster = slint::Image::default();
+                model.set_row_data(i, row);
+            }
+        }
+        ui.set_series_poster(slint::Image::default());
+    });
+    wire!(on_library_sort_changed, |app, ui| app.render(&ui));
+    wire!(on_chapter_order_changed, |app, ui, descending| {
+        ui.set_chapters_descending(descending);
+        app.render(&ui);
+    });
     wire!(on_navigate, |app, ui, section| app.navigate(&ui, section));
+    wire!(on_return_to_catalogue, |app, ui| app
+        .return_to_catalogue(&ui));
     wire!(on_open_item, |app, ui, index| {
         let row = { app.view().rows.get(index as usize).cloned() };
         match row {
@@ -1363,17 +2127,91 @@ pub fn run(services: Services) -> Result<()> {
             None => {}
         }
     });
+    wire!(on_open_series, |app, ui, index| {
+        let series = {
+            app.view()
+                .artwork_rows
+                .get(index as usize)
+                .cloned()
+                .flatten()
+        };
+        if let Some(series) = series {
+            app.open_series(&ui, series);
+        }
+    });
     wire!(on_item_action, |app, ui, index, action| app.item_action(
         &ui,
         index as usize,
         &action
     ));
-    wire!(on_source_selected, |app, ui, index| {
-        app.view().selected = index.max(0) as usize;
-        app.browse(&ui, "popular", Some(String::new()), false);
+    wire!(on_source_selected, |app, ui, index| app
+        .select_source(&ui, index, "popular"));
+    wire!(on_source_latest_selected, |app, ui, index| app
+        .select_source(&ui, index, "latest"));
+    wire!(on_source_pin_picked, |app, ui, id| {
+        let result = app.view().source_browser.toggle_pin(&id);
+        if let Err(e) = result {
+            ui.set_status(e.into());
+        } else {
+            app.render(&ui);
+        }
+    });
+    wire!(on_source_filters_requested, |app, ui| {
+        if ui.get_source_filters_open() {
+            ui.set_source_filters_open(false);
+            return;
+        }
+        if app.view().source_filters_loaded {
+            ui.set_source_filters(ModelRc::new(VecModel::from(
+                app.view().source_filters.rows(),
+            )));
+            ui.set_source_filters_open(true);
+            return;
+        }
+        let choice = {
+            let view = app.view();
+            view.choices.get(view.selected).cloned()
+        };
+        if let Some(choice) = choice.filter(|c| c.filters && c.enabled) {
+            app.task(
+                &ui,
+                move |app, cancel| {
+                    let source = app.services.source(&choice.id)?;
+                    let response = source
+                        .call_cancelled("filters", &json!({"sourceId":choice.id}), cancel)
+                        .map_err(error)?;
+                    crate::source_filters::FilterSet::parse(response)
+                },
+                |app, ui, filters| {
+                    ui.set_source_filter_notice(filters.notice().into());
+                    ui.set_source_filters(ModelRc::new(VecModel::from(filters.rows())));
+                    let mut view = app.view();
+                    view.source_filters = filters;
+                    view.source_filters_loaded = true;
+                    drop(view);
+                    ui.set_source_filters_open(true);
+                },
+            );
+        }
+    });
+    wire!(on_source_filter_changed, |app, ui, key, value| {
+        let _ = ui;
+        let mut view = app.view();
+        // Keep the native editor mounted while typing. Reopening the panel
+        // publishes its validated draft from the provider-value model.
+        view.source_filters.change(&key, &value);
+    });
+    wire!(on_source_filter_selected, |app, ui, key, index| {
+        let _ = ui;
+        let mut view = app.view();
+        view.source_filters.select(&key, index);
+    });
+    wire!(on_source_filters_applied, |app, ui| {
+        ui.set_source_filters_open(false);
+        app.browse(&ui, "filtered", Some(String::new()), false);
     });
     wire!(on_search, |app, ui, query| {
-        if app.view().section == 0 {
+        if app.view().section == 0 || app.view().section == 2 {
             app.view().query = query.to_string();
             app.render(&ui);
         } else {
@@ -1399,6 +2237,7 @@ pub fn run(services: Services) -> Result<()> {
                     Ok(failed)
                 },
                 |app, ui, failed| {
+                    nova_storage::set_str("reader:last-update", &now().to_string());
                     app.render(ui);
                     if failed > 0 {
                         ui.set_status(
@@ -1729,76 +2568,11 @@ pub fn run(services: Services) -> Result<()> {
             view.choices.get(view.selected).cloned()
         };
         if let Some(choice) = choice {
-            if action == "settings" {
-                let package = choice.package;
-                app.task(
-                    &ui,
-                    move |app, _| {
-                        let schema = app
-                            .services
-                            .sources
-                            .settings_schema(&package)
-                            .map_err(error)?;
-                        let values = app.services.sources.settings(&package).map_err(error)?;
-                        Ok((package, schema, values))
-                    },
-                    |app, ui, (package, schema, values)| {
-                        {
-                            let mut view = app.view();
-                            view.section = 8;
-                            view.settings_package = Some(package);
-                        }
-                        let rows = schema
-                            .into_iter()
-                            .map(|f| {
-                                let value = values
-                                    .get(&f.key)
-                                    .cloned()
-                                    .unwrap_or(serde_json::Value::Null);
-                                let selected =
-                                    f.options
-                                        .iter()
-                                        .position(|o| Some(o.as_str()) == value.as_str())
-                                        .unwrap_or(0) as i32;
-                                SettingRow {
-                                    key: f.key.into(),
-                                    name: f.name.into(),
-                                    kind: match f.kind {
-                                        reader_sources::SettingKind::Bool => "bool",
-                                        reader_sources::SettingKind::Select => "select",
-                                        reader_sources::SettingKind::Secret => "secret",
-                                        reader_sources::SettingKind::Text => "text",
-                                    }
-                                    .into(),
-                                    value: value.as_str().unwrap_or_default().into(),
-                                    checked: value.as_bool().unwrap_or(false),
-                                    options: ModelRc::new(VecModel::from(
-                                        f.options.into_iter().map(Into::into).collect::<Vec<_>>(),
-                                    )),
-                                    selected,
-                                }
-                            })
-                            .collect::<Vec<_>>();
-                        ui.set_settings(ModelRc::new(VecModel::from(rows)));
-                        app.render(ui);
-                    },
-                );
-                return;
-            }
-            let result = if action == "remove" {
-                app.services.sources.remove(&choice.package)
-            } else {
-                app.services
-                    .sources
-                    .set_enabled(&choice.package, !choice.enabled)
-            };
-            if let Err(e) = result {
-                ui.set_status(error(e).into());
-            } else {
-                app.navigate(&ui, 3);
-            }
+            app.extension_action(&ui, &choice.package, &action);
         }
     });
+    wire!(on_extension_action, |app, ui, package, action| app
+        .extension_action(&ui, &package, &action));
     wire!(on_check_update, |app, ui| app.task(
         &ui,
         |_, _| crate::updates::check(),
@@ -1828,15 +2602,65 @@ pub fn run(services: Services) -> Result<()> {
             }
         }
     }
-    ui.run().map_err(error)?;
+    let result = ui.run().map_err(error);
+    crate::reader_export::shutdown();
     app.flush();
     app.invalidate();
-    Ok(())
+    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn continue_label_and_action_share_the_actual_resume_target() {
+        let series = reader_domain::SeriesId::new("fixture", "series");
+        let chapters = (0..3)
+            .map(|i| Chapter {
+                id: ChapterId::new(series.clone(), format!("chapter-{i}")),
+                title: format!("Story chapter {i}"),
+                label: String::new(),
+                number: Some(if i == 2 {
+                    "106.1".into()
+                } else {
+                    i.to_string()
+                }),
+                volume: None,
+                source_order: i,
+                language: None,
+                scanlator: None,
+                uploaded_at: None,
+            })
+            .collect::<Vec<_>>();
+        let mut progress = vec![];
+        assert_eq!(
+            resume_chapter(&chapters, &progress).unwrap().id,
+            chapters[0].id
+        );
+        for (i, completed, last_read_at) in [(0, true, 20), (1, false, 10), (2, false, 30)] {
+            progress.push(ReadingProgress {
+                chapter: chapters[i].id.clone(),
+                anchor: ResumeAnchor::default(),
+                mode: ReadingMode::Webtoon,
+                last_read_at,
+                completed,
+            });
+        }
+        let target = resume_chapter(&chapters, &progress).unwrap();
+        assert_eq!(target.id, chapters[2].id);
+        assert_eq!(resume_label(target), "106.1");
+        progress[2].completed = true;
+        assert_eq!(
+            resume_chapter(&chapters, &progress).unwrap().id,
+            chapters[1].id
+        );
+        progress[1].completed = true;
+        assert_eq!(
+            resume_chapter(&chapters, &progress).unwrap().id,
+            chapters[0].id
+        );
+    }
 
     #[test]
     fn logical_reflow_visible_window_and_tall_textures() {
@@ -1863,14 +2687,22 @@ mod tests {
             budget_blocked: BTreeSet::new(),
             desired_anchor: usize::MAX,
             decoded_bytes: BTreeMap::new(),
+            decoded_widths: BTreeMap::new(),
+            target_width: 0,
             viewport_width: 500.,
             viewport_height: 500.,
             anchor: ResumeAnchor::new("stable-2", 2, 0.375).unwrap(),
             mode: ReadingMode::Webtoon,
             completed: false,
         };
+        let services = Services::open(&dir.path().join("data")).unwrap();
         let app = Arc::new(Controller {
-            services: Services::open(dir.path()).unwrap(),
+            artwork: crate::artwork::ArtworkLoader::new(
+                services.clone(),
+                ui.as_weak(),
+                dir.path().join("cache").join("posters"),
+            ),
+            services,
             view: Mutex::new(View {
                 reader: Some(reader),
                 section: 6,
@@ -1882,6 +2714,28 @@ mod tests {
             download_serial: Mutex::new(()),
             active_image: Mutex::new(None),
         });
+        // A direct History/Updates chapter open has no mounted detail hero.
+        // Its OSD and capture folder must use the active series identity.
+        let active_series = app.view().reader.as_ref().unwrap().chapter.series.clone();
+        app.view().series = Some(Series {
+            id: active_series,
+            title: "Current reader series".into(),
+            description: String::new(),
+            authors: vec![],
+            genres: vec![],
+            cover_url: None,
+            canonical_url: None,
+        });
+        ui.set_series_title("Stale detail title".into());
+        app.render(&ui);
+        assert_eq!(ui.get_series_title(), "Current reader series");
+        assert_eq!(
+            reader_series_title(&app.view()),
+            Some("Current reader series")
+        );
+        app.view().series.as_mut().unwrap().id.local_id = "another-series".into();
+        assert_eq!(reader_series_title(&app.view()), None);
+        app.view().series.as_mut().unwrap().id.local_id = "series".into();
         app.mount_pages(&ui);
         let before = app.view().reader.as_ref().unwrap().anchor.clone();
         ui.set_zoom(2.);
@@ -1904,6 +2758,81 @@ mod tests {
         drop(view);
         app.request_images(&ui, 0);
         assert!(!app.view().reader.as_ref().unwrap().requested.contains(&0));
+
+        assert_eq!(Reader::decode_width(500., 1.), 512);
+        assert_eq!(Reader::decode_width(501., 1.), 512);
+        assert_eq!(Reader::decode_width(500., 2.), 1024);
+        assert_eq!(Reader::decode_width(1100., 3.), 2048);
+
+        // A low-resolution preview must upgrade at the same anchor, in every
+        // reading mode, even when the earlier decode completes after reflow.
+        for mode in [
+            ReadingMode::Webtoon,
+            ReadingMode::LeftToRight,
+            ReadingMode::RightToLeft,
+            ReadingMode::Vertical,
+        ] {
+            let before = {
+                let mut view = app.view();
+                let reader = view.reader.as_mut().unwrap();
+                reader.mode = mode;
+                reader.failed.clear();
+                reader.requested.clear();
+                reader.retained.insert(0);
+                reader.decoded_widths.insert(0, 128);
+                reader.decoded_bytes.insert(0, 128 * 100 * 4);
+                reader.anchor.clone()
+            };
+            app.reflow(&ui, 500., 500.);
+            {
+                let mut view = app.view();
+                let reader = view.reader.as_mut().unwrap();
+                assert_eq!(reader.anchor, before);
+                assert!(reader.retained.contains(&0)); // keep the preview
+                assert!(reader.requested.contains(&0));
+                // Finish an in-flight request for the old width. Completion
+                // rechecks the window after removing the requested marker.
+                reader.requested.remove(&0);
+                reader.decoded_widths.insert(0, 128);
+            }
+            app.request_images(&ui, 0);
+            assert!(app.view().reader.as_ref().unwrap().requested.contains(&0));
+            {
+                let mut view = app.view();
+                let reader = view.reader.as_mut().unwrap();
+                reader.requested.remove(&0);
+                reader.decoded_widths.insert(0, reader.target_width);
+                // A source can remain 128px wide despite satisfying the full
+                // requested quality; actual texture size must not retry it.
+            }
+            app.request_images(&ui, 0);
+            app.request_images(&ui, 0);
+            assert!(!app.view().reader.as_ref().unwrap().requested.contains(&0));
+            app.reflow(&ui, 1000., 500.);
+            assert!(app.view().reader.as_ref().unwrap().requested.contains(&0));
+            {
+                let mut view = app.view();
+                let reader = view.reader.as_mut().unwrap();
+                reader.requested.remove(&0);
+                reader.decoded_widths.insert(0, reader.target_width);
+            }
+            app.reflow(&ui, 250., 500.);
+            assert!(!app.view().reader.as_ref().unwrap().requested.contains(&0));
+            assert_eq!(app.view().reader.as_ref().unwrap().anchor, before);
+        }
+
+        {
+            let mut view = app.view();
+            let reader = view.reader.as_mut().unwrap();
+            reader.decoded_bytes = BTreeMap::from([(0, 24 * 1024 * 1024), (1, 32 * 1024 * 1024)]);
+            assert_eq!(reader.retained_bytes_without(0), 32 * 1024 * 1024);
+            // A 32MiB replacement fits exactly; counting its 24MiB preview
+            // as another retained image would incorrectly block the upgrade.
+            assert_eq!(
+                reader.retained_bytes_without(0) + 32 * 1024 * 1024,
+                64 * 1024 * 1024
+            );
+        }
 
         let bytes = std::fs::read(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -1929,5 +2858,87 @@ mod tests {
         assert!(
             (tiles.last().unwrap().offset + tiles.last().unwrap().fraction - 1.).abs() < 0.00001
         );
+        // Returning from a result restores its source, search/pagination and
+        // catalogue rows instead of routing to the Browse management screen.
+        {
+            let mut view = app.view();
+            view.choices = (0..2)
+                .map(|i| Choice {
+                    package: "fixture".into(),
+                    id: format!("fixture.{i}"),
+                    name: format!("Source {i}"),
+                    enabled: true,
+                    filters: false,
+                    language: "en".into(),
+                    latest: true,
+                })
+                .collect();
+            view.saved_catalogue = Some(CatalogueState {
+                source_id: "fixture.1".into(),
+                rows: vec![Series {
+                    id: reader_domain::SeriesId::new("fixture.1", "result"),
+                    title: "Saved result".into(),
+                    description: String::new(),
+                    authors: vec![],
+                    genres: vec![],
+                    cover_url: None,
+                    canonical_url: None,
+                }],
+                query: "saved query".into(),
+                catalogue: "latest".into(),
+                page: 3,
+                has_more: true,
+                selected: 1,
+                filters_active: true,
+            });
+            view.section = 5;
+            view.query.clear();
+            view.selected = 0;
+            view.rows.clear();
+        }
+        app.return_to_catalogue(&ui);
+        assert_eq!(ui.get_section(), 3);
+        assert!(ui.get_source_catalog_open());
+        assert_eq!(ui.get_source_index(), 1);
+        assert_eq!(ui.get_items().row_data(0).unwrap().title, "Saved result");
+        let view = app.view();
+        assert_eq!(view.query, "saved query");
+        assert_eq!(view.page, 3);
+        assert!(view.has_more && view.filters_active);
+        drop(view);
+        // Switching to a disabled source still cancels old work and clears
+        // result ownership/pagination before the disabled-source early return.
+        let old_cancel = app.cancel.lock().unwrap().clone();
+        {
+            let mut view = app.view();
+            view.choices[1].enabled = false;
+            view.page = 8;
+            view.has_more = true;
+        }
+        ui.set_has_more(true);
+        ui.set_busy(true);
+        app.select_source(&ui, 1, "popular");
+        assert!(old_cancel.is_cancelled());
+        assert!(!ui.get_busy() && !ui.get_has_more());
+        {
+            let view = app.view();
+            assert!(view.saved_catalogue.is_none());
+            assert_eq!(view.page, 0);
+            assert!(!view.has_more && view.rows.is_empty());
+        }
+        // A failed page-one request after prior pagination cannot expose an
+        // old Load more state or advance the next request past page one.
+        {
+            let mut view = app.view();
+            view.selected = 0;
+            view.page = 9;
+            view.has_more = true;
+        }
+        ui.set_has_more(true);
+        app.browse(&ui, "latest", Some("new search".into()), false);
+        assert!(!ui.get_has_more());
+        let view = app.view();
+        assert_eq!(view.page, 0);
+        assert!(!view.has_more);
     }
 }

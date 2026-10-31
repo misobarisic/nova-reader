@@ -1,0 +1,130 @@
+// Poster/list geometry and painting adapted from Nova b69a1e5 library.slint.
+import { Theme, Anim, SettingsStyle } from "@NovaUiShared";
+import { FeedbackProgress } from "@NovaUiBase/feedback-motion.slint";
+import { ItemRow } from "media-models.slint";
+import { IconAction } from "controls.slint";
+
+export component LibraryViewSwitch inherits Rectangle {
+    in property <bool> list-view;
+    callback picked(bool);
+    width: 88px; height: 44px; border-radius: 22px;
+    border-width: 1px; border-color: Theme.current.border_medium;
+    background: Theme.current.hero_control; clip: true;
+    for mode in [false, true]: Rectangle {
+        x: mode ? 44px : 0px; width: 44px; height: 44px;
+        feedback := FeedbackProgress { active: root.list-view == mode; }
+        background: Theme.current.selection_wash.mix(transparent, feedback.value);
+        border-width: scope.has-focus ? 2px : 0px; border-color: Theme.current.focus_ring;
+        accessible-role: button; accessible-label: mode ? @tr("List view") : @tr("Grid view");
+        accessible-checkable: true; accessible-checked: root.list-view == mode;
+        accessible-action-default => { root.picked(mode); }
+        Path {
+            x: 12px; y: 12px; width: 20px; height: 20px;
+            viewbox-width: 24; viewbox-height: 24;
+            commands: mode ? "M3 4h3v3H3zm5 0h13v3H8zM3 10h3v3H3zm5 0h13v3H8zM3 16h3v3H3zm5 0h13v3H8z" : "M3 3h7v7H3zm11 0h7v7h-7zM3 14h7v7H3zm11 0h7v7h-7z";
+            fill: Theme.current.accent_vivid.mix(Theme.current.text_hint, feedback.value);
+        }
+        scope := FocusScope { key-pressed(e) => { if e.text == Key.Return || e.text == " " { if !e.repeat { root.picked(mode); } return accept; } return reject; } }
+        TouchArea { mouse-cursor: pointer; clicked => { root.picked(mode); } }
+    }
+}
+
+export component LibraryCard inherits Rectangle {
+    in property <ItemRow> card;
+    in property <bool> list-view;
+    in property <bool> assign-category;
+    in property <bool> overlay-caption;
+    callback picked;
+    callback category-picked;
+    accessible-role: button; accessible-label: root.card.title;
+    accessible-action-default => { root.picked(); }
+    private property <length> poster-height: root.list-view ? root.height - 2px : root.width * 3 / 2;
+    background: transparent;
+    lift := Rectangle {
+        width: 100%; height: 100%;
+        background: Theme.current.card; border-radius: Theme.card_corner_radius;
+        border-width: scope.has-focus ? 2px : 1px;
+        border-color: scope.has-focus ? Theme.current.accent : Theme.current.border_card;
+        clip: true;
+        y: hover.has-hover && !hover.pressed && Anim.enabled && Anim.hover ? -4px : 0px;
+        animate y { duration: Anim.hover_fast; easing: ease-out; }
+        Rectangle {
+            x: 1px; y: 1px;
+            width: root.list-view ? 92px : parent.width - 2px;
+            height: root.poster-height;
+            border-radius: max(0px, Theme.card_corner_radius - 1px);
+            background: Theme.current.home_artwork_placeholder; clip: true;
+            if root.card.poster.width > 0: Image { source: root.card.poster; image-fit: cover; width: 100%; height: 100%; }
+            if root.card.poster.width == 0: Image {
+                source: @image-url("../../assets/icons/navigation/library.svg"); image-fit: contain;
+                width: 36px; height: 36px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                colorize: Theme.current.text_muted;
+            }
+            if !root.list-view: Rectangle { y: parent.height - 70px; height: 70px; width: 100%; background: @linear-gradient(180deg, transparent, Theme.current.card); }
+        }
+        if root.card.total > 0 && !root.overlay-caption: HorizontalLayout {
+            x: root.list-view ? 104px : 9px;
+            y: root.list-view ? parent.height - 26px : root.poster-height - 25px;
+            width: max(1px, parent.width - self.x - 9px); height: 18px; spacing: root.width > 100px ? 8px : 4px;
+            Rectangle {
+                horizontal-stretch: 1; min-width: 1px; height: 100%;
+                Rectangle {
+                    y: (parent.height - self.height) / 2; width: 100%; height: 6px; border-radius: 3px;
+                    background: Theme.current.progress_track_overlay;
+                    Rectangle { width: parent.width * min(1, root.card.completed * 1.0 / max(1, root.card.total)); height: 100%; border-radius: 3px; background: Theme.current.progress_fill; }
+                }
+            }
+            Text { text: root.card.completed + " / " + root.card.total; min-width: 0px; max-width: parent.width * 0.65; overflow: elide; color: Theme.current.text_primary; font-size: 11px; vertical-alignment: center; }
+        }
+        VerticalLayout {
+            x: root.list-view ? 104px : 9px;
+            y: root.list-view ? 14px : root.overlay-caption ? root.poster-height - 54px : root.poster-height + 6px;
+            width: max(1px, parent.width - self.x - 9px); height: root.list-view ? 70px : 60px;
+            spacing: 4px; alignment: start;
+            Text { text: root.card.title; color: Theme.current.text_home_title; font-size: root.list-view ? 15px : 13px; font-weight: 600; overflow: elide; min-width: 0px; max-lines: root.overlay-caption && !root.list-view ? 2 : 1; wrap: word-wrap; }
+            if !root.overlay-caption || root.list-view: Text { text: root.card.badge; color: Theme.current.text_home_metadata; font-size: 11px; overflow: elide; min-width: 0px; }
+            if root.card.subtitle != "" && (!root.overlay-caption || root.list-view): Text { text: root.card.subtitle; color: Theme.current.text_download; font-size: 11px; font-weight: 600; overflow: elide; min-width: 0px; }
+        }
+    }
+    scope := FocusScope {
+        changed has-focus => { if self.has-focus { SettingsStyle.reveal_control(root.absolute-position.y, root.height, false); } }
+        key-pressed(e) => { if e.text == Key.Return || e.text == " " { if !e.repeat { root.picked(); } return accept; } return reject; }
+    }
+    hover := TouchArea { mouse-cursor: pointer; clicked => { root.picked(); } }
+    if root.assign-category: IconAction {
+        x: parent.width - 48px; y: 4px; width: 44px;
+        text: @tr("Toggle category"); icon: @image-url("../../assets/icons/navigation/more.svg");
+        clicked => { root.category-picked(); }
+    }
+}
+
+export component SeriesGrid inherits Rectangle {
+    min-width: 0px;
+    in property <[ItemRow]> items;
+    in property <bool> list-view;
+    in property <int> min-cols: 2;
+    in property <bool> assign-category;
+    in property <bool> overlay-caption;
+    in property <length> viewport-top;
+    in property <length> viewport-height;
+    callback picked(int);
+    callback category-picked(int);
+    callback request-artwork(int,int);
+    out property <int> columns: root.list-view ? 1 : max(root.min-cols, Math.floor((root.width + Theme.card_spacing) / (160px + Theme.card_spacing)));
+    private property <length> item-width: max(1px, min(root.list-view ? root.width : 230px, (root.width - (root.columns - 1) * Theme.card_spacing) / root.columns));
+    private property <length> card-height: root.list-view ? 138px : root.item-width * 3 / 2 + (root.overlay-caption ? 0px : 76px);
+    private property <length> stride: root.card-height + Theme.card_spacing;
+    private property <int> first-row: max(0, Math.floor((root.viewport-top - root.absolute-position.y) / root.stride) - 2);
+    private property <int> last-row: max(0, Math.ceil((root.viewport-top + root.viewport-height - root.absolute-position.y) / root.stride) + 2);
+    height: root.items.length > 0 ? Math.ceil(root.items.length / root.columns) * root.stride - Theme.card_spacing + 4px : 0px;
+    Timer { interval: 150ms; running: root.visible && root.items.length > 0; triggered => { root.request-artwork(root.first-row * root.columns, min(root.items.length, (root.last-row + 1) * root.columns)); } }
+    for item[i] in root.items: Rectangle {
+        x: Math.mod(i, root.columns) * (root.item-width + Theme.card_spacing);
+        y: Math.floor(i / root.columns) * root.stride + 4px;
+        width: root.item-width; height: root.card-height;
+        if Math.floor(i / root.columns) >= root.first-row && Math.floor(i / root.columns) <= root.last-row: LibraryCard {
+            card: item; list-view: root.list-view; overlay-caption: root.overlay-caption; assign-category: root.assign-category;
+            picked => { root.picked(i); } category-picked => { root.category-picked(i); }
+        }
+    }
+}

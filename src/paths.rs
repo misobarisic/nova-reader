@@ -17,3 +17,17 @@ pub fn data_dir() -> Result<PathBuf, String> {
         .map(|dirs| dirs.data_dir().to_path_buf())
         .ok_or_else(|| "Application data directory is unavailable".into())
 }
+
+/// Nova's platform cache convention, under Reader's independent app identity.
+/// Temporary artwork is disposable; chapters and metadata stay in data_dir.
+pub fn cache_dir() -> Result<PathBuf, String> {
+    if let Some(path) = std::env::var_os("NOVA_READER_CACHE_DIR") {
+        return Ok(PathBuf::from(path));
+    }
+    #[cfg(target_os = "android")]
+    return crate::android_documents::cache_dir();
+    #[cfg(not(target_os = "android"))]
+    directories::BaseDirs::new()
+        .map(|dirs| dirs.cache_dir().join("nova-reader"))
+        .ok_or_else(|| "Application cache directory is unavailable".into())
+}

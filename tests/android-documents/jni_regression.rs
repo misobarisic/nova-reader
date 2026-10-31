@@ -1,6 +1,406 @@
 use super::*;
 use jni::{InitArgsBuilder, JNIVersion};
 
+const FIXTURE: &str = "dev/misob/nova/reader/DocumentBridgeFixture";
+
+fn fixture_bool(env: &mut JNIEnv<'_>, method: &str) -> bool {
+    env.call_static_method(FIXTURE, method, "()Z", &[])
+        .unwrap()
+        .z()
+        .unwrap()
+}
+
+fn fixture_updates(env: &mut JNIEnv<'_>, method: &str) -> i32 {
+    env.call_static_method(FIXTURE, method, "()I", &[])
+        .unwrap()
+        .i()
+        .unwrap()
+}
+fn fixture_text(env: &mut JNIEnv<'_>, method: &str) -> String {
+    let value = env
+        .call_static_method(FIXTURE, method, "()Ljava/lang/String;", &[])
+        .unwrap()
+        .l()
+        .unwrap();
+    env.get_string(&JString::from(value)).unwrap().into()
+}
+fn fixture_run(env: &mut JNIEnv<'_>, method: &str) {
+    env.call_static_method(FIXTURE, method, "()V", &[]).unwrap();
+}
+
+fn image_export_and_clipboard_have_real_readable_bytes(env: &mut JNIEnv<'_>) {
+    let staged = cache_dir().unwrap().join("page.png");
+    std::fs::write(&staged, b"fixture encoded image").unwrap();
+    let (send, receive) = std::sync::mpsc::channel();
+    export_image(
+        staged.clone(),
+        "chapter-1.png",
+        "image/png",
+        move |result| {
+            let _ = send.send(result);
+        },
+    );
+    fixture_run(env, "drain");
+    assert_eq!(fixture_text(env, "mime"), "image/png");
+    assert_eq!(fixture_text(env, "title"), "chapter-1.png");
+    assert_eq!(
+        fixture_text(env, "action"),
+        "android.intent.action.CREATE_DOCUMENT"
+    );
+    let (busy_send, busy_receive) = std::sync::mpsc::channel();
+    copy_image(staged.clone(), "image/png", move |result| {
+        let _ = busy_send.send(result);
+    });
+    assert_eq!(
+        busy_receive.recv().unwrap().unwrap_err(),
+        "Another document request is active"
+    );
+    fixture_run(env, "exportResult");
+    fixture_run(env, "awaitCopies");
+    receive
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap()
+        .unwrap();
+    assert_eq!(fixture_text(env, "exported"), "fixture encoded image");
+
+    // A destination failure is an error, and the next image operation can run.
+    env.set_static_field(
+        "android/content/ContentResolver",
+        ("android/content/ContentResolver", "failOutput", "Z"),
+        JValue::Bool(1),
+    )
+    .unwrap();
+    let (send, receive) = std::sync::mpsc::channel();
+    export_image(staged.clone(), "page", "image/png", move |result| {
+        let _ = send.send(result);
+    });
+    fixture_run(env, "drain");
+    fixture_run(env, "exportResult");
+    fixture_run(env, "awaitCopies");
+    assert!(
+        receive
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap()
+            .unwrap_err()
+            .contains("fixture destination failure")
+    );
+    env.set_static_field(
+        "android/content/ContentResolver",
+        ("android/content/ContentResolver", "failOutput", "Z"),
+        JValue::Bool(0),
+    )
+    .unwrap();
+
+    let (send, receive) = std::sync::mpsc::channel();
+    copy_image(staged.clone(), "image/png", move |result| {
+        let _ = send.send(result);
+    });
+    fixture_run(env, "drain");
+    fixture_run(env, "awaitCopies");
+    fixture_run(env, "drain");
+    receive
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap()
+        .unwrap();
+    assert!(
+        fixture_text(env, "clipboardUri").starts_with("content://dev.misob.nova.reader.images/")
+    );
+    assert_eq!(fixture_text(env, "clipboardMime"), "image/png");
+    assert!(fixture_bool(env, "providerRejectsUnsafePaths"));
+    // The staged file and original Activity can disappear before a recipient
+    // reads; a new provider instance still resolves the independent cache copy.
+    std::fs::remove_file(&staged).unwrap();
+    fixture_run(env, "destroy");
+    fixture_run(env, "restartProvider");
+    assert_eq!(fixture_text(env, "clipboardBytes"), "fixture encoded image");
+    fixture_run(env, "create");
+
+    // Canonical cache containment and MIME validation precede publishing.
+    for (path, mime) in [
+        (PathBuf::from("/etc/passwd"), "image/png"),
+        (staged.clone(), "text/plain"),
+    ] {
+        std::fs::write(&staged, b"fixture encoded image").unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        copy_image(path, mime, move |result| {
+            let _ = send.send(result);
+        });
+        fixture_run(env, "drain");
+        assert!(
+            receive
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap()
+                .is_err()
+        );
+    }
+    env.set_static_field(
+        "android/content/ClipboardManager",
+        ("android/content/ClipboardManager", "failClipboard", "Z"),
+        JValue::Bool(1),
+    )
+    .unwrap();
+    let (send, receive) = std::sync::mpsc::channel();
+    copy_image(staged.clone(), "image/png", move |result| {
+        let _ = send.send(result);
+    });
+    fixture_run(env, "drain");
+    fixture_run(env, "awaitCopies");
+    fixture_run(env, "drain");
+    assert!(
+        receive
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap()
+            .unwrap_err()
+            .contains("fixture clipboard failure")
+    );
+    env.set_static_field(
+        "android/content/ClipboardManager",
+        ("android/content/ClipboardManager", "failClipboard", "Z"),
+        JValue::Bool(0),
+    )
+    .unwrap();
+    let (send, receive) = std::sync::mpsc::channel();
+    copy_image(staged.clone(), "image/png", move |result| {
+        let _ = send.send(result);
+    });
+    cancel_pending();
+    fixture_run(env, "drain");
+    assert!(
+        receive
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap()
+            .is_err()
+    );
+    assert!(fixture_bool(env, "retentionAndBounds"));
+    std::fs::remove_file(staged).unwrap();
+}
+
+fn media_store_publishes_complete_images_and_rolls_back_failures(env: &mut JNIEnv<'_>) {
+    let staged = cache_dir().unwrap().join("published.png");
+    std::fs::write(&staged, b"published encoded image").unwrap();
+    for api in [29, 35] {
+        env.call_static_method(FIXTURE, "setApi", "(I)V", &[JValue::Int(api)])
+            .unwrap();
+        fixture_run(env, "resetMedia");
+        for (series, expected) in [
+            (None, "Pictures/Nova Reader/"),
+            (Some("Series 名"), "Pictures/Nova Reader/Series 名/"),
+        ] {
+            let (send, receive) = std::sync::mpsc::channel();
+            publish_image(
+                staged.clone(),
+                "same-name.png",
+                "image/png",
+                series,
+                move |result| {
+                    let _ = send.send(result);
+                },
+            );
+            fixture_run(env, "drain");
+            fixture_run(env, "awaitCopies");
+            receive
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap()
+                .unwrap();
+            assert_eq!(fixture_text(env, "mediaPath"), expected);
+            assert_eq!(fixture_text(env, "mediaName"), "same-name.png");
+            assert_eq!(fixture_text(env, "mediaMime"), "image/png");
+            assert_eq!(fixture_text(env, "exported"), "published encoded image");
+            assert!(fixture_bool(env, "mediaAllVisible"));
+        }
+        assert_eq!(
+            fixture_updates(env, "mediaRows"),
+            2,
+            "fresh rows preserve filename collisions"
+        );
+        assert_eq!(fixture_updates(env, "mediaCommits"), 2);
+    }
+
+    // Insert/open/write/close/publish failures cannot leave incomplete rows.
+    for phase in 1..=5 {
+        fixture_run(env, "resetMedia");
+        env.call_static_method(FIXTURE, "failMedia", "(I)V", &[JValue::Int(phase)])
+            .unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        publish_image(
+            staged.clone(),
+            "page.png",
+            "image/png",
+            None,
+            move |result| {
+                let _ = send.send(result);
+            },
+        );
+        fixture_run(env, "drain");
+        fixture_run(env, "awaitCopies");
+        assert!(
+            receive
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap()
+                .is_err()
+        );
+        assert_eq!(fixture_updates(env, "mediaRows"), 0);
+        assert_eq!(fixture_updates(env, "mediaCommits"), 0);
+        assert_eq!(fixture_updates(env, "mediaDeletes"), i32::from(phase != 1));
+    }
+    fixture_run(env, "resetMedia");
+    fixture_run(env, "cancelMediaDuringWrite");
+    let (send, receive) = std::sync::mpsc::channel();
+    publish_image(
+        staged.clone(),
+        "page.png",
+        "image/png",
+        None,
+        move |result| {
+            let _ = send.send(result);
+        },
+    );
+    fixture_run(env, "drain");
+    fixture_run(env, "awaitCopies");
+    assert!(
+        receive
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap()
+            .is_err()
+    );
+    assert_eq!(fixture_updates(env, "mediaRows"), 0);
+    assert_eq!(fixture_updates(env, "mediaDeletes"), 1);
+
+    fixture_run(env, "resetMedia");
+    let long_folder = "界".repeat(27); // 81 UTF-8 bytes.
+    for folder in [
+        "..",
+        "../escape",
+        "a/b",
+        "a\\b",
+        "bad\n\nname",
+        "trailing.",
+        &long_folder,
+    ] {
+        let (send, receive) = std::sync::mpsc::channel();
+        publish_image(
+            staged.clone(),
+            "page.png",
+            "image/png",
+            Some(folder),
+            move |result| {
+                let _ = send.send(result);
+            },
+        );
+        fixture_run(env, "drain");
+        assert!(
+            receive
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap()
+                .is_err()
+        );
+        assert_eq!(fixture_updates(env, "mediaRows"), 0);
+    }
+
+    // API 26-28 keeps the platform picker, with no legacy storage permission.
+    env.call_static_method(FIXTURE, "setApi", "(I)V", &[JValue::Int(28)])
+        .unwrap();
+    let (send, receive) = std::sync::mpsc::channel();
+    publish_image(
+        staged.clone(),
+        "legacy.png",
+        "image/png",
+        Some("Series"),
+        move |result| {
+            let _ = send.send(result);
+        },
+    );
+    fixture_run(env, "drain");
+    assert_eq!(
+        fixture_text(env, "action"),
+        "android.intent.action.CREATE_DOCUMENT"
+    );
+    assert_eq!(fixture_text(env, "title"), "legacy.png");
+    assert_eq!(fixture_text(env, "mime"), "image/png");
+    assert_eq!(fixture_updates(env, "mediaRows"), 0);
+    fixture_run(env, "exportResult");
+    fixture_run(env, "awaitCopies");
+    receive
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap()
+        .unwrap();
+    env.call_static_method(FIXTURE, "setApi", "(I)V", &[JValue::Int(35)])
+        .unwrap();
+    std::fs::remove_file(staged).unwrap();
+}
+
+fn reader_immersive_follows_controls_and_activity_lifecycle(env: &mut JNIEnv<'_>) {
+    for api in [29, 35] {
+        env.call_static_method(FIXTURE, "setApi", "(I)V", &[JValue::Int(api)])
+            .unwrap();
+        set_reader_immersive(false).unwrap();
+        env.call_static_method(FIXTURE, "drain", "()V", &[])
+            .unwrap();
+        assert!(!fixture_bool(env, "statusHidden"));
+
+        set_reader_immersive(true).unwrap();
+        assert!(
+            !fixture_bool(env, "statusHidden"),
+            "must queue to Java main"
+        );
+        env.call_static_method(FIXTURE, "drain", "()V", &[])
+            .unwrap();
+        assert!(fixture_bool(env, "statusHidden"));
+        assert!(fixture_bool(env, "transientSwipe"));
+        assert!(!fixture_bool(env, "navigationHidden"));
+        assert!(fixture_bool(env, "stableLayout"));
+
+        // Recreation and focus regain restore the requested status-bar state.
+        env.call_static_method(FIXTURE, "recreate", "()V", &[])
+            .unwrap();
+        assert!(fixture_bool(env, "statusHidden"));
+        env.call_static_method(FIXTURE, "revealStatusBar", "()V", &[])
+            .unwrap();
+        assert!(!fixture_bool(env, "statusHidden"));
+        env.call_static_method(FIXTURE, "focus", "()V", &[])
+            .unwrap();
+        assert!(fixture_bool(env, "statusHidden"));
+
+        // A queued show uses the replacement window, never the destroyed one.
+        let previous_updates = fixture_updates(env, "windowUpdates");
+        set_reader_immersive(false).unwrap();
+        env.call_static_method(FIXTURE, "recreate", "()V", &[])
+            .unwrap();
+        assert!(!fixture_bool(env, "statusHidden"));
+        env.call_static_method(FIXTURE, "drain", "()V", &[])
+            .unwrap();
+        assert!(!fixture_bool(env, "statusHidden"));
+        assert!(fixture_bool(env, "previousStatusHidden"));
+        assert_eq!(
+            fixture_updates(env, "previousWindowUpdates"),
+            previous_updates
+        );
+        assert!(!fixture_bool(env, "navigationHidden"));
+        assert!(fixture_bool(env, "stableLayout"));
+
+        // The latest state wins when controls toggle faster than main drains.
+        set_reader_immersive(true).unwrap();
+        set_reader_immersive(false).unwrap();
+        env.call_static_method(FIXTURE, "drain", "()V", &[])
+            .unwrap();
+        assert!(!fixture_bool(env, "statusHidden"));
+
+        // An update between activities is retained for the next onCreate.
+        env.call_static_method(FIXTURE, "destroy", "()V", &[])
+            .unwrap();
+        set_reader_immersive(true).unwrap();
+        env.call_static_method(FIXTURE, "drain", "()V", &[])
+            .unwrap();
+        env.call_static_method(FIXTURE, "create", "()V", &[])
+            .unwrap();
+        assert!(fixture_bool(env, "statusHidden"));
+        set_reader_immersive(false).unwrap();
+        env.call_static_method(FIXTURE, "drain", "()V", &[])
+            .unwrap();
+        assert!(!fixture_bool(env, "statusHidden"));
+    }
+}
+
 #[test]
 fn application_context_launches_and_callbacks_resolve() {
     let classpath = format!(
@@ -30,13 +430,15 @@ fn application_context_launches_and_callbacks_resolve() {
             app.as_obj().as_raw().cast(),
         );
     }
-    const FIXTURE: &str = "dev/misob/nova/reader/DocumentBridgeFixture";
     env.call_static_method(FIXTURE, "create", "()V", &[])
         .unwrap();
     assert_eq!(
         cache_dir().unwrap(),
         PathBuf::from(std::env::var("READER_JNI_CACHE").unwrap())
     );
+    reader_immersive_follows_controls_and_activity_lifecycle(&mut env);
+    image_export_and_clipboard_have_real_readable_bytes(&mut env);
+    media_store_publishes_complete_images_and_rolls_back_failures(&mut env);
 
     // The bridge receives a real Application, not an Activity. Each launch
     // queues to Java main, and the explicitly registered native callback runs.
@@ -154,6 +556,12 @@ fn application_context_launches_and_callbacks_resolve() {
         JValue::Bool(1),
     )
     .unwrap();
+    let error = set_reader_immersive(true).unwrap_err();
+    assert!(
+        error.contains("java.lang.IllegalStateException: fixture class loader failure"),
+        "{error}"
+    );
+    assert!(!env.exception_check().unwrap());
     let (send, receive) = std::sync::mpsc::channel();
     pick_import(ImportKind::AddonZip, move |result| {
         let _ = send.send(result);

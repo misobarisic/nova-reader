@@ -36,7 +36,7 @@ navigation or settings design system.
   after mounting; outgoing layers survive the reverse transition. Disabling
   motion selects explicit endpoints even during an interrupted transition.
   Supported destinations are local import,
-  settings (theme, look and feel, sources, categories and data) and About. It does not advertise
+  settings (theme, display, look and feel, sources, categories, data and cache) and About. It does not advertise
   unsupported video, sync or tracking features.
 - `theme-settings.slint` adapts Nova's Theme and Look and feel modules with Kit
   cards, segmented controls, swatches and toggles. `settings-row.slint` preserves
@@ -70,3 +70,65 @@ reader options, and keyboard/accessibility selection in the shared dropdown.
 palette/geometry changes, rejected invalid edits and reset semantics.
 Linux rendering smoke is separate from Android system-inset, keyboard and
 physical-device acceptance.
+
+
+The collection and detail views also reuse Nova b69a1e5. `library-cards.slint`
+adapts its 2:3 poster/list geometry, captions, progress rail, hover lift and
+responsive 160px/230px sizing; `title-artwork.slint` is Nova's original component.
+`detail-hero.slint` adapts the edge-to-edge artwork, baked palette scrims,
+responsive title/metadata, expandable synopsis and primary/library actions.
+Display settings retain the selected layout and minimum column counts.
+
+The supplied Mihon references define the compact chapter and dated activity
+structure: unread dot, chapter/date/scanlator, trailing download/options, and
+Continue chapter X; History/Updates use covers, date groups and remove/download actions.
+Nova supplies colors, radii, typography, actions and the existing five-tab bar.
+History posters open the series detail page; the text area opens the recorded
+chapter. Unread chapter rows show an accent dot and bright title; read rows
+remove the dot and dim the title. Download/options actions retain an 8px gap.
+Browse separates Sources and Extensions. Source rows group Last used/Pinned/
+language, with independent Latest/pin actions; a source opens Popular/Latest,
+search, provider-defined filters and a poster gallery. Catalogue Back retains
+its stable source identity, result/query/pagination/filter context and scroll.
+Source changes clear the old snapshot before a request can fail.
+
+Chapter controls are hidden on entry. A tap/click reveals their overlay without
+resizing the reading viewport; a drag remains a scroll gesture. On Android the
+status bar follows OSD visibility and its desired state survives recreation and
+focus changes. Status-bar navigation does not alter the navigation bar. Host
+API 29/35 regressions verify Java/JNI transitions separately from device testing.
+
+`reader-context-menu.slint` adds the floating image menu: right-click or a
+stationary 600ms press on a loaded page offers Save image, Save screencap, Copy
+image to clipboard and Copy screencap to clipboard. Its slate panel, lavender
+line icons, rounded corners, divider and focus/hover colors use Nova tokens.
+Dragging cancels the hold and continues scrolling; a completed hold consumes
+its release so it cannot reveal reader controls. Context Menu / Shift+F10 targets
+the current visible page; arrows/Tab and Enter operate the four actions. Outside
+click, Escape, Back and navigation dismiss it. The panel clamps to safe viewport
+bounds and scrolls within unusually short viewports.
+
+Before showing the menu, the UI hides the OSD and export feedback, then calls
+`reader-context-opening(page)` synchronously so the backend can capture a clean
+viewport. An action hides the menu, calls `reader-context-action(page, action)`,
+then calls `reader-context-closed()` to release the cached capture. Cancellation
+also calls the close callback. Export work disables the four actions and exposes
+progress; success/error feedback appears in a reader toast for four seconds.
+More → Settings → Screenshots is a retained settings leaf with Nova rows and
+controls for format, encoding quality and separate series folders. Its
+`CaptureSettings` global publishes validated device preferences; they persist
+under `reader:captures`, independently of library backups and chapter bytes.
+Cache settings also expose independent switches, JPEG/WebP format and quality
+for new cache images and new downloads. Their `ImageStorageSettings` global and
+`reader:image-storage` preferences govern future writes; existing files are
+preserved when a preference changes. Screenshot export format remains separate.
+
+Image cache maintenance uses Nova's platform-directory/worker pattern. Series
+posters are under the platform cache root on both desktop and Android; clearing
+More → Settings → Cache preserves library data and downloaded/imported chapters.
+Reading page images remain in memory unless explicitly downloaded/imported.
+
+The detail header action displays `Continue chapter X`; there is no floating
+bottom-right duplicate. Its label and action
+share the same resume selection (most recent unfinished chapter, then first
+unread, then the first chapter); fractional chapter identifiers stay strings.
