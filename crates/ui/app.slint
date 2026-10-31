@@ -16,8 +16,8 @@ component NavButton inherits Rectangle {
     background: root.active ? #aca0ff18 : touch.has-hover ? #ffffff08 : transparent;
     HorizontalLayout {
         padding-left: 14px; spacing: 12px;
-        Text { text: root.glyph; color: root.active ? #c1b5ff : #84858e; font-size: 20px; width: 24px; }
-        Text { text: root.label; color: root.active ? #ede8ff : #a9aab3; font-size: 14px; font-weight: root.active ? 600 : 400; }
+        Text { text: root.glyph; color: root.active ? #c1b5ff : #84858e; font-size: 20px; width: 24px; vertical-alignment: center; }
+        Text { text: root.label; color: root.active ? #ede8ff : #a9aab3; font-size: 14px; font-weight: root.active ? 600 : 400; vertical-alignment: center; }
     }
     touch := TouchArea { clicked => { root.clicked(); } }
 }
@@ -101,16 +101,6 @@ export component AppWindow inherits Window {
             width: root.navigation-width; background: #131317;
             VerticalLayout {
                 padding: 16px; spacing: 6px;
-                Rectangle {
-                    height: 84px;
-                    HorizontalLayout {
-                        spacing: 10px;
-                        Rectangle { width: 36px; height: 36px; border-radius: 11px; background: #c1b5ff;
-                            Text { text: "N"; color: #211b39; font-weight: 800; font-size: 22px; horizontal-alignment: center; vertical-alignment: center; }
-                        }
-                        VerticalLayout { spacing: 3px; Text { text: "Nova Reader"; color: #f5f2ff; font-weight: 700; font-size: 17px; } Text { text: @tr("ONE MORE CHAPTER"); color: #777581; font-size: 9px; letter-spacing: 1px; } }
-                    }
-                }
                 NavButton { label: @tr("Library"); glyph: "▤"; active: root.section == 0; clicked => { root.navigate(0); } }
                 NavButton { label: @tr("Updates"); glyph: "↻"; active: root.section == 1; clicked => { root.navigate(1); } }
                 NavButton { label: @tr("History"); glyph: "◷"; active: root.section == 2; clicked => { root.navigate(2); } }
