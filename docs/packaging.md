@@ -81,17 +81,17 @@ features. Full license texts and upstream links accompany LICENSE and project
 attribution in desktop packages and Android assets. The launcher artwork is
 inherited from Nova under the same license; it is not a new branding claim.
 
-All PRs, main pushes and version tags run required Linux formatting, Clippy,
-workspace check/tests, distribution builds without updater support, addon Node
-fixtures and reproducible ZIP packaging, packaging regressions,
-Windows GNU checks and Android ARM64 library checks. Nova's named `check-linux`, `check-windows` and `check-android` jobs retain the
-pinned Rust dependency cache, and Android jobs retain runner disk cleanup.
-Release packaging depends on all three check jobs from the same workflow run,
-including version-tag runs. The tag must equal
-`v<Cargo version>` and HEAD, the dereferenced tag and GitHub event SHA must
-agree. Publication depends on all package jobs and verifies the seven-file
-artifact matrix. Build jobs have read-only permissions; only publication may
-write releases.
+The workflow is copied from Nova with reader-specific names, paths and native
+dependencies. Its job conditions and dependencies match Nova exactly: Linux,
+Windows and Android check jobs run on pull requests and pushes to main, while
+tag pushes start the three Android ABI builds, Linux build and Windows build
+directly. Tag builds do not run or depend on check jobs. Android assembly waits
+for its ABI builds; publication waits for Android assembly, Linux and Windows.
+The existing reader signing override and license inventory steps are retained
+because these provide the signing identity and files used by the reader build.
+Nova's pinned Actions, caches, disk cleanup, artifact transport and permissions
+are unchanged. Tag names select the release version; version 0.1.2 carries this
+correction without moving previously pushed tags.
 
 The initial commit's Linux, Windows and Android checks passed in GitHub Actions.
 The v0.1.0 packaging run exposed an unsupported cargo-apk2 flag and the custom

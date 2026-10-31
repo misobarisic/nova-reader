@@ -23,7 +23,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `tests/reading_journey.rs` | Process-boundary install/read/progress/interrupted download/recovery/source-removal/offline journey |
 | `tests/ui_navigation.rs` | Headless Slint navigation and reader model checks |
 | `tools/package-addon.py` | Deterministic manifest-declared reader addon ZIP builder |
-| `.github/scripts`, `.github/workflows` | Nova's parallel Android build/assembly, compiler-closure Windows staging, Linux packaging, Rust caches, license inventory and exact-tag release gating |
+| `.github/scripts`, `.github/workflows` | Nova's parallel Android build/assembly, compiler-closure Windows staging, Linux packaging, Rust caches, license inventory and Nova’s PR/main-check versus tag-build split |
 | `android` | Android resources, platform document bridge and intentionally public local debug signing key |
 
 ## State and work boundaries

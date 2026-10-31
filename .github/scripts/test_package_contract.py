@@ -1,6 +1,7 @@
 """Regressions for independent identity, release gates, and shipped PE imports."""
 import importlib.util
 from pathlib import Path
+import re
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -27,13 +28,20 @@ class PackagingContractTests(unittest.TestCase):
         self.assertIn('Exec=nova-reader\n', desktop)
         self.assertNotIn('video', desktop.lower())
 
-    def test_release_jobs_depend_on_tag_checks(self):
+    def test_nova_tag_push_builds_without_check_job_dependencies(self):
         workflow = (ROOT / '.github/workflows/build-release.yml').read_text()
+        check_condition = "if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')"
+        for job in ('check-linux', 'check-windows', 'check-android'):
+            body = re.split(r'\n  [\w-]+:\n', workflow.split(f'  {job}:\n')[1], maxsplit=1)[0]
+            self.assertIn(check_condition, body)
         for job in ('linux-build', 'windows-build', 'android-build'):
-            body = workflow.split(f'  {job}:\n')[1][:200]
-            self.assertIn('needs: [check-linux, check-windows, check-android]', body)
+            body = re.split(r'\n  [\w-]+:\n', workflow.split(f'  {job}:\n')[1], maxsplit=1)[0]
+            self.assertNotIn('needs:', body)
+            self.assertIn("startsWith(github.ref, 'refs/tags/')", body)
+        self.assertNotIn('validate-release.py', workflow)
         self.assertIn('needs: [android-build]', workflow.split('  android-package:\n')[1][:200])
-        self.assertIn('cargo test --workspace --locked', (ROOT / 'Makefile').read_text())
+        self.assertIn('needs: [android-package, linux-build, windows-build]', workflow)
+
 
 
 if __name__ == '__main__':

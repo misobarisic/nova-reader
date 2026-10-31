@@ -49,3 +49,12 @@ The old Linux release log also exposed an early-closing Debian contents pipe.
 The check now consumes the full listing; a real large `.deb` regression passes.
 Final workspace formatting, Clippy and tests passed, along with 27 packaging
 regressions. Astra 6 medium reviewed the workflow alignment with no P1/P2 blocker.
+
+## Nova tag behavior restored for 0.1.2
+
+The user explicitly requires Nova's workflow behavior. Version 0.1.2 copies
+Nova's YAML and preserves its conditions and dependency graph exactly: checks
+run only on PR/main; tag builds start directly and publication waits only for
+the platform artifacts. The earlier exact-tag check gates are removed.
+Only reader identities, absent video subsystems, license files and existing
+signing overrides require adaptation. A packaging regression guards this split.

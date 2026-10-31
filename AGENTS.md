@@ -51,9 +51,11 @@ cargo test --workspace --locked
 - Build Android APKs for device delivery in release mode with
   `nix develop .#android --command make android-build-release`, unless the user
   explicitly requests a debug build.
-- CI runs formatting, Clippy, workspace checks/tests, addon/packaging regressions,
-  Windows GNU checks and Android ARM64 library checks; tags gate release packaging
-  on the checks for the same commit. See `.github/workflows/build-release.yml`.
+- CI follows Nova's workflow: formatting, Clippy, workspace checks, packaging
+  regressions, Windows GNU and Android ARM64 checks run on PRs and main pushes.
+  Tag pushes build/package/publish directly; check jobs are skipped on tags and
+  build jobs do not depend on them. Preserve this user-requested split when
+  adapting `.github/workflows/build-release.yml`.
 - Run the narrowest relevant behavior tests before the workspace checks. Headless
   Slint tests belong in `tests/`; leaf-crate tests may live next to their code.
 
