@@ -132,3 +132,18 @@ The detail header action displays `Continue chapter X`; there is no floating
 bottom-right duplicate. Its label and action
 share the same resume selection (most recent unfinished chapter, then first
 unread, then the first chapter); fractional chapter identifiers stay strings.
+
+## System bars and chapter downloads (0.1.13)
+
+ReaderActivity follows Nova `crates/player/src/external.rs:523,666–732` for
+normal edge-to-edge layout: transparent status bar, cleared inherited fullscreen
+and translucent-status flags, and stable decor fitting. Active reading hides
+only the status bar. The chapter canvas reaches beneath top/side cutouts while
+OSD controls keep their own safe insets, so OSD changes leave its viewport fixed.
+Normal pages retain their safe area. Detail artwork reaches the window edges,
+with Nova's original `assets/status-bar-scrim.svg`, default gradient strength,
+safe toolbar spacing and safe hero/chapter-list gutters.
+
+Remote chapter rows offer Delete download from their trailing action and menu;
+Downloads exposes the same operation. Local imports retain their sole copy.
+Removal targets the chapter bundle, keeping series metadata and reading history.

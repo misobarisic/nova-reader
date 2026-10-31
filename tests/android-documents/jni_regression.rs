@@ -329,14 +329,31 @@ fn media_store_publishes_complete_images_and_rolls_back_failures(env: &mut JNIEn
     std::fs::remove_file(staged).unwrap();
 }
 
+fn assert_reader_window_layout(env: &mut JNIEnv<'_>) {
+    assert!(fixture_bool(env, "edgeToEdge"));
+    assert!(fixture_bool(env, "transparentStatusBar"));
+    assert!(fixture_bool(env, "cutoutAllowed"));
+    assert!(fixture_bool(env, "unrelatedWindowFlagsPreserved"));
+    assert!(!fixture_bool(env, "navigationHidden"));
+}
+
 fn reader_immersive_follows_controls_and_activity_lifecycle(env: &mut JNIEnv<'_>) {
-    for api in [29, 35] {
+    for api in [26, 28, 29, 30, 35] {
         env.call_static_method(FIXTURE, "setApi", "(I)V", &[JValue::Int(api)])
             .unwrap();
+        fixture_run(env, "destroy");
+        fixture_run(env, "create");
+        assert_reader_window_layout(env);
+        let layout_changes = fixture_updates(env, "layoutChanges");
+        let fitting_calls = fixture_updates(env, "decorFitCalls");
+        assert_eq!(layout_changes, 1);
         set_reader_immersive(false).unwrap();
         env.call_static_method(FIXTURE, "drain", "()V", &[])
             .unwrap();
         assert!(!fixture_bool(env, "statusHidden"));
+        assert_reader_window_layout(env);
+        assert_eq!(fixture_updates(env, "layoutChanges"), layout_changes);
+        assert_eq!(fixture_updates(env, "decorFitCalls"), fitting_calls);
 
         set_reader_immersive(true).unwrap();
         assert!(
@@ -349,17 +366,34 @@ fn reader_immersive_follows_controls_and_activity_lifecycle(env: &mut JNIEnv<'_>
         assert!(fixture_bool(env, "transientSwipe"));
         assert!(!fixture_bool(env, "navigationHidden"));
         assert!(fixture_bool(env, "stableLayout"));
+        assert_reader_window_layout(env);
+        assert_eq!(
+            fixture_updates(env, "layoutChanges"),
+            layout_changes,
+            "show/hide must preserve the client layout"
+        );
+        assert_eq!(
+            fixture_updates(env, "decorFitCalls"),
+            fitting_calls,
+            "OSD toggles must not redispatch decor fitting"
+        );
 
         // Recreation and focus regain restore the requested status-bar state.
         env.call_static_method(FIXTURE, "recreate", "()V", &[])
             .unwrap();
         assert!(fixture_bool(env, "statusHidden"));
+        assert_reader_window_layout(env);
         env.call_static_method(FIXTURE, "revealStatusBar", "()V", &[])
             .unwrap();
         assert!(!fixture_bool(env, "statusHidden"));
         env.call_static_method(FIXTURE, "focus", "()V", &[])
             .unwrap();
         assert!(fixture_bool(env, "statusHidden"));
+        assert_reader_window_layout(env);
+        fixture_run(env, "disturbWindowLayout");
+        assert!(!fixture_bool(env, "edgeToEdge"));
+        fixture_run(env, "focus");
+        assert_reader_window_layout(env);
 
         // A queued show uses the replacement window, never the destroyed one.
         let previous_updates = fixture_updates(env, "windowUpdates");
@@ -367,6 +401,7 @@ fn reader_immersive_follows_controls_and_activity_lifecycle(env: &mut JNIEnv<'_>
         env.call_static_method(FIXTURE, "recreate", "()V", &[])
             .unwrap();
         assert!(!fixture_bool(env, "statusHidden"));
+        assert_reader_window_layout(env);
         env.call_static_method(FIXTURE, "drain", "()V", &[])
             .unwrap();
         assert!(!fixture_bool(env, "statusHidden"));
@@ -377,6 +412,8 @@ fn reader_immersive_follows_controls_and_activity_lifecycle(env: &mut JNIEnv<'_>
         );
         assert!(!fixture_bool(env, "navigationHidden"));
         assert!(fixture_bool(env, "stableLayout"));
+        assert_reader_window_layout(env);
+        let layout_changes = fixture_updates(env, "layoutChanges");
 
         // The latest state wins when controls toggle faster than main drains.
         set_reader_immersive(true).unwrap();
@@ -384,6 +421,8 @@ fn reader_immersive_follows_controls_and_activity_lifecycle(env: &mut JNIEnv<'_>
         env.call_static_method(FIXTURE, "drain", "()V", &[])
             .unwrap();
         assert!(!fixture_bool(env, "statusHidden"));
+        assert_reader_window_layout(env);
+        assert_eq!(fixture_updates(env, "layoutChanges"), layout_changes);
 
         // An update between activities is retained for the next onCreate.
         env.call_static_method(FIXTURE, "destroy", "()V", &[])
@@ -394,11 +433,38 @@ fn reader_immersive_follows_controls_and_activity_lifecycle(env: &mut JNIEnv<'_>
         env.call_static_method(FIXTURE, "create", "()V", &[])
             .unwrap();
         assert!(fixture_bool(env, "statusHidden"));
+        assert_reader_window_layout(env);
         set_reader_immersive(false).unwrap();
         env.call_static_method(FIXTURE, "drain", "()V", &[])
             .unwrap();
         assert!(!fixture_bool(env, "statusHidden"));
+        assert_reader_window_layout(env);
+        assert_eq!(fixture_updates(env, "layoutChanges"), 1);
     }
+    // onCreate may precede controller attachment. Its queued retry converges
+    // without another Rust request or a fullscreen/fitting toggle.
+    set_reader_immersive(true).unwrap();
+    fixture_run(env, "drain");
+    fixture_run(env, "deferInsets");
+    fixture_run(env, "recreate");
+    fixture_run(env, "attachInsets");
+    fixture_run(env, "drain");
+    assert!(fixture_bool(env, "statusHidden"));
+    assert_reader_window_layout(env);
+    set_reader_immersive(false).unwrap();
+    fixture_run(env, "deferInsets");
+    fixture_run(env, "recreate");
+    fixture_run(env, "attachInsets");
+    let previous_updates = fixture_updates(env, "windowUpdates");
+    fixture_run(env, "recreate");
+    fixture_run(env, "drain");
+    assert!(!fixture_bool(env, "statusHidden"));
+    assert_reader_window_layout(env);
+    assert_eq!(
+        fixture_updates(env, "previousWindowUpdates"),
+        previous_updates,
+        "deferred attachment must resolve the current activity"
+    );
 }
 
 #[test]

@@ -154,4 +154,55 @@ fn only_new_download_pages_follow_compression_and_keep_offline_integrity() {
         services.downloads.offline(&chapter.id).unwrap().pages.len(),
         encoded.len()
     );
+    // Deleting a source-free offline bundle removes only its durable files and
+    // job. The library, resume position, bookmarks and metadata stay intact.
+    services.add_library(&series.id).unwrap();
+    services
+        .domain
+        .update(|state| {
+            state.set_progress(reader_domain::ReadingProgress {
+                chapter: chapter.id.clone(),
+                anchor: reader_domain::ResumeAnchor::new(pages[0].id.clone(), 0, 0.375)?,
+                mode: reader_domain::ReadingMode::Webtoon,
+                last_read_at: 12345,
+                completed: false,
+            });
+            state.bookmarks.push(reader_domain::Bookmark {
+                chapter: chapter.id.clone(),
+                anchor: reader_domain::ResumeAnchor::new(pages[0].id.clone(), 0, 0.375)?,
+                note: "Keep my bookmark".into(),
+            });
+            Ok(())
+        })
+        .unwrap();
+    let before = services.domain.snapshot().unwrap();
+    let bundle = offline.pages[0].parent().unwrap().to_path_buf();
+    // List-status refreshes read manifests only. Temporarily withholding one
+    // large page must neither hash payloads nor rewrite its persisted status.
+    let held = bundle.join("temporarily-held.page");
+    std::fs::rename(&offline.pages[0], &held).unwrap();
+    assert_eq!(
+        services.downloads.statuses().unwrap().get(&chapter.id),
+        Some(&reader_downloads::JobStatus::Complete)
+    );
+    std::fs::rename(held, &offline.pages[0]).unwrap();
+    let other_offline = services.downloads.offline(&other.id).unwrap();
+    let other_bytes = other_offline
+        .pages
+        .iter()
+        .map(std::fs::read)
+        .collect::<std::io::Result<Vec<_>>>()
+        .unwrap();
+    services.downloads.remove(&chapter.id).unwrap();
+    assert!(!bundle.exists());
+    assert!(services.downloads.job(&chapter.id).is_err());
+    assert!(services.downloads.offline(&chapter.id).is_err());
+    assert_eq!(services.domain.snapshot().unwrap(), before);
+    assert_eq!(
+        services.downloads.offline(&other.id).unwrap().pages,
+        other_offline.pages
+    );
+    for (path, bytes) in other_offline.pages.iter().zip(other_bytes) {
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
 }

@@ -1,7 +1,7 @@
 use i_slint_backend_testing::{AccessibleRole, ElementHandle};
 use nova_reader::{AppWindow, Appearance, ExtensionRow, ItemRow, PageRow, SourceRow, TileRow};
 use slint::platform::{Key, PointerEventButton, WindowEvent};
-use slint::{ComponentHandle, LogicalSize, ModelRc, VecModel};
+use slint::{ComponentHandle, LogicalSize, Model, ModelRc, VecModel};
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
@@ -294,6 +294,111 @@ fn button(ui: &AppWindow, label: &str) -> ElementHandle {
         .find(|e| e.accessible_role() == Some(AccessibleRole::Button))
         .unwrap_or_else(|| panic!("missing button {label}"))
 }
+
+#[test]
+fn chapter_download_delete_actions_follow_saved_remote_jobs() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().unwrap();
+    let actions = Rc::new(RefCell::new(Vec::new()));
+    ui.on_item_action({
+        let actions = actions.clone();
+        move |index, action| actions.borrow_mut().push((index, action.to_string()))
+    });
+    let rows = Rc::new(VecModel::from(vec![
+        ItemRow {
+            title: "Imported chapter".into(),
+            local_import: true,
+            ..Default::default()
+        },
+        ItemRow {
+            title: "Saved remote chapter".into(),
+            has_download: true,
+            downloaded: true,
+            ..Default::default()
+        },
+    ]));
+    ui.set_items(ModelRc::from(rows.clone()));
+    ui.set_series_title("Download fixture".into());
+    ui.set_section(5);
+    ui.window().set_size(LogicalSize::new(390., 844.));
+    ui.show().unwrap();
+    settle();
+
+    for complete in [true, false] {
+        let mut chapter = rows.row_data(1).unwrap();
+        chapter.downloaded = complete;
+        rows.set_row_data(1, chapter);
+        settle();
+        button(&ui, "Delete download").invoke_accessible_default_action();
+        assert_eq!(
+            actions.borrow().last().unwrap(),
+            &(1, "delete-download".into())
+        );
+        ElementHandle::find_by_accessible_label(&ui, "Chapter options")
+            .filter(|element| element.accessible_role() == Some(AccessibleRole::Button))
+            .nth(1)
+            .unwrap()
+            .invoke_accessible_default_action();
+        settle();
+        let before = actions.borrow().len();
+        // Popup coordinates are local to their own window. Identify the text
+        // action by component instead of comparing it with the trailing icon.
+        ElementHandle::find_by_accessible_label(&ui, "Delete download")
+            .find(|element| element.type_name().as_deref() == Some("PillButton"))
+            .unwrap()
+            .invoke_accessible_default_action();
+        settle();
+        assert_eq!(actions.borrow().len(), before + 1);
+        assert_eq!(
+            actions.borrow().last().unwrap(),
+            &(1, "delete-download".into())
+        );
+    }
+    let mut chapter = rows.row_data(1).unwrap();
+    chapter.has_download = false;
+    chapter.downloaded = false;
+    rows.set_row_data(1, chapter.clone());
+    settle();
+    assert!(
+        ElementHandle::find_by_accessible_label(&ui, "Delete download")
+            .next()
+            .is_none()
+    );
+    button(&ui, "Download").invoke_accessible_default_action();
+    assert_eq!(actions.borrow().last().unwrap(), &(1, "download".into()));
+
+    chapter.local_import = true;
+    chapter.has_download = true; // local identity overrides even a stale job flag
+    rows.set_row_data(1, chapter);
+    settle();
+    assert!(
+        ElementHandle::find_by_accessible_label(&ui, "Delete download")
+            .next()
+            .is_none()
+    );
+    assert!(
+        ElementHandle::find_by_accessible_label(&ui, "Download")
+            .next()
+            .is_none()
+    );
+    ElementHandle::find_by_accessible_label(&ui, "Chapter options")
+        .filter(|element| element.accessible_role() == Some(AccessibleRole::Button))
+        .nth(1)
+        .unwrap()
+        .invoke_accessible_default_action();
+    settle();
+    assert!(
+        ElementHandle::find_by_accessible_label(&ui, "Delete download")
+            .next()
+            .is_none()
+    );
+    assert!(
+        ElementHandle::find_by_accessible_label(&ui, "Download")
+            .next()
+            .is_none()
+    );
+}
+
 #[test]
 fn poster_layout_timelines_chapters_and_reader_controls() {
     i_slint_backend_testing::init_no_event_loop();

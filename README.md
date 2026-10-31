@@ -21,6 +21,9 @@ These device preferences are saved separately from library backups.
 Browse groups sources by last used, pins and language; Extensions manages installed
 packages. Chapters open with controls hidden; tap or click to show them.
 Right-click or hold an image to save/copy its original or the visible screencap.
+Chapter artwork fills the hidden status-bar area; showing the OSD restores the
+bar and keeps controls clear of cutouts. Delete remote chapter downloads from
+the chapter actions or Downloads; reading progress stays intact.
 Saved images go to Pictures/Nova Reader; Android 26–28 uses a destination picker.
 Series posters use the platform cache directory on desktop and Android, separately
 from library data and explicit downloads. `NOVA_READER_CACHE_DIR` can override it.

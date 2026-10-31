@@ -35,14 +35,15 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `crates/reader-domain` | Source-local identities, schema-1 state, library/categories, progress/history/bookmarks, backup/restore |
 | `crates/reader-sources` | Reader v2 ZIP validation, durable registry, typed profile settings, QuickJS host, HTML/URL capabilities and checked source HTTP |
 | `crates/reader-engine` | Dimension probing, bounded PNG/JPEG/WebP decode, display downscale, geometry, resume anchors and decoded cache utility |
-| `crates/reader-downloads` | Durable queue, checksummed page bundles, recovery, quota, source-free offline lookup, local folder/CBZ import |
+| `crates/reader-downloads` | Durable queue, checksummed page bundles, recovery, quota, source-free offline lookup, local folder/CBZ import, bundle removal and manifest-only status hints |
 | `crates/reader-catalogue` | Bounded Keiyoushi protobuf discovery, exact port mappings, signed native catalogue verification and availability states |
 | `examples/addons/manhwa18cc` | Thin Manhwa18 configuration, reusable YiiMadara helper, Apache license/provenance and synthetic parser fixtures |
 | `examples/addons/neutral-fixture` | Installable network-free fixture, bundled geometric PNGs and 320-page chapter |
 | `tests/reading_journey.rs` | Process-boundary install/read/progress/interrupted download/recovery/source-removal/offline journey |
 | `tests/ui_navigation.rs`, `tests/mobile_layout.rs` | Headless reader models, phone/landscape/tablet/desktop control bounds, tab taps, accessible activation and back navigation |
 | `tests/appearance.rs` | Process-boundary appearance persistence, palette application, invalid edits and theme reset preserving motion preferences |
-| `tests/reader_design.rs` | Responsive poster/list/timeline/chapter layouts, source/pin/extension actions, retained catalogue scroll, tap-versus-pan reader OSD and image-menu targeting, hold cancellation, clamping, keyboard/busy/lifecycle behavior |
+| `tests/reader_insets.rs` | Real Window safe-area injection verifies edge-to-edge chapter/detail artwork, safe controls/chapter rows, normal-page restoration and stable OSD geometry; uses the already pinned Slint core as a dev dependency |
+| `tests/reader_design.rs` | Responsive poster/list/timeline/chapter layouts, source/pin/extension actions, retained catalogue scroll, download-delete actions, tap-versus-pan reader OSD and image-menu targeting, hold cancellation, clamping, keyboard/busy/lifecycle behavior |
 | `tests/capture_settings.rs`, `tests/image_storage.rs` | Process-boundary capture/compression persistence, corruption recovery, independent policies and accessible settings controls |
 | `tests/image_download_encoding.rs` | Production Services partial-resume encoding: verified pages remain intact, new pages follow compression policy, completed bundles survive policy changes, disabled future writes retain source bytes and offline hashes survive addon removal |
 | `tools/test-android-documents.py`, `tests/android-documents` | Production Java/JNI host regression with checked JNI and deterministic main-queue/lifecycle fixtures |
@@ -106,7 +107,9 @@ paused/cancelled jobs remain stopped. The app serializes chapter transfers; the
 store retains a two-active-jobs-per-source admission cap.
 
 Workers fetch metadata and images and decode admitted images. Only the Slint
-event loop updates UI models. Navigation work uses cancellation/generation checks.
+event loop updates UI models. Download status hints come from bounded manifests
+on a coalesced worker and are cached in the view; rendering never hashes page
+payloads. Opening offline chapters and recovery still verify stored bytes. Navigation work uses cancellation/generation checks.
 The reader covers the complete visible page window plus one prefetch page on
 each side, cancels obsolete fetches and leaves failed pages waiting for Retry.
 Retained decoded/display pages share a 64 MiB accounting budget. Width-fitted
@@ -123,6 +126,7 @@ Source examples are intended for independent future publication in nova-addons.
 ## Where to look
 
 - Nova design reuse and destination behavior: [UI design](ui-design.md).
+- Delete a downloaded chapter: `src/app.rs` (`delete-download`), `crates/reader-downloads/src/lib.rs` (`remove`), chapter actions and More → Downloads. Local imports are protected.
 - Cover cache placement/maintenance: `src/paths.rs`, `src/artwork.rs`, More → Settings → Cache.
 - Series/chapter layouts, timeline/source groups and reader controls: `crates/ui/library-cards.slint`, `crates/ui/detail-hero.slint`, `crates/ui/timeline.slint`, `crates/ui/source-list.slint`, `tests/reader_design.rs`.
 - Reader image/screencap actions and export settings: `crates/ui/reader-context-menu.slint`, `src/reader_export.rs`, `src/capture_settings.rs`, More → Settings → Screenshots.

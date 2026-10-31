@@ -314,3 +314,27 @@ JNI/Clippy, production Java against API35, MediaStore rollback/legacy picker
 fixtures, and real patched manifest serialization passed. Astra 6 medium's final
 static recheck reported no remaining P1/P2 findings. APK assembly and physical
 Android interaction remain separate CI/device validation.
+
+
+## System-bar layout and download deletion for 0.1.13
+
+The black reader strip had two causes: the native window did not establish
+edge-to-edge/cutout layout, and the shared page wrapper reserved top insets even
+when status icons were hidden. Reader now follows Nova's normal transparent-bar
+window policy, clears inherited fullscreen flags when restoring normal pages,
+and keeps chapter artwork independent of top/side control insets. Detail uses
+Nova's original fixed status-bar scrim and safe toolbar/hero/chapter gutters.
+
+Delete download is available in remote chapter actions and Downloads. The
+operation captures a stable chapter identity before background removal, keeps
+metadata/progress/history, protects local imports, and refuses active writers.
+
+Verification passed actual Window-inset regressions (portrait/status cutout,
+landscape side cutout, safe detail/chapter controls, unchanged OSD viewport and
+normal-page restoration), download action/callback and data-preservation tests,
+all workspace tests, formatting, all-target Clippy with warnings denied,
+workspace check and packaging regressions (28 reported, one platform skip).
+Android JNI/Clippy and production Java compilation against API35 passed with
+API26/28/29/30/35 window fixtures, including inherited fullscreen flags,
+attachment retry and recreation. Astra 6 medium's final recheck reported no
+residual P1/P2 findings. Physical-device rendering remains unverified locally.

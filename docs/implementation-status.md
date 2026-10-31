@@ -11,7 +11,7 @@ the presence of a test or workflow does not establish that it passed on a device
 | 1 — Bootstrap | Independent Reader IDs, Nova’s adaptive rail/bottom tabs, retained More/settings transitions, persisted Theme/Display/Screenshots/Look and feel/Cache pages, safe-area layout and shared Kit controls, pinned kit storage/UI, adapted flake/Makefile/CI/platform packaging | Linux/Android device launch and Windows execution acceptance; complete release artifact smoke and production signing setup |
 | 2 — Share addon foundation | Reader-native v2 package/registry, deterministic packaging, bounded QuickJS/HTTP/HTML, typed profile settings/UI, reader DTOs and actual-host fixture tests | Generic kit extraction and shared package tooling; unchanged Nova v1 runtime/package consumer gate; publishing a kit revision before pin updates |
 | 3 — Reference reading flow | YiiMadara/Manhwa18 parser and explicit language/NSFW capabilities; neutral install/browse/details/chapters/pages; library, reading modes and persisted logical resume | Live source availability; device interaction/resume checks; independently published native source package in nova-addons |
-| 4 — Usable alpha | Categories/bookmarks, dated History/Updates, compact chapter actions, source pins/last-used grouping, Sources/Extensions management, source filters and cover cache; manual updates; ordered checksummed bundles; queue pause/resume/cancel/retry, recovery and queued-job startup resume; local folder/CBZ/ZIP imports; validated metadata backup/restore | Target-platform process-kill/offline/restore acceptance, Android SAF device validation, selectable durable external download destination, configurable quota/retention and source concurrency policies |
+| 4 — Usable alpha | Categories/bookmarks, dated History/Updates, compact chapter actions, source pins/last-used grouping, Sources/Extensions management, source filters and cover cache; manual updates; ordered checksummed bundles; remote chapter download deletion; queue pause/resume/cancel/retry, recovery and queued-job startup resume; local folder/CBZ/ZIP imports; validated metadata backup/restore | Target-platform process-kill/offline/restore acceptance, Android SAF device validation, selectable durable external download destination, configurable quota/retention and source concurrency policies |
 | 5 — Discovery/distribution | Bounded gzip/protobuf catalogue adapter, live-derived exact upstream IDs, native port mapping, Ed25519 verification/trust API and sequence floors, discovery states | Published signed catalogue/ZIPs; trust/key-management UI and durable policy; automated download/hash-check/review/activation lifecycle and permission-change UX |
 | 6 — Beta/v1 | Platform CI/release scaffolding and focused regression tests | Scheduled Android updates/download policy, background/reboot behavior, sync, external tracking, migration UX, device performance budgets, accessibility and full release rehearsal |
 
@@ -45,9 +45,17 @@ save/clipboard actions. Capture format, quality and series-folder preferences
 follow Nova. Android 29+ saves use MediaStore; older Android uses the document
 picker. Screencaps exclude the menu/OSD and are bounded to eight million pixels.
 
+Chapter and detail artwork extend beneath system-bar/cutout areas. Reader OSD
+controls keep independent safe insets; normal pages restore Nova's transparent
+status-bar layout and detail scrim. Host tests cover layout and platform calls;
+physical Android rendering remains a device acceptance check.
+
 Chapter downloads use verified individual pages and atomic completion manifests.
 The store recovers interrupted jobs, retries missing/corrupt pages and refuses
-false completion. Optional JPEG/WebP compression applies only to newly fetched
+false completion. Remote chapter downloads can be deleted from chapter actions
+or Downloads without removing library metadata, progress or other chapters;
+local imports remain protected. Status hints refresh off the UI thread without
+hashing page files. Optional JPEG/WebP compression applies only to newly fetched
 pages, preserves dimensions and keeps original bytes when the chosen codec
 cannot preserve the image. Existing verified pages remain unchanged.
 Queued jobs automatically resume on app startup; paused and

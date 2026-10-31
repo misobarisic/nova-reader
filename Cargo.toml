@@ -13,7 +13,7 @@ slint-build = "=1.18.0"
 
 [package]
 name = "nova-reader"
-version = "0.1.12"
+version = "0.1.13"
 edition = "2024"
 license.workspace = true
 description = "A source-based manga and webtoon reader for desktop and Android"
@@ -61,6 +61,7 @@ rustls = { version = "0.23", default-features = false, features = ["std", "tls12
 webpki-roots = "1"
 
 [dev-dependencies]
+i-slint-core = { version = "=1.18.0", default-features = false }
 i-slint-backend-testing = "=1.18.0"
 zip = { version = "2.4", default-features = false, features = ["deflate"] }
 

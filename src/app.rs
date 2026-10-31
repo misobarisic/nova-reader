@@ -165,6 +165,10 @@ struct CatalogueState {
 struct View {
     section: i32,
     rows: Vec<Row>,
+    download_states: BTreeMap<ChapterId, reader_downloads::JobStatus>,
+    download_refreshing: bool,
+    download_refresh_again: bool,
+    download_revision: u64,
     choices: Vec<Choice>,
     selected: usize,
     series: Option<Series>,
@@ -614,6 +618,13 @@ impl Controller {
                     }
                 }
                 Row::Chapter(c) => {
+                    let local_import = c.id.series.source_id == "local";
+                    let download = if local_import {
+                        None
+                    } else {
+                        view.download_states.get(&c.id)
+                    };
+                    let downloaded = download == Some(&reader_downloads::JobStatus::Complete);
                     let series = snapshot.series.iter().find(|s| s.id == c.id.series);
                     let key = series.map(crate::artwork::key).unwrap_or_default();
                     let read = snapshot
@@ -642,6 +653,9 @@ impl Controller {
                     if let Some(language) = &c.language {
                         meta.push(language.clone());
                     }
+                    if downloaded {
+                        meta.push(text::tr("Downloaded"));
+                    }
                     ItemRow {
                         title: if view.section == 1 || view.section == 2 {
                             series
@@ -659,6 +673,9 @@ impl Controller {
                         .into(),
                         badge: text::tr(if read { "Read" } else { "Unread" }).into(),
                         read,
+                        downloaded,
+                        has_download: download.is_some(),
+                        local_import,
                         chapter_meta: meta.join(" · ").into(),
                         group: stamp.group.into(),
                         timestamp: stamp.timestamp.into(),
@@ -669,6 +686,7 @@ impl Controller {
                     }
                 }
                 Row::Download(c) => ItemRow {
+                    local_import: c.series.source_id == "local",
                     title: snapshot
                         .chapters
                         .iter()
@@ -968,6 +986,9 @@ impl Controller {
             ui.set_section(section);
         } else {
             self.render(ui);
+            if section == 5 {
+                self.refresh_download_states(ui);
+            }
         }
     }
     fn return_to_catalogue(&self, ui: &AppWindow) {
@@ -1094,6 +1115,7 @@ impl Controller {
         if cached {
             self.invalidate();
             self.render(ui);
+            self.refresh_download_states(ui);
             return;
         }
         self.task(
@@ -1106,6 +1128,7 @@ impl Controller {
                 view.section = 5;
                 drop(view);
                 app.render(ui);
+                app.refresh_download_states(ui);
             },
         );
     }
@@ -1688,10 +1711,23 @@ impl Controller {
                         )
                         .into(),
                         bookmarked: job.status == reader_downloads::JobStatus::Complete,
+                        downloaded: job.chapter.series.source_id != "local"
+                            && job.status == reader_downloads::JobStatus::Complete,
+                        has_download: job.chapter.series.source_id != "local",
+                        local_import: job.chapter.series.source_id == "local",
                         ..ItemRow::default()
                     })
                     .collect::<Vec<_>>();
-                app.view().rows = jobs.into_iter().map(|j| Row::Download(j.chapter)).collect();
+                let mut view = app.view();
+                view.download_states = jobs
+                    .iter()
+                    .map(|job| (job.chapter.clone(), job.status.clone()))
+                    .collect();
+                view.rows = jobs
+                    .into_iter()
+                    .map(|job| Row::Download(job.chapter))
+                    .collect();
+                drop(view);
                 app.render(ui);
                 ui.set_items(ModelRc::new(VecModel::from(rows)));
             },
@@ -1709,6 +1745,17 @@ impl Controller {
             let result = (|| {
                 let cancel = CancelToken::default();
                 app.services.prepare_download(&chapter, &cancel)?;
+                let queued_app = app.clone();
+                let series = chapter.series.clone();
+                let _ = weak.upgrade_in_event_loop(move |ui| {
+                    let view = queued_app.view();
+                    let refresh =
+                        view.section == 5 && view.series.as_ref().is_some_and(|s| s.id == series);
+                    drop(view);
+                    if refresh {
+                        queued_app.refresh_download_states(&ui);
+                    }
+                });
                 let _serial = app
                     .download_serial
                     .lock()
@@ -1726,6 +1773,7 @@ impl Controller {
                 if app.view().section == 7 {
                     app.download_list(&ui);
                 }
+                app.refresh_download_states(&ui);
             });
         });
     }
@@ -1780,6 +1828,28 @@ impl Controller {
             _ => return,
         };
         let result = match action {
+            "delete-download" => {
+                // Capture the stable identity before asynchronous work; row
+                // ordering can change while a chapter bundle is removed.
+                self.task(
+                    ui,
+                    move |app, _| {
+                        app.remove_download(&chapter)?;
+                        Ok(chapter)
+                    },
+                    |app, ui, chapter| {
+                        app.view().download_states.remove(&chapter);
+                        if app.view().section == 7 {
+                            app.download_list(ui);
+                        } else {
+                            app.render(ui);
+                        }
+                        ui.set_status(text::tr("Download deleted.").into());
+                        app.refresh_download_states(ui);
+                    },
+                );
+                return;
+            }
             "download" | "resume" => {
                 self.download(ui, chapter);
                 return;
@@ -1835,6 +1905,61 @@ impl Controller {
         } else {
             self.render(ui);
         }
+    }
+    fn refresh_download_states(self: &Arc<Self>, ui: &AppWindow) {
+        let revision = {
+            let mut view = self.view();
+            view.download_revision = view.download_revision.wrapping_add(1);
+            if view.download_refreshing {
+                view.download_refresh_again = true;
+                return;
+            }
+            view.download_refreshing = true;
+            view.download_revision
+        };
+        let app = self.clone();
+        let weak = ui.as_weak();
+        std::thread::spawn(move || {
+            let states = app.services.downloads.statuses().map_err(error);
+            let _ = weak.upgrade_in_event_loop(move |ui| {
+                let mut view = app.view();
+                view.download_refreshing = false;
+                let again = std::mem::take(&mut view.download_refresh_again);
+                let current = revision == view.download_revision;
+                let refresh = current && view.section == 5;
+                if current {
+                    match states {
+                        Ok(states) => view.download_states = states,
+                        Err(message) => ui.set_status(message.into()),
+                    }
+                }
+                drop(view);
+                if refresh {
+                    app.render(&ui);
+                }
+                if again {
+                    app.refresh_download_states(&ui);
+                }
+            });
+        });
+    }
+    fn remove_download(&self, chapter: &ChapterId) -> Result<()> {
+        if chapter.series.source_id == "local" {
+            return Err(text::tr(
+                "Imported local chapters cannot be deleted as downloads.",
+            ));
+        }
+        self.services
+            .downloads
+            .remove(chapter)
+            .map_err(|message| match message {
+                reader_downloads::Error::Invalid(reason) if reason == "chapter already running" => {
+                    text::tr(
+                        "Pause or cancel this download and wait for it to stop before deleting it.",
+                    )
+                }
+                message => error(message),
+            })
     }
     fn install(self: &Arc<Self>, ui: &AppWindow, path: PathBuf) {
         self.task(
@@ -2088,11 +2213,18 @@ pub fn run(services: Services) -> Result<()> {
     std::thread::spawn(move || Controller::image_worker(worker, receiver, weak));
     macro_rules! wire { ($method:ident, |$this:ident,$window:ident $(,$arg:ident)*| $body:expr) => {{let $this=app.clone();let weak=ui.as_weak();ui.$method(move |$($arg),*|{if let Some($window)=weak.upgrade(){$body}});}}; }
     #[cfg(target_os = "android")]
-    ui.on_immersive_changed(|immersive| {
-        if let Err(e) = crate::android_documents::set_reader_immersive(immersive) {
+    {
+        ui.on_immersive_changed(|immersive| {
+            if let Err(e) = crate::android_documents::set_reader_immersive(immersive) {
+                eprintln!("Nova Reader: {e}");
+            }
+        });
+        // Java's Activity state can survive recreation while this new UI
+        // starts on Library, whose default section emits no change callback.
+        if let Err(e) = crate::android_documents::set_reader_immersive(false) {
             eprintln!("Nova Reader: {e}");
         }
-    });
+    }
     wire!(on_request_artwork, |app, ui, first, last| app
         .request_artwork(&ui, first, last));
     wire!(on_image_cache_refresh, |app, ui| {
@@ -2595,13 +2727,27 @@ pub fn run(services: Services) -> Result<()> {
         slint::CloseRequestResponse::HideWindow
     });
     app.render(&ui);
-    if let Ok(jobs) = app.services.downloads.jobs() {
-        for job in jobs {
-            if job.status == reader_downloads::JobStatus::Queued {
-                app.download(&ui, job.chapter);
-            }
+    app.refresh_download_states(&ui);
+    // Recovery verifies persisted payloads; keep that potentially large scan
+    // off the event loop as well as the lightweight list-status refresh.
+    let startup = app.clone();
+    let startup_ui = ui.as_weak();
+    std::thread::spawn(move || {
+        let queued = startup.services.downloads.jobs().map(|jobs| {
+            jobs.into_iter()
+                .filter(|job| job.status == reader_downloads::JobStatus::Queued)
+                .map(|job| job.chapter)
+                .collect::<Vec<_>>()
+        });
+        if let Ok(queued) = queued {
+            let _ = startup_ui.upgrade_in_event_loop(move |ui| {
+                for chapter in queued {
+                    startup.download(&ui, chapter);
+                }
+                startup.refresh_download_states(&ui);
+            });
         }
-    }
+    });
     let result = ui.run().map_err(error);
     crate::reader_export::shutdown();
     app.flush();
@@ -2858,6 +3004,79 @@ mod tests {
         assert!(
             (tiles.last().unwrap().offset + tiles.last().unwrap().fraction - 1.).abs() < 0.00001
         );
+        // Chapter flags and deletion share the store's verified job state.
+        // Running transfers must be stopped first; imported chapters are the
+        // user's only local copy and are never treated as removable downloads.
+        let series = app.view().series.clone().unwrap();
+        let chapter = Chapter {
+            id: ChapterId::new(series.id.clone(), "download-delete"),
+            title: "Download deletion fixture".into(),
+            label: "1".into(),
+            number: Some("1".into()),
+            volume: None,
+            source_order: 0,
+            language: None,
+            scanlator: None,
+            uploaded_at: None,
+        };
+        app.services
+            .save_details(series.clone(), vec![chapter.clone()])
+            .unwrap();
+        let resource = reader_downloads::PageResource {
+            id: "first".into(),
+            url: "https://example.invalid/page".into(),
+            headers: BTreeMap::new(),
+        };
+        app.services
+            .downloads
+            .enqueue(chapter.id.clone(), vec![resource.clone()])
+            .unwrap();
+        app.view().section = 5;
+        app.view().download_states = app.services.downloads.statuses().unwrap();
+        app.render(&ui);
+        let row = ui.get_items().row_data(0).unwrap();
+        assert!(row.has_download && !row.downloaded && !row.local_import);
+        app.services
+            .downloads
+            .run(&chapter.id, |_| {
+                assert!(
+                    app.remove_download(&chapter.id)
+                        .unwrap_err()
+                        .contains("Pause or cancel")
+                );
+                Ok(bytes.clone())
+            })
+            .unwrap();
+        app.view().download_states = app.services.downloads.statuses().unwrap();
+        app.render(&ui);
+        let row = ui.get_items().row_data(0).unwrap();
+        assert!(row.has_download && row.downloaded);
+        app.remove_download(&chapter.id).unwrap();
+        app.view().download_states = app.services.downloads.statuses().unwrap();
+        app.render(&ui);
+        let row = ui.get_items().row_data(0).unwrap();
+        assert!(!row.has_download && !row.downloaded);
+
+        let local = ChapterId::new(reader_domain::SeriesId::new("local", "import"), "chapter");
+        app.services
+            .downloads
+            .enqueue(local.clone(), vec![resource])
+            .unwrap();
+        app.services
+            .downloads
+            .run(&local, |_| Ok(bytes.clone()))
+            .unwrap();
+        let local_before = app.services.downloads.offline(&local).unwrap().pages;
+        assert!(
+            app.remove_download(&local)
+                .unwrap_err()
+                .contains("Imported local")
+        );
+        assert_eq!(
+            app.services.downloads.offline(&local).unwrap().pages,
+            local_before
+        );
+
         // Returning from a result restores its source, search/pagination and
         // catalogue rows instead of routing to the Browse management screen.
         {

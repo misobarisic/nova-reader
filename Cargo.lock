@@ -3393,11 +3393,12 @@ dependencies = [
 
 [[package]]
 name = "nova-reader"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "arboard",
  "directories",
  "i-slint-backend-testing",
+ "i-slint-core",
  "image",
  "jni 0.21.1",
  "ndk-context",

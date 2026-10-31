@@ -187,15 +187,13 @@ fn save(root: &Path, job: &ChapterDownload) -> Result<()> {
         &bytes,
     )
 }
-fn load(root: &Path, chapter: &ChapterId) -> Result<ChapterDownload> {
-    let path = root.join(chapter_key(chapter)).join("manifest.json");
+fn load_manifest(path: &Path) -> Result<ChapterDownload> {
     let file = File::open(path)?;
     if file.metadata()?.len() > 16 * 1024 * 1024 {
         return Err(Error::Invalid("oversized download manifest".into()));
     }
     let job: ChapterDownload = serde_json::from_reader(file)?;
     if job.schema_version != 1
-        || &job.chapter != chapter
         || job.pages.is_empty()
         || job.pages.len() > 10000
         || job
@@ -204,6 +202,13 @@ fn load(root: &Path, chapter: &ChapterId) -> Result<ChapterDownload> {
             .enumerate()
             .any(|(i, p)| p.filename != page_name(i, &p.resource.id))
     {
+        return Err(Error::Invalid("invalid download manifest".into()));
+    }
+    Ok(job)
+}
+fn load(root: &Path, chapter: &ChapterId) -> Result<ChapterDownload> {
+    let job = load_manifest(&root.join(chapter_key(chapter)).join("manifest.json"))?;
+    if &job.chapter != chapter {
         return Err(Error::Invalid("invalid download manifest".into()));
     }
     Ok(job)
@@ -382,6 +387,39 @@ impl DownloadStore {
         }
         jobs.sort_by_key(|job| job.queue_order);
         Ok(jobs)
+    }
+    /// Persisted status hints for list actions, without reading page payloads
+    /// or hashing chapter bundles. Call `offline` before opening stored pages.
+    /// Manifest publication is atomic, so readers need no lock during disk I/O.
+    pub fn statuses(&self) -> Result<BTreeMap<ChapterId, JobStatus>> {
+        let root = self
+            .inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .root
+            .clone();
+        let mut statuses = BTreeMap::new();
+        for directory in fs::read_dir(&root)? {
+            let directory = directory?;
+            let kind = match directory.file_type() {
+                Ok(kind) => kind,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            if !kind.is_dir() {
+                continue;
+            }
+            let job = match load_manifest(&directory.path().join("manifest.json")) {
+                Ok(job) => job,
+                Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            if directory.file_name() != std::ffi::OsStr::new(&chapter_key(&job.chapter)) {
+                return Err(Error::Invalid("invalid download directory identity".into()));
+            }
+            statuses.insert(job.chapter, job.status);
+        }
+        Ok(statuses)
     }
     fn status(&self, chapter: &ChapterId, status: JobStatus) -> Result<()> {
         let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());

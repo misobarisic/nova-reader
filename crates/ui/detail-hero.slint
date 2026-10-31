@@ -38,6 +38,9 @@ export component HeroAction inherits Rectangle {
 export component DetailHero inherits Rectangle {
     min-width: 0px;
     in property <length> viewport-width;
+    in property <length> safe-top;
+    in property <length> safe-left;
+    in property <length> safe-right;
     in property <string> title;
     in property <string> description;
     in property <string> resume-chapter;
@@ -53,9 +56,9 @@ export component DetailHero inherits Rectangle {
     private property <bool> expanded: false;
     changed title => { root.expanded = false; }
     private property <length> gutter: root.narrow ? 20px : 64px;
-    private property <length> overview-width: max(1px, root.viewport-width - 2 * root.gutter);
+    private property <length> overview-width: max(1px, root.viewport-width - 2 * root.gutter - root.safe-left - root.safe-right);
     private property <length> text-width: root.narrow ? root.overview-width : min(650px, root.overview-width * 0.55);
-    private property <length> backdrop-height: root.narrow ? 560px : 740px;
+    private property <length> backdrop-height: (root.narrow ? 560px : 740px) + root.safe-top;
     height: body.preferred-height;
     Rectangle {
         x: 0px; y: 0px; width: root.width; height: min(root.height, root.backdrop-height + 60px); clip: true;
@@ -69,8 +72,8 @@ export component DetailHero inherits Rectangle {
     }
     body := VerticalLayout {
         width: root.width;
-        padding-left: root.gutter; padding-right: root.gutter;
-        padding-top: root.narrow ? 250px : 100px; padding-bottom: 16px;
+        padding-left: root.gutter + root.safe-left; padding-right: root.gutter + root.safe-right;
+        padding-top: (root.narrow ? 250px : 100px) + root.safe-top; padding-bottom: 16px;
         spacing: root.narrow ? 14px : 18px; alignment: start;
         HorizontalLayout {
             VerticalLayout {

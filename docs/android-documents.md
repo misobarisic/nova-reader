@@ -19,7 +19,32 @@ activity reference when the queue runs. The latest desired state survives
 activity recreation and is reapplied on creation and window focus. API 30 and
 newer use `WindowInsetsController` with transient bars available by swipe; older
 versions use fullscreen/immersive-sticky decor flags while retaining other flags.
-Only the status bar is hidden; navigation bar visibility is left to Android.
+Only the status bar is hidden; the navigation bar remains visible.
+
+The activity keeps its native surface behind the status bar in every page and
+both reader control states. API 30+ uses `setDecorFitsSystemWindows(false)`;
+API 26-29 retains `LAYOUT_STABLE|LAYOUT_HIDE_NAVIGATION|LAYOUT_FULLSCREEN` while toggling only bar
+visibility flags. The status bar is transparent. Cutout layout uses `ALWAYS`
+on API 30+ and `SHORT_EDGES` on API 28-29. Showing controls therefore keeps the
+same client viewport instead of reserving or releasing a strip above the image.
+These settings are reapplied on activity creation and window focus.
+This matches Nova's normal transparent, edge-to-edge window policy in
+`nova/crates/player/src/external.rs` (`EDGE_TO_EDGE` at line 523 and
+`apply_system_bars` at lines 666-732). Navigation is kept visible for Reader's
+status-only immersive mode. Inherited window `FLAG_FULLSCREEN`, translucent
+status flags and legacy navigation-hiding flags are cleared, so leaving a
+chapter can restore the status bar even if the native framework set fullscreen.
+Decor fitting is configured once per creation/focus rather than redispatched
+for each controls toggle. If the API 30+ insets controller is not attached during
+creation, one decor-view post retries against the latest activity/state; focus
+also reasserts it.
+
+Slint 1.18's Android backend reports system-bar and cutout insets without setting
+the window fitting policy. Its Java inset listeners remain installed: normal
+pages apply the reported safe-area padding, chapter artwork fills the top of
+the surface, and the reader controls independently respect the status/cutout
+inset. Do not toggle Slint fullscreen or decor fitting with the controls; that
+would change the viewport or suppress safe-area information used by the UI.
 
 ## Application integration
 
@@ -157,10 +182,15 @@ backup export launch, cancellation/native callback registration, recreation
 between request and launch, missing activity errors, Java exception reporting
 and successful retry after clearing the exception. The Rust callback test also
 checks single completion, busy rejection and stale-result rejection. The window
-fixtures exercise both API 29 decor flags and API 35 insets: queued hide/show,
+fixtures exercise API 26/28/29 decor flags and API 30/35 insets: queued hide/show,
 transient swipe behavior, retained state across recreation and missing activity,
 focus reapplication, rapid toggles, and rejection of updates to stale windows.
-They also check that unrelated decor flags and navigation visibility survive.
+They also check transparent status bars, the matching cutout policies and
+edge-to-edge fitting with both hidden/shown controls, unchanged layout flags
+across toggles, and restoration after recreation/focus. Unrelated window/decor
+flags and navigation visibility must survive.
+Fixtures begin with fullscreen/navigation hiding already set and verify normal
+bar restoration, deferred controller attachment and a stale attachment retry.
 Image fixtures verify MIME/filename picker metadata, real export bytes, provider
 stream failures, clipboard bytes after staging deletion/activity destruction and
 provider restart, cache/MIME bounds, read-only traversal rejection, retention,
@@ -185,6 +215,10 @@ In a chapter, verify controls start hidden, tapping restores both the controls
 and status bar, tapping again hides both, a system swipe temporarily reveals the
 status bar, and rotation or returning from another app preserves the requested
 state. Leaving the reader must restore the status bar.
+Check portrait and landscape on a cutout device: chapter pixels must reach the
+top edge with either control state, the image must not move when toggling
+controls, the visible toolbar must remain clear of status icons/cutouts, and
+normal pages must keep their safe-area padding.
 For all four image actions, verify saved/pasted pixels, image MIME and filename,
 common/per-series Pictures placement on API 29+, destination cancellation/failure
 on API 26-28, cleanup after interrupted saves, and pasting into another app after

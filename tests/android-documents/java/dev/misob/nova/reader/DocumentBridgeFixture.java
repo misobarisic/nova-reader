@@ -11,6 +11,7 @@ import android.os.Handler;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowInsets;
+import android.view.WindowManager;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
@@ -147,7 +148,47 @@ public class DocumentBridgeFixture {
             : (current.getWindow().getDecorView().getSystemUiVisibility()&View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY)!=0;
     }
     public static boolean stableLayout() {
-        return (current.getWindow().getDecorView().getSystemUiVisibility()&View.SYSTEM_UI_FLAG_LAYOUT_STABLE)!=0;
+        return Build.VERSION.SDK_INT>=30?!current.getWindow().decorFitsSystemWindows
+            :(current.getWindow().getDecorView().getSystemUiVisibility()&View.SYSTEM_UI_FLAG_LAYOUT_STABLE)!=0;
+    }
+    public static boolean edgeToEdge() {
+        int layout=View.SYSTEM_UI_FLAG_LAYOUT_STABLE|View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION|View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN;
+        Window window=current.getWindow();
+        return Build.VERSION.SDK_INT>=30?!window.decorFitsSystemWindows
+            :(window.getDecorView().getSystemUiVisibility()&layout)==layout;
+    }
+    public static boolean transparentStatusBar() {
+        Window window=current.getWindow();
+        return window.statusBarColor==0
+            && (window.flags()&WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS)!=0
+            && (window.flags()&(WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS|WindowManager.LayoutParams.FLAG_FULLSCREEN))==0;
+    }
+    public static boolean cutoutAllowed() {
+        Window window=current.getWindow();
+        if (Build.VERSION.SDK_INT<28) return window.cutoutAccesses==0;
+        return window.getAttributes().layoutInDisplayCutoutMode==(Build.VERSION.SDK_INT>=30
+            ?WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            :WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES);
+    }
+    public static boolean unrelatedWindowFlagsPreserved() {
+        Window window=current.getWindow();
+        return (window.flags()&WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)!=0
+            && (window.getDecorView().getSystemUiVisibility()&View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR)!=0;
+    }
+    public static int layoutChanges() {
+        Window window=current.getWindow();
+        return Build.VERSION.SDK_INT>=30?window.decorFitChanges:window.getDecorView().layoutChanges;
+    }
+    public static int decorFitCalls() { return current.getWindow().decorFitCalls; }
+    public static void deferInsets() { Window.initiallyInsetsReady=false; }
+    public static void attachInsets() { current.getWindow().insetsReady=true;Window.initiallyInsetsReady=true; }
+    public static void disturbWindowLayout() {
+        Window window=current.getWindow();
+        if (Build.VERSION.SDK_INT>=30) window.setDecorFitsSystemWindows(true);
+        else window.getDecorView().setSystemUiVisibility(window.getDecorView().getSystemUiVisibility()
+            &~(View.SYSTEM_UI_FLAG_LAYOUT_STABLE|View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION|View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN));
+        window.setStatusBarColor(0xff000000);
+        if (Build.VERSION.SDK_INT>=28) window.getAttributes().layoutInDisplayCutoutMode=0;
     }
     public static void revealStatusBar() {
         Window window=current.getWindow();

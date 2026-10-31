@@ -111,6 +111,7 @@ export component AppWindow inherits Window {
     in property <[SettingRow]> settings;
     // Nova's responsive breakpoint applies equally to Android and desktop.
     out property <bool> mobile-ui: root.width < 700px;
+    private property <bool> edge-to-edge-artwork: root.section == 5 || root.section == 6;
     out property <length> navigation-width: root.mobile-ui || root.section == 5 || root.section == 6 ? 0px : 64px;
     out property <length> bottom-navigation-height: root.mobile-ui && !(root.section == 3 && root.source-catalog-open) && (root.section == 0 || root.section == 1 || root.section == 2 || root.section == 3 || root.section == 4) ? 68px : 0px;
     in-out property <bool> reader-osd: false;
@@ -189,7 +190,7 @@ export component AppWindow inherits Window {
         if !root.reader-osd { root.show-reader-options = false; }
         root.immersive-changed(root.section == 6 && !root.reader-osd);
     }
-    out property <length> reader-width: min(1100px, max(100px, (root.width - root.safe-area-insets.left - root.safe-area-insets.right - 16px) * root.zoom));
+    out property <length> reader-width: min(1100px, max(100px, (root.width - (root.section == 6 ? 0px : root.safe-area-insets.left + root.safe-area-insets.right) - 16px) * root.zoom));
     private property <length> reader-height: root.total-ratio * root.reader-width;
 
     callback request-artwork(int,int);
@@ -255,10 +256,14 @@ export component AppWindow inherits Window {
     }
     keyboard := FocusScope {
         width: root.width; height: root.height;
-        Rectangle {
-            x: root.safe-area-insets.left; y: root.safe-area-insets.top;
-            width: max(0px, root.width - root.safe-area-insets.left - root.safe-area-insets.right);
-            height: max(0px, root.height - root.safe-area-insets.top - root.safe-area-insets.bottom);
+        // Chapter artwork reaches underneath status bars and display cutouts.
+        // Only the OSD controls use those insets, so showing controls does not
+        // resize or shift the reading viewport.
+        content-viewport := Rectangle {
+            x: root.edge-to-edge-artwork ? 0px : root.safe-area-insets.left;
+            y: root.edge-to-edge-artwork ? 0px : root.safe-area-insets.top;
+            width: max(0px, root.width - (root.edge-to-edge-artwork ? 0px : root.safe-area-insets.left + root.safe-area-insets.right));
+            height: max(0px, root.height - (root.edge-to-edge-artwork ? 0px : root.safe-area-insets.top) - root.safe-area-insets.bottom);
             VerticalLayout {
                 spacing: 0px;
                 HorizontalLayout {
@@ -432,7 +437,9 @@ export component AppWindow inherits Window {
                                     request-artwork(first,last) => { root.request-artwork(first,last); }
                                 }
                                 if root.section == 5: DetailHero {
-                                    viewport-width: root.width - root.safe-area-insets.left - root.safe-area-insets.right;
+                                    viewport-width: root.width;
+                                    safe-top: root.safe-area-insets.top;
+                                    safe-left: root.safe-area-insets.left; safe-right: root.safe-area-insets.right;
                                     title: root.series-title; description: root.series-description; resume-chapter: root.resume-chapter;
                                     metadata: root.series-metadata; genres: root.series-genres;
                                     poster: root.series-poster; in-library: root.in-library;
@@ -450,8 +457,8 @@ export component AppWindow inherits Window {
                                     request-artwork(first,last) => { root.request-artwork(first,last); }
                                 }
                                 if root.section == 5: VerticalLayout {
-                                    padding-left: root.mobile-ui ? 20px : 64px;
-                                    padding-right: root.mobile-ui ? 20px : 64px;
+                                    padding-left: root.safe-area-insets.left + (root.mobile-ui ? 20px : 64px);
+                                    padding-right: root.safe-area-insets.right + (root.mobile-ui ? 20px : 64px);
                                     spacing: 4px;
                                     HorizontalLayout {
                                         Text { text: @tr("{n} chapter" | "{n} chapters" % root.items.length); font-size: 20px; font-weight: 600; color: Theme.current.text_bright; vertical-alignment: center; min-width: 0px; }
@@ -497,6 +504,7 @@ export component AppWindow inherits Window {
                                                 ActionButton { text: @tr("Pause"); clicked => { root.item-action(index, "pause"); } }
                                                 ActionButton { text: @tr("Resume"); clicked => { root.item-action(index, "resume"); } }
                                                 ActionButton { text: @tr("Cancel"); clicked => { root.item-action(index, "cancel"); } }
+                                                if row.has-download && !row.local-import: ActionButton { text: @tr("Delete download"); clicked => { root.item-action(index, "delete-download"); } }
                                             }
                                         }
                                     }
@@ -573,10 +581,12 @@ export component AppWindow inherits Window {
                                 }
                             }
                             if root.reader-osd: Rectangle {
-                                width: parent.width; height: parent.height;
+                                x: 0px; y: 0px; width: parent.width; height: parent.height;
                             Rectangle {
-                                y: 0px; width: parent.width; height: 64px; background: Theme.current.nav_rail;
+                                y: 0px; width: parent.width; height: root.safe-area-insets.top + 64px; background: Theme.current.nav_rail;
                                 HorizontalLayout {
+                                    x: root.safe-area-insets.left; y: root.safe-area-insets.top;
+                                    width: max(0px, parent.width - root.safe-area-insets.left - root.safe-area-insets.right); height: 64px;
                                     padding: 8px; spacing: 8px;
                                     IconAction { text: @tr("Back to chapters"); icon: @image-url("../../assets/icons/navigation/back.svg"); clicked => { root.navigate(5); } }
                                     VerticalLayout {
@@ -589,9 +599,11 @@ export component AppWindow inherits Window {
                                 }
                             }
                             if root.show-reader-options: Rectangle {
-                                y: 64px; width: parent.width; height: min(120px, max(48px, root.height - root.safe-area-insets.top - root.safe-area-insets.bottom - 176px));
+                                y: root.safe-area-insets.top + 64px; width: parent.width; height: min(120px, max(48px, root.height - root.safe-area-insets.top - root.safe-area-insets.bottom - 176px));
                                 background: Theme.current.nav_rail;
                                 ScrollView {
+                                    x: root.safe-area-insets.left;
+                                    width: max(0px, parent.width - root.safe-area-insets.left - root.safe-area-insets.right); height: parent.height;
                                     VerticalLayout {
                                         padding: 8px; spacing: 8px;
                                         ComboBox { min-width: 0px; model: [@tr("Webtoon"), @tr("Left to right"), @tr("Right to left"), @tr("Vertical paging")]; current-index <=> root.reading-mode; selected(value) => { root.mode-changed(self.current-index); } }
@@ -607,6 +619,8 @@ export component AppWindow inherits Window {
                             Rectangle {
                                 y: parent.height - 64px; width: parent.width; height: 64px; background: Theme.current.nav_rail;
                                 HorizontalLayout {
+                                    x: root.safe-area-insets.left;
+                                    width: max(0px, parent.width - root.safe-area-insets.left - root.safe-area-insets.right); height: 64px;
                                     padding: 8px; spacing: 6px;
                                     IconAction { text: @tr("Previous chapter"); icon: @image-url("../../assets/icons/navigation/chapter-previous.svg"); enabled: root.can-previous; clicked => { root.chapter-step(-1); } }
                                     IconAction { text: @tr("Previous page"); icon: @image-url("../../assets/icons/navigation/previous.svg"); clicked => { root.page-step(-1); } }
@@ -618,10 +632,19 @@ export component AppWindow inherits Window {
                             }
                         }
                         if root.section == 5: Rectangle {
-                            x: 0px; y: 0px; width: parent.width; height: 76px;
-                            background: @linear-gradient(180deg, #000000b3, transparent);
+                            x: 0px; y: 0px; width: parent.width; height: root.safe-area-insets.top + (root.mobile-ui ? 64px : 76px);
+                            // Nova detail.slint: fixed scrim over scrolling art,
+                            // with toolbar controls below the system status bar.
+                            if root.mobile-ui: detail-status-scrim := Image {
+                                x: 0px; y: 0px; width: parent.width; height: root.safe-area-insets.top + 64px;
+                                source: @image-url("../../assets/status-bar-scrim.svg"); image-fit: fill;
+                                opacity: Theme.status_bar_gradient / 100;
+                            }
                             HorizontalLayout {
-                                padding-left: 20px; padding-right: 20px; padding-top: 16px; padding-bottom: 16px; spacing: 12px;
+                                padding-left: root.safe-area-insets.left + (root.mobile-ui ? 10px : 16px);
+                                padding-right: root.safe-area-insets.right + (root.mobile-ui ? 10px : 16px);
+                                padding-top: root.safe-area-insets.top + (root.mobile-ui ? 10px : 16px);
+                                padding-bottom: root.mobile-ui ? 10px : 16px; spacing: root.mobile-ui ? 6px : 12px;
                                 BackButton { clicked => { root.go-back(); } }
                                 Rectangle { horizontal-stretch: 1; }
                                 IconAction { width: 44px; text: @tr("Refresh"); icon: @image-url("../../assets/icons/navigation/updates.svg"); clicked => { root.browse("chapters"); } }

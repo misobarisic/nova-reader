@@ -7,6 +7,7 @@ import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.database.Cursor;
+import android.graphics.Color;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -18,6 +19,8 @@ import android.provider.OpenableColumns;
 import android.provider.MediaStore;
 import android.content.ContentValues;
 import android.view.View;
+import android.view.Window;
+import android.view.WindowManager;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import java.io.File;
@@ -49,6 +52,7 @@ public final class ReaderActivity extends NativeActivity {
     private static long lastCancelledId;
     private static volatile WeakReference<ReaderActivity> foreground = new WeakReference<>(null);
     private static volatile boolean readerImmersive;
+    private boolean decorFitsConfigured;
     private static native void nativeDocumentResult(long id, String path, String name, String error);
 
     private static final class Request {
@@ -92,25 +96,65 @@ public final class ReaderActivity extends NativeActivity {
         });
         if (!posted) throw new IllegalStateException("Reader UI thread is unavailable");
     }
-    @SuppressWarnings("deprecation")
     private void applyReaderImmersive() {
+        applyReaderImmersive(true);
+    }
+    @SuppressWarnings("deprecation")
+    private void applyReaderImmersive(boolean retryOnAttach) {
+        Window window=getWindow();
+        // Slint reports system-bar/cutout insets to the UI. Keep the native
+        // surface behind them in both OSD states so showing controls cannot
+        // resize the chapter or reserve a black strip above the image.
+        window.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
+        window.clearFlags(WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS|WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        window.setStatusBarColor(Color.TRANSPARENT);
+        if (Build.VERSION.SDK_INT>=28) {
+            WindowManager.LayoutParams attributes=window.getAttributes();
+            int cutoutMode=Build.VERSION.SDK_INT>=30
+                ?WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+                :WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+            if (attributes.layoutInDisplayCutoutMode!=cutoutMode) {
+                attributes.layoutInDisplayCutoutMode=cutoutMode;
+                window.setAttributes(attributes);
+            }
+        }
         if (Build.VERSION.SDK_INT>=30) {
-            WindowInsetsController controller=getWindow().getInsetsController();
+            View decor=window.getDecorView();
+            int flags=decor.getSystemUiVisibility();
+            int legacyVisibility=View.SYSTEM_UI_FLAG_FULLSCREEN|View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY|View.SYSTEM_UI_FLAG_HIDE_NAVIGATION;
+            if ((flags&legacyVisibility)!=0) decor.setSystemUiVisibility(flags&~legacyVisibility);
+            // Changing decor fitting redispatches insets; configure once per
+            // creation/focus, independently of reader OSD visibility.
+            if (!decorFitsConfigured) {
+                window.setDecorFitsSystemWindows(false);
+                decorFitsConfigured=true;
+            }
+            WindowInsetsController controller=window.getInsetsController();
             if (controller!=null) {
                 controller.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+                controller.show(WindowInsets.Type.navigationBars());
                 if (readerImmersive) controller.hide(WindowInsets.Type.statusBars());
                 else controller.show(WindowInsets.Type.statusBars());
+            } else if (retryOnAttach) {
+                // View.post waits for attachment when onCreate has no insets
+                // controller yet. Resolve current activity and latest intent;
+                // one deferred attempt avoids a loop if attachment never comes.
+                decor.post(() -> {
+                    ReaderActivity activity=foreground.get();
+                    if (activity!=null && !activity.isFinishing() && !activity.isDestroyed()) activity.applyReaderImmersive(false);
+                });
             }
         } else {
-            View decor=getWindow().getDecorView();
-            int flags=decor.getSystemUiVisibility();
+            View decor=window.getDecorView();
+            int flags=(decor.getSystemUiVisibility()&~View.SYSTEM_UI_FLAG_HIDE_NAVIGATION)
+                |View.SYSTEM_UI_FLAG_LAYOUT_STABLE|View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION|View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN;
             int readerFlags=View.SYSTEM_UI_FLAG_FULLSCREEN|View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY;
             decor.setSystemUiVisibility(readerImmersive?flags|readerFlags:flags&~readerFlags);
         }
     }
     @Override public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
-        if (hasFocus) applyReaderImmersive();
+        if (hasFocus) {decorFitsConfigured=false;applyReaderImmersive();}
     }
 
     public static void requestDocument(int kind, long id, String exportPath) {
