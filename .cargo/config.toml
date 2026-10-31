@@ -20,7 +20,9 @@ dev-run = ["run", "--config", ".cargo/local-kit.toml"]
 dev-release = ["build", "--config", ".cargo/local-kit.toml", "--profile", "dev-release"]
 dev-release-run = ["run", "--config", ".cargo/local-kit.toml", "--profile", "dev-release"]
 
-# 16 KiB ELF segment alignment is required in addition to APK ZIP alignment.
+# Plain Cargo builds request 16 KiB ELF alignment here. cargo-apk2 overrides
+# these flags with CARGO_ENCODED_RUSTFLAGS; root build.rs also sets alignment
+# on the final Android cdylib link so APK builds retain the requirement.
 [target.aarch64-linux-android]
 rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
 [target.armv7-linux-androideabi]

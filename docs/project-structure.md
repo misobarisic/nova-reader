@@ -6,6 +6,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 
 | Location | Responsibility |
 | --- | --- |
+| `build.rs` | Final Android cdylib 16 KiB ELF alignment, preserved when cargo-apk2 overrides Cargo rustflags |
 | `src/main.rs`, `src/lib.rs` | Desktop entry, Android entry/lifecycle, CLI routing |
 | `src/app.rs` | Worker orchestration, navigation, source/settings selection, visible-page loading, display tiles, lifecycle progress flush |
 | `src/services.rs` | Shared UI/test services: install, metadata conversion, library, downloads and local import |
@@ -29,7 +30,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `tests/reading_journey.rs` | Process-boundary install/read/progress/interrupted download/recovery/source-removal/offline journey |
 | `tests/ui_navigation.rs`, `tests/mobile_layout.rs` | Headless reader models, phone/landscape/tablet/desktop control bounds, tab taps, accessible activation and back navigation |
 | `tools/package-addon.py` | Deterministic manifest-declared reader addon ZIP builder |
-| `.github/scripts`, `.github/workflows` | Nova's parallel Android build/assembly, compiler-closure Windows staging, Linux packaging, Rust caches, license inventory and Nova’s PR/main-check versus tag-build split |
+| `.github/scripts`, `.github/workflows` | Nova's parallel Android build/assembly, compiler-closure Windows staging, Linux packaging, Rust caches, license inventory and Nova’s PR/main-check versus tag-build split; real-ELF encoded-rustflags packaging regression |
 | `android` | Android resources, platform document bridge and intentionally public local debug signing key |
 
 ## State and work boundaries

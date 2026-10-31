@@ -1,5 +1,10 @@
 """Exercise release ABI splits without needing the Android signing tools."""
 import importlib.util
+import json
+import os
+import shutil
+import subprocess
+import sys
 import tempfile
 import struct
 import tomllib
@@ -59,6 +64,47 @@ def binary_manifest(*, utf8=True, enabled=False, resource_id=0x010104EA, duplica
 
 
 class AndroidPackagingTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform.startswith("linux") and shutil.which("cargo"),
+                         "requires host Cargo and a Linux ELF linker, no Android SDK")
+    def test_final_cdylib_alignment_survives_cargo_apk_encoded_flags(self):
+        fixture = self.root / "link-fixture"
+        (fixture / "src").mkdir(parents=True)
+        (fixture / ".cargo").mkdir()
+        (fixture / "Cargo.toml").write_text(
+            '[package]\nname="alignment-fixture"\nversion="0.0.0"\nedition="2024"\n'
+            '[lib]\ncrate-type=["cdylib"]\n'
+        )
+        (fixture / "src/lib.rs").write_text('pub fn fixture() -> u32 { 42 }\n')
+        # This was Reader's original configuration. cargo-apk2 overrides it
+        # even when the encoded flags do not contain a page-alignment option.
+        (fixture / ".cargo/config.toml").write_text(
+            '[build]\nrustflags=["-C", "link-arg=-Wl,-z,max-page-size=16384"]\n'
+        )
+        env = dict(os.environ, CARGO_TARGET_DIR=str(fixture / "target"),
+                   CARGO_ENCODED_RUSTFLAGS="-C\x1fdebuginfo=0")
+        env.pop("RUSTFLAGS", None)
+        root_build = Path(__file__).resolve().parents[2] / "build.rs"
+        for target_os, compatible in [("linux", False), ("android", True)]:
+            # Only simulate the build-script target gate; Cargo still uses the
+            # installed host toolchain to produce and inspect real ELF bytes.
+            (fixture / "build.rs").write_text(
+                'mod reader { include!(' + json.dumps(str(root_build)) + '); '
+                'pub fn run() { main(); } }\n'
+                'fn main() { unsafe { std::env::set_var("CARGO_CFG_TARGET_OS", '
+                + json.dumps(target_os) + '); } reader::run(); }\n'
+            )
+            subprocess.run(["cargo", "build", "--offline"], cwd=fixture, env=env,
+                           check=True, capture_output=True)
+            apk = self.root / f"linked-{target_os}.apk"
+            with ZipFile(apk, "w") as archive:
+                archive.write(fixture / "target/debug/libalignment_fixture.so",
+                              "lib/test/libnova_reader.so")
+            if compatible:
+                packaging.verify_elf_alignment(apk)
+            else:
+                with self.assertRaisesRegex(RuntimeError, "16 KiB compatible"):
+                    packaging.verify_elf_alignment(apk)
+
     def test_actual_elf_load_segments_require_16k_alignment(self):
         for elf_class, header_size, program_size in [(2, 64, 56), (1, 52, 32)]:
             for alignment in (4096, 16384):

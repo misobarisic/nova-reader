@@ -122,3 +122,26 @@ Astra 6 medium found no actionable regression; focused layout/navigation tests
 passed.
 Formatting, workspace check, Clippy for all targets with warnings denied and the
 full workspace test suite also passed for the final change.
+
+## Android ELF alignment fix for 0.1.8
+
+The v0.1.5 assembly job (run 41200379600) failed because
+`lib/arm64-v8a/libnova_reader.so` had four PT_LOAD segments aligned to 4096 bytes.
+The actual uploaded APK was downloaded and inspected; this was its only native
+library. The pinned cargo-apk2 `ndk-build2/src/cargo.rs` constructs
+CARGO_ENCODED_RUSTFLAGS from environment flags and supplies that to child Cargo,
+overriding Reader's configured target rustflags. Versions 0.1.6/0.1.7 retained
+that same build configuration.
+
+Root build.rs now emits the 16 KiB maximum-page-size argument on the final
+Android cdylib link for every ABI. Host builds emit no link directive. The
+packager's ELF, ZIP alignment, payload and signing checks remain intact; the
+workflow YAML and signing identity are unchanged. A regression uses real host
+Cargo/ELF linking under encoded rustflags, shows the original config is ignored,
+and verifies the Android build directive restores compatibility.
+
+Formatting, workspace check, Clippy for all targets with warnings denied, the
+full workspace tests, and all 28 packaging regressions passed locally. Astra 6
+medium found no review blockers and independently ran the Android packaging
+suite successfully. Host ELF regression is separate from actual Android APK
+assembly and device acceptance; those results belong to the new release run.

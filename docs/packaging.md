@@ -58,8 +58,10 @@ assets. The local `android-build-release-universal` Make target remains an
 alternative. `cargo fetch --locked` checks the committed lock before invoking
 cargo-apk2, whose CLI does not support Cargo's `--locked` argument. It emits ARM64, ARMv7,
 x86_64 and universal APKs. Every shipped ELF library is checked against its ABI;
-video libraries are rejected. ELF PT_LOAD segments are also checked for 16 KiB compatibility; Cargo target
-flags request that segment alignment. Per-ABI APKs store and align libraries to 16 KiB;
+video libraries are rejected. ELF PT_LOAD segments are also checked for 16 KiB
+compatibility. Root `build.rs` emits the page-size argument on the final Android
+cdylib link: cargo-apk2 sets `CARGO_ENCODED_RUSTFLAGS`, which overrides the target
+flags in `.cargo/config.toml`. Plain Cargo builds still use those target flags. Per-ABI APKs store and align libraries to 16 KiB;
 the universal APK compresses/extracts them. Every result is signed, signature
 verified and compared with the original signing identity and payload.
 
@@ -107,3 +109,11 @@ The Android shell includes host libclang with target-specific NDK sysroots for
 QuickJS bindgen, plus GN/Ninja/Git/Curl for ARMv7 Skia source builds.
 `make check-android-java` compiles the SAF activity against API 35; Android CI
 runs it alongside the ARM64 Rust check with update checking enabled.
+
+Version 0.1.5 compiled all three Android inputs but assembly rejected the ARM64
+Reader library's 4 KiB ELF load-segment alignment. The same configuration remained
+in versions 0.1.6 and 0.1.7. Version 0.1.8 sets alignment on the final cdylib link
+instead of relying on the overridden Cargo flags. The regression links real ELF
+libraries under encoded rustflags, reproduces the rejection without the Android
+build directive, and verifies that the directive fixes it. This host-link test
+does not replace the full Android build/sign/assembly run or device acceptance.
