@@ -1,0 +1,15 @@
+// Reader-owned values; palette, controls and motion come from Nova Kit.
+export global Appearance {
+    in-out property <int> accent-color: 0;
+    in-out property <int> background-style: 0;
+    in-out property <int> card-radius: 10;
+    in-out property <int> button-radius: 8;
+    in-out property <int> card-spacing: 8;
+    in-out property <bool> transparent-navbar: true;
+    in-out property <bool> animations: true;
+    in-out property <bool> transitions: true;
+    in-out property <bool> hover: true;
+    in-out property <bool> navigation-feedback: true;
+    callback setting-changed(string, int);
+    callback restore-theme;
+}

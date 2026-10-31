@@ -1,7 +1,7 @@
 use std::{cell::Cell, rc::Rc, time::Duration};
 
 use i_slint_backend_testing::ElementHandle;
-use nova_reader::{AppWindow, ItemRow};
+use nova_reader::{Anim, AppWindow, ItemRow, Theme};
 use slint::platform::{PointerEventButton, WindowEvent};
 use slint::{ComponentHandle, LogicalSize, ModelRc, VecModel};
 
@@ -14,12 +14,32 @@ fn settle() {
 }
 
 fn action(ui: &AppWindow, label: &str) -> ElementHandle {
-    for _ in 0..12 {
+    for attempt in 0..32 {
+        let mut direction = if label == "Back" || attempt >= 16 {
+            100.
+        } else {
+            -100.
+        };
         if let Some(action) = ElementHandle::find_by_accessible_label(ui, label).next() {
-            return action;
+            let center = action.absolute_position().y + action.size().height / 2.;
+            let height = ui.window().size().height as f32 / ui.window().scale_factor();
+            let navigation = ["Library", "Updates", "History", "Browse", "More"].contains(&label);
+            let bottom = if navigation {
+                height
+            } else {
+                height - ui.get_bottom_navigation_height()
+            };
+            if center >= 0. && center < bottom {
+                return action;
+            }
+            if center < 0. {
+                direction = 100.;
+            }
         }
         let id = if ui.get_section() == 4 {
             "MorePage::landing-scroll"
+        } else if [11, 12, 14, 15].contains(&ui.get_section()) {
+            "MorePage::detail-scroll"
         } else if ui.get_section() >= 9 {
             "MorePage::child-scroll"
         } else {
@@ -28,7 +48,7 @@ fn action(ui: &AppWindow, label: &str) -> ElementHandle {
         let Some(scroll) = ElementHandle::find_by_element_id(ui, id).next() else {
             break;
         };
-        scroll.scroll(0., -100.);
+        scroll.scroll(0., direction);
         settle();
     }
     panic!("missing action: {label}, section {}", ui.get_section());
@@ -113,7 +133,7 @@ fn nova_navigation_more_and_responsive_controls() {
             narrow,
             "use Nova's breakpoint on Android too"
         );
-        for section in [0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13] {
+        for section in [0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15] {
             ui.set_section(section);
             settle();
             let bottom = narrow && [0, 1, 2, 3, 4].contains(&section);
@@ -178,6 +198,14 @@ fn nova_navigation_more_and_responsive_controls() {
         assert_eq!(ui.get_bottom_navigation_height(), 0.);
         tap(&ui, "Categories");
         assert_eq!(ui.get_section(), 11);
+        tap(&ui, "Back");
+        assert_eq!(ui.get_section(), 10);
+        tap(&ui, "Theme");
+        assert_eq!(ui.get_section(), 14);
+        tap(&ui, "Back");
+        assert_eq!(ui.get_section(), 10);
+        tap(&ui, "Look and feel");
+        assert_eq!(ui.get_section(), 15);
         tap(&ui, "Back");
         assert_eq!(ui.get_section(), 10);
         tap(&ui, "Back");
@@ -262,6 +290,7 @@ fn nova_navigation_more_and_responsive_controls() {
     });
     settle();
     back(&ui);
+
     assert_eq!(
         ui.get_section(),
         3,
@@ -327,6 +356,115 @@ fn nova_navigation_more_and_responsive_controls() {
         "More keyboard navigation must work after child return"
     );
     back(&ui);
+
+    // A nested push retains the Settings landing and paints both layers in
+    // motion. Back reverses that motion, including a partially entered leaf.
+    ui.window().set_size(LogicalSize::new(390., 720.));
+    ui.set_section(10);
+    settle();
+    ui.set_section(14);
+    for _ in 0..5 {
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(16));
+    }
+    let detail = ElementHandle::find_by_element_id(&ui, "MorePage::detail")
+        .next()
+        .unwrap();
+    let landing = ElementHandle::find_by_element_id(&ui, "MorePage::child")
+        .next()
+        .unwrap();
+    assert!(detail.absolute_position().x > 0. && detail.absolute_position().x < 390.);
+    assert!(landing.absolute_position().x < 0. && landing.absolute_position().x > -110.);
+    ui.invoke_go_back();
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(16));
+    assert!(
+        ElementHandle::find_by_element_id(&ui, "MorePage::detail")
+            .next()
+            .is_some(),
+        "outgoing leaf must survive Back"
+    );
+    settle();
+    assert_eq!(ui.get_section(), 10);
+    assert!(
+        ElementHandle::find_by_element_id(&ui, "MorePage::detail")
+            .next()
+            .is_none()
+    );
+    assert!(landing.absolute_position().x.abs() < 1.);
+
+    ui.set_section(14);
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(32));
+    ui.global::<Anim>().set_enabled(false);
+    assert!(
+        ElementHandle::find_by_element_id(&ui, "MorePage::detail")
+            .next()
+            .unwrap()
+            .absolute_position()
+            .x
+            .abs()
+            < 1.
+    );
+    // Publish the off event before a second user event re-enables motion.
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(1));
+    // Re-enable before the old animation's duration has elapsed. It must not
+    // expose a stale intermediate position that was merely painted over.
+    ui.global::<Anim>().set_enabled(true);
+    assert!(
+        ElementHandle::find_by_element_id(&ui, "MorePage::detail")
+            .next()
+            .unwrap()
+            .absolute_position()
+            .x
+            .abs()
+            < 1.
+    );
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(16));
+    assert!(
+        ElementHandle::find_by_element_id(&ui, "MorePage::detail")
+            .next()
+            .unwrap()
+            .absolute_position()
+            .x
+            .abs()
+            < 1.
+    );
+    ui.global::<Anim>().set_enabled(false);
+    ui.invoke_go_back();
+    assert!(
+        ElementHandle::find_by_element_id(&ui, "MorePage::detail")
+            .next()
+            .is_none()
+    );
+    assert!(landing.absolute_position().x.abs() < 1.);
+    settle();
+    ui.global::<Anim>().set_enabled(true);
+
+    // Settings has its own retained offset, independent of More's scroller.
+    ui.window().set_size(LogicalSize::new(390., 300.));
+    settle();
+    let settings_scroll = ElementHandle::find_by_element_id(&ui, "MorePage::child-scroll")
+        .next()
+        .unwrap();
+    let data = action(&ui, "Data");
+    settings_scroll.scroll(0., -180.);
+    settle();
+    let settings_y = data.absolute_position().y;
+    ui.set_section(14);
+    settle();
+    back(&ui);
+    assert!((data.absolute_position().y - settings_y).abs() < 1.);
+
+    // Both Nova bottom-bar modes preserve tab placement and usable content.
+    ui.window().set_size(LogicalSize::new(390., 720.));
+    ui.set_section(0);
+    for transparent in [true, false] {
+        ui.global::<Theme>().set_transparent_navbar(transparent);
+        settle();
+        for tab in ElementHandle::find_by_element_type_name(&ui, "BottomItem") {
+            assert!(tab.absolute_position().y >= 720. - 68.);
+            assert!(tab.absolute_position().y + tab.size().height <= 720.);
+        }
+    }
+    ui.global::<Theme>().set_transparent_navbar(true);
 
     // Ordinary page switches reset scroll; loading more rows on the same page does not.
     ui.window().set_size(LogicalSize::new(390., 720.));

@@ -444,6 +444,10 @@ impl Controller {
             );
         } else if section == 7 {
             self.download_list(ui);
+        } else if section == 4 || section >= 9 {
+            // These retained pages own their content. Publishing their route
+            // must not deserialize/rebuild a potentially large library first.
+            ui.set_section(section);
         } else {
             self.render(ui);
         }
@@ -1333,6 +1337,7 @@ fn reading_mode(index: i32) -> ReadingMode {
 pub fn run(services: Services) -> Result<()> {
     let ui = AppWindow::new().map_err(error)?;
     ui.set_app_version(env!("CARGO_PKG_VERSION").into());
+    crate::appearance::init(&ui)?;
     let (sender, receiver) = mpsc::channel();
     let app = Arc::new(Controller {
         services,

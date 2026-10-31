@@ -13,11 +13,13 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `src/cli.rs`, `src/paths.rs` | Commands, bounded file input, independent application directory |
 | `src/android_documents.rs`, `android/java/dev/misob/nova/reader/ReaderActivity.java` | Application-context JNI, registered callbacks and current-activity SAF import/export on Java main |
 | `src/updates.rs` | Optional reader application release discovery |
+| `src/appearance.rs` | Device appearance/motion preferences, validated edits, immediate application and KV persistence |
 | `crates/ui/app.slint` | Shared pages/reader models, safe-area layout, platform/width shell selection, detail origin and translated text |
 | `crates/ui/navigation.slint` | Nova’s 64px icon rail, flat five-tab bottom bar, icon feedback and keyboard navigation |
 | `crates/ui/controls.slint`, `crates/ui/page-header.slint` | Thin Nova Kit control adapters and Nova’s PageHeader; shared palette, typography and accessibility |
-| `crates/ui/more.slint` | Retained Nova-style More landing and local import/settings/categories/data/About child pages |
-| `crates/ui/build.rs` | Kit source aliases, embedded resources, debug layout metadata and narrow Kit-dropdown keyboard/accessibility adaptation |
+| `crates/ui/more.slint` | Retained Nova-style More/Settings landings, nested slide/fade layers, scroll/focus restoration and local import/categories/data/About pages |
+| `crates/ui/appearance.slint`, `crates/ui/theme-settings.slint`, `crates/ui/settings-row.slint`, `crates/ui/src/appearance.rs` | Nova theme/motion settings controls, responsive setting rows and adapted Nova palette derivation |
+| `crates/ui/build.rs` | Kit source aliases, embedded resources, debug layout metadata and narrow Kit dropdown/segmented keyboard/accessibility adaptations |
 | `assets/fonts` | Nova’s bundled Roboto faces and Apache notices; More/settings artwork comes directly from Kit |
 | `assets/icons/navigation` | Embedded SVG navigation and reader controls, independent of system font glyph coverage |
 | `crates/reader-domain` | Source-local identities, schema-1 state, library/categories, progress/history/bookmarks, backup/restore |
@@ -29,6 +31,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `examples/addons/neutral-fixture` | Installable network-free fixture, bundled geometric PNGs and 320-page chapter |
 | `tests/reading_journey.rs` | Process-boundary install/read/progress/interrupted download/recovery/source-removal/offline journey |
 | `tests/ui_navigation.rs`, `tests/mobile_layout.rs` | Headless reader models, phone/landscape/tablet/desktop control bounds, tab taps, accessible activation and back navigation |
+| `tests/appearance.rs` | Process-boundary appearance persistence, palette application, invalid edits and theme reset preserving motion preferences |
 | `tools/test-android-documents.py`, `tests/android-documents` | Production Java/JNI host regression with checked JNI and deterministic main-queue/lifecycle fixtures |
 | `tools/package-addon.py` | Deterministic manifest-declared reader addon ZIP builder |
 | `.github/scripts`, `.github/workflows` | Nova's copied platform packagers and PR/main-check versus tag-build split, required Reader identity/license/signing integration |
@@ -42,6 +45,13 @@ in the Reader application directory. The internal database filename remains
 `nova.redb`; the application directory isolates it from Nova. One directory is
 supported per process. Restore validates the replacement before publishing it.
 The native metadata backup excludes executable addons, cookies and chapter bytes.
+
+Device appearance preferences live separately under `reader:appearance` in the
+same database. Missing values use Nova's defaults; palette/radius/spacing edits
+and animation switches apply immediately after a successful save. Theme reset
+preserves motion preferences. Portable library backup/restore leaves these
+device choices intact. More/Settings route changes publish directly without
+loading/deserializing library metadata before starting their transitions.
 
 `addons/` contains registry state, immutable content-addressed packages and its
 writer lock. Package version history rejects changed bytes at the same identity
@@ -79,6 +89,7 @@ Source examples are intended for independent future publication in nova-addons.
 ## Where to look
 
 - Nova design reuse and destination behavior: [UI design](ui-design.md).
+- Appearance controls, palette and device persistence: `crates/ui/theme-settings.slint`, `crates/ui/src/appearance.rs`, `src/appearance.rs`.
 - Android picker context, callbacks and host JVM regression: [Android documents](android-documents.md).
 - Android/desktop shells and touch layout checks: `crates/ui/navigation.slint`, `crates/ui/app.slint`, `tests/mobile_layout.rs`.
 - Static review scope and outcome: [review record](../REVIEW.md).

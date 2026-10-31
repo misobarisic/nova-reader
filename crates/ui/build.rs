@@ -2,6 +2,7 @@ fn main() {
     let shared = std::path::PathBuf::from(nova_ui_base::SLINT_SOURCE_DIR);
     let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo OUT_DIR"));
     let dropdown = reader_dropdown(&shared, &out);
+    let segmented = reader_segmented(&shared, &out);
     slint_build::compile_with_config(
         "app.slint",
         slint_build::CompilerConfiguration::new()
@@ -9,6 +10,7 @@ fn main() {
             .with_library_paths(std::collections::HashMap::from([
                 ("NovaUiBase".into(), shared.clone()),
                 ("ReaderDropdown".into(), dropdown),
+                ("ReaderSegmented".into(), segmented),
                 ("NovaUiShared".into(), shared.join("host-globals.slint")),
             ]))
             // Layout regressions inspect element bounds in development builds.
@@ -18,6 +20,37 @@ fn main() {
             .with_default_translation_context(slint_build::DefaultTranslationContext::None),
     )
     .expect("compile Nova Reader UI");
+}
+
+// Preserve the pinned Kit's complete segmented control. Only its repeated
+// option's missing assistive-technology action is adapted for this host.
+fn reader_segmented(shared: &std::path::Path, out: &std::path::Path) -> std::path::PathBuf {
+    let source = shared.join("settings-controls.slint");
+    println!("cargo:rerun-if-changed={}", source.display());
+    let contents = std::fs::read_to_string(source).expect("read Kit settings controls");
+    let start = contents
+        .find("export component Segmented inherits HorizontalLayout {")
+        .expect("Kit Segmented start");
+    let end = contents[start..]
+        .find("// Section title:")
+        .expect("Kit Segmented end")
+        + start;
+    let old = "        accessible-checked: root.current_index == i;";
+    let mut component = contents[start..end].to_owned();
+    assert_eq!(
+        component.matches(old).count(),
+        1,
+        "Kit Segmented contract changed"
+    );
+    component = component.replace(old, &format!("{old}\n        accessible-action-default => {{ if root.enabled && i != root.disabled_index {{ root.picked(i); }} }}"));
+    let adapted = format!(
+        "import {{ Theme, Anim, SettingsStyle, InterfaceStyle }} from \"@NovaUiShared\";\n{component}"
+    );
+    let destination = out.join("reader-segmented.slint");
+    if std::fs::read_to_string(&destination).ok().as_deref() != Some(&adapted) {
+        std::fs::write(&destination, adapted).expect("write adapted Kit Segmented");
+    }
+    destination
 }
 
 // Keep the pinned Kit implementation and its visuals. This revision limits

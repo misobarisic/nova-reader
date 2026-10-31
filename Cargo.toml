@@ -13,7 +13,7 @@ slint-build = "=1.18.0"
 
 [package]
 name = "nova-reader"
-version = "0.1.10"
+version = "0.1.11"
 edition = "2024"
 license.workspace = true
 description = "A source-based manga and webtoon reader for desktop and Android"
@@ -30,6 +30,7 @@ android = ["slint/backend-android-activity-06"]
 update-check = ["dep:reqwest", "dep:semver"]
 
 [dependencies]
+nova-storage = { workspace = true }
 slint = { workspace = true }
 nova-reader-ui = { path = "crates/ui" }
 reader-domain = { path = "crates/reader-domain" }

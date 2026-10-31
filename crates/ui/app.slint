@@ -4,6 +4,8 @@ import { ScrollView } from "@NovaUiBase/scrollview.slint";
 import { ReaderField as LineEdit, ReaderSelect as ComboBox, ReaderToggle as CheckBox } from "controls.slint";
 import { PageHeader } from "page-header.slint";
 import { MorePage } from "more.slint";
+export { Appearance } from "appearance.slint";
+export { Theme, Anim } from "@NovaUiShared";
 import "../../assets/fonts/Roboto-Regular.ttf";
 import "../../assets/fonts/Roboto-Bold.ttf";
 import { ActionButton, IconAction, CategoryPicker } from "controls.slint";
@@ -89,7 +91,7 @@ export component AppWindow inherits Window {
     callback flush-progress;
 
     public function go-back() {
-        root.navigate(root.section == 6 ? 5 : root.section == 8 ? 3 : root.section == 11 || root.section == 12 ? 10 : root.section >= 9 || root.section == 7 ? 4 : root.section == 5 ? root.detail-origin : 0);
+        root.navigate(root.section == 6 ? 5 : root.section == 8 ? 3 : root.section == 11 || root.section == 12 || root.section == 14 || root.section == 15 ? 10 : root.section >= 9 || root.section == 7 ? 4 : root.section == 5 ? root.detail-origin : 0);
     }
 
     changed section => {
@@ -105,7 +107,7 @@ export component AppWindow inherits Window {
         width: root.navigation-width + root.safe-area-insets.left; height: root.height;
         background: Theme.current.nav_rail;
     }
-    if root.bottom-navigation-height > 0px: Rectangle {
+    if root.bottom-navigation-height > 0px && !Theme.transparent_navbar: Rectangle {
         y: root.height - root.bottom-navigation-height - root.safe-area-insets.bottom;
         width: root.width; height: root.bottom-navigation-height + root.safe-area-insets.bottom;
         background: Theme.current.nav_bottom;
@@ -146,6 +148,7 @@ export component AppWindow inherits Window {
                             // and the software keyboard cannot squeeze out the list.
                             VerticalLayout {
                                 padding: 18px;
+                                padding-bottom: 18px + (Theme.transparent_navbar ? root.bottom-navigation-height : 0px);
                                 spacing: 16px; alignment: start;
                                 page-heading := PageHeader {
                                     title: root.heading; subtitle: root.caption; narrow: root.mobile-ui;
@@ -220,7 +223,7 @@ export component AppWindow inherits Window {
                                     }
                                 }
                                 if root.section != 4 && root.section != 8: VerticalLayout {
-                                    spacing: 10px;
+                                    spacing: Theme.card_spacing;
                                     for row[index] in root.items: Rectangle {
                                         height: (root.section == 5 || root.section == 7 || (root.section == 0 && root.category-target > 0)) ? 136px : 80px;
                                         border-radius: Theme.card_corner_radius; background: hover.has-hover ? Theme.current.control_hover : Theme.current.card;
@@ -363,7 +366,7 @@ export component AppWindow inherits Window {
                         more-page := MorePage {
                             // Keep More's retained landing viewport unchanged
                             // when its child pages hide the external bottom bar.
-                            width: parent.width; height: parent.height + root.bottom-navigation-height;
+                            width: parent.width; height: parent.height + (Theme.transparent_navbar ? 0px : root.bottom-navigation-height);
                             visible: root.section == 4 || root.section >= 9;
                             section: root.section; narrow: root.mobile-ui;
                             app-version: root.app-version; status: root.status;

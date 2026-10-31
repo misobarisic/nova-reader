@@ -194,3 +194,39 @@ single-use/stale-result test. The JNI harness also passed Clippy with warnings
 denied. Workspace formatting, all-target Clippy, workspace check/tests and all
 28 packaging regressions passed. Astra 6 medium found no P1/P2 issue. These are
 bridge and compilation checks, not physical-device/document-provider acceptance.
+
+## Theme and More/settings motion for 0.1.11
+
+Astra 6 at medium investigated the differences against Nova b69a1e5. Reader
+had no theme preference page/backend, and one shared child boolean kept its
+animation targets unchanged on Settings → Categories/Data and Back. Shared
+child scrolling also reset the Settings landing. Pure More/settings routes
+additionally deserialized the complete library before publishing navigation.
+
+Theme and Look and feel now adapt Nova's modules, Kit controls and original
+palette derivation. Device preferences persist under `reader:appearance`,
+independently of portable library metadata. Retained nested layers, deferred
+entry and scroll/focus restoration use Nova's transition pattern and timings;
+More/settings route changes publish without rebuilding library models.
+Transparent navigation uses Nova's overlay/fade and scroll end-space pattern.
+
+Astra's follow-up identified lost toggle bindings, missing accessible actions,
+unfinished animations reviving after master-off, and malformed cosmetic JSON
+blocking startup. Two-way draft/rollback state, narrowly adapted Kit segmented
+actions, explicit animation cancellation/endpoints and recoverable defaults
+address these. Astra's re-review reported no residual P1/P2 issue; it did not
+independently execute tests. The rapid motion regression publishes the off
+event before re-enabling one millisecond later, within the old transition.
+
+Coverage includes actual pointer/accessibility activation and retained switch
+reset, separate-process restart/palette/reset behavior, corrupt preference
+recovery, intermediate nested motion, interrupted Back, rapid motion toggles,
+retained More/Settings offsets and responsive layouts. Xvfb renders of Theme,
+Settings and More were inspected at phone/desktop sizes. Android frame times
+and touch/system-inset behavior still require physical-device verification.
+Release workflow and platform packaging scripts are unchanged.
+
+Final local formatting, all-target Clippy with warnings denied, workspace check
+and workspace tests passed. The packaging suite passed with 28 tests reported
+and one platform-specific skip. These checks precede the release tag; tag builds
+retain Nova's existing compile/package-only workflow.

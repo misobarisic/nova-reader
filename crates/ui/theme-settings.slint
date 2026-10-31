@@ -1,0 +1,194 @@
+// Adapted from Nova b69a1e5 theme-module.slint and look-feel-module.slint.
+import { Theme } from "@NovaUiShared";
+import { SettingsCard, ToggleSwitch, AddonIconButton, SectionHeader, PillButton } from "@NovaUiBase/settings-controls.slint";
+import { Segmented } from "@ReaderSegmented";
+import { IcCheck } from "@NovaUiBase/icons.slint";
+import { Appearance } from "appearance.slint";
+import { SettingsRow } from "settings-row.slint";
+
+component AccentChoices inherits HorizontalLayout {
+    in property <bool> interactive;
+    in property <int> first-index: 0;
+    in property <[string]> labels;
+    spacing: 8px; alignment: start;
+    for label[i] in root.labels: swatch := AddonIconButton {
+        private property <int> index: root.first-index + i;
+        private property <bool> selected: Appearance.accent-color == self.index;
+        private property <color> ink: self.index == 0 ? #ffffff : #000000;
+        enabled: root.interactive; name: label; width: 56px; height: 44px;
+        background: [#8b5cf6, #ff8b35, #67a9ff, #36d0b4, #fb7185, #22d3ee, #fbbf24, #a3e635][self.index];
+        accessible-checkable: true; accessible-checked: self.selected;
+        border-color: self.ink;
+        if swatch.selected: IcCheck {
+            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+            width: 24px; height: 24px; fill: swatch.ink;
+        }
+        clicked => { if root.interactive { Appearance.setting-changed("accent_color", self.index); } }
+        accessible-action-default => { if root.interactive { Appearance.setting-changed("accent_color", self.index); } }
+    }
+}
+
+export component ThemeSettings inherits VerticalLayout {
+    in property <bool> narrow;
+    in property <bool> phone-layout;
+    in property <bool> interactive;
+    spacing: 16px; alignment: start;
+    SettingsCard { SettingsRow {
+        row-title: @tr("Accent color"); row-desc: @tr("Choose the highlight color used throughout the app.");
+        if !root.narrow: VerticalLayout {
+            spacing: 8px;
+            AccentChoices { interactive: root.interactive; labels: [@tr("Purple"), @tr("Orange"), @tr("Blue"), @tr("Teal")]; }
+            AccentChoices { interactive: root.interactive; first-index: 4; labels: [@tr("Rose"), @tr("Cyan"), @tr("Amber"), @tr("Lime")]; }
+        }
+        if root.narrow: VerticalLayout {
+            spacing: 8px;
+            AccentChoices { interactive: root.interactive; labels: [@tr("Purple"), @tr("Orange")]; }
+            AccentChoices { interactive: root.interactive; first-index: 2; labels: [@tr("Blue"), @tr("Teal")]; }
+            AccentChoices { interactive: root.interactive; first-index: 4; labels: [@tr("Rose"), @tr("Cyan")]; }
+            AccentChoices { interactive: root.interactive; first-index: 6; labels: [@tr("Amber"), @tr("Lime")]; }
+        }
+    } }
+    SettingsCard { SettingsRow {
+        row-title: @tr("Background style"); row-desc: @tr("Use the default palette, a subtle accent tint, or pure black backgrounds.");
+        private property <int> selected: Appearance.background-style == 0 ? 0 : Appearance.background-style == 1 ? 1 : 2;
+        if !root.narrow: Segmented { enabled: root.interactive;
+            labels: [@tr("Default"), @tr("Accent-tinted"), @tr("True black")];
+            current_index: selected >= 0 && selected < 3 ? selected : -1;
+            picked(i) => { Appearance.setting-changed("background_style", [0, 1, 2][i]); }
+        }
+        if root.narrow: VerticalLayout {
+            spacing: 8px;
+            Segmented { enabled: root.interactive;
+                labels: [@tr("Default"), @tr("Accent-tinted")];
+                current_index: selected >= 0 && selected < 2 ? selected : -1;
+                picked(i) => { Appearance.setting-changed("background_style", [0, 1, 2][i]); }
+            }
+            Segmented { enabled: root.interactive;
+                labels: [@tr("True black")];
+                current_index: selected >= 2 && selected < 3 ? selected - 2 : -1;
+                picked(i) => { Appearance.setting-changed("background_style", [0, 1, 2][i + 2]); }
+            }
+        }
+    } }
+    SettingsCard { SettingsRow {
+        row-title: @tr("Card corner radius"); row-desc: @tr("Choose how rounded cards look. Soft is the default.");
+        private property <int> selected: Appearance.card-radius == 0 ? 0 : Appearance.card-radius == 4 ? 1 : Appearance.card-radius == 10 ? 2 : Appearance.card-radius == 16 ? 3 : 4;
+        if !root.narrow: Segmented { enabled: root.interactive;
+            labels: [@tr("Square"), @tr("Subtle"), @tr("Soft"), @tr("Rounded"), @tr("Extra rounded")];
+            current_index: selected >= 0 && selected < 5 ? selected : -1;
+            picked(i) => { Appearance.setting-changed("card_radius", [0, 4, 10, 16, 24][i]); }
+        }
+        if root.narrow: VerticalLayout {
+            spacing: 8px;
+            Segmented { enabled: root.interactive;
+                labels: [@tr("Square"), @tr("Subtle"), @tr("Soft")];
+                current_index: selected >= 0 && selected < 3 ? selected : -1;
+                picked(i) => { Appearance.setting-changed("card_radius", [0, 4, 10, 16, 24][i]); }
+            }
+            Segmented { enabled: root.interactive;
+                labels: [@tr("Rounded"), @tr("Extra rounded")];
+                current_index: selected >= 3 && selected < 5 ? selected - 3 : -1;
+                picked(i) => { Appearance.setting-changed("card_radius", [0, 4, 10, 16, 24][i + 3]); }
+            }
+        }
+    } }
+    SettingsCard { SettingsRow {
+        row-title: @tr("Button corner radius"); row-desc: @tr("Choose how rounded buttons and controls look.");
+        private property <int> selected: Appearance.button-radius == 0 ? 0 : Appearance.button-radius == 4 ? 1 : Appearance.button-radius == 8 ? 2 : Appearance.button-radius == 12 ? 3 : 4;
+        if !root.narrow: Segmented { enabled: root.interactive;
+            labels: [@tr("Square"), @tr("Subtle"), @tr("Soft"), @tr("Rounded"), @tr("Extra rounded")];
+            current_index: selected >= 0 && selected < 5 ? selected : -1;
+            picked(i) => { Appearance.setting-changed("button_radius", [0, 4, 8, 12, 24][i]); }
+        }
+        if root.narrow: VerticalLayout {
+            spacing: 8px;
+            Segmented { enabled: root.interactive;
+                labels: [@tr("Square"), @tr("Subtle"), @tr("Soft")];
+                current_index: selected >= 0 && selected < 3 ? selected : -1;
+                picked(i) => { Appearance.setting-changed("button_radius", [0, 4, 8, 12, 24][i]); }
+            }
+            Segmented { enabled: root.interactive;
+                labels: [@tr("Rounded"), @tr("Extra rounded")];
+                current_index: selected >= 3 && selected < 5 ? selected - 3 : -1;
+                picked(i) => { Appearance.setting-changed("button_radius", [0, 4, 8, 12, 24][i + 3]); }
+            }
+        }
+    } }
+    SettingsCard { SettingsRow {
+        row-title: @tr("Card spacing"); row-desc: @tr("Choose the gap between list cards.");
+        private property <int> selected: Appearance.card-spacing == 0 ? 0 : Appearance.card-spacing == 4 ? 1 : Appearance.card-spacing == 8 ? 2 : Appearance.card-spacing == 12 ? 3 : 4;
+        if !root.narrow: Segmented { enabled: root.interactive;
+            labels: [@tr("None"), @tr("Compact"), @tr("Default"), @tr("Roomy"), @tr("Wide")];
+            current_index: selected >= 0 && selected < 5 ? selected : -1;
+            picked(i) => { Appearance.setting-changed("card_spacing", [0, 4, 8, 12, 16][i]); }
+        }
+        if root.narrow: VerticalLayout {
+            spacing: 8px;
+            Segmented { enabled: root.interactive;
+                labels: [@tr("None"), @tr("Compact"), @tr("Default")];
+                current_index: selected >= 0 && selected < 3 ? selected : -1;
+                picked(i) => { Appearance.setting-changed("card_spacing", [0, 4, 8, 12, 16][i]); }
+            }
+            Segmented { enabled: root.interactive;
+                labels: [@tr("Roomy"), @tr("Wide")];
+                current_index: selected >= 3 && selected < 5 ? selected - 3 : -1;
+                picked(i) => { Appearance.setting-changed("card_spacing", [0, 4, 8, 12, 16][i + 3]); }
+            }
+        }
+    } }
+    SettingsCard { SettingsRow {
+        row-title: @tr("Transparent bottom navigation bar");
+        row-desc: root.phone-layout ? @tr("Show content behind the bottom bar with a dark gradient.") : @tr("Available when using bottom navigation.");
+        ToggleSwitch {
+            name: @tr("Transparent bottom navigation bar"); enabled: root.phone-layout && root.interactive;
+            checked <=> Appearance.transparent-navbar;
+            toggled => { Appearance.setting-changed("transparent_navbar", self.checked ? 1 : 0); }
+            accessible-action-default => { if self.enabled { Appearance.setting-changed("transparent_navbar", Appearance.transparent-navbar ? 0 : 1); } }
+        }
+    } }
+    HorizontalLayout { alignment: start;
+        PillButton {
+            enabled: root.interactive; label: @tr("Restore theme defaults");
+            clicked => { Appearance.restore-theme(); }
+            accessible-action-default => { if root.interactive { Appearance.restore-theme(); } }
+        }
+    }
+}
+
+export component MotionSettings inherits VerticalLayout {
+    in property <bool> interactive;
+    spacing: 16px; alignment: start;
+    SectionHeader { label: @tr("Animations"); }
+    SettingsCard { SettingsRow {
+        row-title: @tr("Enable animations"); row-desc: @tr("Master switch. Turn off to make every transition and hover effect instant.");
+        ToggleSwitch {
+            name: @tr("Enable animations"); checked <=> Appearance.animations; enabled: root.interactive;
+            toggled => { Appearance.setting-changed("animations", self.checked ? 1 : 0); }
+            accessible-action-default => { if self.enabled { Appearance.setting-changed("animations", Appearance.animations ? 0 : 1); } }
+        }
+    } }
+    SettingsCard { SettingsRow {
+        row-title: @tr("Page transitions"); row-desc: @tr("Slide and fade between pages.");
+        ToggleSwitch {
+            name: @tr("Page transitions"); checked <=> Appearance.transitions; enabled: root.interactive && Appearance.animations;
+            toggled => { Appearance.setting-changed("transitions", self.checked ? 1 : 0); }
+            accessible-action-default => { if self.enabled { Appearance.setting-changed("transitions", Appearance.transitions ? 0 : 1); } }
+        }
+    } }
+    SettingsCard { SettingsRow {
+        row-title: @tr("Hover effects"); row-desc: @tr("Highlight fades on buttons, toggles, rows and filter pills.");
+        ToggleSwitch {
+            name: @tr("Hover effects"); checked <=> Appearance.hover; enabled: root.interactive && Appearance.animations;
+            toggled => { Appearance.setting-changed("hover", self.checked ? 1 : 0); }
+            accessible-action-default => { if self.enabled { Appearance.setting-changed("hover", Appearance.hover ? 0 : 1); } }
+        }
+    } }
+    SettingsCard { SettingsRow {
+        row-title: @tr("Navigation feedback"); row-desc: @tr("Gently pop the selected navigation icon when switching pages.");
+        ToggleSwitch {
+            name: @tr("Navigation feedback"); checked <=> Appearance.navigation-feedback; enabled: root.interactive && Appearance.animations;
+            toggled => { Appearance.setting-changed("navigation_feedback", self.checked ? 1 : 0); }
+            accessible-action-default => { if self.enabled { Appearance.setting-changed("navigation_feedback", Appearance.navigation-feedback ? 0 : 1); } }
+        }
+    } }
+}

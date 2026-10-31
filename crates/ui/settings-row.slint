@@ -1,0 +1,38 @@
+// Nova b69a1e5 SettingsRow presentation, without Nova's sync/search bridges.
+import { Theme } from "@NovaUiShared";
+
+export component SettingsRow inherits Rectangle {
+    in property <string> row-title;
+    in property <string> row-desc;
+    min-width: 0px;
+    accessible-role: groupbox;
+    background: Theme.current.card;
+    private property <length> inner-width: max(0px, self.width - 32px);
+    private property <length> control-width: controls.preferred-width;
+    private property <length> control-height: controls.preferred-height;
+    private property <length> side-text-width: min(max(0px, root.inner-width - root.control-width - 16px), root.inner-width * 0.62);
+    private property <bool> stack-controls: root.side-text-width < 150px;
+    private property <length> text-width: root.stack-controls ? root.inner-width : root.side-text-width;
+    private property <length> text-height: title-col.preferred-height;
+    height: max(64px, 28px + (root.stack-controls ? root.text-height + 10px + root.control-height : max(root.text-height, root.control-height)));
+    Rectangle {
+        x: 16px; y: parent.height - 1px;
+        width: max(0px, parent.width - 32px); height: 1px;
+        background: Theme.current.border_subtle;
+    }
+    title-col := VerticalLayout {
+        x: 16px; y: root.stack-controls ? 14px : (root.height - self.height) / 2;
+        width: root.text-width; height: self.preferred-height;
+        spacing: 3px; alignment: center;
+        Text { text: root.row-title; font-size: 16px; font-weight: 600; color: Theme.current.text_bright; wrap: word-wrap; min-width: 0px; }
+        if root.row-desc != "": Text { text: root.row-desc; font-size: 14px; color: Theme.current.text_settings; wrap: word-wrap; min-width: 0px; }
+    }
+    controls := HorizontalLayout {
+        x: root.stack-controls ? 16px : root.width - 16px - root.control-width;
+        y: root.stack-controls ? 14px + root.text-height + 10px : (root.height - self.height) / 2;
+        width: root.stack-controls ? root.inner-width : root.control-width;
+        height: root.control-height;
+        alignment: start; spacing: 8px;
+        @children
+    }
+}

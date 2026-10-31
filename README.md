@@ -10,6 +10,9 @@ acceptance gates.
 The interface follows Nova's design: an adaptive icon rail or five-tab bottom
 bar, shared Nova Kit controls, and More/settings cards. Local imports are under
 **More → Local chapters**; categories and backups are under **More → Settings**.
+**More → Settings → Theme** offers Nova's accents, background styles, card/button
+styling and transparent bottom bar. **Look and feel** controls animations.
+These device preferences are saved separately from library backups.
 See [UI design reuse](docs/ui-design.md) for the source/component mapping.
 
 ## Run a neutral reading flow

@@ -188,23 +188,30 @@ export component MobileNavigation inherits Rectangle {
     in property <length> safe-left: 0px;
     in property <length> safe-right: 0px;
     callback navigate(int);
-    height: 68px + root.safe-bottom; vertical-stretch: 0;
-    background: Theme.current.nav_bottom;
+    private property <length> bar-height: 68px + root.safe-bottom;
+    height: Theme.transparent_navbar ? 0px : root.bar-height; vertical-stretch: 0;
     motion := NavFeedback { active: root.section; }
     function focus_item(index: int) {
         let next = Math.mod(index + 5, 5);
         if next == 0 { library.focus_control(); } else if next == 1 { updates.focus_control(); }
         else if next == 2 { history.focus_control(); } else if next == 3 { browse.focus_control(); } else { more.focus_control(); }
     }
-    // The full bar, including system inset and gaps, consumes stray taps.
-    TouchArea { width: 100%; height: 100%; clicked => { } }
-    HorizontalLayout {
-        x: 12px + root.safe-left; y: 0px;
-        width: parent.width - 24px - root.safe-left - root.safe-right; height: 60px;
-        library := BottomItem { label: @tr("Library"); icon: @image-url("../../assets/icons/navigation/library.svg"); active: root.section == 0; pop: root.section == 0 ? motion.pulse : 0; picked => { root.navigate(0); } move-focus(direction) => { root.focus_item(0 + direction); } }
-        updates := BottomItem { label: @tr("Updates"); icon: @image-url("../../assets/icons/navigation/updates.svg"); active: root.section == 1; pop: root.section == 1 ? motion.pulse : 0; picked => { root.navigate(1); } move-focus(direction) => { root.focus_item(1 + direction); } }
-        history := BottomItem { label: @tr("History"); active: root.section == 2; pop: root.section == 2 ? motion.pulse : 0; picked => { root.navigate(2); } move-focus(direction) => { root.focus_item(2 + direction); } }
-        browse := BottomItem { label: @tr("Browse"); icon: @image-url("../../assets/icons/navigation/browse.svg"); active: root.section == 3; pop: root.section == 3 ? motion.pulse : 0; picked => { root.navigate(3); } move-focus(direction) => { root.focus_item(3 + direction); } }
-        more := BottomItem { label: @tr("More"); icon: @image-url("../../assets/icons/navigation/more.svg"); active: root.section == 4; pop: root.section == 4 ? motion.pulse : 0; picked => { root.navigate(4); } move-focus(direction) => { root.focus_item(4 + direction); } }
+    // Nova's overlay releases its layout slot. Only the controls consume taps;
+    // the optional 32px fade lets content scroll underneath.
+    panel := Rectangle {
+        y: Theme.transparent_navbar ? -self.height : 0px;
+        width: root.width;
+        height: root.bar-height + (Theme.transparent_navbar ? 32px : 0px);
+        background: Theme.transparent_navbar ? @linear-gradient(180deg, #00000000 0%, #000000b3 40%, #000000ed 100%) : Theme.current.nav_bottom;
+        TouchArea { y: Theme.transparent_navbar ? 32px : 0px; width: 100%; height: root.bar-height; clicked => { } }
+        HorizontalLayout {
+            x: 12px + root.safe-left; y: Theme.transparent_navbar ? 32px : 0px;
+            width: parent.width - 24px - root.safe-left - root.safe-right; height: 60px;
+            library := BottomItem { label: @tr("Library"); icon: @image-url("../../assets/icons/navigation/library.svg"); active: root.section == 0; pop: root.section == 0 ? motion.pulse : 0; picked => { root.navigate(0); } move-focus(direction) => { root.focus_item(0 + direction); } }
+            updates := BottomItem { label: @tr("Updates"); icon: @image-url("../../assets/icons/navigation/updates.svg"); active: root.section == 1; pop: root.section == 1 ? motion.pulse : 0; picked => { root.navigate(1); } move-focus(direction) => { root.focus_item(1 + direction); } }
+            history := BottomItem { label: @tr("History"); active: root.section == 2; pop: root.section == 2 ? motion.pulse : 0; picked => { root.navigate(2); } move-focus(direction) => { root.focus_item(2 + direction); } }
+            browse := BottomItem { label: @tr("Browse"); icon: @image-url("../../assets/icons/navigation/browse.svg"); active: root.section == 3; pop: root.section == 3 ? motion.pulse : 0; picked => { root.navigate(3); } move-focus(direction) => { root.focus_item(3 + direction); } }
+            more := BottomItem { label: @tr("More"); icon: @image-url("../../assets/icons/navigation/more.svg"); active: root.section == 4; pop: root.section == 4 ? motion.pulse : 0; picked => { root.navigate(4); } move-focus(direction) => { root.focus_item(4 + direction); } }
+        }
     }
 }

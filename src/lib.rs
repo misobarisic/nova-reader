@@ -3,6 +3,7 @@ pub use nova_reader_ui::*;
 #[cfg(target_os = "android")]
 pub mod android_documents;
 mod app;
+pub mod appearance;
 mod cli;
 mod paths;
 pub mod services;

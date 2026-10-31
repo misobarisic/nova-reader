@@ -10,6 +10,9 @@ navigation or settings design system.
   icon-only `NavFeedback`. The narrow bar is 68px high, has five equal slots,
   24px icons and 12px labels, and selects with accent color without a tile fill.
   Both bars consume gap taps and support keyboard and accessible activation.
+  Nova's transparent-bar option releases the layout slot and draws its existing
+  32px dark fade above the tabs. Scroll content reserves end space so the final
+  row can move clear of the controls; opaque mode reserves the full 68px slot.
 - The same 700px breakpoint selects the compact shell on Android and desktop.
   Wide Android windows therefore use the rail, as Nova does. Details and the
   reader cover navigation; narrow child pages hide the bottom bar. Desktop
@@ -28,9 +31,21 @@ navigation or settings design system.
 - `more.slint` uses Nova's retained landing / sliding child pattern. Its landing
   viewport stays stable when external bottom navigation hides, preserving the
   scroll position on child return with deferred scroll/focus restoration after
-  layout publication. Supported destinations are local import,
-  settings (sources, categories and data) and About. It does not advertise
+  layout publication. Settings has its own retained landing and independently
+  animated leaf layer, preserving its offset on Back. Entry targets are staged
+  after mounting; outgoing layers survive the reverse transition. Disabling
+  motion selects explicit endpoints even during an interrupted transition.
+  Supported destinations are local import,
+  settings (theme, look and feel, sources, categories and data) and About. It does not advertise
   unsupported video, sync or tracking features.
+- `theme-settings.slint` adapts Nova's Theme and Look and feel modules with Kit
+  cards, segmented controls, swatches and toggles. `settings-row.slint` preserves
+  Nova's side-by-side/stacked measurement without its app-specific sync/search
+  bridges. Eight accents, three background styles, card/button radius, card
+  spacing and transparent navigation apply live. Motion offers Nova's master,
+  page-transition, hover and navigation-feedback switches. Palette derivation
+  comes from Nova's Rust implementation. Device preferences persist independently
+  of portable library metadata; theme reset preserves motion choices.
 - Roboto Regular/Bold and the Library/Browse/More/Updates/Downloads artwork are
   reused from Nova. Fonts and SVGs are embedded into packaged builds. Font
   provenance and the full Apache license live under `assets/fonts`; font
@@ -43,9 +58,15 @@ keyboard handling on all platforms, expose popup opening, and provide accessible
 option activation. All its visual implementation remains upstream code. A
 changed upstream contract fails compilation rather than silently losing these
 adaptations. No files in the dependency checkout are changed.
+The same build step extracts the pinned Kit `Segmented` implementation and adds
+only its missing per-option accessible action. Theme switches use two-way UI
+draft values and roll back to saved preferences if persistence fails.
 
 `tests/mobile_layout.rs` checks the breakpoint, rail/bar geometry, responsive
-bounds, actual tab/card activation, More child Back and retained scroll,
+bounds, actual tab/card activation, More/Settings Back and retained scroll,
+intermediate nested push/pop positions, interrupted/master-off transitions,
 reader options, and keyboard/accessibility selection in the shared dropdown.
+`tests/appearance.rs` checks saving and reloading in separate processes, actual
+palette/geometry changes, rejected invalid edits and reset semantics.
 Linux rendering smoke is separate from Android system-inset, keyboard and
 physical-device acceptance.

@@ -3,6 +3,7 @@
 import { Theme, Anim, SettingsStyle } from "@NovaUiShared";
 import { SettingsCard } from "@NovaUiBase/settings-controls.slint";
 import { ScrollView } from "@NovaUiBase/scrollview.slint";
+import { ThemeSettings, MotionSettings } from "theme-settings.slint";
 import { PageHeader } from "page-header.slint";
 import { MenuLink, ActionButton, ReaderField } from "controls.slint";
 
@@ -23,20 +24,75 @@ export component MorePage inherits Rectangle {
     private property <int> choice: root.narrow ? 1 : 2;
     public function focus_shell() {
         if root.section == 4 { nav-scope.focus(); }
+        else if root.detail-open { detail-scope.focus(); }
         else { child-scope.focus(); }
     }
     changed narrow => { root.choice = max(root.narrow ? 1 : 2, root.choice); }
     private property <bool> local-open: root.section >= 9;
+    private property <bool> detail-open: root.section == 11 || root.section == 12 || root.section == 14 || root.section == 15;
     private property <int> child-section: 9;
-    private property <float> slide: root.local-open ? 1 : 0;
-    private property <float> alpha: root.local-open ? 1 : 0;
-    animate slide { duration: Anim.transition_slide; easing: ease-out; }
-    animate alpha { duration: Anim.transition_fade; }
+    private property <int> detail-section: 11;
+    private property <bool> entered: false;
+    private property <bool> detail-entered: false;
+    private property <bool> motion: Anim.enabled && Anim.transitions;
+    private property <float> progress: root.entered ? 1 : 0;
+    private property <float> fade: root.entered ? 1 : 0;
+    private property <float> detail-progress: root.detail-entered ? 1 : 0;
+    private property <float> detail-fade: root.detail-entered ? 1 : 0;
+    animate progress { duration: Anim.transition_slide; easing: ease-out; }
+    animate fade { duration: Anim.transition_fade; }
+    animate detail-progress { duration: Anim.transition_slide; easing: ease-out; }
+    animate detail-fade { duration: Anim.transition_fade; }
+    changed entered => { root.progress = root.entered ? 1 : 0; root.fade = root.entered ? 1 : 0; }
+    changed detail-entered => { root.detail-progress = root.detail-entered ? 1 : 0; root.detail-fade = root.detail-entered ? 1 : 0; }
+    changed motion => {
+        if !root.motion {
+            entry-tick.stop(); detail-entry-tick.stop();
+            root.entered = root.local-open; root.detail-entered = root.detail-open;
+            root.progress = root.local-open ? 1 : 0; root.fade = root.local-open ? 1 : 0;
+            root.detail-progress = root.detail-open ? 1 : 0; root.detail-fade = root.detail-open ? 1 : 0;
+        }
+    }
+    // Explicit endpoints keep master-off instantaneous even during a running
+    // animation. Retained layers reverse from their current painted position.
+    private property <float> slide: root.motion ? root.progress : root.local-open ? 1 : 0;
+    private property <float> alpha: root.motion ? root.fade : root.local-open ? 1 : 0;
+    private property <float> sub-slide: root.motion ? root.detail-progress : root.detail-open ? 1 : 0;
+    private property <float> sub-alpha: root.motion ? root.detail-fade : root.detail-open ? 1 : 0;
+    changed local-open => {
+        if root.local-open { entry-tick.start(); }
+        else { entry-tick.stop(); root.entered = false; }
+    }
+    changed detail-open => {
+        if root.detail-open { detail-entry-tick.start(); }
+        else { detail-entry-tick.stop(); root.detail-entered = false; root.child-restore-pending = true; }
+    }
+    // Mount and lay out before publishing the entrance target, as in Nova.
+    entry-tick := Timer { interval: 1ms; running: false; triggered => { self.stop(); root.entered = root.local-open; } }
+    detail-entry-tick := Timer { interval: 1ms; running: false; triggered => { self.stop(); root.detail-entered = root.detail-open; } }
     private property <length> landing-scroll-y: 0px;
     private property <bool> restore-pending: true;
+    private property <length> child-scroll-y: 0px;
+    private property <bool> child-restore-pending: false;
+    private property <bool> child-active: root.local-open && !root.detail-open && root.sub-slide <= 0 && root.sub-alpha <= 0;
+    private property <bool> detail-active: root.local-open && root.detail-open;
     changed section => {
-        if root.section >= 9 { root.child-section = root.section; }
+        if root.section == 9 || root.section == 10 || root.section == 13 {
+            if root.child-section != root.section { child-scroll.content-y = 0px; root.child-scroll-y = 0px; }
+            root.child-section = root.section;
+        }
+        if root.detail-open { root.child-section = 10; root.detail-section = root.section; detail-scroll.content-y = 0px; }
         if root.section == 4 { root.restore-pending = true; }
+    }
+    child-restore := Timer {
+        interval: 16ms; running: root.child-restore-pending && root.local-open;
+        triggered => {
+            if root.child-active {
+                child-scroll.content-y = root.child-scroll-y;
+                root.child-restore-pending = false;
+                child-scope.focus();
+            }
+        }
     }
     // Like Nova's restore_scroll timer, apply the saved position after layout
     // publication. Hidden native scroll views may clamp their content offset.
@@ -56,6 +112,7 @@ export component MorePage inherits Rectangle {
     changed focus-request => {
         if SettingsStyle.keyboard-mode && root.visible {
             if root.landing-active { root.reveal_landing(); }
+            else if root.detail-open { root.reveal_detail(); }
             else if root.local-open { root.reveal_child(); }
         }
     }
@@ -73,10 +130,17 @@ export component MorePage inherits Rectangle {
             child-scroll.content-y -= top + SettingsStyle.focus-height - child-scroll.visible-height;
         }
     }
+    function reveal_detail() {
+        let top = SettingsStyle.focus-y - detail-scroll.absolute-position.y;
+        if top < 0px { detail-scroll.content-y -= top; }
+        else if top + SettingsStyle.focus-height > detail-scroll.visible-height {
+            detail-scroll.content-y -= top + SettingsStyle.focus-height - detail-scroll.visible-height;
+        }
+    }
     // This scroller remains mounted while its children own input. Returning
     // restores the same cards and position, just like Nova's More page.
     landing := Rectangle {
-        width: root.width; height: max(0px, root.height - (root.narrow ? 68px : 0px));
+        width: root.width; height: max(0px, root.height - (root.narrow && !Theme.transparent_navbar ? 68px : 0px));
         visible: !root.local-open || root.slide < 1 || root.alpha < 1;
         x: -0.28 * root.width * root.slide; opacity: 1 - root.alpha;
         nav-scope := FocusScope {
@@ -102,7 +166,7 @@ export component MorePage inherits Rectangle {
                 mouse-drag-pan-enabled: true;
                 content-width: self.visible-width;
                 VerticalLayout {
-                    padding: 18px; spacing: 12px; alignment: start;
+                    padding: 18px; padding-bottom: 18px + (root.narrow && Theme.transparent_navbar ? 68px : 0px); spacing: 12px; alignment: start;
                     PageHeader { title: @tr("More"); narrow: root.narrow; show-back: root.narrow; back => { root.navigate(0); } }
                     if root.narrow: SettingsCard { MenuLink {
                         focused: SettingsStyle.keyboard-mode && root.choice == 1;
@@ -128,71 +192,59 @@ export component MorePage inherits Rectangle {
             }
         }
     }
+    // Settings landing stays mounted beneath its selected leaf. Back reveals
+    // the same scroll/focus state instead of replacing a shared child body.
     child := Rectangle {
         width: root.width; height: root.height;
-        visible: root.local-open || root.slide > 0 || root.alpha > 0;
-        x: root.width * (1 - root.slide); opacity: root.alpha;
+        visible: (root.local-open || root.slide > 0 || root.alpha > 0) && (!root.detail-open || root.sub-slide < 1 || root.sub-alpha < 1);
+        x: root.width * (1 - root.slide) - 0.28 * root.width * root.sub-slide;
+        opacity: root.alpha * (1 - root.sub-alpha);
         child-scope := FocusScope {
-            width: parent.width; height: parent.height; enabled: root.local-open;
+            width: parent.width; height: parent.height; enabled: root.child-active;
             child-scroll := ScrollView {
                 width: parent.width; height: parent.height;
-                mouse-drag-pan-enabled: true;
-                content-width: self.visible-width;
-                in property <int> destination: root.child-section;
-                changed destination => { self.content-y = 0px; }
+                mouse-drag-pan-enabled: true; content-width: self.visible-width;
+                changed content-y => { if root.child-active && !root.child-restore-pending { root.child-scroll-y = self.content-y; } }
                 VerticalLayout {
                     padding: 18px; spacing: 12px; alignment: start;
                     PageHeader {
-                        title: root.child-section == 9 ? @tr("Local chapters") : root.child-section == 10 ? @tr("Settings") : root.child-section == 11 ? @tr("Categories") : root.child-section == 12 ? @tr("Data") : @tr("About");
-                        narrow: root.narrow; show-back: true;
-                        back => { root.navigate(root.child-section == 11 || root.child-section == 12 ? 10 : 4); }
+                        title: root.child-section == 9 ? @tr("Local chapters") : root.child-section == 10 ? @tr("Settings") : @tr("About");
+                        narrow: root.narrow; show-back: true; back => { if root.child-active { root.navigate(4); } }
                     }
                     if root.status != "": Text { min-width: 0px; text: root.status; color: Theme.current.text_settings; wrap: word-wrap; }
                     if root.child-section == 9: VerticalLayout {
                         spacing: 12px;
                         SettingsCard { MenuLink {
-                            interactive: root.local-open; title: @tr("Import a local chapter"); subtitle: @tr("Choose a CBZ or ZIP archive"); icon-kind: 8;
+                            interactive: root.child-active; title: @tr("Import a local chapter"); subtitle: @tr("Choose a CBZ or ZIP archive"); icon-kind: 8;
                             picked => { root.local-import(false); }
                         } }
                         SettingsCard { MenuLink {
-                            interactive: root.local-open; title: @tr("Import an image folder"); subtitle: @tr("Choose a folder of chapter pages"); icon-kind: 2;
+                            interactive: root.child-active; title: @tr("Import an image folder"); subtitle: @tr("Choose a folder of chapter pages"); icon-kind: 2;
                             picked => { root.local-import(true); }
                         } }
                     }
                     if root.child-section == 10: VerticalLayout {
                         spacing: 12px;
                         SettingsCard { MenuLink {
-                            interactive: root.local-open; title: @tr("Sources"); subtitle: @tr("Install, browse and configure source addons"); icon-kind: 0;
+                            interactive: root.child-active; title: @tr("Theme"); subtitle: @tr("Accent color, backgrounds and card styling"); icon-kind: 3;
+                            picked => { root.navigate(14); }
+                        } }
+                        SettingsCard { MenuLink {
+                            interactive: root.child-active; title: @tr("Look and feel"); subtitle: @tr("Animations and motion options"); icon-kind: 4;
+                            picked => { root.navigate(15); }
+                        } }
+                        SettingsCard { MenuLink {
+                            interactive: root.child-active; title: @tr("Sources"); subtitle: @tr("Install, browse and configure source addons"); icon-kind: 0;
                             picked => { root.navigate(3); }
                         } }
                         SettingsCard { MenuLink {
-                            interactive: root.local-open; title: @tr("Categories"); subtitle: @tr("Organize your library"); icon-kind: 1;
+                            interactive: root.child-active; title: @tr("Categories"); subtitle: @tr("Organize your library"); icon-kind: 1;
                             picked => { root.navigate(11); }
                         } }
                         SettingsCard { MenuLink {
-                            interactive: root.local-open; title: @tr("Data"); subtitle: @tr("Backup and import"); icon-kind: 8;
+                            interactive: root.child-active; title: @tr("Data"); subtitle: @tr("Backup and import"); icon-kind: 8;
                             picked => { root.navigate(12); }
                         } }
-                    }
-                    if root.child-section == 11: SettingsCard {
-                        VerticalLayout {
-                            padding: 16px; spacing: 12px;
-                            Text { min-width: 0px; text: @tr("Create a category, then assign it from your library."); color: Theme.current.text_settings; wrap: word-wrap; }
-                            ReaderField { enabled: root.local-open; text <=> root.category-text; placeholder-text: @tr("New category"); accepted(value) => { root.add-category(root.category-text); } }
-                            ActionButton { enabled: root.local-open; text: @tr("Add category"); clicked => { root.add-category(root.category-text); } }
-                        }
-                    }
-                    if root.child-section == 12: VerticalLayout {
-                        spacing: 12px;
-                        SettingsCard { MenuLink {
-                            interactive: root.local-open; title: @tr("Export metadata backup"); subtitle: @tr("Save your library and reading progress"); icon-kind: 8;
-                            picked => { root.backup(false); }
-                        } }
-                        SettingsCard { MenuLink {
-                            interactive: root.local-open; title: @tr("Restore metadata backup"); subtitle: @tr("Restore a saved library and reading progress"); icon-kind: 7;
-                            picked => { root.backup(true); }
-                        } }
-                        Text { min-width: 0px; text: @tr("Backups include library, categories, history and reading position. Chapter files, cookies and addon code are excluded."); color: Theme.current.text_secondary; wrap: word-wrap; }
                     }
                     if root.child-section == 13: VerticalLayout {
                         spacing: 12px;
@@ -206,10 +258,53 @@ export component MorePage inherits Rectangle {
                             }
                         }
                         SettingsCard { MenuLink {
-                            interactive: root.local-open; title: @tr("Check for app updates"); subtitle: @tr("Look for a new Nova Reader release"); icon-kind: 6;
+                            interactive: root.child-active; title: @tr("Check for app updates"); subtitle: @tr("Look for a new Nova Reader release"); icon-kind: 6;
                             picked => { root.check-update(); }
                         } }
                     }
+                }
+            }
+        }
+    }
+    detail := Rectangle {
+        width: root.width; height: root.height;
+        visible: (root.local-open || root.slide > 0 || root.alpha > 0) && (root.detail-open || root.sub-slide > 0 || root.sub-alpha > 0);
+        x: root.width * (1 - root.slide) + root.width * (1 - root.sub-slide);
+        opacity: root.alpha * root.sub-alpha;
+        detail-scope := FocusScope {
+            width: parent.width; height: parent.height; enabled: root.detail-active;
+            detail-scroll := ScrollView {
+                width: parent.width; height: parent.height;
+                mouse-drag-pan-enabled: true; content-width: self.visible-width;
+                VerticalLayout {
+                    padding: 18px; spacing: 16px; alignment: start;
+                    PageHeader {
+                        title: root.detail-section == 11 ? @tr("Categories") : root.detail-section == 12 ? @tr("Data") : root.detail-section == 14 ? @tr("Theme") : @tr("Look and feel");
+                        narrow: root.narrow; show-back: true; back => { if root.detail-active { root.navigate(10); } }
+                    }
+                    if root.status != "": Text { min-width: 0px; text: root.status; color: Theme.current.text_settings; wrap: word-wrap; }
+                    if root.detail-section == 11: SettingsCard {
+                        VerticalLayout {
+                            padding: 16px; spacing: 12px;
+                            Text { min-width: 0px; text: @tr("Create a category, then assign it from your library."); color: Theme.current.text_settings; wrap: word-wrap; }
+                            ReaderField { enabled: root.detail-active; text <=> root.category-text; placeholder-text: @tr("New category"); accepted(value) => { root.add-category(root.category-text); } }
+                            ActionButton { enabled: root.detail-active; text: @tr("Add category"); clicked => { root.add-category(root.category-text); } }
+                        }
+                    }
+                    if root.detail-section == 12: VerticalLayout {
+                        spacing: 12px;
+                        SettingsCard { MenuLink {
+                            interactive: root.detail-active; title: @tr("Export metadata backup"); subtitle: @tr("Save your library and reading progress"); icon-kind: 8;
+                            picked => { root.backup(false); }
+                        } }
+                        SettingsCard { MenuLink {
+                            interactive: root.detail-active; title: @tr("Restore metadata backup"); subtitle: @tr("Restore a saved library and reading progress"); icon-kind: 7;
+                            picked => { root.backup(true); }
+                        } }
+                        Text { min-width: 0px; text: @tr("Backups include library, categories, history and reading position. Chapter files, cookies and addon code are excluded."); color: Theme.current.text_secondary; wrap: word-wrap; }
+                    }
+                    if root.detail-section == 14: ThemeSettings { narrow: root.width < 700px; phone-layout: root.narrow; interactive: root.detail-active; }
+                    if root.detail-section == 15: MotionSettings { interactive: root.detail-active; }
                 }
             }
         }
