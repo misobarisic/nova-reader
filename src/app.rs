@@ -1319,6 +1319,7 @@ fn reading_mode(index: i32) -> ReadingMode {
 
 pub fn run(services: Services) -> Result<()> {
     let ui = AppWindow::new().map_err(error)?;
+    ui.set_app_version(env!("CARGO_PKG_VERSION").into());
     ui.set_desktop(!cfg!(target_os = "android"));
     let (sender, receiver) = mpsc::channel();
     let app = Arc::new(Controller {

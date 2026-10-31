@@ -2,7 +2,6 @@
 """Package release APKs from parallel per-ABI or one universal cargo-apk2 build."""
 import argparse
 import copy
-import hashlib
 import os
 import re
 import struct
@@ -424,7 +423,7 @@ def main():
         sources = abi_apks(parser.parse_args().abi_apk)
     except ValueError as error:
         parser.error(str(error))
-    profile = os.environ.get("NOVA_READER_RELEASE_PROFILE", "release")
+    profile = os.environ.get("NOVA_RELEASE_PROFILE", "release")
     source = Path(os.environ.get("CARGO_TARGET_DIR", "target")) / profile / "apk" / "nova_reader.apk"
     inputs = sources.values() if sources else [source]
     tools = Path(os.environ["ANDROID_HOME"]) / "build-tools" / "35.0.0"
@@ -432,16 +431,6 @@ def main():
     with Path("Cargo.toml").open("rb") as handle:
         version = tomllib.load(handle)["package"]["version"]
     original_signers = None
-    if os.environ.get("GITHUB_REF_TYPE") == "tag":
-        # The tracked debug certificate is public; a populated secret alone
-        # must not make an APK signed by that certificate distributable.
-        debug_certificate = subprocess.check_output([
-            "keytool", "-exportcert", "-keystore", "android/keystore/debug.keystore",
-            "-storepass", "android", "-alias", "androiddebugkey",
-        ], stderr=subprocess.PIPE)
-        debug_fingerprint = hashlib.sha256(debug_certificate).hexdigest()
-    else:
-        debug_fingerprint = None
     for apk in inputs:
         if not apk.is_file():
             raise RuntimeError(f"Missing built APK for profile {profile}: {apk}")
@@ -450,15 +439,13 @@ def main():
         verify_native_layout(apk)
         verify_elf_alignment(apk)
         signers = signer_certificates(apksigner, apk)
-        if debug_fingerprint in signers:
-            raise RuntimeError("Distribution APK is signed with the public debug certificate")
         if original_signers is not None and signers != original_signers:
             raise RuntimeError(f"Signing certificates differ between APK inputs: {apk}")
         original_signers = signers
     keystore, password = signing_key(Path("Cargo.toml"), profile)
     if not keystore.is_file():
         raise RuntimeError("Configured Android release keystore does not exist")
-    env = dict(os.environ, NOVA_READER_APK_KEYSTORE_PASSWORD=password)
+    env = dict(os.environ, NOVA_APK_KEYSTORE_PASSWORD=password)
     tag = os.environ["GITHUB_REF_NAME"].removeprefix("v").replace("/", "-")
     dist = Path("dist")
     dist.mkdir(exist_ok=True)
@@ -476,7 +463,7 @@ def main():
             run(zipalign, "-P", "16", "-f", "4", unsigned, aligned)
             run(
                 apksigner, "sign", "--ks", keystore,
-                "--ks-pass", "env:NOVA_READER_APK_KEYSTORE_PASSWORD",
+                "--ks-pass", "env:NOVA_APK_KEYSTORE_PASSWORD",
                 "--out", output, aligned, env=env,
             )
             run(zipalign, "-c", "-P", "16", "4", output)

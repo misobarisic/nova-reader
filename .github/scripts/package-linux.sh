@@ -4,7 +4,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo_root"
 
-profile="${NOVA_READER_RELEASE_PROFILE:-release}"
+profile="${NOVA_RELEASE_PROFILE:-release}"
 binary="target/$profile/nova-reader"
 if [[ ! -x "$binary" ]]; then
   echo "Missing release binary: $binary (run cargo build --profile $profile --bin nova-reader first)" >&2
@@ -151,7 +151,7 @@ LDAI_OUTPUT="$appimage" \
     "${linuxdeploy_args[@]}" --output appimage
 
 test "$(dpkg-deb -f "$deb_file" Package)" = nova-reader
-dpkg-deb --contents "$deb_file" | grep -q './usr/bin/nova-reader$'
+dpkg-deb --contents "$deb_file" | grep './usr/bin/nova-reader$' > /dev/null
 # Execute the AppImage's built-in extractor as an artifact-format smoke check.
 (cd "$work" && "$appimage" --appimage-extract >/dev/null)
 test -x "$work/squashfs-root/usr/bin/nova-reader"

@@ -1,15 +1,20 @@
 .PHONY: apk android-build android-build-release android-build-release-universal android-run android-run-release linux-build linux-build-release linux-run linux-run-release check check-addons check-android-java
 ANDROID_TARGET ?= aarch64-linux-android
 RELEASE_PROFILE ?= release
-UPDATE_FEATURES ?=
-ANDROID_ARGS = --locked --target $(ANDROID_TARGET) --no-default-features --features android$(UPDATE_FEATURES) --lib -p nova-reader
+UPDATE_FEATURES ?= ,update-check
+ANDROID_ARGS = --target $(ANDROID_TARGET) --no-default-features --features android$(UPDATE_FEATURES) --lib -p nova-reader
 apk: android-build
+# cargo-apk2 does not accept Cargo's --locked flag; resolve/fetch with Cargo
+# first so the committed lock is checked before invoking Nova's build command.
 android-build:
+	cargo fetch --locked --target $(ANDROID_TARGET)
 	cargo apk2 build $(ANDROID_ARGS)
 android-build-release:
+	cargo fetch --locked --target $(ANDROID_TARGET)
 	cargo apk2 build $(ANDROID_ARGS) --profile $(RELEASE_PROFILE)
 android-build-release-universal:
-	cargo apk2 build --locked --no-default-features --features android$(UPDATE_FEATURES) --lib -p nova-reader --profile $(RELEASE_PROFILE)
+	cargo fetch --locked
+	cargo apk2 build --no-default-features --features android$(UPDATE_FEATURES) --lib -p nova-reader --profile $(RELEASE_PROFILE)
 android-run:
 	cargo apk2 run $(ANDROID_ARGS)
 android-run-release:

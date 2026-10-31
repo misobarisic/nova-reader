@@ -44,3 +44,57 @@ ignore-dev-dependencies = true
 ignore-build-dependencies = true
 ignore-transitive-dependencies = false
 workarounds = ["ring", "rustls"]
+
+[slint]
+accepted = ["GPL-3.0-only"]
+
+[slint-macros]
+accepted = ["GPL-3.0-only"]
+
+[slint-build]
+accepted = ["GPL-3.0-only"]
+
+[slint-interpreter]
+accepted = ["GPL-3.0-only"]
+
+[i-slint-common]
+accepted = ["GPL-3.0-only"]
+
+[i-slint-core]
+accepted = ["GPL-3.0-only"]
+
+[i-slint-core-macros]
+accepted = ["GPL-3.0-only"]
+
+[i-slint-compiler]
+accepted = ["GPL-3.0-only"]
+
+[i-slint-backend-selector]
+accepted = ["GPL-3.0-only"]
+
+[i-slint-backend-android-activity]
+accepted = ["GPL-3.0-only"]
+
+[i-slint-backend-winit]
+accepted = ["GPL-3.0-only"]
+
+[i-slint-backend-qt]
+accepted = ["GPL-3.0-only"]
+
+[i-slint-backend-linuxkms]
+accepted = ["GPL-3.0-only"]
+
+[i-slint-backend-testing]
+accepted = ["GPL-3.0-only"]
+
+[i-slint-renderer-femtovg]
+accepted = ["GPL-3.0-only"]
+
+[i-slint-renderer-skia]
+accepted = ["GPL-3.0-only"]
+
+[i-slint-renderer-software]
+accepted = ["GPL-3.0-only"]
+
+[i-slint-live-preview]
+accepted = ["GPL-3.0-only"]

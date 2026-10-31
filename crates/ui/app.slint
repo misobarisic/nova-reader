@@ -24,6 +24,7 @@ component NavButton inherits Rectangle {
 
 export component AppWindow inherits Window {
     title: "Nova Reader";
+    in property <string> app-version;
     width: 1120px;
     height: 780px;
     background: Theme.current.canvas;
@@ -110,7 +111,7 @@ export component AppWindow inherits Window {
                 NavButton { label: @tr("More"); glyph: "···"; active: root.section == 4; clicked => { root.navigate(4); } }
                 Rectangle { vertical-stretch: 1; }
                 Text { text: @tr("Read at your own pace."); color: #666671; font-size: 11px; }
-                Text { text: "0.1.0 · GPL-3.0+"; color: #53535e; font-size: 10px; }
+                Text { text: root.app-version + " · GPL-3.0+"; color: #53535e; font-size: 10px; }
             }
         }
         VerticalLayout {

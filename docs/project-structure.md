@@ -12,7 +12,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `src/cli.rs`, `src/paths.rs` | Commands, bounded file input, independent application directory |
 | `src/android_documents.rs`, `android/java/dev/misob/nova/reader/ReaderActivity.java` | Android SAF document/tree import, staged backup export and JNI callbacks |
 | `src/updates.rs` | Optional reader application release discovery |
-| `crates/ui` | Slint application window, responsive navigation, reader/page models and translated text |
+| `crates/ui` | Slint application window, responsive navigation, reader/page models, application version binding and translated text |
 | `crates/reader-domain` | Source-local identities, schema-1 state, library/categories, progress/history/bookmarks, backup/restore |
 | `crates/reader-sources` | Reader v2 ZIP validation, durable registry, typed profile settings, QuickJS host, HTML/URL capabilities and checked source HTTP |
 | `crates/reader-engine` | Dimension probing, bounded PNG/JPEG/WebP decode, display downscale, geometry, resume anchors and decoded cache utility |
@@ -23,7 +23,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `tests/reading_journey.rs` | Process-boundary install/read/progress/interrupted download/recovery/source-removal/offline journey |
 | `tests/ui_navigation.rs` | Headless Slint navigation and reader model checks |
 | `tools/package-addon.py` | Deterministic manifest-declared reader addon ZIP builder |
-| `.github/scripts`, `.github/workflows` | Platform packaging, license inventory, regression checks, exact-tag release gating |
+| `.github/scripts`, `.github/workflows` | Nova's parallel Android build/assembly, compiler-closure Windows staging, Linux packaging, Rust caches, license inventory and exact-tag release gating |
 | `android` | Android resources, platform document bridge and intentionally public local debug signing key |
 
 ## State and work boundaries

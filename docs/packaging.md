@@ -23,7 +23,7 @@ Copy `.cargo/local-kit.example.toml` to `.cargo/local-kit.toml` to use sibling
 The app uses `.ReaderActivity`, a thin framework NativeActivity subclass for
 Android document import, and loads `libnova_reader.so`. `cargo-apk2` compiles
 `android/java` into DEX; no Gradle project is needed. Its ID is `dev.misob.nova.reader`; the display
-name is Nova Reader. Internet access is declared for future source networking.
+name is Nova Reader. Internet access is declared for source networking.
 `cargo-apk2` is pinned to `32b91331ff2371f3f06505ea6ceea3743e423a1c`
 with Nova's CLI dependency lock and just the read-only-library and uncompressed
 native-library fixes. Nova's PiP, receiver and version migration patches are
@@ -41,17 +41,22 @@ Local builds use the intentionally public debug key in `android/keystore`:
 nix develop .#android --command make android-build-release
 ```
 
-Before public distribution, establish a private signing key and retain it for
-all subsequent upgrades. The tag workflow requires repository secrets
-`ANDROID_KEYSTORE_BASE64` and `ANDROID_KEYSTORE_PASSWORD`. It decodes the
-keystore into the runner's temporary directory and uses cargo-apk2's
-`CARGO_APK_CD_RELEASE_KEYSTORE` / `_PASSWORD` overrides. No production key or
-secret is supplied by this bootstrap. Local overrides use the same pattern
-with the selected profile uppercased and hyphens replaced by underscores.
+Signing uses Nova's selected-profile precedence: the
+`CARGO_APK_<PROFILE>_KEYSTORE` / `_PASSWORD` environment overrides take priority
+over the matching Cargo metadata profile. The intentionally public debug key
+remains available for personal sideload builds; store distribution requires a
+private override. If `ANDROID_KEYSTORE_BASE64` and `ANDROID_KEYSTORE_PASSWORD`
+repository secrets are configured, the workflow imports that same existing key
+for every ABI build and the assembly job. Both must be supplied together.
+No signing identity is replaced when these overrides are present.
 
-The release build produces all three ABIs in one invocation. The packager also
-accepts three `--abi-apk ABI=PATH` arguments for parallel inputs, requiring
-identical manifests, resources and shared assets. It emits ARM64, ARMv7,
+The workflow follows Nova's three parallel `android-build` matrix jobs (ARM64,
+ARMv7 and x86_64), followed by `android-package` assembly. Each uploads its
+`nova_reader.apk` as a separate input. The packager merges all three
+`--abi-apk ABI=PATH` inputs, requiring identical manifests, resources and shared
+assets. The local `android-build-release-universal` Make target remains an
+alternative. `cargo fetch --locked` checks the committed lock before invoking
+cargo-apk2, whose CLI does not support Cargo's `--locked` argument. It emits ARM64, ARMv7,
 x86_64 and universal APKs. Every shipped ELF library is checked against its ABI;
 video libraries are rejected. ELF PT_LOAD segments are also checked for 16 KiB compatibility; Cargo target
 flags request that segment alignment. Per-ABI APKs store and align libraries to 16 KiB;
@@ -64,9 +69,11 @@ Tagged builds use `cd-release`. Linux release binaries are built on Ubuntu
 22.04 with system development libraries and packaged as Debian and AppImage
 artifacts. The AppImage tools have pinned SHA-256 checksums. Debian package
 identity, installed binary, dependency resolution and AppImage extraction are
-checked. Windows builds use the Nix GNU cross toolchain. Its packager walks
-actual PE imports recursively, copies required MinGW runtimes, rejects video
-DLLs and fails on unresolved non-system imports before creating the ZIP.
+checked. Windows builds use the Nix GNU cross toolchain. Its packager uses Nova's compiler-closure DLL staging with
+`nix-store -qR`, preserves read-only Nix inputs and creates a flat ZIP. Windows
+system libraries such as UIAutomationCore are supplied by Windows. The upload
+uses `archive: false` and publication downloads that artifact by ID with
+`skip-decompress: true`, preserving the original release ZIP.
 
 `dependency-licenses.sh` uses cargo-about 0.9.1 (Nix-provided or explicitly
 installed by Linux CI) with `--locked --fail` for the exact release targets and
@@ -77,16 +84,22 @@ inherited from Nova under the same license; it is not a new branding claim.
 All PRs, main pushes and version tags run required Linux formatting, Clippy,
 workspace check/tests, distribution builds without updater support, addon Node
 fixtures and reproducible ZIP packaging, packaging regressions,
-Windows GNU checks and Android ARM64 library checks. Release packaging depends
-on all three check jobs from the same workflow run. The tag must equal
+Windows GNU checks and Android ARM64 library checks. Nova's named `check-linux`, `check-windows` and `check-android` jobs retain the
+pinned Rust dependency cache, and Android jobs retain runner disk cleanup.
+Release packaging depends on all three check jobs from the same workflow run,
+including version-tag runs. The tag must equal
 `v<Cargo version>` and HEAD, the dereferenced tag and GitHub event SHA must
 agree. Publication depends on all package jobs and verifies the seven-file
 artifact matrix. Build jobs have read-only permissions; only publication may
 write releases.
 
-This bootstrap has packaging regression coverage; an actual cross-platform
-release and device smoke run are required before claiming installation and
-launch acceptance. Device launch, Android touch behavior and Windows execution
+The initial commit's Linux, Windows and Android checks passed in GitHub Actions.
+The v0.1.0 packaging run exposed an unsupported cargo-apk2 flag and the custom
+Windows DLL checker rejecting an OS library. Linux packaging also completed
+both artifacts but failed its added Debian listing check because `grep -q`
+closed the pipe early. Version 0.1.1 restores Nova's build/DLL staging paths and
+consumes the complete Debian listing, with regressions covering all three failures. A complete artifact and device
+smoke run is required before claiming installation and launch acceptance. Device launch, Android touch behavior and Windows execution
 cannot be established by host-side archive and compile checks alone.
 
 The Android shell includes host libclang with target-specific NDK sysroots for

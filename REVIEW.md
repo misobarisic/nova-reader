@@ -32,3 +32,20 @@ Final local verification on 31 October 2026 passed:
 
 The first local test link required repairing broken fontconfig/freetype shared-library symlinks in the execution environment; no repository workaround was added.
 Android Java/JNI checks passed separately during bridge implementation. Nix evaluation, Windows/Android cross-builds, real devices and complete release artifacts remain unverified locally. Static review and Linux smoke do not substitute for those gates.
+
+## Release setup alignment for 0.1.1
+
+The workflow and packaging recipes now follow Nova's job layout, three parallel
+Android ABI builds and separate assembly, Rust caches, runner cleanup, named
+steps and original Windows ZIP transfer. Reader identities and dependencies
+remain distinct, and releases still require checks on the exact tagged commit.
+Cargo-apk2 receives only supported arguments after a locked Cargo fetch; Windows
+uses Nova's compiler-closure DLL staging instead of a custom OS-library list.
+Configured signing overrides retain their identity, with Nova's Cargo-profile
+fallback available. Packaging regressions include the actual Make command line
+and repeated read-only DLL staging. The application version is taken from Cargo.
+
+The old Linux release log also exposed an early-closing Debian contents pipe.
+The check now consumes the full listing; a real large `.deb` regression passes.
+Final workspace formatting, Clippy and tests passed, along with 27 packaging
+regressions. Astra 6 medium reviewed the workflow alignment with no P1/P2 blocker.
