@@ -108,3 +108,17 @@ is available in this workspace. The release workflow YAML is unchanged.
 Final formatting, workspace check, Clippy for all targets with warnings denied,
 all workspace tests, and 27 packaging regressions passed. Astra's final review
 found no remaining demonstrated P1/P2 issue.
+
+## History root tab for 0.1.7
+
+The user-requested bottom-tab order is Library, Updates, History, Browse, More.
+History now keeps bottom navigation visible and Back returns to Library. The
+rail uses the same root order, with Downloads before More. The redundant phone
+More card is removed, and keyboard focus/selection indices follow the new order.
+Nova's theme, shared History glyph and navigation feedback remain in use.
+The existing layout regression verifies five ordered tabs at phone widths,
+History activation/selection/Back, and More child navigation and scroll state.
+Astra 6 medium found no actionable regression; focused layout/navigation tests
+passed.
+Formatting, workspace check, Clippy for all targets with warnings denied and the
+full workspace test suite also passed for the final change.

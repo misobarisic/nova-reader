@@ -13,7 +13,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `src/android_documents.rs`, `android/java/dev/misob/nova/reader/ReaderActivity.java` | Android SAF document/tree import, staged backup export and JNI callbacks |
 | `src/updates.rs` | Optional reader application release discovery |
 | `crates/ui/app.slint` | Shared pages/reader models, safe-area layout, platform/width shell selection, detail origin and translated text |
-| `crates/ui/navigation.slint` | Nova’s 64px icon rail, flat four-tab bottom bar, icon feedback and keyboard navigation |
+| `crates/ui/navigation.slint` | Nova’s 64px icon rail, flat five-tab bottom bar, icon feedback and keyboard navigation |
 | `crates/ui/controls.slint`, `crates/ui/page-header.slint` | Thin Nova Kit control adapters and Nova’s PageHeader; shared palette, typography and accessibility |
 | `crates/ui/more.slint` | Retained Nova-style More landing and local import/settings/categories/data/About child pages |
 | `crates/ui/build.rs` | Kit source aliases, embedded resources, debug layout metadata and narrow Kit-dropdown keyboard/accessibility adaptation |

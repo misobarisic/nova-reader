@@ -7,16 +7,17 @@ navigation or settings design system.
 
 - `navigation.slint` adapts Nova's `sidenav.slint` and `bottomnav.slint`:
   64px icon rail, 56px item pitch, immediate 48px accent circle, and shared
-  icon-only `NavFeedback`. The narrow bar is 68px high, has four equal slots,
+  icon-only `NavFeedback`. The narrow bar is 68px high, has five equal slots,
   24px icons and 12px labels, and selects with accent color without a tile fill.
   Both bars consume gap taps and support keyboard and accessible activation.
 - The same 700px breakpoint selects the compact shell on Android and desktop.
   Wide Android windows therefore use the rail, as Nova does. Details and the
   reader cover navigation; narrow child pages hide the bottom bar. Desktop
   More/settings children retain the stationary rail.
-- Root destinations are Library, Updates, Browse and More. History and Downloads
-  occupy Nova's two desktop shortcut slots before More. On phones they are
-  More cards rather than extra bottom tabs.
+- Root destinations are Library, Updates, History, Browse and More, in that
+  order as requested. Downloads occupies the desktop shortcut slot before More
+  and is a More card on phones. History keeps the bottom bar visible and Back
+  returns to Library.
 - `page-header.slint` is adapted directly from Nova's `PageHeader`, with the
   same typography and back-button placement. Page gutters are 18px.
 - `controls.slint` only adapts Reader's API/accessibility to Nova Kit's

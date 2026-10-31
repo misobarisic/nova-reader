@@ -20,12 +20,12 @@ export component MorePage inherits Rectangle {
     callback check-update;
     background: Theme.current.artwork_canvas;
     clip: true;
-    private property <int> choice: root.narrow ? 0 : 2;
+    private property <int> choice: root.narrow ? 1 : 2;
     public function focus_shell() {
         if root.section == 4 { nav-scope.focus(); }
         else { child-scope.focus(); }
     }
-    changed narrow => { root.choice = max(root.narrow ? 0 : 2, root.choice); }
+    changed narrow => { root.choice = max(root.narrow ? 1 : 2, root.choice); }
     private property <bool> local-open: root.section >= 9;
     private property <int> child-section: 9;
     private property <float> slide: root.local-open ? 1 : 0;
@@ -84,12 +84,12 @@ export component MorePage inherits Rectangle {
             key-pressed(e) => {
                 if e.text == Key.UpArrow || e.text == Key.DownArrow {
                     SettingsStyle.keyboard-mode = true;
-                    root.choice = clamp(root.choice + (e.text == Key.UpArrow ? -1 : 1), root.narrow ? 0 : 2, 4);
+                    root.choice = clamp(root.choice + (e.text == Key.UpArrow ? -1 : 1), root.narrow ? 1 : 2, 4);
                     self.focus();
                     return accept;
                 }
                 if e.text == Key.Return || e.text == " " {
-                    if !e.repeat { root.navigate(root.choice == 0 ? 2 : root.choice == 1 ? 7 : root.choice == 2 ? 9 : root.choice == 3 ? 10 : 13); }
+                    if !e.repeat { root.navigate(root.choice == 1 ? 7 : root.choice == 2 ? 9 : root.choice == 3 ? 10 : 13); }
                     return accept;
                 }
                 return reject;
@@ -104,11 +104,6 @@ export component MorePage inherits Rectangle {
                 VerticalLayout {
                     padding: 18px; spacing: 12px; alignment: start;
                     PageHeader { title: @tr("More"); narrow: root.narrow; show-back: root.narrow; back => { root.navigate(0); } }
-                    if root.narrow: SettingsCard { MenuLink {
-                        focused: SettingsStyle.keyboard-mode && root.choice == 0;
-                        interactive: root.landing-active; title: @tr("History"); subtitle: @tr("Pick up where you left off");
-                        destination-id: "more:history"; icon: @image-url("../../assets/icons/navigation/history.svg"); picked => { root.choice = 0; root.navigate(2); }
-                    } }
                     if root.narrow: SettingsCard { MenuLink {
                         focused: SettingsStyle.keyboard-mode && root.choice == 1;
                         interactive: root.landing-active; title: @tr("Downloads"); subtitle: @tr("Read your saved chapters");

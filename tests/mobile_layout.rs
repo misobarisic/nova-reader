@@ -116,7 +116,7 @@ fn nova_navigation_more_and_responsive_controls() {
         for section in [0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13] {
             ui.set_section(section);
             settle();
-            let bottom = narrow && [0, 1, 3, 4].contains(&section);
+            let bottom = narrow && [0, 1, 2, 3, 4].contains(&section);
             assert_eq!(
                 ui.get_bottom_navigation_height(),
                 if bottom { 68. } else { 0. }
@@ -132,7 +132,14 @@ fn nova_navigation_more_and_responsive_controls() {
             assert_controls_fit(&ui, width);
             let tabs =
                 ElementHandle::find_by_element_type_name(&ui, "BottomItem").collect::<Vec<_>>();
-            assert_eq!(tabs.len(), if bottom { 4 } else { 0 });
+            assert_eq!(tabs.len(), if bottom { 5 } else { 0 });
+            if bottom {
+                let labels = tabs
+                    .iter()
+                    .map(|tab| tab.accessible_label().unwrap().to_string())
+                    .collect::<Vec<_>>();
+                assert_eq!(labels, ["Library", "Updates", "History", "Browse", "More"]);
+            }
             for tab in tabs {
                 let pos = tab.absolute_position();
                 assert!(pos.y >= height - 68. && pos.y + tab.size().height <= height);
@@ -143,6 +150,18 @@ fn nova_navigation_more_and_responsive_controls() {
         action(&ui, "Browse").invoke_accessible_default_action();
         settle();
         assert_eq!(ui.get_section(), 3);
+        tap(&ui, "History");
+        assert_eq!(ui.get_section(), 2);
+        assert_eq!(
+            ui.get_bottom_navigation_height(),
+            if narrow { 68. } else { 0. }
+        );
+        assert_eq!(
+            action(&ui, "History").accessible_item_selected(),
+            Some(true)
+        );
+        back(&ui);
+        assert_eq!(ui.get_section(), 0);
         tap(&ui, "More");
         assert_eq!(ui.get_section(), 4);
         if narrow {

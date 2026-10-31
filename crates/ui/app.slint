@@ -56,7 +56,7 @@ export component AppWindow inherits Window {
     // Nova's responsive breakpoint applies equally to Android and desktop.
     out property <bool> mobile-ui: root.width < 700px;
     out property <length> navigation-width: root.mobile-ui || root.section == 5 || root.section == 6 ? 0px : 64px;
-    out property <length> bottom-navigation-height: root.mobile-ui && (root.section == 0 || root.section == 1 || root.section == 3 || root.section == 4) ? 68px : 0px;
+    out property <length> bottom-navigation-height: root.mobile-ui && (root.section == 0 || root.section == 1 || root.section == 2 || root.section == 3 || root.section == 4) ? 68px : 0px;
     private property <bool> show-reader-options: false;
     out property <length> reader-width: min(1100px, max(100px, (root.width - root.safe-area-insets.left - root.safe-area-insets.right - 16px) * root.zoom));
     private property <length> reader-height: root.total-ratio * root.reader-width;
@@ -89,7 +89,7 @@ export component AppWindow inherits Window {
     callback flush-progress;
 
     public function go-back() {
-        root.navigate(root.section == 6 ? 5 : root.section == 8 ? 3 : root.section == 11 || root.section == 12 ? 10 : root.section >= 9 || root.section == 2 || root.section == 7 ? 4 : root.section == 5 ? root.detail-origin : 0);
+        root.navigate(root.section == 6 ? 5 : root.section == 8 ? 3 : root.section == 11 || root.section == 12 ? 10 : root.section >= 9 || root.section == 7 ? 4 : root.section == 5 ? root.detail-origin : 0);
     }
 
     changed section => {
@@ -149,7 +149,7 @@ export component AppWindow inherits Window {
                                 spacing: 16px; alignment: start;
                                 page-heading := PageHeader {
                                     title: root.heading; subtitle: root.caption; narrow: root.mobile-ui;
-                                    show-back: root.section == 2 || root.section == 5 || root.section == 7 || root.section == 8;
+                                    show-back: root.section == 5 || root.section == 7 || root.section == 8;
                                     back => { root.go-back(); }
                                 }
                                 if root.status != "": Rectangle {

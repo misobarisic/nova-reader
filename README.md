@@ -7,7 +7,7 @@ plan** (planning baseline 31 October 2026). It is a working development tree;
 [implementation status](docs/implementation-status.md) records the outstanding
 acceptance gates.
 
-The interface follows Nova's design: an adaptive icon rail or four-tab bottom
+The interface follows Nova's design: an adaptive icon rail or five-tab bottom
 bar, shared Nova Kit controls, and More/settings cards. Local imports are under
 **More → Local chapters**; categories and backups are under **More → Settings**.
 See [UI design reuse](docs/ui-design.md) for the source/component mapping.
