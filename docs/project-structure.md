@@ -30,7 +30,8 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `tests/reading_journey.rs` | Process-boundary install/read/progress/interrupted download/recovery/source-removal/offline journey |
 | `tests/ui_navigation.rs`, `tests/mobile_layout.rs` | Headless reader models, phone/landscape/tablet/desktop control bounds, tab taps, accessible activation and back navigation |
 | `tools/package-addon.py` | Deterministic manifest-declared reader addon ZIP builder |
-| `.github/scripts`, `.github/workflows` | Nova's parallel Android build/assembly, compiler-closure Windows staging, Linux packaging, Rust caches, license inventory and Nova’s PR/main-check versus tag-build split; real-ELF encoded-rustflags packaging regression |
+| `.github/scripts`, `.github/workflows` | Nova's copied platform packagers and PR/main-check versus tag-build split, required Reader identity/license/signing integration |
+| `.github/scripts/test_package_nova_parity.py` | Immutable Nova-source parity for all three packaging scripts, masking only documented app metadata/media-license differences |
 | `android` | Android resources, platform document bridge and intentionally public local debug signing key |
 
 ## State and work boundaries

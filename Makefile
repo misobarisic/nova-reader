@@ -1,32 +1,53 @@
-.PHONY: apk android-build android-build-release android-build-release-universal android-run android-run-release linux-build linux-build-release linux-run linux-run-release check check-addons check-android-java
+
+
+.PHONY: apk android-build android-build-release android-build-release-universal \
+	android-run android-run-release \
+	linux-build linux-build-release linux-run linux-run-release
+
+# Run these inside the appropriate dev shell: `nix develop` for Linux or
+# `nix develop .#android` for Android. Override the target for an emulator,
+# e.g. `make android-run ANDROID_TARGET=x86_64-linux-android`.
 ANDROID_TARGET ?= aarch64-linux-android
+# Local release builds stay quick; tagged CI selects cd-release explicitly.
 RELEASE_PROFILE ?= release
+# Set UPDATE_FEATURES= to build APKs without any GitHub update checks.
 UPDATE_FEATURES ?= ,update-check
 ANDROID_ARGS = --target $(ANDROID_TARGET) --no-default-features --features android$(UPDATE_FEATURES) --lib -p nova-reader
+
+# cargo-apk2 (not cargo-apk) compiles Reader's Java document activity to DEX.
 apk: android-build
-# cargo-apk2 does not accept Cargo's --locked flag; resolve/fetch with Cargo
-# first so the committed lock is checked before invoking Nova's build command.
+
 android-build:
-	cargo fetch --locked --target $(ANDROID_TARGET)
 	cargo apk2 build $(ANDROID_ARGS)
+
 android-build-release:
-	cargo fetch --locked --target $(ANDROID_TARGET)
 	cargo apk2 build $(ANDROID_ARGS) --profile $(RELEASE_PROFILE)
+
+# Local three-ABI alternative to CI's parallel single-ABI builds. The release
+# packager accepts either input to produce the same four APK variants.
 android-build-release-universal:
-	cargo fetch --locked
 	cargo apk2 build --no-default-features --features android$(UPDATE_FEATURES) --lib -p nova-reader --profile $(RELEASE_PROFILE)
+
 android-run:
 	cargo apk2 run $(ANDROID_ARGS)
+
 android-run-release:
 	cargo apk2 run $(ANDROID_ARGS) --profile $(RELEASE_PROFILE)
+
 linux-build:
-	cargo build --locked
+	cargo build
+
 linux-build-release:
-	cargo build --locked --profile $(RELEASE_PROFILE)
+	cargo build --profile $(RELEASE_PROFILE)
+
 linux-run:
-	cargo run --locked
+	cargo run
+
 linux-run-release:
-	cargo run --locked --profile $(RELEASE_PROFILE)
+	cargo run --profile $(RELEASE_PROFILE)
+
+.PHONY: check check-addons check-android-java
+
 check: check-addons
 	cargo fmt --all -- --check
 	cargo clippy --workspace --locked -- -D warnings

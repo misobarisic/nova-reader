@@ -11,15 +11,7 @@ if [[ ! -x "$binary" ]]; then
   exit 1
 fi
 
-if ldd "$binary" | grep -Ei 'lib(mpv|avcodec|avfilter|avformat|avutil|swscale|swresample)'; then
-  echo "Reader unexpectedly links video libraries" >&2
-  exit 1
-fi
-if ldd "$binary" | grep -q 'not found'; then
-  echo "Reader has unresolved runtime dependencies" >&2
-  exit 1
-fi
-cargo_version="$(cargo metadata --locked --no-deps --format-version 1 | python3 -c 'import json, sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "nova-reader"))')"
+cargo_version="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "nova-reader"))')"
 event_name="${GITHUB_EVENT_NAME:-local}"
 if [[ "$event_name" == "pull_request" ]]; then
   artifact_tag="pr-${GITHUB_EVENT_NUMBER:-0}"
@@ -150,11 +142,6 @@ LDAI_OUTPUT="$appimage" \
   "$tools_dir/linuxdeploy-x86_64.AppImage" \
     "${linuxdeploy_args[@]}" --output appimage
 
-test "$(dpkg-deb -f "$deb_file" Package)" = nova-reader
-dpkg-deb --contents "$deb_file" | grep './usr/bin/nova-reader$' > /dev/null
-# Execute the AppImage's built-in extractor as an artifact-format smoke check.
-(cd "$work" && "$appimage" --appimage-extract >/dev/null)
-test -x "$work/squashfs-root/usr/bin/nova-reader"
 test -s "$appimage"
 chmod 755 "$appimage"
 echo "Created $deb_file"

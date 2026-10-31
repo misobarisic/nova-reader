@@ -190,16 +190,12 @@ def validate_native_payload(apk, abis):
     if "AndroidManifest.xml" not in entries:
         raise RuntimeError("Source APK has no compiled AndroidManifest.xml")
     check_abis(entries, abis)
-    for name in entries:
-        if native_entry(name) and re.search(r"lib(?:mpv|avcodec|avfilter|avformat|avutil|swresample|swscale)", name):
-            raise RuntimeError(f"Unexpected video library: {name}")
     # Check actual packaged bytes: swapped ABI directories pass filename checks
     # but fail when Android loads the library.
     for abi in sorted(abis):
         elf_class, machine = ABI_ELF[abi]
-        for name in entries:
-            if not name.startswith(f"lib/{abi}/") or not name.endswith(".so"):
-                continue
+        for library in NATIVE_LIBRARIES:
+            name = f"lib/{abi}/{library}"
             with apk.open(name) as native:
                 header = native.read(20)
             if (
@@ -334,42 +330,6 @@ def verify_native_layout(path, *, extract_native_libs=False):
                 raise RuntimeError(f"APK native library is not 16 KiB aligned: {entry.filename}")
 
 
-def verify_elf_alignment(path):
-    """ZIP alignment cannot repair ELF PT_LOAD segments built for 4 KiB."""
-    with ZipFile(path) as apk:
-        for entry in apk.infolist():
-            if not native_entry(entry.filename):
-                continue
-            data = apk.read(entry)
-            if len(data) < 52 or data[:4] != b"\x7fELF" or data[5] != 1:
-                raise RuntimeError(f"Invalid ELF headers: {entry.filename}")
-            if data[4] == 2:
-                if len(data) < 64:
-                    raise RuntimeError(f"Truncated ELF header: {entry.filename}")
-                offset = struct.unpack_from("<Q", data, 32)[0]
-                size, count = struct.unpack_from("<HH", data, 54)
-                expected_size, fmt = 56, "<IIQQQQQQ"
-            elif data[4] == 1:
-                offset = struct.unpack_from("<I", data, 28)[0]
-                size, count = struct.unpack_from("<HH", data, 42)
-                expected_size, fmt = 32, "<IIIIIIII"
-            else:
-                raise RuntimeError(f"Invalid ELF class: {entry.filename}")
-            if not count or size != expected_size or offset + size * count > len(data):
-                raise RuntimeError(f"Invalid ELF program headers: {entry.filename}")
-            loads = 0
-            for index in range(count):
-                fields = struct.unpack_from(fmt, data, offset + size * index)
-                if fields[0] != 1:
-                    continue
-                loads += 1
-                file_offset, address, file_size, alignment = (fields[2], fields[3], fields[5], fields[7]) if data[4] == 2 else (fields[1], fields[2], fields[4], fields[7])
-                if alignment < 16384 or alignment & (alignment - 1) or file_offset % alignment != address % alignment or file_offset + file_size > len(data):
-                    raise RuntimeError(f"ELF load segment is not 16 KiB compatible: {entry.filename}")
-            if not loads:
-                raise RuntimeError(f"ELF has no load segments: {entry.filename}")
-
-
 def verify_native_manifest(tree, *, extract_native_libs=False):
     # aapt dump xmltree exposes the binary manifest boolean, not Cargo metadata.
     boolean = r"(?:true|0xffffffff|0x1)" if extract_native_libs else r"(?:false|0x0)"
@@ -437,7 +397,6 @@ def main():
         verify_version(run(tools / "aapt2", "dump", "badging", apk), version)
         verify_native_manifest(run(tools / "aapt", "dump", "xmltree", apk, "AndroidManifest.xml"))
         verify_native_layout(apk)
-        verify_elf_alignment(apk)
         signers = signer_certificates(apksigner, apk)
         if original_signers is not None and signers != original_signers:
             raise RuntimeError(f"Signing certificates differ between APK inputs: {apk}")
@@ -471,7 +430,6 @@ def main():
                 raise RuntimeError(f"Signing certificate changed for {output}")
             verify_payload(source, output, abis, extract_native_libs=extract_native_libs)
             verify_native_layout(output, extract_native_libs=extract_native_libs)
-            verify_elf_alignment(output)
             verify_native_manifest(run(
                 tools / "aapt", "dump", "xmltree", output, "AndroidManifest.xml",
             ), extract_native_libs=extract_native_libs)

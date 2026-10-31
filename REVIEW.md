@@ -145,3 +145,26 @@ full workspace tests, and all 28 packaging regressions passed locally. Astra 6
 medium found no review blockers and independently ran the Android packaging
 suite successfully. Host ELF regression is separate from actual Android APK
 assembly and device acceptance; those results belong to the new release run.
+
+## Nova packaging parity restored for 0.1.9
+
+The prior claim of copying Nova's release setup was too broad: the YAML job graph
+matched, but Reader-only release gates remained in the invoked packagers. The
+ELF gate absent from Nova was the gate that failed v0.1.5. All three platform
+packagers are now re-copied from Nova b69a1e5765ecc65ac3b00acdfe2f16e2f46a5dda,
+with only Reader identities/artifacts, its existing Android version-code policy,
+absent media inputs and required license inventory integration adapted.
+Nova's merge, payload, ABI, ZIP alignment, manifest and signer checks remain.
+Reader-only video/ELF release checks, Linux ldd/contents/extraction preflights and
+the Windows replacement bundle assertion are removed. Make's build/run recipes
+also follow Nova; the extra preflight fetch is removed. Existing private signing
+overrides are unchanged. No check dependency or new tag check is added.
+
+The Android build alignment fix remains. Its real-ELF test helper is now confined
+to the development test suite instead of being part of release assembly. Parity
+tests compare all three scripts to canonical digests derived from the immutable
+Nova source, masking only the documented necessary app adaptations. Astra 6
+medium independently compared those digests to the actual git-show reference
+and found no P1/P2 blocker. All 28 packaging tests, shell syntax, formatting,
+Clippy for all targets, workspace check and all workspace tests passed locally.
+Actual release assembly remains a separate CI result.

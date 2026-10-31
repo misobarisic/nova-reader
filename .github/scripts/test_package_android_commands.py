@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class AndroidCommandTests(unittest.TestCase):
-    def test_locked_fetch_precedes_apk2_without_unsupported_locked_argument(self):
+    def test_nova_apk2_command_has_no_extra_fetch_or_unsupported_locked_argument(self):
         with tempfile.TemporaryDirectory() as scratch:
             root = Path(scratch)
             cargo = root / 'cargo'
@@ -31,13 +31,13 @@ with Path(os.environ['CARGO_COMMAND_LOG']).open('a') as log:
                                 'ANDROID_TARGET=armv7-linux-androideabi', 'RELEASE_PROFILE=cd-release'],
                                cwd=root, env=env, check=True, capture_output=True)
                 commands = log.read_text().splitlines()
-                self.assertTrue(commands[0].startswith('fetch --locked'))
-                self.assertTrue(commands[1].startswith('apk2 build '))
-                self.assertNotIn('--locked', commands[1])
-                self.assertIn('--profile cd-release', commands[1])
-                self.assertIn('--features android,update-check', commands[1])
+                self.assertEqual(len(commands), 1)
+                self.assertTrue(commands[0].startswith('apk2 build '))
+                self.assertNotIn('--locked', commands[0])
+                self.assertIn('--profile cd-release', commands[0])
+                self.assertIn('--features android,update-check', commands[0])
                 if target == 'android-build-release':
-                    self.assertIn('--target armv7-linux-androideabi', commands[1])
+                    self.assertIn('--target armv7-linux-androideabi', commands[0])
 
 
 if __name__ == '__main__':

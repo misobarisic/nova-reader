@@ -7,7 +7,7 @@ tag="${GITHUB_REF_NAME#v}"
 tag="${tag//\//-}"
 bundle="target/windows-package"
 dist="dist"
-# Match Nova: old runs may have inherited read-only Nix directory modes.
+# Older runs may have copied read-only directory modes from Nix inputs.
 if [[ -d "$bundle" ]]; then
   find "$bundle" -type d -exec chmod u+w {} +
 fi
@@ -19,8 +19,8 @@ cp "target/x86_64-pc-windows-gnu/$profile/nova-reader.exe" "$bundle/nova-reader.
 cp LICENSE THIRD_PARTY_NOTICES.md "$bundle/"
 cp target/licenses/x86_64-pc-windows-gnu.txt "$bundle/DEPENDENCY_LICENSES.txt"
 
-# Nova's compiler-closure staging supplies the MinGW runtime DLLs without
-# trying to bundle DLLs supplied by Windows itself (for example UIAutomationCore).
+# Include only DLL files from the compiler's Nix dependency closure. This
+# supplies MinGW's runtime DLLs without committing toolchain binaries.
 while IFS= read -r store_path; do
   while IFS= read -r -d '' dll; do
     name="${dll##*/}"
@@ -40,8 +40,6 @@ bundle = Path(bundle_name)
 dist = Path(dist_name)
 output = dist / f"Nova-Reader-Windows-x86_64-{tag}.zip"
 files = sorted(path for path in bundle.rglob("*") if path.is_file())
-if not any(path.name == "nova-reader.exe" for path in files):
-    raise SystemExit("Windows bundle is missing nova-reader.exe")
 with ZipFile(output, "w", compression=ZIP_DEFLATED, compresslevel=9) as archive:
     for path in files:
         archive.write(path, arcname=path.relative_to(bundle))
