@@ -1,0 +1,24 @@
+/target/
+/.cargo/local-kit.toml
+/pkg/
+web-console.log
+
+# Android build outputs
+*.apk
+*.aab
+/.reasonix/
+/.omx/
+
+# Generated visual output
+/output/
+
+/dist/
+
+__pycache__/
+
+/android/assets/dependency-licenses/
+
+node_modules/
+
+# Addon parser test dependencies
+**/node_modules/

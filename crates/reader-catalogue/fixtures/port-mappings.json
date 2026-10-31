@@ -1,0 +1,23 @@
+[
+  {
+    "repository": "https://raw.githubusercontent.com/keiyoushi/extensions/repo/index.pb",
+    "package_name": "eu.kanade.tachiyomi.extension.all.manhwa18cc",
+    "source_id": "4841602236575491202",
+    "native_addon_id": "manhwa18cc",
+    "native_source_id": "manhwa18cc.en"
+  },
+  {
+    "repository": "https://raw.githubusercontent.com/keiyoushi/extensions/repo/index.pb",
+    "package_name": "eu.kanade.tachiyomi.extension.all.manhwa18cc",
+    "source_id": "6864643444164576223",
+    "native_addon_id": "manhwa18cc",
+    "native_source_id": "manhwa18cc.ko"
+  },
+  {
+    "repository": "https://raw.githubusercontent.com/keiyoushi/extensions/repo/index.pb",
+    "package_name": "eu.kanade.tachiyomi.extension.all.manhwa18cc",
+    "source_id": "993336618407081332",
+    "native_addon_id": "manhwa18cc",
+    "native_source_id": "manhwa18cc.all"
+  }
+]

@@ -1,0 +1,91 @@
+use crate::{
+    paths,
+    services::{Result, Services, error},
+};
+use std::{
+    io::Read,
+    path::{Path, PathBuf},
+};
+
+fn read(path: &Path, limit: u64) -> Result<Vec<u8>> {
+    let file = std::fs::File::open(path).map_err(error)?;
+    if file.metadata().map_err(error)?.len() > limit {
+        return Err("File exceeds size limit".into());
+    }
+    let mut bytes = Vec::new();
+    file.take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(error)?;
+    if bytes.len() as u64 > limit {
+        return Err("File exceeds size limit".into());
+    }
+    Ok(bytes)
+}
+pub fn run() -> Result<bool> {
+    let mut args = std::env::args_os().skip(1);
+    let Some(command) = args.next() else {
+        return Ok(false);
+    };
+    let command = command.to_str().ok_or("Invalid command")?;
+    if command == "--help" || command == "-h" {
+        println!(
+            "Nova Reader {}\n\nRun without arguments to open the reader.\n\n  install-addon FILE.zip\n  list-sources\n  import FILE.cbz\n  import-folder DIRECTORY\n  backup FILE.json\n  restore FILE.json\n  catalogue-keiyoushi [HTTPS_INDEX_URL]\n\nSet NOVA_READER_DATA_DIR to use an independent application directory.\nSources are executable JavaScript packages; APK/JAR catalogues are discovery only.",
+            env!("CARGO_PKG_VERSION")
+        );
+        return Ok(true);
+    }
+    if command == "--version" {
+        println!("Nova Reader {}", env!("CARGO_PKG_VERSION"));
+        return Ok(true);
+    }
+    if command == "catalogue-keiyoushi" {
+        let url = args
+            .next()
+            .map(|v| v.to_string_lossy().into_owned())
+            .unwrap_or_else(|| reader_catalogue::KEIYOUSHI_INDEX.into());
+        let catalogue = reader_catalogue::CatalogueClient::new()
+            .map_err(error)?
+            .fetch_keiyoushi(&url)
+            .map_err(error)?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&catalogue).map_err(error)?
+        );
+        return Ok(true);
+    }
+    let services = Services::open(&paths::data_dir()?)?;
+    if command == "list-sources" {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&services.sources.list().map_err(error)?)
+                .map_err(error)?
+        );
+        return Ok(true);
+    }
+    let path = PathBuf::from(
+        args.next()
+            .ok_or("This command requires a file or directory")?,
+    );
+    if args.next().is_some() {
+        return Err("Unexpected extra arguments".into());
+    }
+    match command {
+        "install-addon" => {
+            let id = services.install(&read(&path, 8 * 1024 * 1024)?)?;
+            println!("Installed {id}");
+        }
+        "import" | "import-folder" => {
+            let id = services.import_local(&path, command == "import-folder")?;
+            println!("Imported {}", id.local_id);
+        }
+        "backup" => {
+            std::fs::write(path, services.domain.backup_json().map_err(error)?).map_err(error)?
+        }
+        "restore" => services
+            .domain
+            .restore_json(&read(&path, 32 * 1024 * 1024)?)
+            .map_err(error)?,
+        _ => return Err("Unknown command. Run nova-reader --help.".into()),
+    }
+    Ok(true)
+}

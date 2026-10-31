@@ -1,0 +1,129 @@
+[workspace]
+members = ["crates/reader-domain", "crates/reader-sources", "crates/reader-engine", "crates/reader-downloads", "crates/reader-catalogue", "crates/ui"]
+resolver = "3"
+
+[workspace.package]
+license = "GPL-3.0-or-later"
+
+[workspace.dependencies]
+nova-storage = { git = "https://github.com/misobarisic/nova-kit", rev = "63141dfc6abd39a247edde1f33ebaeb59dc7229a" }
+nova-ui-base = { git = "https://github.com/misobarisic/nova-kit", rev = "63141dfc6abd39a247edde1f33ebaeb59dc7229a" }
+slint = { version = "=1.18.0", default-features = false, features = ["std", "compat-1-2", "accessibility"] }
+slint-build = "=1.18.0"
+
+[package]
+name = "nova-reader"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+description = "A source-based manga and webtoon reader for desktop and Android"
+repository = "https://github.com/misobarisic/nova-reader"
+
+[lib]
+name = "nova_reader"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["desktop", "update-check"]
+desktop = ["slint/backend-winit", "slint/renderer-femtovg"]
+android = ["slint/backend-android-activity-06"]
+update-check = ["dep:reqwest", "dep:semver"]
+
+[dependencies]
+slint = { workspace = true }
+nova-reader-ui = { path = "crates/ui" }
+reader-domain = { path = "crates/reader-domain" }
+reader-sources = { path = "crates/reader-sources" }
+reader-engine = { path = "crates/reader-engine" }
+reader-downloads = { path = "crates/reader-downloads" }
+reader-catalogue = { path = "crates/reader-catalogue" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+directories = "6"
+url = "2"
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"], optional = true }
+semver = { version = "1", optional = true }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal", "wayland"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+ndk-context = "0.1"
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "aws-lc-rs"] }
+webpki-roots = "1"
+
+[dev-dependencies]
+tempfile = "3"
+i-slint-backend-testing = "=1.18.0"
+image = { version = "0.25", default-features = false, features = ["png"] }
+zip = { version = "2.4", default-features = false, features = ["deflate"] }
+
+[profile.dev]
+debug = false
+strip = "symbols"
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+strip = "symbols"
+
+[profile.dev-release]
+inherits = "release"
+lto = false
+codegen-units = 4
+
+[profile.cd-release]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+incremental = false
+
+[package.metadata.android]
+package = "dev.misob.nova.reader"
+build_targets = ["aarch64-linux-android", "armv7-linux-androideabi", "x86_64-linux-android"]
+resources = "android/res"
+assets = "android/assets"
+use_aapt2 = true
+java_sources = "android/java"
+
+[package.metadata.android.application]
+has_code = true
+extract_native_libs = false
+label = "Nova Reader"
+icon = "@mipmap/ic_launcher"
+
+[[package.metadata.android.application.activity]]
+name = "dev.misob.nova.reader.ReaderActivity"
+config_changes = "orientation|keyboardHidden|screenSize|screenLayout|smallestScreenSize|density|uiMode|layoutDirection"
+
+[[package.metadata.android.application.activity.meta_data]]
+name = "android.app.lib_name"
+
+[[package.metadata.android.application.activity.intent_filter]]
+actions = ["android.intent.action.MAIN"]
+categories = ["android.intent.category.LAUNCHER"]
+
+[package.metadata.android.sdk]
+min_sdk_version = 26
+target_sdk_version = 35
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.INTERNET"
+
+[package.metadata.android.signing.dev]
+path = "android/keystore/debug.keystore"
+keystore_password = "android"
+
+[package.metadata.android.signing.release]
+path = "android/keystore/debug.keystore"
+keystore_password = "android"
+
+[package.metadata.android.signing.dev-release]
+path = "android/keystore/debug.keystore"
+keystore_password = "android"
+
+[package.metadata.android.signing.cd-release]
+path = "android/keystore/debug.keystore"
+keystore_password = "android"

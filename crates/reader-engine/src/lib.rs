@@ -1,0 +1,369 @@
+//! Bounded CPU image decode and renderer-independent logical geometry.
+use image::ImageDecoder;
+use reader_domain::{ReadingMode, ResumeAnchor};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    io::Cursor,
+    ops::Range,
+};
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("image exceeds supported limits")]
+    Limit,
+    #[error("invalid layout dimensions")]
+    Layout,
+    #[error(transparent)]
+    Image(#[from] image::ImageError),
+}
+pub type Result<T> = std::result::Result<T, Error>;
+#[derive(Clone, Copy, Debug)]
+pub struct DecodeLimits {
+    pub max_encoded_bytes: usize,
+    pub max_width: u32,
+    pub max_height: u32,
+    pub max_pixels: u64,
+    pub max_decoded_bytes: u64,
+}
+impl Default for DecodeLimits {
+    fn default() -> Self {
+        Self {
+            max_encoded_bytes: 32 * 1024 * 1024,
+            max_width: 16384,
+            max_height: 65536,
+            max_pixels: 32_000_000,
+            max_decoded_bytes: 128 * 1024 * 1024,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PageDimensions {
+    pub width: u32,
+    pub height: u32,
+}
+fn reader(bytes: &[u8], limits: DecodeLimits) -> Result<image::ImageReader<Cursor<&[u8]>>> {
+    if bytes.len() > limits.max_encoded_bytes {
+        return Err(Error::Limit);
+    }
+    let format = image::guess_format(bytes)?;
+    if !matches!(
+        format,
+        image::ImageFormat::Png | image::ImageFormat::Jpeg | image::ImageFormat::WebP
+    ) {
+        return Err(Error::Limit);
+    }
+    let mut reader = image::ImageReader::with_format(Cursor::new(bytes), format);
+    let mut bounds = image::Limits::default();
+    bounds.max_image_width = Some(limits.max_width);
+    bounds.max_image_height = Some(limits.max_height);
+    bounds.max_alloc = Some(limits.max_decoded_bytes);
+    reader.limits(bounds);
+    Ok(reader)
+}
+pub fn inspect_image(bytes: &[u8], limits: DecodeLimits) -> Result<PageDimensions> {
+    let (width, height) = reader(bytes, limits)?.into_dimensions()?;
+    let pixels = u64::from(width) * u64::from(height);
+    if width == 0
+        || height == 0
+        || width > limits.max_width
+        || height > limits.max_height
+        || pixels > limits.max_pixels
+        || pixels
+            .checked_mul(4)
+            .is_none_or(|b| b > limits.max_decoded_bytes)
+    {
+        return Err(Error::Limit);
+    }
+    Ok(PageDimensions { width, height })
+}
+/// Full decode is admitted only after dimension probing. Images larger than the
+/// supported budget fail explicitly; post-decode tiling is never used to claim
+/// a reduction in peak allocation.
+pub fn decode_image(bytes: &[u8], limits: DecodeLimits) -> Result<image::RgbaImage> {
+    let dimensions = inspect_image(bytes, limits)?;
+    let decoder = reader(bytes, limits)?.into_decoder()?;
+    let rgba_bytes = u64::from(dimensions.width) * u64::from(dimensions.height) * 4;
+    // Reserve both the decoder's native output and RGBA conversion at once.
+    if decoder
+        .total_bytes()
+        .checked_add(rgba_bytes)
+        .is_none_or(|n| n > limits.max_decoded_bytes)
+    {
+        return Err(Error::Limit);
+    }
+    Ok(image::DynamicImage::from_decoder(decoder)?.into_rgba8())
+}
+/// Bound GPU/display retention independently of original image admission.
+/// This still requires a bounded full CPU decode; unsupported originals fail
+/// before allocation rather than pretending that resizing removes that peak.
+pub fn decode_display_image(
+    bytes: &[u8],
+    limits: DecodeLimits,
+    max_width: u32,
+    max_height: u32,
+) -> Result<image::RgbaImage> {
+    if max_width == 0 || max_height == 0 {
+        return Err(Error::Limit);
+    }
+    let dimensions = inspect_image(bytes, limits)?;
+    const DISPLAY_PIXELS: u64 = 8_000_000;
+    let pixels = u64::from(dimensions.width) * u64::from(dimensions.height);
+    if dimensions.width <= max_width && dimensions.height <= max_height && pixels <= DISPLAY_PIXELS
+    {
+        return decode_image(bytes, limits);
+    }
+    let scale = (f64::from(max_width) / f64::from(dimensions.width))
+        .min(f64::from(max_height) / f64::from(dimensions.height))
+        .min((DISPLAY_PIXELS as f64 / pixels as f64).sqrt())
+        .min(1.0);
+    let width = (f64::from(dimensions.width) * scale).floor().max(1.0) as u32;
+    let height = (f64::from(dimensions.height) * scale).floor().max(1.0) as u32;
+    let display_bytes = u64::from(width) * u64::from(height) * 4;
+    let decode_budget = limits
+        .max_decoded_bytes
+        .checked_sub(display_bytes)
+        .ok_or(Error::Limit)?;
+    let original = decode_image(
+        bytes,
+        DecodeLimits {
+            max_decoded_bytes: decode_budget,
+            ..limits
+        },
+    )?;
+    // image::resize uses an intermediate floating point bitmap. Sample directly
+    // so display output is the only allocation added to the admitted original.
+    Ok(image::RgbaImage::from_fn(width, height, |x, y| {
+        let sx = (u64::from(x) * u64::from(original.width()) / u64::from(width)) as u32;
+        let sy = (u64::from(y) * u64::from(original.height()) / u64::from(height)) as u32;
+        *original.get_pixel(sx, sy)
+    }))
+}
+#[derive(Clone, Debug)]
+pub struct PageLayout {
+    pub index: usize,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+#[derive(Clone, Debug)]
+pub struct Layout {
+    pub pages: Vec<PageLayout>,
+    pub width: f64,
+    pub height: f64,
+    pub mode: ReadingMode,
+}
+pub fn layout_pages(
+    pages: &[PageDimensions],
+    mode: ReadingMode,
+    viewport_width: f64,
+    viewport_height: f64,
+    gap: f64,
+) -> Result<Layout> {
+    if !viewport_width.is_finite()
+        || !viewport_height.is_finite()
+        || !gap.is_finite()
+        || viewport_width <= 0.0
+        || viewport_height <= 0.0
+        || gap < 0.0
+        || pages.iter().any(|p| p.width == 0 || p.height == 0)
+    {
+        return Err(Error::Layout);
+    }
+    let mut result = Layout {
+        pages: Vec::with_capacity(pages.len()),
+        width: viewport_width,
+        height: viewport_height,
+        mode,
+    };
+    let mut cursor = 0.0;
+    for (index, p) in pages.iter().enumerate() {
+        let scale = match mode {
+            ReadingMode::Webtoon => viewport_width / f64::from(p.width),
+            _ => (viewport_width / f64::from(p.width)).min(viewport_height / f64::from(p.height)),
+        };
+        let width = f64::from(p.width) * scale;
+        let height = f64::from(p.height) * scale;
+        let (x, y) = match mode {
+            ReadingMode::Webtoon => ((viewport_width - width) / 2.0, cursor),
+            ReadingMode::Vertical => (
+                (viewport_width - width) / 2.0,
+                cursor + (viewport_height - height) / 2.0,
+            ),
+            _ => (
+                cursor + (viewport_width - width) / 2.0,
+                (viewport_height - height) / 2.0,
+            ),
+        };
+        result.pages.push(PageLayout {
+            index,
+            x,
+            y,
+            width,
+            height,
+        });
+        cursor += match mode {
+            ReadingMode::Webtoon => height + gap,
+            ReadingMode::Vertical => viewport_height + gap,
+            _ => viewport_width + gap,
+        };
+    }
+    match mode {
+        ReadingMode::Webtoon | ReadingMode::Vertical => {
+            result.height = (cursor - gap).max(viewport_height)
+        }
+        _ => result.width = (cursor - gap).max(viewport_width),
+    }
+    if mode == ReadingMode::RightToLeft {
+        for p in &mut result.pages {
+            p.x = result.width - p.x - p.width;
+        }
+    }
+    Ok(result)
+}
+impl Layout {
+    pub fn anchor_position(&self, anchor: &ResumeAnchor) -> Option<(f64, f64)> {
+        self.pages
+            .get(anchor.page_index)
+            .map(|p| (p.x, p.y + p.height * anchor.offset()))
+    }
+    pub fn visible(&self, x: f64, y: f64, width: f64, height: f64) -> Vec<usize> {
+        self.pages
+            .iter()
+            .filter(|p| {
+                p.x < x + width && p.x + p.width > x && p.y < y + height && p.y + p.height > y
+            })
+            .map(|p| p.index)
+            .collect()
+    }
+}
+/// A page list update resolves by stable page ID first. A removed page falls
+/// back to its previous logical index, clamped to the available list.
+pub fn resolve_anchor(anchor: &ResumeAnchor, page_ids: &[String]) -> Option<ResumeAnchor> {
+    if page_ids.is_empty() {
+        return None;
+    }
+    let index = page_ids
+        .iter()
+        .position(|id| id == &anchor.page_id)
+        .unwrap_or(anchor.page_index.min(page_ids.len() - 1));
+    Some(ResumeAnchor {
+        page_id: page_ids[index].clone(),
+        page_index: index,
+        offset_millionths: anchor.offset_millionths.min(1_000_000),
+    })
+}
+pub fn prefetch_window(current: usize, count: usize, before: usize, after: usize) -> Range<usize> {
+    current.saturating_sub(before).min(count)
+        ..current.saturating_add(after).saturating_add(1).min(count)
+}
+/// Byte-accounted LRU. Pinned/visible pages should stay with the caller; this
+/// cache owns only evictable decoded images, separate from downloaded originals.
+pub struct ImageCache {
+    budget: usize,
+    used: usize,
+    order: VecDeque<String>,
+    images: BTreeMap<String, image::RgbaImage>,
+}
+impl ImageCache {
+    pub fn new(budget: usize) -> Self {
+        Self {
+            budget,
+            used: 0,
+            order: VecDeque::new(),
+            images: BTreeMap::new(),
+        }
+    }
+    pub fn used_bytes(&self) -> usize {
+        self.used
+    }
+    pub fn insert(&mut self, key: String, image: image::RgbaImage) -> bool {
+        let bytes = image.as_raw().len();
+        if bytes > self.budget {
+            return false;
+        }
+        self.remove(&key);
+        while self.used + bytes > self.budget {
+            if let Some(old) = self.order.pop_front() {
+                self.remove(&old);
+            } else {
+                break;
+            }
+        }
+        self.used += bytes;
+        self.order.push_back(key.clone());
+        self.images.insert(key, image);
+        true
+    }
+    fn remove(&mut self, key: &str) {
+        if let Some(old) = self.images.remove(key) {
+            self.used -= old.as_raw().len();
+        }
+        self.order.retain(|k| k != key);
+    }
+    pub fn get(&mut self, key: &str) -> Option<&image::RgbaImage> {
+        if self.images.contains_key(key) {
+            self.order.retain(|k| k != key);
+            self.order.push_back(key.into());
+        }
+        self.images.get(key)
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn geometry_and_stable_resume() {
+        let pages = [
+            PageDimensions {
+                width: 100,
+                height: 1000,
+            },
+            PageDimensions {
+                width: 200,
+                height: 100,
+            },
+        ];
+        let layout = layout_pages(&pages, ReadingMode::Webtoon, 200.0, 400.0, 0.0).unwrap();
+        let anchor = ResumeAnchor::new("first", 0, 0.25).unwrap();
+        assert_eq!(layout.anchor_position(&anchor), Some((0.0, 500.0)));
+        let rtl = layout_pages(&pages, ReadingMode::RightToLeft, 200.0, 400.0, 0.0).unwrap();
+        assert!(rtl.pages[0].x > rtl.pages[1].x);
+        assert_eq!(
+            resolve_anchor(&anchor, &["new".into(), "first".into()])
+                .unwrap()
+                .page_index,
+            1
+        );
+    }
+    #[test]
+    fn memory_admission_and_eviction() {
+        let mut cache = ImageCache::new(16);
+        assert!(cache.insert("a".into(), image::RgbaImage::new(2, 2)));
+        assert!(cache.insert("b".into(), image::RgbaImage::new(2, 2)));
+        assert!(cache.get("a").is_none());
+        assert_eq!(cache.used_bytes(), 16);
+        let image = image::DynamicImage::new_rgba8(4, 4);
+        let mut data = Cursor::new(Vec::new());
+        image.write_to(&mut data, image::ImageFormat::Png).unwrap();
+        assert!(
+            inspect_image(
+                data.get_ref(),
+                DecodeLimits {
+                    max_pixels: 15,
+                    ..DecodeLimits::default()
+                }
+            )
+            .is_err()
+        );
+        assert_eq!(
+            decode_image(data.get_ref(), DecodeLimits::default())
+                .unwrap()
+                .width(),
+            4
+        );
+        let display = decode_display_image(data.get_ref(), DecodeLimits::default(), 2, 2).unwrap();
+        assert_eq!(display.dimensions(), (2, 2));
+        assert!(decode_display_image(data.get_ref(), DecodeLimits::default(), 0, 2).is_err());
+    }
+}

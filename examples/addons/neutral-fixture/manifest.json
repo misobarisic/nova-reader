@@ -1,0 +1,31 @@
+{
+  "formatVersion": 2,
+  "contract": "nova-reader1",
+  "api": "^1.0",
+  "id": "neutral-fixture",
+  "name": "Neutral reader fixtures",
+  "version": "1.0.0",
+  "language": "en",
+  "nsfw": false,
+  "entry": "main.js",
+  "scripts": [],
+  "assets": [
+    "NOTICE.md",
+    "pages/portrait.png",
+    "pages/wide.png",
+    "pages/tall.png"
+  ],
+  "permissions": {
+    "domains": [],
+    "httpPost": false
+  },
+  "capabilities": [
+    "capabilities",
+    "browse",
+    "search",
+    "filters",
+    "details",
+    "chapters",
+    "pages"
+  ]
+}

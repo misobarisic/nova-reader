@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Nova Reader
+Comment=Read comics and webtoons
+Exec=nova-reader
+Icon=nova-reader
+Terminal=false
+Categories=Graphics;Viewer;
+StartupWMClass=nova-reader

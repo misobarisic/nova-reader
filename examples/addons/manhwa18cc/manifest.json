@@ -1,0 +1,15 @@
+{
+  "formatVersion": 2,
+  "contract": "nova-reader1",
+  "api": "^1.0",
+  "id": "manhwa18cc",
+  "name": "Manhwa18.cc (English, Korean, all)",
+  "version": "1.0.0",
+  "language": "all",
+  "nsfw": true,
+  "entry": "main.js",
+  "scripts": ["yiimadara.js"],
+  "assets": ["NOTICE.md", "LICENSE"],
+  "permissions": {"domains": ["manhwa18.cc"], "httpPost": false},
+  "capabilities": ["capabilities", "browse", "search", "filters", "details", "chapters", "pages"]
+}

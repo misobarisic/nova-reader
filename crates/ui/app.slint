@@ -1,0 +1,321 @@
+import { Button, LineEdit, ScrollView, ComboBox, CheckBox, Spinner } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+export struct ItemRow { title: string, subtitle: string, badge: string, bookmarked: bool }
+export struct TileRow { image: image, offset: float, fraction: float }
+export struct PageRow { tiles:[TileRow], page-id: string, image: image, ratio: float, position: float, loaded: bool, error: string }
+export struct SettingRow { key: string, name: string, kind: string, value: string, checked: bool, options: [string], selected: int }
+
+component NavButton inherits Rectangle {
+    in property <string> label;
+    in property <string> glyph;
+    in property <bool> active;
+    callback clicked;
+    min-height: 48px;
+    border-radius: 10px;
+    background: root.active ? #aca0ff18 : touch.has-hover ? #ffffff08 : transparent;
+    HorizontalLayout {
+        padding-left: 14px; spacing: 12px;
+        Text { text: root.glyph; color: root.active ? #c1b5ff : #84858e; font-size: 20px; width: 24px; }
+        Text { text: root.label; color: root.active ? #ede8ff : #a9aab3; font-size: 14px; font-weight: root.active ? 600 : 400; }
+    }
+    touch := TouchArea { clicked => { root.clicked(); } }
+}
+
+export component AppWindow inherits Window {
+    title: "Nova Reader";
+    width: 1120px;
+    height: 780px;
+    background: Theme.current.canvas;
+    default-font-family: "sans-serif";
+    default-font-size: 14px;
+    in-out property <int> section: 0;
+    in property <string> heading: @tr("Your library");
+    in property <string> caption: @tr("A home for your next chapter.");
+    in property <string> status;
+    in property <bool> busy;
+    in property <[ItemRow]> items;
+    in property <[string]> sources;
+    in-out property <int> source-index: -1;
+    in property <string> series-title;
+    in property <string> series-description;
+    in property <bool> in-library;
+    in property <bool> has-more;
+    in-out property <bool> show-adult: false;
+    in property <[PageRow]> pages;
+    in property <float> total-ratio;
+    in-out property <length> scroll-y: 0px;
+    in-out property <int> current-page: 0;
+    in-out property <int> reading-mode: 0;
+    in-out property <float> zoom: 1;
+    in property <string> position-label;
+    in property <bool> can-previous;
+    in property <bool> can-next;
+    in-out property <string> path-text;
+    in-out property <string> category-text;
+    in property <bool> desktop: true;
+    in property <[string]> categories;
+    in-out property <int> category-index: 0;
+    in-out property <int> category-target: 0;
+    in property <[SettingRow]> settings;
+    private property <bool> narrow: root.width < 720px;
+    private property <length> navigation-width: root.narrow || root.section == 6 ? 0px : 216px;
+    out property <length> reader-width: min(1100px, max(100px, (root.width - 16px) * root.zoom));
+    private property <length> reader-height: root.total-ratio * root.reader-width;
+
+    callback navigate(int);
+    callback open-item(int);
+    callback item-action(int, string);
+    callback search(string);
+    callback source-selected(int);
+    callback browse(string);
+    callback load-more;
+    callback install-addon;
+    callback install-path(string);
+    callback local-import(bool);
+    callback backup(bool);
+    callback check-update;
+    callback toggle-library;
+    callback download-chapter;
+    callback chapter-step(int);
+    in-out property <length> reader-viewport-height: 0px;
+    callback reader-position(float, float, float);
+    callback reader-reflow(float,float);
+    callback mode-changed(int);
+    callback page-step(int);
+    callback add-category(string);
+    callback category-selected(int);
+    callback category-assignment-selected(int);
+    callback setting-changed(string, string);
+    callback source-action(string);
+    callback flush-progress;
+
+    changed reader-width => { if root.section == 6 {root.reader-reflow(root.reader-width / 1px, root.reader-viewport-height / 1px);} }
+
+    Rectangle {
+      width: root.width; height: root.height;
+      HorizontalLayout {
+        width: root.width; height: root.height;
+        spacing: 0px;
+        if root.navigation-width > 0px: Rectangle {
+            width: root.navigation-width; background: #131317;
+            VerticalLayout {
+                padding: 16px; spacing: 6px;
+                Rectangle {
+                    height: 84px;
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Rectangle { width: 36px; height: 36px; border-radius: 11px; background: #c1b5ff;
+                            Text { text: "N"; color: #211b39; font-weight: 800; font-size: 22px; horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                        VerticalLayout { spacing: 3px; Text { text: "Nova Reader"; color: #f5f2ff; font-weight: 700; font-size: 17px; } Text { text: @tr("ONE MORE CHAPTER"); color: #777581; font-size: 9px; letter-spacing: 1px; } }
+                    }
+                }
+                NavButton { label: @tr("Library"); glyph: "▤"; active: root.section == 0; clicked => { root.navigate(0); } }
+                NavButton { label: @tr("Updates"); glyph: "↻"; active: root.section == 1; clicked => { root.navigate(1); } }
+                NavButton { label: @tr("History"); glyph: "◷"; active: root.section == 2; clicked => { root.navigate(2); } }
+                NavButton { label: @tr("Browse"); glyph: "⌕"; active: root.section == 3; clicked => { root.navigate(3); } }
+                Rectangle { height: 1px; background: #ffffff0c; }
+                NavButton { label: @tr("Downloads"); glyph: "↓"; active: root.section == 7; clicked => { root.navigate(7); } }
+                NavButton { label: @tr("More"); glyph: "···"; active: root.section == 4; clicked => { root.navigate(4); } }
+                Rectangle { vertical-stretch: 1; }
+                Text { text: @tr("Read at your own pace."); color: #666671; font-size: 11px; }
+                Text { text: "0.1.0 · GPL-3.0+"; color: #53535e; font-size: 10px; }
+            }
+        }
+        VerticalLayout {
+            padding: root.section == 6 ? 0px : root.narrow ? 16px : 36px;
+            padding-bottom: root.narrow ? 8px : 24px;
+            spacing: 18px;
+            if root.section != 6: VerticalLayout {
+                spacing: 8px;
+                Text { text: root.heading; color: #f1eef9; font-size: root.narrow ? 28px : 34px; font-weight: 700; }
+                Text { text: root.caption; color: #93919f; wrap: word-wrap; font-size: 13px; }
+            }
+            if root.status != "": Rectangle {
+                min-height: 44px; background: #b5a3ff12; border-radius: 8px;
+                Text { text: root.status; color: #c7bdf0; wrap: word-wrap; x: 12px; y: 8px; width: parent.width - 24px; }
+            }
+            if root.busy: HorizontalLayout { Spinner { width: 24px; height: 24px; } Text { text: @tr("Loading…"); color: #a4a1b0; } }
+            if root.section == 3: VerticalLayout {
+                spacing: 10px;
+                HorizontalLayout {
+                    ComboBox { model: root.sources; current-index <=> root.source-index; selected(value) => { root.source-selected(self.current-index); } }
+                    Button { text: @tr("Install addon"); clicked => { root.install-addon(); } }
+                }
+                CheckBox { text: @tr("Show adult sources"); checked <=> root.show-adult; toggled => { root.navigate(3); } }
+                HorizontalLayout {
+                    query := LineEdit { placeholder-text: @tr("Search this source…"); accepted => { root.search(self.text); } }
+                    Button { text: @tr("Search"); clicked => { root.search(query.text); } }
+                }
+                HorizontalLayout {
+                    Button { text: @tr("Popular"); clicked => { root.browse("popular"); } }
+                    Button { text: @tr("Latest"); clicked => { root.browse("latest"); } }
+                    Button { text: @tr("Enable / disable"); clicked => { root.source-action("toggle"); } }
+                    Button { text: @tr("Remove"); clicked => { root.source-action("remove"); } }
+                    Button { text: @tr("Settings"); clicked => { root.source-action("settings"); } }
+                }
+            }
+            if root.section == 0: HorizontalLayout {
+                library-query := LineEdit { placeholder-text: @tr("Search your library…"); accepted => { root.search(self.text); } }
+                Button { text: @tr("Search"); clicked => { root.search(library-query.text); } }
+            }
+            if root.section == 0: HorizontalLayout {
+                VerticalLayout { Text { text: @tr("Filter"); color:#8d849b; font-size:11px; } ComboBox { min-width:0px; model: root.categories; current-index <=> root.category-index; selected(value) => { root.category-selected(self.current-index); } } }
+                VerticalLayout { Text { text: @tr("Category to assign"); color:#8d849b; font-size:11px; } ComboBox { min-width:0px; model: root.categories; current-index <=> root.category-target; selected(value) => { root.category-assignment-selected(self.current-index); } } }
+            }
+            if root.section == 1: Button { text: @tr("Refresh library"); clicked => { root.browse("refresh"); } }
+            if root.section == 5: VerticalLayout {
+                Text { text: root.series-description; color: #a7a3b1; wrap: word-wrap; overflow: elide; max-height: 110px; }
+                HorizontalLayout {
+                    Button { text: root.in-library ? @tr("Remove from library") : @tr("Add to library"); clicked => { root.toggle-library(); } }
+                    Button { text: @tr("Continue reading"); clicked => { root.chapter-step(0); } }
+                    Button { text: @tr("Refresh"); clicked => { root.browse("chapters"); } }
+                }
+            }
+            if root.section != 4 && root.section != 6 && root.section != 8: ScrollView {
+                VerticalLayout {
+                    alignment:start;
+                    spacing: 8px;
+                    for row[index] in root.items: Rectangle {
+                        height: 88px; border-radius: 10px; background: hover.has-hover ? #24222c : #19181f;
+                        border-width: 1px; border-color: #ffffff07;
+                        HorizontalLayout {
+                            padding: 14px; spacing: 12px;
+                            Rectangle { width: 4px; border-radius: 2px; background: row.bookmarked ? #c4b5fd : #393541; }
+                            VerticalLayout {
+                                spacing: 6px;
+                                Text { text: row.title; color: #e6e1ef; font-weight: 600; overflow: elide; }
+                                Text { text: row.subtitle; color: #85818f; font-size: 12px; overflow: elide; }
+                            }
+                            Text { text: row.badge; color: #b6a4ea; font-size: 11px; horizontal-alignment: right; }
+                        }
+                        hover := TouchArea { clicked => { root.open-item(index); } }
+                        if root.section == 0 && root.category-target > 0: Button { width:160px; x: parent.width - self.width - 10px; y: 49px; height: 30px; text: @tr("Toggle category"); clicked => { root.item-action(index, "category"); } }
+                        if root.section == 5: HorizontalLayout {
+                            width:min(parent.width - 20px,360px); x: parent.width - self.width - 10px; y: 49px; height: 30px;
+                            Button { text: @tr("Read / unread"); clicked => { root.item-action(index, "read"); } }
+                            Button { text: row.bookmarked ? @tr("Unbookmark") : @tr("Bookmark"); clicked => { root.item-action(index, "bookmark"); } }
+                            Button { text: @tr("Download"); clicked => { root.item-action(index, "download"); } }
+                        }
+                        if root.section == 7: HorizontalLayout {
+                            width:min(parent.width - 20px,360px); x: parent.width - self.width - 10px; y: 49px; height: 30px;
+                            Button { text: @tr("Pause"); clicked => { root.item-action(index, "pause"); } }
+                            Button { text: @tr("Resume"); clicked => { root.item-action(index, "resume"); } }
+                            Button { text: @tr("Cancel"); clicked => { root.item-action(index, "cancel"); } }
+                        }
+                    }
+                    if root.items.length == 0 && !root.busy: Rectangle {
+                        min-height: 220px;
+                        VerticalLayout {
+                            alignment: center; spacing: 12px;
+                            Text { text: "▱"; color: #655b83; font-size: 48px; horizontal-alignment: center; }
+                            Text { text: root.section == 0 ? @tr("Your next story starts here") : @tr("Nothing here yet"); color: #d0c9de; font-size: 19px; horizontal-alignment: center; }
+                            Text { text: root.section == 0 ? @tr("Install a source in Browse, or import a local chapter in More.") : @tr("Try refreshing or choosing another source."); color: #777181; wrap: word-wrap; horizontal-alignment: center; }
+                        }
+                    }
+                    if root.has-more: Button { text: @tr("Load more"); clicked => { root.load-more(); } }
+                }
+            }
+            if root.section == 4: ScrollView {
+                VerticalLayout {
+                    spacing: 12px;
+                    Text { text: @tr("Your reading space"); color: #ddd4ee; font-size: 18px; font-weight: 600; }
+                    Button { text: @tr("Downloads"); clicked => { root.navigate(7); } }
+                    Button { text: @tr("Install a source addon (.zip)"); clicked => { root.install-addon(); } }
+                    Button { text: @tr("Import a local chapter (.cbz / .zip)"); clicked => { root.local-import(false); } }
+                    Button { text: @tr("Import an image folder"); clicked => { root.local-import(true); } }
+                    Button { text: @tr("Export metadata backup"); clicked => { root.backup(false); } }
+                    Button { text: @tr("Restore metadata backup"); clicked => { root.backup(true); } }
+                    Text { text: @tr("Backups include library, categories, history and reading position. Chapter files, cookies and addon code are excluded."); color: #8a8296; wrap: word-wrap; }
+                    HorizontalLayout {
+                        LineEdit { text <=> root.category-text; placeholder-text: @tr("New category"); }
+                        Button { text: @tr("Add category"); clicked => { root.add-category(root.category-text); } }
+                    }
+                    Button { text: @tr("Check for app updates"); clicked => { root.check-update(); } }
+                    Text { text: @tr("Nova Reader · GPL-3.0-or-later\nBuilt with Nova Kit and Slint. Source addons are installed explicitly and may become unavailable."); color: #6f687a; wrap: word-wrap; font-size: 12px; }
+                }
+            }
+            if root.section == 8: ScrollView {
+                VerticalLayout {
+                    spacing: 16px;
+                    for setting in root.settings: VerticalLayout {
+                        spacing: 8px;
+                        Text { text: setting.name; color: #d5cce4; }
+                        if setting.kind == "bool": CheckBox { checked: setting.checked; toggled => { root.setting-changed(setting.key, self.checked ? "true" : "false"); } }
+                        if setting.kind == "text" || setting.kind == "secret": LineEdit { text: setting.value; input-type: setting.kind == "secret" ? InputType.password : InputType.text; placeholder-text: setting.kind == "secret" ? @tr("Enter a new secret to replace it") : ""; accepted => { root.setting-changed(setting.key, self.text); } }
+                        if setting.kind == "select": ComboBox { model: setting.options; current-index: setting.selected; selected(value) => { root.setting-changed(setting.key, value); } }
+                    }
+                    if root.settings.length == 0: Text { text: @tr("This source has no configurable settings."); color: #968aa5; }
+                    Text { text: @tr("Text fields save when you press Enter. Secrets are stored only in this profile and are excluded from backups."); color: #867991; wrap: word-wrap; }
+                }
+            }
+            if root.section == 6: VerticalLayout {
+                spacing: 0px;
+                Rectangle { height: root.narrow ? 92px : 58px; background: #19171e;
+                    VerticalLayout {
+                        padding: 8px; spacing: 4px;
+                        HorizontalLayout { spacing:8px;
+                            Button { text: "‹"; clicked => { root.navigate(5); } }
+                            Text { text: root.series-title; color: #ddd7e7; overflow: elide; }
+                            Text { text: root.position-label; color: #afa3c0; font-size: 11px; }
+                            if !root.narrow: ComboBox { max-width:260px; model: [@tr("Webtoon"), @tr("Left to right"), @tr("Right to left"), @tr("Vertical paging")]; current-index <=> root.reading-mode; selected(value) => { root.mode-changed(self.current-index); } }
+                            Button { text: "↓"; clicked => { root.download-chapter(); } }
+                        }
+                        if root.narrow: ComboBox { model: [@tr("Webtoon"), @tr("Left to right"), @tr("Right to left"), @tr("Vertical paging")]; current-index <=> root.reading-mode; selected(value) => { root.mode-changed(self.current-index); } }
+                    }
+                }
+                reader := Flickable {
+                    content-y <=> root.scroll-y;
+                    changed content-y => {if root.reading-mode==0{root.reader-position(-self.content-y / 1px,root.reader-width / 1px,self.height / 1px);}}
+                    changed height => {root.reader-viewport-height=self.height;root.reader-reflow(root.reader-width / 1px,self.height / 1px);}
+                    interactive: root.reading-mode == 0 || root.zoom > 1;
+                    content-width: max(self.width, root.reader-width);
+                    content-height: root.reading-mode == 0 ? max(self.height, root.reader-height) : self.height;
+                    for page[index] in root.pages: Rectangle {
+                        visible: root.reading-mode == 0 || index == root.current-page;
+                        x: (max(reader.width, root.reader-width) - self.width) / 2;
+                        y: root.reading-mode == 0 ? page.position * root.reader-width : 0px;
+                        width: root.reader-width;
+                        height: root.reading-mode == 0 ? root.reader-width * page.ratio : reader.height;
+                        background: #111015;
+                        if page.loaded: Rectangle {
+                            width: root.reading-mode==0 ? parent.width : min(parent.width,parent.height/page.ratio);
+                            height: root.reading-mode==0 ? parent.height : min(parent.height,parent.width*page.ratio);
+                            x:(parent.width - self.width)/2; y:(parent.height - self.height)/2;
+                            for tile in page.tiles: Image {source:tile.image;x:0px;y:tile.offset*parent.height;width:parent.width;height:tile.fraction*parent.height;image-fit:fill;}
+                        }
+                        if !page.loaded: Text { text: page.error == "" ? @tr("Loading page {}", index + 1) : page.error; color: #7e748b; wrap: word-wrap; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                }
+                Rectangle { height: 48px; background: #19171e;
+                    HorizontalLayout {
+                        padding: 6px;
+                        Button { text: root.narrow ? "«" : @tr("Previous chapter"); enabled: root.can-previous; clicked => { root.chapter-step(-1); } }
+                        Button { text: "‹"; clicked => { root.page-step(-1); } }
+                        Button { text: "−"; clicked => { root.zoom = max(0.5, root.zoom - 0.25); } }
+                        Button { text: "+"; clicked => { root.zoom = min(3, root.zoom + 0.25); } }
+                        Button { text: @tr("Retry"); clicked => { root.page-step(0); } }
+                        Button { text: "›"; clicked => { root.page-step(1); } }
+                        Button { text: root.narrow ? "»" : @tr("Next chapter"); enabled: root.can-next; clicked => { root.chapter-step(1); } }
+                    }
+                }
+            }
+            if root.narrow && root.section != 6: HorizontalLayout {
+                spacing: 2px;
+                for label[index] in [@tr("Library"), @tr("Updates"), @tr("History"), @tr("Browse"), @tr("More")]: Button { text: label; clicked => { root.navigate(index); } }
+            }
+        }
+    }
+    }
+    keyboard := FocusScope {
+        key-pressed(event) => {
+            if event.text == Key.Escape { root.navigate(root.section == 6 ? 5 : 0); return accept; }
+            if root.section == 6 && event.text == Key.RightArrow { root.page-step(root.reading-mode == 2 ? -1 : 1); return accept; }
+            if root.section == 6 && event.text == Key.LeftArrow { root.page-step(root.reading-mode == 2 ? 1 : -1); return accept; }
+            if root.section == 6 && (event.text == " " || event.text == Key.DownArrow) { root.page-step(1); return accept; }
+            return reject;
+        }
+    }
+    forward-focus: keyboard;
+}
