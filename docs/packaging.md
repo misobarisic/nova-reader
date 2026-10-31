@@ -78,7 +78,8 @@ uses `archive: false` and publication downloads that artifact by ID with
 `dependency-licenses.sh` uses cargo-about 0.9.1 (Nix-provided or explicitly
 installed by Linux CI) with `--locked --fail` for the exact release targets and
 features. Full license texts and upstream links accompany LICENSE and project
-attribution in desktop packages and Android assets. The launcher artwork is
+attribution in desktop packages and Android assets. The inventory also includes
+the Apache license for the bundled Roboto faces reused from Nova. The launcher artwork is
 inherited from Nova under the same license; it is not a new branding claim.
 
 The workflow is copied from Nova with reader-specific names, paths and native

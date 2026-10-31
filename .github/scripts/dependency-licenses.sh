@@ -9,6 +9,7 @@ esac
 mkdir -p target/licenses
 for target in "${targets[@]}"; do
   cargo-about generate --locked --fail -c .github/scripts/about.toml --target "$target" --no-default-features --features "$features" assets/dependency-licenses.hbs > "target/licenses/$target.txt"
+  cat assets/fonts/LICENSE.txt >> "target/licenses/$target.txt"
 done
 if [[ "$1" == android ]]; then
   mkdir -p android/assets/dependency-licenses

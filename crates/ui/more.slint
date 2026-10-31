@@ -1,0 +1,222 @@
+// Reader destinations hosted in Nova's retained More landing/push-page pattern.
+// Layout, SettingsCard/SettingsLink rows and transitions follow Nova b69a1e5.
+import { Theme, Anim, SettingsStyle } from "@NovaUiShared";
+import { SettingsCard } from "@NovaUiBase/settings-controls.slint";
+import { ScrollView } from "@NovaUiBase/scrollview.slint";
+import { PageHeader } from "page-header.slint";
+import { MenuLink, ActionButton, ReaderField } from "controls.slint";
+
+export component MorePage inherits Rectangle {
+    in property <int> section;
+    in property <bool> narrow;
+    in property <string> app-version;
+    in property <string> status;
+    in-out property <string> category-text;
+    callback navigate(int);
+    callback install-addon;
+    callback local-import(bool);
+    callback backup(bool);
+    callback add-category(string);
+    callback check-update;
+    background: Theme.current.artwork_canvas;
+    clip: true;
+    private property <int> choice: root.narrow ? 0 : 2;
+    public function focus_shell() {
+        if root.section == 4 { nav-scope.focus(); }
+        else { child-scope.focus(); }
+    }
+    changed narrow => { root.choice = max(root.narrow ? 0 : 2, root.choice); }
+    private property <bool> local-open: root.section >= 9;
+    private property <int> child-section: 9;
+    private property <float> slide: root.local-open ? 1 : 0;
+    private property <float> alpha: root.local-open ? 1 : 0;
+    animate slide { duration: Anim.transition_slide; easing: ease-out; }
+    animate alpha { duration: Anim.transition_fade; }
+    private property <length> landing-scroll-y: 0px;
+    private property <bool> restore-pending: true;
+    changed section => {
+        if root.section >= 9 { root.child-section = root.section; }
+        if root.section == 4 { root.restore-pending = true; }
+    }
+    // Like Nova's restore_scroll timer, apply the saved position after layout
+    // publication. Hidden native scroll views may clamp their content offset.
+    restore-scroll := Timer {
+        interval: 16ms;
+        running: root.section == 4 && root.restore-pending;
+        triggered => {
+            if root.landing-active {
+                landing-scroll.content-y = root.landing-scroll-y;
+                root.restore-pending = false;
+                nav-scope.focus();
+            }
+        }
+    }
+    private property <bool> landing-active: root.section == 4 && root.slide <= 0 && root.alpha <= 0;
+    private property <int> focus-request: SettingsStyle.focus-request;
+    changed focus-request => {
+        if SettingsStyle.keyboard-mode && root.visible {
+            if root.landing-active { root.reveal_landing(); }
+            else if root.local-open { root.reveal_child(); }
+        }
+    }
+    function reveal_landing() {
+        let top = SettingsStyle.focus-y - landing-scroll.absolute-position.y;
+        if top < 0px { landing-scroll.content-y -= top; }
+        else if top + SettingsStyle.focus-height > landing-scroll.visible-height {
+            landing-scroll.content-y -= top + SettingsStyle.focus-height - landing-scroll.visible-height;
+        }
+    }
+    function reveal_child() {
+        let top = SettingsStyle.focus-y - child-scroll.absolute-position.y;
+        if top < 0px { child-scroll.content-y -= top; }
+        else if top + SettingsStyle.focus-height > child-scroll.visible-height {
+            child-scroll.content-y -= top + SettingsStyle.focus-height - child-scroll.visible-height;
+        }
+    }
+    // This scroller remains mounted while its children own input. Returning
+    // restores the same cards and position, just like Nova's More page.
+    landing := Rectangle {
+        width: root.width; height: max(0px, root.height - (root.narrow ? 68px : 0px));
+        visible: !root.local-open || root.slide < 1 || root.alpha < 1;
+        x: -0.28 * root.width * root.slide; opacity: 1 - root.alpha;
+        nav-scope := FocusScope {
+            width: parent.width; height: parent.height; enabled: root.landing-active;
+            key-pressed(e) => {
+                if e.text == Key.UpArrow || e.text == Key.DownArrow {
+                    SettingsStyle.keyboard-mode = true;
+                    root.choice = clamp(root.choice + (e.text == Key.UpArrow ? -1 : 1), root.narrow ? 0 : 2, 4);
+                    self.focus();
+                    return accept;
+                }
+                if e.text == Key.Return || e.text == " " {
+                    if !e.repeat { root.navigate(root.choice == 0 ? 2 : root.choice == 1 ? 7 : root.choice == 2 ? 9 : root.choice == 3 ? 10 : 13); }
+                    return accept;
+                }
+                return reject;
+            }
+            landing-scroll := ScrollView {
+                changed content-y => {
+                    if root.landing-active && !root.restore-pending { root.landing-scroll-y = self.content-y; }
+                }
+                width: parent.width; height: parent.height;
+                mouse-drag-pan-enabled: true;
+                content-width: self.visible-width;
+                VerticalLayout {
+                    padding: 18px; spacing: 12px; alignment: start;
+                    PageHeader { title: @tr("More"); narrow: root.narrow; show-back: root.narrow; back => { root.navigate(0); } }
+                    if root.narrow: SettingsCard { MenuLink {
+                        focused: SettingsStyle.keyboard-mode && root.choice == 0;
+                        interactive: root.landing-active; title: @tr("History"); subtitle: @tr("Pick up where you left off");
+                        destination-id: "more:history"; icon: @image-url("../../assets/icons/navigation/history.svg"); picked => { root.choice = 0; root.navigate(2); }
+                    } }
+                    if root.narrow: SettingsCard { MenuLink {
+                        focused: SettingsStyle.keyboard-mode && root.choice == 1;
+                        interactive: root.landing-active; title: @tr("Downloads"); subtitle: @tr("Read your saved chapters");
+                        destination-id: "more:downloads"; icon-kind: 17; picked => { root.choice = 1; root.navigate(7); }
+                    } }
+                    SettingsCard { MenuLink {
+                        focused: SettingsStyle.keyboard-mode && root.choice == 2;
+                        interactive: root.landing-active; title: @tr("Local chapters"); subtitle: @tr("Import chapter archives and image folders");
+                        destination-id: "more:local"; icon-kind: 2; picked => { root.choice = 2; root.navigate(9); }
+                    } }
+                    SettingsCard { MenuLink {
+                        focused: SettingsStyle.keyboard-mode && root.choice == 3;
+                        interactive: root.landing-active; title: @tr("Settings"); subtitle: @tr("Make Nova Reader yours");
+                        destination-id: "more:settings"; icon-kind: 10; picked => { root.choice = 3; root.navigate(10); }
+                    } }
+                    SettingsCard { MenuLink {
+                        focused: SettingsStyle.keyboard-mode && root.choice == 4;
+                        interactive: root.landing-active; title: @tr("About"); subtitle: @tr("Information about Nova Reader");
+                        destination-id: "more:about"; icon-kind: 15; picked => { root.choice = 4; root.navigate(13); }
+                    } }
+                }
+            }
+        }
+    }
+    child := Rectangle {
+        width: root.width; height: root.height;
+        visible: root.local-open || root.slide > 0 || root.alpha > 0;
+        x: root.width * (1 - root.slide); opacity: root.alpha;
+        child-scope := FocusScope {
+            width: parent.width; height: parent.height; enabled: root.local-open;
+            child-scroll := ScrollView {
+                width: parent.width; height: parent.height;
+                mouse-drag-pan-enabled: true;
+                content-width: self.visible-width;
+                in property <int> destination: root.child-section;
+                changed destination => { self.content-y = 0px; }
+                VerticalLayout {
+                    padding: 18px; spacing: 12px; alignment: start;
+                    PageHeader {
+                        title: root.child-section == 9 ? @tr("Local chapters") : root.child-section == 10 ? @tr("Settings") : root.child-section == 11 ? @tr("Categories") : root.child-section == 12 ? @tr("Data") : @tr("About");
+                        narrow: root.narrow; show-back: true;
+                        back => { root.navigate(root.child-section == 11 || root.child-section == 12 ? 10 : 4); }
+                    }
+                    if root.status != "": Text { min-width: 0px; text: root.status; color: Theme.current.text_settings; wrap: word-wrap; }
+                    if root.child-section == 9: VerticalLayout {
+                        spacing: 12px;
+                        SettingsCard { MenuLink {
+                            interactive: root.local-open; title: @tr("Import a local chapter"); subtitle: @tr("Choose a CBZ or ZIP archive"); icon-kind: 8;
+                            picked => { root.local-import(false); }
+                        } }
+                        SettingsCard { MenuLink {
+                            interactive: root.local-open; title: @tr("Import an image folder"); subtitle: @tr("Choose a folder of chapter pages"); icon-kind: 2;
+                            picked => { root.local-import(true); }
+                        } }
+                    }
+                    if root.child-section == 10: VerticalLayout {
+                        spacing: 12px;
+                        SettingsCard { MenuLink {
+                            interactive: root.local-open; title: @tr("Sources"); subtitle: @tr("Install, browse and configure source addons"); icon-kind: 0;
+                            picked => { root.navigate(3); }
+                        } }
+                        SettingsCard { MenuLink {
+                            interactive: root.local-open; title: @tr("Categories"); subtitle: @tr("Organize your library"); icon-kind: 1;
+                            picked => { root.navigate(11); }
+                        } }
+                        SettingsCard { MenuLink {
+                            interactive: root.local-open; title: @tr("Data"); subtitle: @tr("Backup and import"); icon-kind: 8;
+                            picked => { root.navigate(12); }
+                        } }
+                    }
+                    if root.child-section == 11: SettingsCard {
+                        VerticalLayout {
+                            padding: 16px; spacing: 12px;
+                            Text { min-width: 0px; text: @tr("Create a category, then assign it from your library."); color: Theme.current.text_settings; wrap: word-wrap; }
+                            ReaderField { enabled: root.local-open; text <=> root.category-text; placeholder-text: @tr("New category"); accepted(value) => { root.add-category(root.category-text); } }
+                            ActionButton { enabled: root.local-open; text: @tr("Add category"); clicked => { root.add-category(root.category-text); } }
+                        }
+                    }
+                    if root.child-section == 12: VerticalLayout {
+                        spacing: 12px;
+                        SettingsCard { MenuLink {
+                            interactive: root.local-open; title: @tr("Export metadata backup"); subtitle: @tr("Save your library and reading progress"); icon-kind: 8;
+                            picked => { root.backup(false); }
+                        } }
+                        SettingsCard { MenuLink {
+                            interactive: root.local-open; title: @tr("Restore metadata backup"); subtitle: @tr("Restore a saved library and reading progress"); icon-kind: 7;
+                            picked => { root.backup(true); }
+                        } }
+                        Text { min-width: 0px; text: @tr("Backups include library, categories, history and reading position. Chapter files, cookies and addon code are excluded."); color: Theme.current.text_secondary; wrap: word-wrap; }
+                    }
+                    if root.child-section == 13: VerticalLayout {
+                        spacing: 12px;
+                        SettingsCard {
+                            VerticalLayout {
+                                padding: 16px; spacing: 8px;
+                                Text { min-width: 0px; text: "Nova Reader"; font-size: 24px; font-weight: 700; color: Theme.current.text_bright; }
+                                Text { text: root.app-version; color: Theme.current.text_settings; }
+                                Text { min-width: 0px; text: @tr("GPL-3.0-or-later. Built with Nova Kit and Slint."); color: Theme.current.text_secondary; wrap: word-wrap; }
+                                Text { min-width: 0px; text: @tr("Source addons are installed explicitly and may become unavailable."); color: Theme.current.text_secondary; wrap: word-wrap; }
+                            }
+                        }
+                        SettingsCard { MenuLink {
+                            interactive: root.local-open; title: @tr("Check for app updates"); subtitle: @tr("Look for a new Nova Reader release"); icon-kind: 6;
+                            picked => { root.check-update(); }
+                        } }
+                    }
+                }
+            }
+        }
+    }
+}

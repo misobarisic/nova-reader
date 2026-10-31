@@ -1,82 +1,204 @@
+// Adapted from Nova b69a1e5, sidenav.slint and bottomnav.slint.
+// Preserve Nova's geometry/selection/motion; only destinations are Reader-owned.
+import { Theme, Anim, SettingsStyle } from "@NovaUiShared";
+import { ScrollView } from "@NovaUiBase/scrollview.slint";
+import { IcHistory } from "@NovaUiBase/icons.slint";
+
+export global NavState { in-out property <int> from: 0; }
+export global NavMetrics { out property <length> rail-width: 64px; }
+
+export component NavFeedback inherits Rectangle {
+    in property <int> active: 0;
+    width: 0px;
+    height: 0px;
+    out property <float> pulse: feedback && motion_enabled ? 4 * progress * (1 - progress) : 0.0;
+    private property <bool> entered: false;
+    private property <int> last_active: 0;
+    private property <bool> initialized: false;
+    private property <float> progress: root.entered ? 1.0 : 0.0;
+    private property <bool> feedback: false;
+    private property <bool> motion_enabled: Anim.enabled && Anim.nav_slide;
+    animate progress { duration: root.entered ? Anim.nav_feedback : 0ms; easing: ease-out; }
+
+    init => {
+        root.feedback = root.motion_enabled && NavState.from != root.active;
+        root.last_active = root.active;
+        root.initialized = true;
+        NavState.from = root.active;
+        if (root.feedback) { go.start(); } else { root.entered = true; }
+    }
+    changed active => {
+        // Persistent chrome observes selection changes without reconstruction.
+        if (!root.initialized || root.last_active == root.active) { return; }
+        go.stop();
+        root.feedback = root.motion_enabled && root.last_active != root.active;
+        root.last_active = root.active;
+        NavState.from = root.active;
+        root.entered = false;
+        if (root.feedback) { go.start(); } else { root.entered = true; }
+    }
+    changed motion_enabled => {
+        if (!root.motion_enabled) { go.stop(); root.feedback = false; root.entered = true; }
+    }
+    go := Timer {
+        interval: 16ms; running: false;
+        triggered => { self.stop(); root.entered = true; }
+    }
+}
+
 component NavigationItem inherits Rectangle {
     in property <string> label;
     in property <image> icon;
     in property <bool> active;
-    in property <bool> bottom;
-    callback clicked;
-    min-width: 0px;
-    height: root.bottom ? 64px : 48px;
-    border-radius: 10px;
-    background: root.active ? #aca0ff18 : touch.has-hover ? #ffffff08 : transparent;
-    border-width: focus.has-focus ? 2px : 0px; border-color: #c1b5ff;
-    accessible-role: tab;
+    in property <float> pop;
+    callback picked;
+    callback move-focus(int);
+    public function focus_control() { item-focus.focus(); }
+    min-width: 0px; height: 56px;
+    accessible-role: button;
     accessible-label: root.label;
     accessible-item-selectable: true;
     accessible-item-selected: root.active;
-    accessible-action-default => { root.clicked(); }
-    Image {
-        source: root.icon; width: 22px; height: 22px;
-        x: root.bottom ? (parent.width - self.width) / 2 : 16px;
-        y: root.bottom ? 9px : (parent.height - self.height) / 2;
-        image-fit: contain; colorize: root.active ? #c1b5ff : #84858e;
+    accessible-action-default => { root.picked(); }
+    Rectangle {
+        width: 48px; height: 48px;
+        x: (parent.width - self.width) / 2; y: 4px;
+        background: root.active || item-focus.has-focus ? transparent : item-touch.has-hover ? Theme.current.control_hover : transparent;
+        border-radius: 24px;
+        border-width: item-focus.has-focus ? 2px : 0px;
+        border-color: Theme.current.text_bright;
+        if root.icon.width > 0: Image {
+            source: root.icon; image-fit: contain;
+            width: 24px + root.pop * 2px; height: self.width;
+            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+            colorize: root.active ? Theme.current.on_accent : Theme.current.text_muted;
+        }
+        if root.icon.width == 0: IcHistory {
+            width: 24px + root.pop * 2px; height: self.width;
+            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+            fill: root.active ? Theme.current.on_accent : Theme.current.text_muted;
+        }
     }
-    Text {
-        x: root.bottom ? 2px : 50px; y: root.bottom ? 35px : 0px;
-        width: max(0px, parent.width - self.x - (root.bottom ? 2px : 8px));
-        height: root.bottom ? 22px : parent.height;
-        text: root.label; color: root.active ? #ede8ff : #a9aab3;
-        font-size: root.bottom ? 11px : 14px; font-weight: root.active ? 600 : 400;
-        vertical-alignment: center; horizontal-alignment: root.bottom ? center : left;
-        overflow: elide;
-    }
-    focus := FocusScope {
-        key-pressed(event) => {
-            if event.text == Key.Return || event.text == " " {
-                if !event.repeat { root.clicked(); }
-                return accept;
-            }
+    item-focus := FocusScope {
+        key-pressed(e) => {
+            SettingsStyle.keyboard-mode = true;
+            if e.text == Key.Return || e.text == " " { if !e.repeat { root.picked(); } return accept; }
+            if e.text == Key.UpArrow { root.move-focus(-1); return accept; }
+            if e.text == Key.DownArrow { root.move-focus(1); return accept; }
             return reject;
         }
     }
-    touch := TouchArea { clicked => { focus.focus(); root.clicked(); } }
-    forward-focus: focus;
+    item-touch := TouchArea { mouse-cursor: pointer; clicked => { SettingsStyle.keyboard-mode = false; root.picked(); } }
+    forward-focus: item-focus;
 }
 
 export component DesktopSidebar inherits Rectangle {
     in property <int> section;
-    in property <string> app-version;
     callback navigate(int);
-    width: 216px; background: #131317;
-    // Keep all destinations reachable on short desktop windows too.
-    Flickable {
+    width: NavMetrics.rail-width; background: Theme.current.nav_rail;
+    private property <int> selected: root.section == 0 ? 0 : root.section == 1 ? 1 : root.section == 3 || root.section == 8 ? 2 : root.section == 2 ? 3 : root.section == 7 ? 4 : 5;
+    motion := NavFeedback { active: root.section; }
+    function focus_item(index: int) {
+        let next = Math.mod(index + 6, 6);
+        if next == 0 { library.focus_control(); } else if next == 1 { updates.focus_control(); }
+        else if next == 2 { browse.focus_control(); } else if next == 3 { history.focus_control(); }
+        else if next == 4 { downloads.focus_control(); } else { more.focus_control(); }
+    }
+    TouchArea { width: 100%; height: 100%; clicked => { } }
+    ScrollView {
         width: parent.width; height: parent.height;
-        content-width: self.width; content-height: max(self.height, 388px);
-        VerticalLayout {
-            width: parent.width; height: parent.content-height;
-            padding: 16px; spacing: 6px;
-            NavigationItem { label: @tr("Library"); icon: @image-url("../../assets/icons/navigation/library.svg"); active: root.section == 0; clicked => { root.navigate(0); } }
-            NavigationItem { label: @tr("Updates"); icon: @image-url("../../assets/icons/navigation/updates.svg"); active: root.section == 1; clicked => { root.navigate(1); } }
-            NavigationItem { label: @tr("History"); icon: @image-url("../../assets/icons/navigation/history.svg"); active: root.section == 2; clicked => { root.navigate(2); } }
-            NavigationItem { label: @tr("Browse"); icon: @image-url("../../assets/icons/navigation/browse.svg"); active: root.section == 3; clicked => { root.navigate(3); } }
-            Rectangle { height: 1px; background: #ffffff0c; }
-            NavigationItem { label: @tr("Downloads"); icon: @image-url("../../assets/icons/navigation/downloads.svg"); active: root.section == 7; clicked => { root.navigate(7); } }
-            NavigationItem { label: @tr("More"); icon: @image-url("../../assets/icons/navigation/more.svg"); active: root.section == 4; clicked => { root.navigate(4); } }
-            Rectangle { vertical-stretch: 1; }
-            Text { text: root.app-version + " · GPL-3.0+"; color: #53535e; font-size: 10px; }
+        content-width: self.visible-width;
+        content-height: max(self.visible-height, 352px);
+        mouse-drag-pan-enabled: true;
+        Rectangle {
+            x: 0px; y: 0px; width: root.width - 8px;
+            height: max(root.height, 352px);
+            marker-dot := Rectangle {
+                x: (parent.width - self.width) / 2;
+                y: 12px + root.selected * 56px;
+                width: 48px; height: 48px; border-radius: 24px;
+                background: Theme.current.accent;
+            }
+            VerticalLayout {
+                padding-top: 8px; padding-bottom: 8px;
+                library := NavigationItem { label: @tr("Library"); icon: @image-url("../../assets/icons/navigation/library.svg"); active: root.selected == 0; pop: root.selected == 0 ? motion.pulse : 0; picked => { root.navigate(0); } move-focus(direction) => { root.focus_item(0 + direction); } }
+                updates := NavigationItem { label: @tr("Updates"); icon: @image-url("../../assets/icons/navigation/updates.svg"); active: root.selected == 1; pop: root.selected == 1 ? motion.pulse : 0; picked => { root.navigate(1); } move-focus(direction) => { root.focus_item(1 + direction); } }
+                browse := NavigationItem { label: @tr("Browse"); icon: @image-url("../../assets/icons/navigation/browse.svg"); active: root.selected == 2; pop: root.selected == 2 ? motion.pulse : 0; picked => { root.navigate(3); } move-focus(direction) => { root.focus_item(2 + direction); } }
+                history := NavigationItem { label: @tr("History");  active: root.selected == 3; pop: root.selected == 3 ? motion.pulse : 0; picked => { root.navigate(2); } move-focus(direction) => { root.focus_item(3 + direction); } }
+                downloads := NavigationItem { label: @tr("Downloads"); icon: @image-url("../../assets/icons/navigation/downloads.svg"); active: root.selected == 4; pop: root.selected == 4 ? motion.pulse : 0; picked => { root.navigate(7); } move-focus(direction) => { root.focus_item(4 + direction); } }
+                more := NavigationItem { label: @tr("More"); icon: @image-url("../../assets/icons/navigation/more.svg"); active: root.selected == 5; pop: root.selected == 5 ? motion.pulse : 0; picked => { root.navigate(4); } move-focus(direction) => { root.focus_item(5 + direction); } }
+                Rectangle { vertical-stretch: 1; }
+            }
         }
     }
 }
 
+component BottomItem inherits Rectangle {
+    in property <string> label;
+    in property <image> icon;
+    in property <bool> active;
+    in property <float> pop;
+    callback picked;
+    callback move-focus(int);
+    public function focus_control() { key-focus.focus(); }
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-item-selectable: true;
+    accessible-item-selected: root.active;
+    accessible-action-default => { root.picked(); }
+    height: 60px; min-width: 0px;
+    Rectangle {
+        x: 4px; y: 0px; width: parent.width - 8px; height: 60px;
+        border-radius: 28px; background: transparent;
+        border-width: key-focus.has-focus ? 2px : 0px; border-color: Theme.current.text_bright;
+    }
+    Image {
+        source: root.icon; image-fit: contain;
+        width: 24px + root.pop * 2px; height: self.width;
+        x: (parent.width - self.width) / 2; y: 19px - self.height / 2;
+        colorize: root.active ? Theme.current.accent_soft : Theme.current.nav_icon_inactive;
+    }
+    Text {
+        x: 4px; y: 36px; width: parent.width - 8px; height: 17px;
+        text: root.label; font-size: 12px; font-weight: root.active ? 600 : 400;
+        color: root.active ? Theme.current.accent_soft : Theme.current.nav_label_inactive;
+        horizontal-alignment: center; vertical-alignment: center; overflow: elide;
+    }
+    key-focus := FocusScope {
+        key-pressed(e) => {
+            SettingsStyle.keyboard-mode = true;
+            if e.text == Key.Return || e.text == " " { if !e.repeat { root.picked(); } return accept; }
+            if e.text == Key.LeftArrow { root.move-focus(-1); return accept; }
+            if e.text == Key.RightArrow { root.move-focus(1); return accept; }
+            return reject;
+        }
+    }
+    TouchArea { mouse-cursor: pointer; clicked => { SettingsStyle.keyboard-mode = false; root.picked(); } }
+    forward-focus: key-focus;
+}
+
 export component MobileNavigation inherits Rectangle {
     in property <int> section;
+    in property <length> safe-bottom: 0px;
+    in property <length> safe-left: 0px;
+    in property <length> safe-right: 0px;
     callback navigate(int);
-    height: 68px; vertical-stretch: 0; background: #131317;
+    height: 68px + root.safe-bottom; vertical-stretch: 0;
+    background: Theme.current.nav_bottom;
+    motion := NavFeedback { active: root.section; }
+    function focus_item(index: int) {
+        let next = Math.mod(index + 4, 4);
+        if next == 0 { library.focus_control(); } else if next == 1 { updates.focus_control(); }
+        else if next == 2 { browse.focus_control(); } else { more.focus_control(); }
+    }
+    // The full bar, including system inset and gaps, consumes stray taps.
+    TouchArea { width: 100%; height: 100%; clicked => { } }
     HorizontalLayout {
-        padding: 2px; spacing: 2px;
-        NavigationItem { bottom: true; label: @tr("Library"); icon: @image-url("../../assets/icons/navigation/library.svg"); active: root.section == 0 || root.section == 5; clicked => { root.navigate(0); } }
-        NavigationItem { bottom: true; label: @tr("Updates"); icon: @image-url("../../assets/icons/navigation/updates.svg"); active: root.section == 1; clicked => { root.navigate(1); } }
-        NavigationItem { bottom: true; label: @tr("History"); icon: @image-url("../../assets/icons/navigation/history.svg"); active: root.section == 2; clicked => { root.navigate(2); } }
-        NavigationItem { bottom: true; label: @tr("Browse"); icon: @image-url("../../assets/icons/navigation/browse.svg"); active: root.section == 3 || root.section == 8; clicked => { root.navigate(3); } }
-        NavigationItem { bottom: true; label: @tr("More"); icon: @image-url("../../assets/icons/navigation/more.svg"); active: root.section == 4 || root.section == 7; clicked => { root.navigate(4); } }
+        x: 12px + root.safe-left; y: 0px;
+        width: parent.width - 24px - root.safe-left - root.safe-right; height: 60px;
+        library := BottomItem { label: @tr("Library"); icon: @image-url("../../assets/icons/navigation/library.svg"); active: root.section == 0; pop: root.section == 0 ? motion.pulse : 0; picked => { root.navigate(0); } move-focus(direction) => { root.focus_item(0 + direction); } }
+        updates := BottomItem { label: @tr("Updates"); icon: @image-url("../../assets/icons/navigation/updates.svg"); active: root.section == 1; pop: root.section == 1 ? motion.pulse : 0; picked => { root.navigate(1); } move-focus(direction) => { root.focus_item(1 + direction); } }
+        browse := BottomItem { label: @tr("Browse"); icon: @image-url("../../assets/icons/navigation/browse.svg"); active: root.section == 3; pop: root.section == 3 ? motion.pulse : 0; picked => { root.navigate(3); } move-focus(direction) => { root.focus_item(2 + direction); } }
+        more := BottomItem { label: @tr("More"); icon: @image-url("../../assets/icons/navigation/more.svg"); active: root.section == 4; pop: root.section == 4 ? motion.pulse : 0; picked => { root.navigate(4); } move-focus(direction) => { root.focus_item(3 + direction); } }
     }
 }

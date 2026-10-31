@@ -1,63 +1,82 @@
-import { ComboBox } from "std-widgets.slint";
+import { Theme, SettingsStyle } from "@NovaUiShared";
+import { PillButton, AddonIconButton, SettingsInput, ToggleSwitch, SettingsLink, SettingsBackButton } from "@NovaUiBase/settings-controls.slint";
+import { Dropdown } from "@ReaderDropdown";
 
-// Shared actions keep a 48 logical-pixel target on touch screens and accept
-// keyboard activation on desktop. Text never forces a page wider than its host.
+// Thin Reader API adapters. All painting, motion, pointer/keyboard handling,
+// and geometry come from the same Nova Kit controls used by Nova itself.
 export component ActionButton inherits Rectangle {
     in property <string> text;
-    in property <image> icon;
-    in property <bool> icon-only;
     in property <bool> accent;
     in property <bool> enabled: true;
     callback clicked;
-    min-width: 0px;
-    min-height: 48px;
-    preferred-height: 48px;
-    vertical-stretch: 0;
-    border-radius: 8px;
-    background: !root.enabled ? #ffffff04 : touch.pressed ? #aca0ff30 : root.accent ? #aca0ff24 : touch.has-hover ? #ffffff14 : #ffffff09;
-    border-width: focus.has-focus ? 2px : 1px;
-    border-color: focus.has-focus ? #c1b5ff : #ffffff0c;
-    accessible-role: button;
-    accessible-label: root.text;
-    accessible-enabled: root.enabled;
-    accessible-action-default => { if root.enabled { root.clicked(); } }
-    if root.icon-only: Image {
-        source: root.icon; width: 22px; height: 22px;
-        x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
-        colorize: root.enabled ? #d9d2e7 : #66616f;
-        image-fit: contain;
+    min-width: 0px; height: 44px; vertical-stretch: 0;
+    button := PillButton {
+        width: parent.width; height: parent.height;
+        label: root.text; primary: root.accent; enabled: root.enabled;
+        compact: true; wrap_label: true;
+        accessible-action-default => { if root.enabled { root.clicked(); } }
+        clicked => { root.clicked(); }
     }
-    if !root.icon-only: Text {
-        x: 10px; width: max(0px, parent.width - 20px); height: parent.height;
-        text: root.text; color: root.enabled ? #ddd7e7 : #66616f;
-        font-size: 14px; horizontal-alignment: center; vertical-alignment: center;
-        wrap: word-wrap; overflow: elide;
-    }
-    focus := FocusScope {
-        enabled: root.enabled;
-        key-pressed(event) => {
-            if event.text == Key.Return || event.text == " " {
-                if !event.repeat { root.clicked(); }
-                return accept;
-            }
-            return reject;
-        }
-    }
-    touch := TouchArea { enabled: root.enabled; clicked => { focus.focus(); root.clicked(); } }
-    forward-focus: focus;
+    forward-focus: button;
 }
 
-export component IconAction inherits ActionButton { icon-only: true; width: 48px; }
+export component IconAction inherits AddonIconButton {
+    in property <string> text;
+    in property <image> icon;
+    name: root.text;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    Image {
+        source: root.icon; width: 20px; height: 20px;
+        x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+        colorize: Theme.current.text_settings; image-fit: contain;
+    }
+}
+
+export component BackButton inherits SettingsBackButton {
+    accessible-action-default => { root.clicked(); }
+}
+
+export component MenuLink inherits SettingsLink {
+    accessible-action-default => { if root.enabled && root.interactive { root.picked(); } }
+}
+
+export component ReaderField inherits SettingsInput { min-width: 0px; }
+export component ReaderSelect inherits Dropdown {
+    min-width: 0px; roomy: true;
+    accessible-role: combobox;
+    accessible-enabled: root.enabled;
+    accessible-label: root.placeholder-text;
+    accessible-value: root.current-index >= 0 ? root.model[root.current-index] : "";
+    accessible-action-default => { if root.enabled && root.model.length > 0 { root.open_popup(); } }
+    accessible-action-expand => { if root.enabled && root.model.length > 0 { root.open_popup(); } }
+
+}
+
+export component ReaderToggle inherits Rectangle {
+    in property <string> text;
+    in-out property <bool> checked;
+    callback toggled;
+    min-width: 0px; min-height: 44px;
+    HorizontalLayout {
+        spacing: 12px;
+        Text { min-width: 0px; text: root.text; color: Theme.current.text_settings; wrap: word-wrap; vertical-alignment: center; }
+        ToggleSwitch {
+            name: root.text; checked <=> root.checked;
+            accessible-action-default => { self.checked = !self.checked; root.toggled(); }
+            toggled => { root.toggled(); }
+        }
+    }
+}
 
 export component CategoryPicker inherits Rectangle {
     in property <string> label;
     in property <[string]> model;
     in-out property <int> current-index;
     callback selected(int);
-    min-width: 0px; height: 72px;
+    min-width: 0px; height: 68px;
     VerticalLayout {
         spacing: 8px;
-        Text { min-width: 0px; text: root.label; color: #8d849b; font-size: 12px; }
-        ComboBox { min-width: 0px; height: 48px; model: root.model; current-index <=> root.current-index; selected(value) => { root.selected(self.current-index); } }
+        Text { min-width: 0px; text: root.label; color: Theme.current.text_secondary; font-size: 12px; }
+        ReaderSelect { model: root.model; current-index <=> root.current-index; selected(value) => { root.selected(self.current-index); } }
     }
 }

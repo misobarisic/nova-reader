@@ -3,7 +3,7 @@
 Nova Reader is derived from [Nova](https://github.com/misobarisic/nova), revision
 `b69a1e5765ecc65ac3b00acdfe2f16e2f46a5dda`, by Nova's contributors. Adapted
 material includes project/build/release structure, platform conventions,
-application artwork and reader source runtime/HTTP foundations. Reader changes
+application artwork, navigation/PageHeader/More presentation patterns, and reader source runtime/HTTP foundations. Reader changes
 remove video-specific responsibilities and establish a separate application.
 Nova and this project's code are GPL-3.0-or-later; the full GPL text is in LICENSE.
 
@@ -36,3 +36,11 @@ produces full dependency license texts/upstream links separately for Linux,
 Windows and Android; those inventories accompany packaged artifacts. This notice
 is attribution, not a substitute for that target-specific dependency inventory.
 The inherited launcher art is not newly commissioned Reader branding.
+
+The UI uses the same Roboto Regular and Bold faces as Nova, derived from
+[googlefonts/roboto-2](https://github.com/googlefonts/roboto-2) revision
+`38062f4b4a0be4346d07a928408da21602545e9e` under Apache-2.0. Nova's prepared
+faces are retained unchanged; see `assets/fonts/README.md` and the full license
+in `assets/fonts/LICENSE.txt`. That license is included in every packaged
+platform dependency inventory. Navigation and menu artwork is reused from Nova
+under the project's existing license and attribution.

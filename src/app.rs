@@ -255,6 +255,14 @@ impl Controller {
             ),
             7 => ("Downloads", "Your chapters, ready whenever you are."),
             8 => ("Source settings", "Settings belong to this profile."),
+            9 => (
+                "Local chapters",
+                "Import chapter archives and image folders.",
+            ),
+            10 => ("Settings", "Make Nova Reader yours."),
+            11 => ("Categories", "Organize your library."),
+            12 => ("Data", "Backup and import."),
+            13 => ("About", "Information about Nova Reader."),
             _ => ("Reader", ""),
         };
         ui.set_heading(text::tr(heading).into());
@@ -1325,7 +1333,6 @@ fn reading_mode(index: i32) -> ReadingMode {
 pub fn run(services: Services) -> Result<()> {
     let ui = AppWindow::new().map_err(error)?;
     ui.set_app_version(env!("CARGO_PKG_VERSION").into());
-    ui.set_desktop(!cfg!(target_os = "android"));
     let (sender, receiver) = mpsc::channel();
     let app = Arc::new(Controller {
         services,

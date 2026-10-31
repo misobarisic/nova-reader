@@ -13,8 +13,11 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `src/android_documents.rs`, `android/java/dev/misob/nova/reader/ReaderActivity.java` | Android SAF document/tree import, staged backup export and JNI callbacks |
 | `src/updates.rs` | Optional reader application release discovery |
 | `crates/ui/app.slint` | Shared pages/reader models, safe-area layout, platform/width shell selection, detail origin and translated text |
-| `crates/ui/navigation.slint` | Separate desktop sidebar and Android/compact bottom tabs; Android keeps the mobile shell at every width |
-| `crates/ui/controls.slint` | Keyboard and screen-reader accessible actions with 48px touch targets |
+| `crates/ui/navigation.slint` | Nova’s 64px icon rail, flat four-tab bottom bar, icon feedback and keyboard navigation |
+| `crates/ui/controls.slint`, `crates/ui/page-header.slint` | Thin Nova Kit control adapters and Nova’s PageHeader; shared palette, typography and accessibility |
+| `crates/ui/more.slint` | Retained Nova-style More landing and local import/settings/categories/data/About child pages |
+| `crates/ui/build.rs` | Kit source aliases, embedded resources, debug layout metadata and narrow Kit-dropdown keyboard/accessibility adaptation |
+| `assets/fonts` | Nova’s bundled Roboto faces and Apache notices; More/settings artwork comes directly from Kit |
 | `assets/icons/navigation` | Embedded SVG navigation and reader controls, independent of system font glyph coverage |
 | `crates/reader-domain` | Source-local identities, schema-1 state, library/categories, progress/history/bookmarks, backup/restore |
 | `crates/reader-sources` | Reader v2 ZIP validation, durable registry, typed profile settings, QuickJS host, HTML/URL capabilities and checked source HTTP |
@@ -72,6 +75,7 @@ Source examples are intended for independent future publication in nova-addons.
 
 ## Where to look
 
+- Nova design reuse and destination behavior: [UI design](ui-design.md).
 - Android/desktop shells and touch layout checks: `crates/ui/navigation.slint`, `crates/ui/app.slint`, `tests/mobile_layout.rs`.
 - Static review scope and outcome: [review record](../REVIEW.md).
 - Run/build/install and CLI: [README](../README.md), [packaging](packaging.md).

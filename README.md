@@ -7,6 +7,11 @@ plan** (planning baseline 31 October 2026). It is a working development tree;
 [implementation status](docs/implementation-status.md) records the outstanding
 acceptance gates.
 
+The interface follows Nova's design: an adaptive icon rail or four-tab bottom
+bar, shared Nova Kit controls, and More/settings cards. Local imports are under
+**More → Local chapters**; categories and backups are under **More → Settings**.
+See [UI design reuse](docs/ui-design.md) for the source/component mapping.
+
 ## Run a neutral reading flow
 
 Use the pinned Nix development shell, or install a Rust toolchain and the desktop
@@ -77,6 +82,7 @@ cargo clippy --workspace --locked -- -D warnings
 cargo test --workspace --locked
 cargo test --locked --test reading_journey
 cargo test --locked --test ui_navigation
+cargo test --locked --test mobile_layout
 node examples/addons/neutral-fixture/tests/fixture.test.mjs
 npm ci --ignore-scripts --prefix examples/addons/manhwa18cc/tests
 npm test --prefix examples/addons/manhwa18cc/tests

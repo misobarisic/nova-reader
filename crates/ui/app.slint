@@ -1,5 +1,11 @@
-import { LineEdit, ScrollView, ComboBox, CheckBox, Spinner } from "std-widgets.slint";
-import { Theme } from "theme.slint";
+import { Spinner } from "std-widgets.slint";
+import { Theme, SettingsStyle } from "@NovaUiShared";
+import { ScrollView } from "@NovaUiBase/scrollview.slint";
+import { ReaderField as LineEdit, ReaderSelect as ComboBox, ReaderToggle as CheckBox } from "controls.slint";
+import { PageHeader } from "page-header.slint";
+import { MorePage } from "more.slint";
+import "../../assets/fonts/Roboto-Regular.ttf";
+import "../../assets/fonts/Roboto-Bold.ttf";
 import { ActionButton, IconAction, CategoryPicker } from "controls.slint";
 import { DesktopSidebar, MobileNavigation } from "navigation.slint";
 
@@ -15,8 +21,8 @@ export component AppWindow inherits Window {
     min-height: 240px;
     preferred-width: 1120px;
     preferred-height: 780px;
-    background: Theme.current.canvas;
-    default-font-family: "sans-serif";
+    background: Theme.current.artwork_canvas;
+    default-font-family: "Roboto";
     default-font-size: 14px;
     in-out property <int> section: 0;
     in property <int> detail-origin: 0;
@@ -43,16 +49,14 @@ export component AppWindow inherits Window {
     in property <bool> can-next;
     in-out property <string> path-text;
     in-out property <string> category-text;
-    in property <bool> desktop: true;
     in property <[string]> categories;
     in-out property <int> category-index: 0;
     in-out property <int> category-target: 0;
     in property <[SettingRow]> settings;
-    // Platform selection survives Android landscape/tablet widths. Desktop can
-    // also use the compact shell when its window is narrow.
-    out property <bool> mobile-ui: !root.desktop || root.width < 720px;
-    out property <length> navigation-width: root.mobile-ui || root.section == 6 ? 0px : 216px;
-    out property <length> bottom-navigation-height: root.mobile-ui && root.section != 6 ? 68px : 0px;
+    // Nova's responsive breakpoint applies equally to Android and desktop.
+    out property <bool> mobile-ui: root.width < 700px;
+    out property <length> navigation-width: root.mobile-ui || root.section == 5 || root.section == 6 ? 0px : 64px;
+    out property <length> bottom-navigation-height: root.mobile-ui && (root.section == 0 || root.section == 1 || root.section == 3 || root.section == 4) ? 68px : 0px;
     private property <bool> show-reader-options: false;
     out property <length> reader-width: min(1100px, max(100px, (root.width - root.safe-area-insets.left - root.safe-area-insets.right - 16px) * root.zoom));
     private property <length> reader-height: root.total-ratio * root.reader-width;
@@ -84,12 +88,28 @@ export component AppWindow inherits Window {
     callback source-action(string);
     callback flush-progress;
 
-    changed section => { keyboard.focus(); }
+    public function go-back() {
+        root.navigate(root.section == 6 ? 5 : root.section == 8 ? 3 : root.section == 11 || root.section == 12 ? 10 : root.section >= 9 || root.section == 2 || root.section == 7 ? 4 : root.section == 5 ? root.detail-origin : 0);
+    }
+
+    changed section => {
+        keyboard.focus();
+        if root.section == 4 || root.section >= 9 { more-page.focus_shell(); }
+    }
 
     changed reader-width => { if root.section == 6 {root.reader-reflow(root.reader-width / 1px, root.reader-viewport-height / 1px);} }
 
     // Insets come from the actual Window, including Android system bars and
     // cutouts. Both shells share pages/callbacks, never the desktop geometry.
+    if root.navigation-width > 0px: Rectangle {
+        width: root.navigation-width + root.safe-area-insets.left; height: root.height;
+        background: Theme.current.nav_rail;
+    }
+    if root.bottom-navigation-height > 0px: Rectangle {
+        y: root.height - root.bottom-navigation-height - root.safe-area-insets.bottom;
+        width: root.width; height: root.bottom-navigation-height + root.safe-area-insets.bottom;
+        background: Theme.current.nav_bottom;
+    }
     keyboard := FocusScope {
         width: root.width; height: root.height;
         Rectangle {
@@ -101,253 +121,259 @@ export component AppWindow inherits Window {
                 HorizontalLayout {
                     spacing: 0px;
                     if root.navigation-width > 0px: DesktopSidebar {
-                        section: root.section; app-version: root.app-version;
+                        section: root.section >= 9 ? 4 : root.section;
                         navigate(section) => { root.navigate(section); }
                     }
-                    if root.section != 6: page-scroll := ScrollView {
-                        in property <int> destination: root.section;
-                        changed destination => { self.content-y = 0px; }
+                    Rectangle {
                         min-width: 0px;
-                        // Headers and filters scroll with the page, so landscape
-                        // and the software keyboard cannot squeeze out the list.
-                        VerticalLayout {
-                            padding: root.mobile-ui ? 16px : 36px;
-                            spacing: 16px; alignment: start;
-                            HorizontalLayout {
-                                spacing: 12px;
-                                if root.section == 5 || root.section == 7 || root.section == 8: IconAction {
-                                    text: @tr("Back"); icon: @image-url("../../assets/icons/navigation/back.svg");
-                                    clicked => { root.navigate(root.section == 8 ? 3 : root.section == 7 ? 4 : root.section == 5 ? root.detail-origin : 0); }
-                                }
-                                page-heading := Text {
-                                    min-width: 0px; text: root.heading; color: #f1eef9;
-                                    font-size: root.mobile-ui ? 28px : 34px; font-weight: 700;
-                                    wrap: word-wrap; vertical-alignment: center;
+                        if root.section != 6 && root.section != 4 && root.section < 9: page-scroll := ScrollView {
+                            private property <int> control-focus-request: SettingsStyle.focus-request;
+                            changed control-focus-request => {
+                                if SettingsStyle.keyboard-mode {
+                                    let top = SettingsStyle.focus-y - self.absolute-position.y;
+                                    if top < 0px { self.content-y -= top; }
+                                    else if top + SettingsStyle.focus-height > self.visible-height {
+                                        self.content-y -= top + SettingsStyle.focus-height - self.visible-height;
+                                    }
                                 }
                             }
-                            Text { min-width: 0px; text: root.caption; color: #93919f; wrap: word-wrap; font-size: 13px; }
-                            if root.status != "": Rectangle {
-                                min-height: status-text.preferred-height + 24px;
-                                background: #b5a3ff12; border-radius: 8px;
-                                status-text := Text {
-                                    text: root.status; color: #c7bdf0; wrap: word-wrap;
-                                    x: 12px; y: 12px; width: max(0px, parent.width - 24px);
+                            in property <int> destination: root.section;
+                            changed destination => { self.content-y = 0px; }
+                            min-width: 0px;
+                            mouse-drag-pan-enabled: true;
+                            content-width: self.visible-width;
+                            // Headers and filters scroll with the page, so landscape
+                            // and the software keyboard cannot squeeze out the list.
+                            VerticalLayout {
+                                padding: 18px;
+                                spacing: 16px; alignment: start;
+                                page-heading := PageHeader {
+                                    title: root.heading; subtitle: root.caption; narrow: root.mobile-ui;
+                                    show-back: root.section == 2 || root.section == 5 || root.section == 7 || root.section == 8;
+                                    back => { root.go-back(); }
                                 }
-                            }
-                            if root.busy: HorizontalLayout {
-                                Spinner { width: 24px; height: 24px; }
-                                Text { min-width: 0px; text: @tr("Loading…"); color: #a4a1b0; }
-                            }
-                            if root.section == 3: VerticalLayout {
-                                spacing: 12px;
-                                ComboBox {
-                                    min-width: 0px; min-height: 48px; model: root.sources;
-                                    current-index <=> root.source-index;
-                                    selected(value) => { root.source-selected(self.current-index); }
+                                if root.status != "": Rectangle {
+                                    min-height: status-text.preferred-height + 24px;
+                                    background: Theme.current.selection_wash; border-radius: 8px;
+                                    status-text := Text {
+                                        text: root.status; color: Theme.current.text_settings; wrap: word-wrap;
+                                        x: 12px; y: 12px; width: max(0px, parent.width - 24px);
+                                    }
                                 }
-                                ActionButton { text: @tr("Install addon"); clicked => { root.install-addon(); } }
-                                CheckBox { min-width: 0px; min-height: 48px; text: @tr("Show adult sources"); checked <=> root.show-adult; toggled => { root.navigate(3); } }
-                                HorizontalLayout {
-                                    spacing: 8px;
-                                    query := LineEdit { min-width: 0px; min-height: 48px; placeholder-text: @tr("Search this source…"); accepted => { root.search(self.text); } }
-                                    ActionButton { width: 80px; text: @tr("Search"); clicked => { root.search(query.text); } }
+                                if root.busy: HorizontalLayout {
+                                    Spinner { width: 24px; height: 24px; }
+                                    Text { min-width: 0px; text: @tr("Loading…"); color: Theme.current.text_secondary; }
                                 }
-                                HorizontalLayout {
-                                    spacing: 8px;
-                                    ActionButton { text: @tr("Popular"); clicked => { root.browse("popular"); } }
-                                    ActionButton { text: @tr("Latest"); clicked => { root.browse("latest"); } }
-                                }
-                                HorizontalLayout {
-                                    spacing: 8px;
-                                    ActionButton { text: @tr("Enable / disable"); clicked => { root.source-action("toggle"); } }
-                                    ActionButton { text: @tr("Remove"); clicked => { root.source-action("remove"); } }
-                                    ActionButton { text: @tr("Settings"); clicked => { root.source-action("settings"); } }
-                                }
-                            }
-                            if root.section == 0: VerticalLayout {
-                                spacing: 12px;
-                                HorizontalLayout {
-                                    spacing: 8px;
-                                    library-query := LineEdit { min-width: 0px; min-height: 48px; placeholder-text: @tr("Search your library…"); accepted => { root.search(self.text); } }
-                                    ActionButton { width: 80px; text: @tr("Search"); clicked => { root.search(library-query.text); } }
-                                }
-                                if root.mobile-ui: VerticalLayout {
+                                if root.section == 3: VerticalLayout {
                                     spacing: 12px;
-                                    CategoryPicker { label: @tr("Filter"); model: root.categories; current-index <=> root.category-index; selected(index) => { root.category-selected(index); } }
-                                    CategoryPicker { label: @tr("Category to assign"); model: root.categories; current-index <=> root.category-target; selected(index) => { root.category-assignment-selected(index); } }
-                                }
-                                if !root.mobile-ui: HorizontalLayout {
-                                    spacing: 16px;
-                                    CategoryPicker { label: @tr("Filter"); model: root.categories; current-index <=> root.category-index; selected(index) => { root.category-selected(index); } }
-                                    CategoryPicker { label: @tr("Category to assign"); model: root.categories; current-index <=> root.category-target; selected(index) => { root.category-assignment-selected(index); } }
-                                }
-                            }
-                            if root.section == 1: ActionButton { text: @tr("Refresh library"); clicked => { root.browse("refresh"); } }
-                            if root.section == 5: VerticalLayout {
-                                spacing: 12px;
-                                Text { min-width: 0px; text: root.series-description; color: #a7a3b1; wrap: word-wrap; }
-                                ActionButton { accent: true; text: @tr("Continue reading"); clicked => { root.chapter-step(0); } }
-                                HorizontalLayout {
-                                    spacing: 8px;
-                                    ActionButton { text: root.in-library ? @tr("Remove from library") : @tr("Add to library"); clicked => { root.toggle-library(); } }
-                                    ActionButton { text: @tr("Refresh"); clicked => { root.browse("chapters"); } }
-                                }
-                            }
-                            if root.section != 4 && root.section != 8: VerticalLayout {
-                                spacing: 10px;
-                                for row[index] in root.items: Rectangle {
-                                    height: (root.section == 5 || root.section == 7 || (root.section == 0 && root.category-target > 0)) ? 136px : 80px;
-                                    border-radius: 10px; background: hover.has-hover ? #24222c : #19181f;
-                                    border-width: 1px; border-color: #ffffff07;
-                                    VerticalLayout {
-                                        padding: 8px; spacing: 0px;
-                                        Rectangle {
-                                            height: 64px;
-                                            HorizontalLayout {
-                                                padding: 6px; spacing: 10px;
-                                                Rectangle { width: 4px; border-radius: 2px; background: row.bookmarked ? #c4b5fd : #393541; }
-                                                VerticalLayout {
-                                                    spacing: 6px;
-                                                    Text { min-width: 0px; text: row.title; color: #e6e1ef; font-weight: 600; overflow: elide; }
-                                                    Text { min-width: 0px; text: row.subtitle; color: #85818f; font-size: 12px; overflow: elide; }
-                                                }
-                                                Text { width: root.mobile-ui ? 64px : 96px; text: row.badge; color: #b6a4ea; font-size: 11px; overflow: elide; horizontal-alignment: right; }
-                                            }
-                                            hover := TouchArea { clicked => { root.open-item(index); } }
-                                        }
-                                        if root.section == 0 && root.category-target > 0: ActionButton { text: @tr("Toggle category"); clicked => { root.item-action(index, "category"); } }
-                                        if root.section == 5: HorizontalLayout {
-                                            spacing: 6px;
-                                            ActionButton { text: @tr("Read / unread"); clicked => { root.item-action(index, "read"); } }
-                                            ActionButton { text: row.bookmarked ? @tr("Unbookmark") : @tr("Bookmark"); clicked => { root.item-action(index, "bookmark"); } }
-                                            ActionButton { text: @tr("Download"); clicked => { root.item-action(index, "download"); } }
-                                        }
-                                        if root.section == 7: HorizontalLayout {
-                                            spacing: 6px;
-                                            ActionButton { text: @tr("Pause"); clicked => { root.item-action(index, "pause"); } }
-                                            ActionButton { text: @tr("Resume"); clicked => { root.item-action(index, "resume"); } }
-                                            ActionButton { text: @tr("Cancel"); clicked => { root.item-action(index, "cancel"); } }
-                                        }
+                                    ComboBox {
+                                        min-width: 0px; model: root.sources;
+                                        current-index <=> root.source-index;
+                                        selected(value) => { root.source-selected(self.current-index); }
                                     }
-                                }
-                                if root.items.length == 0 && !root.busy: Rectangle {
-                                    min-height: 220px;
-                                    VerticalLayout {
-                                        alignment: center; spacing: 12px;
-                                        Rectangle {
-                                            height: 56px;
-                                            Image {
-                                                source: @image-url("../../assets/icons/navigation/library.svg"); width: 48px; height: 48px;
-                                                x: (parent.width - self.width) / 2; y: 4px;
-                                                image-fit: contain; colorize: #655b83;
-                                            }
-                                        }
-                                        Text { min-width: 0px; text: root.section == 0 ? @tr("Your next story starts here") : @tr("Nothing here yet"); color: #d0c9de; font-size: 19px; wrap: word-wrap; horizontal-alignment: center; }
-                                        Text { min-width: 0px; text: root.section == 0 ? @tr("Install a source in Browse, or import a local chapter in More.") : @tr("Try refreshing or choosing another source."); color: #777181; wrap: word-wrap; horizontal-alignment: center; }
-                                    }
-                                }
-                                if root.has-more: ActionButton { text: @tr("Load more"); clicked => { root.load-more(); } }
-                            }
-                            if root.section == 4: VerticalLayout {
-                                spacing: 12px;
-                                Text { text: @tr("Your reading space"); color: #ddd4ee; font-size: 18px; font-weight: 600; }
-                                ActionButton { text: @tr("Downloads"); clicked => { root.navigate(7); } }
-                                ActionButton { text: @tr("Install a source addon (.zip)"); clicked => { root.install-addon(); } }
-                                ActionButton { text: @tr("Import a local chapter (.cbz / .zip)"); clicked => { root.local-import(false); } }
-                                ActionButton { text: @tr("Import an image folder"); clicked => { root.local-import(true); } }
-                                ActionButton { text: @tr("Export metadata backup"); clicked => { root.backup(false); } }
-                                ActionButton { text: @tr("Restore metadata backup"); clicked => { root.backup(true); } }
-                                Text { min-width: 0px; text: @tr("Backups include library, categories, history and reading position. Chapter files, cookies and addon code are excluded."); color: #8a8296; wrap: word-wrap; }
-                                LineEdit { min-width: 0px; min-height: 48px; text <=> root.category-text; placeholder-text: @tr("New category"); accepted => { root.add-category(root.category-text); } }
-                                ActionButton { text: @tr("Add category"); clicked => { root.add-category(root.category-text); } }
-                                ActionButton { text: @tr("Check for app updates"); clicked => { root.check-update(); } }
-                                Text { min-width: 0px; text: @tr("Nova Reader · GPL-3.0-or-later\nBuilt with Nova Kit and Slint. Source addons are installed explicitly and may become unavailable."); color: #6f687a; wrap: word-wrap; font-size: 12px; }
-                                Text { text: root.app-version; color: #6f687a; font-size: 12px; }
-                            }
-                            if root.section == 8: VerticalLayout {
-                                spacing: 16px;
-                                for setting in root.settings: VerticalLayout {
-                                    spacing: 8px;
-                                    Text { min-width: 0px; text: setting.name; color: #d5cce4; wrap: word-wrap; }
-                                    if setting.kind == "bool": CheckBox { min-height: 48px; checked: setting.checked; toggled => { root.setting-changed(setting.key, self.checked ? "true" : "false"); } }
-                                    if setting.kind == "text" || setting.kind == "secret": LineEdit { min-width: 0px; min-height: 48px; text: setting.value; input-type: setting.kind == "secret" ? InputType.password : InputType.text; placeholder-text: setting.kind == "secret" ? @tr("Enter a new secret to replace it") : ""; accepted => { root.setting-changed(setting.key, self.text); } }
-                                    if setting.kind == "select": ComboBox { min-width: 0px; min-height: 48px; model: setting.options; current-index: setting.selected; selected(value) => { root.setting-changed(setting.key, value); } }
-                                }
-                                if root.settings.length == 0: Text { min-width: 0px; text: @tr("This source has no configurable settings."); color: #968aa5; wrap: word-wrap; }
-                                Text { min-width: 0px; text: @tr("Text fields save when you press Enter. Secrets are stored only in this profile and are excluded from backups."); color: #867991; wrap: word-wrap; }
-                            }
-                        }
-                    }
-                    if root.section == 6: VerticalLayout {
-                        spacing: 0px;
-                        if root.status != "": Text {
-                            min-width: 0px; max-height: 72px; text: root.status;
-                            color: #c7bdf0; wrap: word-wrap; overflow: elide;
-                        }
-                        Rectangle {
-                            height: 64px; background: #19171e;
-                            HorizontalLayout {
-                                padding: 8px; spacing: 8px;
-                                IconAction { text: @tr("Back to chapters"); icon: @image-url("../../assets/icons/navigation/back.svg"); clicked => { root.navigate(5); } }
-                                VerticalLayout {
-                                    spacing: 2px;
-                                    Text { min-width: 0px; text: root.series-title; color: #ddd7e7; overflow: elide; }
-                                    Text { min-width: 0px; text: root.position-label; color: #afa3c0; font-size: 12px; overflow: elide; }
-                                }
-                                ActionButton { width: 76px; text: @tr("Options"); clicked => { root.show-reader-options = !root.show-reader-options; } }
-                                IconAction { text: @tr("Download chapter"); icon: @image-url("../../assets/icons/navigation/downloads.svg"); clicked => { root.download-chapter(); } }
-                            }
-                        }
-                        if root.show-reader-options: Rectangle {
-                            height: min(120px, max(48px, root.height - root.safe-area-insets.top - root.safe-area-insets.bottom - 176px));
-                            background: #19171e;
-                            ScrollView {
-                                VerticalLayout {
-                                    padding: 8px; spacing: 8px;
-                                    ComboBox { min-width: 0px; min-height: 48px; model: [@tr("Webtoon"), @tr("Left to right"), @tr("Right to left"), @tr("Vertical paging")]; current-index <=> root.reading-mode; selected(value) => { root.mode-changed(self.current-index); } }
+                                    ActionButton { text: @tr("Install addon"); clicked => { root.install-addon(); } }
+                                    CheckBox { min-width: 0px; text: @tr("Show adult sources"); checked <=> root.show-adult; toggled => { root.navigate(3); } }
                                     HorizontalLayout {
                                         spacing: 8px;
-                                        IconAction { text: @tr("Zoom out"); icon: @image-url("../../assets/icons/navigation/minus.svg"); clicked => { root.zoom = max(0.5, root.zoom - 0.25); } }
-                                        Text { min-width: 0px; text: @tr("Zoom {}%", round(root.zoom * 100)); color: #afa3c0; horizontal-alignment: center; vertical-alignment: center; }
-                                        IconAction { text: @tr("Zoom in"); icon: @image-url("../../assets/icons/navigation/plus.svg"); clicked => { root.zoom = min(3, root.zoom + 0.25); } }
+                                        query := LineEdit { min-width: 0px; placeholder-text: @tr("Search this source…"); accepted => { root.search(self.text); } }
+                                        ActionButton { width: 80px; text: @tr("Search"); clicked => { root.search(query.text); } }
+                                    }
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        ActionButton { text: @tr("Popular"); clicked => { root.browse("popular"); } }
+                                        ActionButton { text: @tr("Latest"); clicked => { root.browse("latest"); } }
+                                    }
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        ActionButton { text: @tr("Enable / disable"); clicked => { root.source-action("toggle"); } }
+                                        ActionButton { text: @tr("Remove"); clicked => { root.source-action("remove"); } }
+                                        ActionButton { text: @tr("Settings"); clicked => { root.source-action("settings"); } }
+                                    }
+                                }
+                                if root.section == 0: VerticalLayout {
+                                    spacing: 12px;
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        library-query := LineEdit { min-width: 0px; placeholder-text: @tr("Search your library…"); accepted => { root.search(self.text); } }
+                                        ActionButton { width: 80px; text: @tr("Search"); clicked => { root.search(library-query.text); } }
+                                    }
+                                    if root.mobile-ui: VerticalLayout {
+                                        spacing: 12px;
+                                        CategoryPicker { label: @tr("Filter"); model: root.categories; current-index <=> root.category-index; selected(index) => { root.category-selected(index); } }
+                                        CategoryPicker { label: @tr("Category to assign"); model: root.categories; current-index <=> root.category-target; selected(index) => { root.category-assignment-selected(index); } }
+                                    }
+                                    if !root.mobile-ui: HorizontalLayout {
+                                        spacing: 16px;
+                                        CategoryPicker { label: @tr("Filter"); model: root.categories; current-index <=> root.category-index; selected(index) => { root.category-selected(index); } }
+                                        CategoryPicker { label: @tr("Category to assign"); model: root.categories; current-index <=> root.category-target; selected(index) => { root.category-assignment-selected(index); } }
+                                    }
+                                }
+                                if root.section == 1: ActionButton { text: @tr("Refresh library"); clicked => { root.browse("refresh"); } }
+                                if root.section == 5: VerticalLayout {
+                                    spacing: 12px;
+                                    Text { min-width: 0px; text: root.series-description; color: Theme.current.text_settings; wrap: word-wrap; }
+                                    ActionButton { accent: true; text: @tr("Continue reading"); clicked => { root.chapter-step(0); } }
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        ActionButton { text: root.in-library ? @tr("Remove from library") : @tr("Add to library"); clicked => { root.toggle-library(); } }
+                                        ActionButton { text: @tr("Refresh"); clicked => { root.browse("chapters"); } }
+                                    }
+                                }
+                                if root.section != 4 && root.section != 8: VerticalLayout {
+                                    spacing: 10px;
+                                    for row[index] in root.items: Rectangle {
+                                        height: (root.section == 5 || root.section == 7 || (root.section == 0 && root.category-target > 0)) ? 136px : 80px;
+                                        border-radius: Theme.card_corner_radius; background: hover.has-hover ? Theme.current.control_hover : Theme.current.card;
+                                        border-width: 1px; border-color: Theme.current.border_soft;
+                                        VerticalLayout {
+                                            padding: 8px; spacing: 0px;
+                                            Rectangle {
+                                                height: 64px;
+                                                HorizontalLayout {
+                                                    padding: 6px; spacing: 10px;
+                                                    Rectangle { width: 4px; border-radius: 2px; background: row.bookmarked ? Theme.current.accent_soft : Theme.current.control_border; }
+                                                    VerticalLayout {
+                                                        spacing: 6px;
+                                                        Text { min-width: 0px; text: row.title; color: Theme.current.text_bright; font-weight: 600; overflow: elide; }
+                                                        Text { min-width: 0px; text: row.subtitle; color: Theme.current.text_secondary; font-size: 12px; overflow: elide; }
+                                                    }
+                                                    Text { width: root.mobile-ui ? 64px : 96px; text: row.badge; color: Theme.current.accent_soft; font-size: 11px; overflow: elide; horizontal-alignment: right; }
+                                                }
+                                                hover := TouchArea { clicked => { root.open-item(index); } }
+                                            }
+                                            if root.section == 0 && root.category-target > 0: ActionButton { text: @tr("Toggle category"); clicked => { root.item-action(index, "category"); } }
+                                            if root.section == 5: HorizontalLayout {
+                                                spacing: 6px;
+                                                ActionButton { text: @tr("Read / unread"); clicked => { root.item-action(index, "read"); } }
+                                                ActionButton { text: row.bookmarked ? @tr("Unbookmark") : @tr("Bookmark"); clicked => { root.item-action(index, "bookmark"); } }
+                                                ActionButton { text: @tr("Download"); clicked => { root.item-action(index, "download"); } }
+                                            }
+                                            if root.section == 7: HorizontalLayout {
+                                                spacing: 6px;
+                                                ActionButton { text: @tr("Pause"); clicked => { root.item-action(index, "pause"); } }
+                                                ActionButton { text: @tr("Resume"); clicked => { root.item-action(index, "resume"); } }
+                                                ActionButton { text: @tr("Cancel"); clicked => { root.item-action(index, "cancel"); } }
+                                            }
+                                        }
+                                    }
+                                    if root.items.length == 0 && !root.busy: Rectangle {
+                                        min-height: 220px;
+                                        VerticalLayout {
+                                            alignment: center; spacing: 12px;
+                                            Rectangle {
+                                                height: 56px;
+                                                Image {
+                                                    source: @image-url("../../assets/icons/navigation/library.svg"); width: 48px; height: 48px;
+                                                    x: (parent.width - self.width) / 2; y: 4px;
+                                                    image-fit: contain; colorize: Theme.current.text_muted;
+                                                }
+                                            }
+                                            Text { min-width: 0px; text: root.section == 0 ? @tr("Your next story starts here") : @tr("Nothing here yet"); color: Theme.current.text_bright; font-size: 19px; wrap: word-wrap; horizontal-alignment: center; }
+                                            Text { min-width: 0px; text: root.section == 0 ? @tr("Install a source in Browse, or import a local chapter in More.") : @tr("Try refreshing or choosing another source."); color: Theme.current.text_secondary; wrap: word-wrap; horizontal-alignment: center; }
+                                        }
+                                    }
+                                    if root.has-more: ActionButton { text: @tr("Load more"); clicked => { root.load-more(); } }
+                                }
+                                if root.section == 8: VerticalLayout {
+                                    spacing: 16px;
+                                    for setting in root.settings: VerticalLayout {
+                                        spacing: 8px;
+                                        Text { min-width: 0px; text: setting.name; color: Theme.current.text_bright; wrap: word-wrap; }
+                                        if setting.kind == "bool": CheckBox { checked: setting.checked; toggled => { root.setting-changed(setting.key, self.checked ? "true" : "false"); } }
+                                        if setting.kind == "text" || setting.kind == "secret": LineEdit { min-width: 0px; text: setting.value; input-type: setting.kind == "secret" ? InputType.password : InputType.text; placeholder-text: setting.kind == "secret" ? @tr("Enter a new secret to replace it") : ""; accepted => { root.setting-changed(setting.key, self.text); } }
+                                        if setting.kind == "select": ComboBox { min-width: 0px; model: setting.options; current-index: setting.selected; selected(value) => { root.setting-changed(setting.key, value); } }
+                                    }
+                                    if root.settings.length == 0: Text { min-width: 0px; text: @tr("This source has no configurable settings."); color: Theme.current.text_secondary; wrap: word-wrap; }
+                                    Text { min-width: 0px; text: @tr("Text fields save when you press Enter. Secrets are stored only in this profile and are excluded from backups."); color: Theme.current.text_secondary; wrap: word-wrap; }
+                                }
+                            }
+                        }
+                        if root.section == 6: VerticalLayout {
+                            spacing: 0px;
+                            if root.status != "": Text {
+                                min-width: 0px; max-height: 72px; text: root.status;
+                                color: Theme.current.text_settings; wrap: word-wrap; overflow: elide;
+                            }
+                            Rectangle {
+                                height: 64px; background: Theme.current.nav_rail;
+                                HorizontalLayout {
+                                    padding: 8px; spacing: 8px;
+                                    IconAction { text: @tr("Back to chapters"); icon: @image-url("../../assets/icons/navigation/back.svg"); clicked => { root.navigate(5); } }
+                                    VerticalLayout {
+                                        spacing: 2px;
+                                        Text { min-width: 0px; text: root.series-title; color: Theme.current.text_bright; overflow: elide; }
+                                        Text { min-width: 0px; text: root.position-label; color: Theme.current.text_secondary; font-size: 12px; overflow: elide; }
+                                    }
+                                    ActionButton { width: 76px; text: @tr("Options"); clicked => { root.show-reader-options = !root.show-reader-options; } }
+                                    IconAction { text: @tr("Download chapter"); icon: @image-url("../../assets/icons/navigation/downloads.svg"); clicked => { root.download-chapter(); } }
+                                }
+                            }
+                            if root.show-reader-options: Rectangle {
+                                height: min(120px, max(48px, root.height - root.safe-area-insets.top - root.safe-area-insets.bottom - 176px));
+                                background: Theme.current.nav_rail;
+                                ScrollView {
+                                    VerticalLayout {
+                                        padding: 8px; spacing: 8px;
+                                        ComboBox { min-width: 0px; model: [@tr("Webtoon"), @tr("Left to right"), @tr("Right to left"), @tr("Vertical paging")]; current-index <=> root.reading-mode; selected(value) => { root.mode-changed(self.current-index); } }
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            IconAction { text: @tr("Zoom out"); icon: @image-url("../../assets/icons/navigation/minus.svg"); clicked => { root.zoom = max(0.5, root.zoom - 0.25); } }
+                                            Text { min-width: 0px; text: @tr("Zoom {}%", round(root.zoom * 100)); color: Theme.current.text_secondary; horizontal-alignment: center; vertical-alignment: center; }
+                                            IconAction { text: @tr("Zoom in"); icon: @image-url("../../assets/icons/navigation/plus.svg"); clicked => { root.zoom = min(3, root.zoom + 0.25); } }
+                                        }
                                     }
                                 }
                             }
-                        }
-                        reader := Flickable {
-                            min-width: 0px; min-height: 0px;
-                            content-y <=> root.scroll-y;
-                            changed content-y => {if root.reading-mode==0{root.reader-position(-self.content-y / 1px,root.reader-width / 1px,self.height / 1px);}}
-                            changed height => {root.reader-viewport-height=self.height;root.reader-reflow(root.reader-width / 1px,self.height / 1px);}
-                            interactive: root.reading-mode == 0 || root.zoom > 1;
-                            content-width: max(self.width, root.reader-width);
-                            content-height: root.reading-mode == 0 ? max(self.height, root.reader-height) : self.height;
-                            for page[index] in root.pages: Rectangle {
-                                visible: root.reading-mode == 0 || index == root.current-page;
-                                x: (max(reader.width, root.reader-width) - self.width) / 2;
-                                y: root.reading-mode == 0 ? page.position * root.reader-width : 0px;
-                                width: root.reader-width;
-                                height: root.reading-mode == 0 ? root.reader-width * page.ratio : reader.height;
-                                background: #111015;
-                                if page.loaded: Rectangle {
-                                    width: root.reading-mode==0 ? parent.width : min(parent.width,parent.height/page.ratio);
-                                    height: root.reading-mode==0 ? parent.height : min(parent.height,parent.width*page.ratio);
-                                    x:(parent.width - self.width)/2; y:(parent.height - self.height)/2;
-                                    for tile in page.tiles: Image {source:tile.image;x:0px;y:tile.offset*parent.height;width:parent.width;height:tile.fraction*parent.height;image-fit:fill;}
+                            reader := Flickable {
+                                min-width: 0px; min-height: 0px;
+                                content-y <=> root.scroll-y;
+                                changed content-y => {if root.reading-mode==0{root.reader-position(-self.content-y / 1px,root.reader-width / 1px,self.height / 1px);}}
+                                changed height => {root.reader-viewport-height=self.height;root.reader-reflow(root.reader-width / 1px,self.height / 1px);}
+                                interactive: root.reading-mode == 0 || root.zoom > 1;
+                                content-width: max(self.width, root.reader-width);
+                                content-height: root.reading-mode == 0 ? max(self.height, root.reader-height) : self.height;
+                                for page[index] in root.pages: Rectangle {
+                                    visible: root.reading-mode == 0 || index == root.current-page;
+                                    x: (max(reader.width, root.reader-width) - self.width) / 2;
+                                    y: root.reading-mode == 0 ? page.position * root.reader-width : 0px;
+                                    width: root.reader-width;
+                                    height: root.reading-mode == 0 ? root.reader-width * page.ratio : reader.height;
+                                    background: Theme.current.artwork_canvas;
+                                    if page.loaded: Rectangle {
+                                        width: root.reading-mode==0 ? parent.width : min(parent.width,parent.height/page.ratio);
+                                        height: root.reading-mode==0 ? parent.height : min(parent.height,parent.width*page.ratio);
+                                        x:(parent.width - self.width)/2; y:(parent.height - self.height)/2;
+                                        for tile in page.tiles: Image {source:tile.image;x:0px;y:tile.offset*parent.height;width:parent.width;height:tile.fraction*parent.height;image-fit:fill;}
+                                    }
+                                    if !page.loaded: Text { text: page.error == "" ? @tr("Loading page {}", index + 1) : page.error; color: Theme.current.text_secondary; wrap: word-wrap; horizontal-alignment: center; vertical-alignment: center; }
                                 }
-                                if !page.loaded: Text { text: page.error == "" ? @tr("Loading page {}", index + 1) : page.error; color: #7e748b; wrap: word-wrap; horizontal-alignment: center; vertical-alignment: center; }
+                            }
+                            Rectangle {
+                                height: 64px; background: Theme.current.nav_rail;
+                                HorizontalLayout {
+                                    padding: 8px; spacing: 6px;
+                                    IconAction { text: @tr("Previous chapter"); icon: @image-url("../../assets/icons/navigation/chapter-previous.svg"); enabled: root.can-previous; clicked => { root.chapter-step(-1); } }
+                                    IconAction { text: @tr("Previous page"); icon: @image-url("../../assets/icons/navigation/previous.svg"); clicked => { root.page-step(-1); } }
+                                    ActionButton { text: @tr("Retry"); clicked => { root.page-step(0); } }
+                                    IconAction { text: @tr("Next page"); icon: @image-url("../../assets/icons/navigation/next.svg"); clicked => { root.page-step(1); } }
+                                    IconAction { text: @tr("Next chapter"); icon: @image-url("../../assets/icons/navigation/chapter-next.svg"); enabled: root.can-next; clicked => { root.chapter-step(1); } }
+                                }
                             }
                         }
-                        Rectangle {
-                            height: 64px; background: #19171e;
-                            HorizontalLayout {
-                                padding: 8px; spacing: 6px;
-                                IconAction { text: @tr("Previous chapter"); icon: @image-url("../../assets/icons/navigation/chapter-previous.svg"); enabled: root.can-previous; clicked => { root.chapter-step(-1); } }
-                                IconAction { text: @tr("Previous page"); icon: @image-url("../../assets/icons/navigation/previous.svg"); clicked => { root.page-step(-1); } }
-                                ActionButton { text: @tr("Retry"); clicked => { root.page-step(0); } }
-                                IconAction { text: @tr("Next page"); icon: @image-url("../../assets/icons/navigation/next.svg"); clicked => { root.page-step(1); } }
-                                IconAction { text: @tr("Next chapter"); icon: @image-url("../../assets/icons/navigation/chapter-next.svg"); enabled: root.can-next; clicked => { root.chapter-step(1); } }
-                            }
+                        more-page := MorePage {
+                            // Keep More's retained landing viewport unchanged
+                            // when its child pages hide the external bottom bar.
+                            width: parent.width; height: parent.height + root.bottom-navigation-height;
+                            visible: root.section == 4 || root.section >= 9;
+                            section: root.section; narrow: root.mobile-ui;
+                            app-version: root.app-version; status: root.status;
+                            category-text <=> root.category-text;
+                            navigate(section) => { root.navigate(section); }
+                            install-addon => { root.install-addon(); }
+                            local-import(folder) => { root.local-import(folder); }
+                            backup(restore) => { root.backup(restore); }
+                            add-category(name) => { root.add-category(name); }
+                            check-update => { root.check-update(); }
                         }
                     }
                 }
@@ -358,8 +384,8 @@ export component AppWindow inherits Window {
             }
         }
         key-pressed(event) => {
-            if event.text == Key.Escape || event.text == Key.Back {
-                root.navigate(root.section == 6 ? 5 : root.section == 8 ? 3 : root.section == 7 ? 4 : root.section == 5 ? root.detail-origin : 0);
+            if event.text == Key.Escape || event.text == Key.Back || event.text == Key.Backspace {
+                root.go-back();
                 return accept;
             }
             if root.section == 6 && event.text == Key.RightArrow { root.page-step(root.reading-mode == 2 ? -1 : 1); return accept; }

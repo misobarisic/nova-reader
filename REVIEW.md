@@ -80,3 +80,31 @@ Linux Xvfb visual checks covered 320px/390px phones, 844px landscape reader opti
 and the 1120px desktop sidebar. These exercise the mobile Slint layout on Linux;
 Android system insets, software keyboard and physical-device interaction still
 require device validation. No local Android SDK/NDK/device was available.
+
+## Nova UI reuse for 0.1.6
+
+The reference remains Nova b69a1e5 and the existing pinned Nova Kit revision.
+Reader now adapts Nova's 64px icon rail, accent selection circle, flat four-slot
+bottom bar, icon feedback and 700px responsive breakpoint. History/Downloads
+use desktop shortcut slots and phone More cards. Details/reader cover navigation;
+phone child pages hide the bottom bar and wide More children retain the rail.
+The More landing, card rows, typography, shared palette, retained scroll and
+push/pop behavior follow Nova. Settings/local import/categories/data/About reuse
+Kit SettingsCard/SettingsLink, PageHeader, inputs and actions. Nova's prepared
+Roboto faces are embedded with their full Apache license in packaged inventories.
+See docs/ui-design.md for component/source mapping and the narrow build-time
+adaptation of Kit's TV-gated dropdown keyboard/accessibility API.
+
+Astra 6 medium reviewed this change. The dropdown keyboard/accessibility gap and
+More scroll/focus restoration findings were fixed. Focused tests verify geometry
+at both sides of the breakpoint, actual card/tab activation, child Back behavior,
+More scroll preservation, keyboard navigation after pop, dropdown keyboard and
+accessible selection, and touch dragging to the twentieth dropdown entry.
+Linux Xvfb captures were inspected for phone/desktop More, phone Settings,
+320px Browse, desktop Library and wide landscape Library. Physical Android
+system-bar/IME/device interaction remains unverified locally; no SDK/NDK/device
+is available in this workspace. The release workflow YAML is unchanged.
+
+Final formatting, workspace check, Clippy for all targets with warnings denied,
+all workspace tests, and 27 packaging regressions passed. Astra's final review
+found no remaining demonstrated P1/P2 issue.
