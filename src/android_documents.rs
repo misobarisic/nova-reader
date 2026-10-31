@@ -4,7 +4,7 @@
 #![cfg(target_os = "android")]
 
 use jni::{
-    JNIEnv, JavaVM,
+    JNIEnv, JavaVM, NativeMethod,
     objects::{JClass, JObject, JString, JValue},
     sys::jlong,
 };
@@ -40,41 +40,82 @@ pub enum ImportKind {
     BackupJson = 3,
 }
 
-fn with_activity<T>(
+fn take_java_exception(env: &mut JNIEnv<'_>) -> Option<String> {
+    if !env.exception_check().unwrap_or(false) {
+        return None;
+    }
+    let exception = env.exception_occurred().ok();
+    let _ = env.exception_clear();
+    let message = exception.and_then(|exception| {
+        let exception = env.auto_local(exception);
+        let text = env
+            .call_method(&*exception, "toString", "()Ljava/lang/String;", &[])
+            .ok()?
+            .l()
+            .ok()?;
+        let text = env.auto_local(JString::from(text));
+        env.get_string(&text).ok().map(Into::into)
+    });
+    // A broken Throwable.toString must not leave another pending exception.
+    if env.exception_check().unwrap_or(false) {
+        let _ = env.exception_clear();
+    }
+    message
+}
+
+fn with_context<T>(
     call: impl FnOnce(&mut JNIEnv<'_>, JObject<'_>, JClass<'_>) -> jni::errors::Result<T>,
 ) -> Result<T, String> {
-    // android-activity owns these references until NativeActivity is destroyed.
+    // android-activity 0.6 publishes the Application, not an Activity, here.
+    // As in Nova, resolve app classes through this Context's class loader and
+    // let Java find the current foreground Activity on its main thread.
     let context = ndk_context::android_context();
-    let result = (|| -> jni::errors::Result<T> {
-        let vm = unsafe { JavaVM::from_raw(context.vm().cast()) }?;
-        let mut env = vm.attach_current_thread()?;
-        let result = env.with_local_frame(24, |env| {
-            let activity = unsafe { JObject::from_raw(context.context().cast()) };
-            let loader = env
-                .call_method(
-                    &activity,
-                    "getClassLoader",
-                    "()Ljava/lang/ClassLoader;",
-                    &[],
-                )?
-                .l()?;
-            let name = env.new_string(ACTIVITY_CLASS)?;
-            let class = env
-                .call_method(
-                    &loader,
-                    "loadClass",
-                    "(Ljava/lang/String;)Ljava/lang/Class;",
-                    &[JValue::Object(&name)],
-                )?
-                .l()?;
-            call(env, activity, class.into())
-        });
-        if result.is_err() && env.exception_check().unwrap_or(false) {
-            let _ = env.exception_clear();
-        }
-        result
-    })();
-    result.map_err(|error| format!("Android document picker: {error}"))
+    let vm = unsafe { JavaVM::from_raw(context.vm().cast()) }
+        .map_err(|error| format!("Android document picker: {error}"))?;
+    let mut env = vm
+        .attach_current_thread()
+        .map_err(|error| format!("Android document picker: {error}"))?;
+    let result = env.with_local_frame(24, |env| {
+        let application = unsafe { JObject::from_raw(context.context().cast()) };
+        let loader = env
+            .call_method(
+                &application,
+                "getClassLoader",
+                "()Ljava/lang/ClassLoader;",
+                &[],
+            )?
+            .l()?;
+        let name = env.new_string(ACTIVITY_CLASS)?;
+        let class = env
+            .call_method(
+                &loader,
+                "loadClass",
+                "(Ljava/lang/String;)Ljava/lang/Class;",
+                &[JValue::Object(&name)],
+            )?
+            .l()?;
+        let class = JClass::from(class);
+        // NativeActivity loads the library through the framework. Bind the
+        // app-Dex callback explicitly instead of depending on JVM native
+        // library discovery on a later Java UI/copy thread.
+        env.register_native_methods(
+            &class,
+            &[NativeMethod {
+                name: "nativeDocumentResult".into(),
+                sig: "(JLjava/lang/String;Ljava/lang/String;Ljava/lang/String;)V".into(),
+                fn_ptr: Java_dev_misob_nova_reader_ReaderActivity_nativeDocumentResult
+                    as *mut std::ffi::c_void,
+            }],
+        )?;
+        call(env, application, class)
+    });
+    let exception = take_java_exception(&mut env);
+    result.map_err(|error| {
+        format!(
+            "Android document picker: {}",
+            exception.unwrap_or_else(|| error.to_string())
+        )
+    })
 }
 fn reserve(callback: Callback) -> Result<i64, (Callback, &'static str)> {
     let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
@@ -118,7 +159,7 @@ fn launch(kind: i32, path: Option<&std::path::Path>, callback: Callback) {
             return;
         }
     };
-    let result = with_activity(|env, activity, class| {
+    let result = with_context(|env, _, class| {
         let path = env.new_string(
             path.map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_default(),
@@ -126,13 +167,8 @@ fn launch(kind: i32, path: Option<&std::path::Path>, callback: Callback) {
         env.call_static_method(
             class,
             "requestDocument",
-            "(Landroid/app/Activity;IJLjava/lang/String;)V",
-            &[
-                JValue::Object(&activity),
-                JValue::Int(kind),
-                JValue::Long(id),
-                JValue::Object(&path),
-            ],
+            "(IJLjava/lang/String;)V",
+            &[JValue::Int(kind), JValue::Long(id), JValue::Object(&path)],
         )?;
         Ok(())
     });
@@ -152,9 +188,9 @@ pub fn export_backup(staged: PathBuf, callback: impl FnOnce(Result<(), String>) 
 /// Cache directory accepted by export_backup. Stage only validated backup JSON
 /// here; delete staging/import files after the receiving service consumes them.
 pub fn cache_dir() -> Result<PathBuf, String> {
-    with_activity(|env, activity, _| {
+    with_context(|env, application, _| {
         let file = env
-            .call_method(activity, "getCacheDir", "()Ljava/io/File;", &[])?
+            .call_method(application, "getCacheDir", "()Ljava/io/File;", &[])?
             .l()?;
         let path = env
             .call_method(file, "getAbsolutePath", "()Ljava/lang/String;", &[])?
@@ -172,7 +208,7 @@ pub fn cancel_pending() {
         .as_ref()
         .map(|p| p.id);
     if let Some(id) = id {
-        let _ = with_activity(|env, _, class| {
+        let _ = with_context(|env, _, class| {
             env.call_static_method(class, "cancelDocument", "(J)V", &[JValue::Long(id)])?;
             Ok(())
         });

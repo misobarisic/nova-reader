@@ -4,7 +4,12 @@
 `android/java/dev/misob/nova/reader/ReaderActivity.java` bridge Android's Storage
 Access Framework (SAF) to reader services. The custom activity extends
 `NativeActivity`; Slint/android-activity retain the native surface and event loop.
-This bridge starts no background jobs or services.
+This bridge starts no background jobs or services. `ndk-context` exposes the
+Application context with android-activity 0.6. Rust uses its class loader and
+cache directory without casting it to an Activity. Java posts the picker launch
+to the main thread and resolves the current ReaderActivity there, retaining only
+a weak reference. JNI explicitly registers the result callback on the app class;
+Java launch exceptions preserve their class/message and are cleared before retry.
 
 ## Application integration
 
@@ -73,15 +78,24 @@ resume an external picker or an interrupted provider copy.
 
 ## Verification
 
-The Java activity compiles as Java 8 bytecode against Android API 35 classes. A
-host harness executes the exact extracted transfer, filename, and ordering
-helpers, covering strict byte admission, cancellation, a stalled provider, large
-numeric names, and filename sanitizing. The
-Rust JNI module is type-checked and linted against `jni 0.21` and `ndk-context 0.1`
-in a host harness with its Android module gate removed. Its callback regression
-checks single completion, busy rejection, and stale-result rejection. These
-checks validate JNI argument and lifetime types; they are not Android executable
-or device tests.
+The Java activity compiles as Java 8 bytecode against Android API 35 classes.
+The committed host regression runs the production activity and Rust JNI module
+in a real JVM with `-Xcheck:jni`. Small Android fixtures provide a deterministic
+main queue, Application context and activity lifecycle; they do not emulate an
+Android device or a document provider.
+
+```sh
+nix develop .#android --command python3 tools/test-android-documents.py --clippy
+# Or supply API classes directly when a full SDK is not installed:
+python3 tools/test-android-documents.py --android-jar /path/to/android.jar --clippy
+```
+
+It checks cache access through Application, all four import launch types,
+backup export launch, cancellation/native callback registration, recreation
+between request and launch, missing activity errors, Java exception reporting
+and successful retry after clearing the exception. The Rust callback test also
+checks single completion, busy rejection and stale-result rejection. Host JNI
+execution and Java compilation do not establish Android provider/device behavior.
 
 Before Android delivery, build the actual ARM64 target and APK, then verify on a
 device: select an addon ZIP, CBZ and nested image folder; restore and export a

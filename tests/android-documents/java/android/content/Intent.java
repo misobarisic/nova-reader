@@ -1,0 +1,24 @@
+package android.content;
+import android.net.Uri;
+public class Intent {
+    public static final String ACTION_OPEN_DOCUMENT="android.intent.action.OPEN_DOCUMENT";
+    public static final String ACTION_OPEN_DOCUMENT_TREE="android.intent.action.OPEN_DOCUMENT_TREE";
+    public static final String ACTION_CREATE_DOCUMENT="android.intent.action.CREATE_DOCUMENT";
+    public static final String CATEGORY_OPENABLE="android.intent.category.OPENABLE";
+    public static final String EXTRA_TITLE="android.intent.extra.TITLE";
+    public static final String EXTRA_MIME_TYPES="android.intent.extra.MIME_TYPES";
+    public static final int FLAG_GRANT_READ_URI_PERMISSION=1;
+    public static final int FLAG_GRANT_WRITE_URI_PERMISSION=2;
+    public static final int FLAG_GRANT_PERSISTABLE_URI_PERMISSION=64;
+    public final String action;
+    public String type;
+    private int flags;
+    public Intent(String action) { this.action=action; }
+    public Intent setType(String type) { this.type=type; return this; }
+    public Intent addFlags(int flags) { this.flags|=flags; return this; }
+    public Intent addCategory(String category) { return this; }
+    public Intent putExtra(String key,String value) { return this; }
+    public Intent putExtra(String key,String[] value) { return this; }
+    public int getFlags() { return flags; }
+    public Uri getData() { return null; }
+}

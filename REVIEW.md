@@ -168,3 +168,29 @@ medium independently compared those digests to the actual git-show reference
 and found no P1/P2 blocker. All 28 packaging tests, shell syntax, formatting,
 Clippy for all targets, workspace check and all workspace tests passed locally.
 Actual release assembly remains a separate CI result.
+
+## Android document picker bridge fix for 0.1.10
+
+The screenshot's generic Java exception exposed an incorrect context assumption.
+android-activity 0.6.1 init.rs obtains get_application() and initializes
+ndk-context with an Application global reference. Reader passed that object to
+requestDocument as an Activity. The bridge now uses Application only for class
+loading/cache access, and Java resolves the current weak ReaderActivity on the
+main queue, following Nova's foreground-activity pattern. The live reference is
+published before NativeActivity startup and an old instance cannot clear a newer
+instance during recreation.
+
+The Rust bridge explicitly registers its result method on the app class and
+reports Throwable.toString while clearing pending exceptions and deleting local
+refs, so failed launches can be retried. The launch signature has no Activity
+parameter. Picker/copy limits and the release workflow are unchanged.
+
+Production Java compiled against Android API 35. The committed host regression
+runs production Java and Rust JNI in a real JVM with -Xcheck:jni, using a small
+framework fixture and a foreign Java thread for queued callbacks. It passed all
+four imports, backup export launch, cancellation, activity replacement before
+launch, absent activity, exception cause/cleanup/retry, and the existing busy/
+single-use/stale-result test. The JNI harness also passed Clippy with warnings
+denied. Workspace formatting, all-target Clippy, workspace check/tests and all
+28 packaging regressions passed. Astra 6 medium found no P1/P2 issue. These are
+bridge and compilation checks, not physical-device/document-provider acceptance.

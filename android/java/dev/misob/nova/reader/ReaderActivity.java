@@ -1,12 +1,13 @@
 package dev.misob.nova.reader;
 
-import android.app.Activity;
 import android.app.NativeActivity;
 import android.content.ContentResolver;
 import android.content.Intent;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.DocumentsContract;
 import android.provider.OpenableColumns;
 import java.io.File;
@@ -35,6 +36,7 @@ public final class ReaderActivity extends NativeActivity {
     private static final ExecutorService COPIES = Executors.newSingleThreadExecutor();
     private static Request active;
     private static long lastCancelledId;
+    private static volatile WeakReference<ReaderActivity> foreground = new WeakReference<>(null);
     private static native void nativeDocumentResult(long id, String path, String name, String error);
 
     private static final class Request {
@@ -61,12 +63,18 @@ public final class ReaderActivity extends NativeActivity {
         ImageDocument(Uri uri, String name, long size) {this.uri=uri;this.name=name;this.size=size;}
     }
 
-    public static void requestDocument(Activity candidate, int kind, long id, String exportPath) {
-        if (!(candidate instanceof ReaderActivity)) {
-            nativeDocumentResult(id,null,null,"Reader document activity is unavailable"); return;
-        }
-        ReaderActivity activity=(ReaderActivity)candidate;
-        activity.runOnUiThread(() -> activity.openDocument(kind,id,exportPath));
+    public static void requestDocument(int kind, long id, String exportPath) {
+        // ndk-context exposes the Application, not an Activity. Resolve the
+        // current Reader activity after posting, so recreation cannot leave a
+        // queued picker launch targeting the activity that was destroyed.
+        boolean posted=new Handler(Looper.getMainLooper()).post(() -> {
+            ReaderActivity activity=foreground.get();
+            if (activity==null || activity.isFinishing() || activity.isDestroyed()) {
+                nativeDocumentResult(id,null,null,"Reader document activity is unavailable"); return;
+            }
+            activity.openDocument(kind,id,exportPath);
+        });
+        if (!posted) nativeDocumentResult(id,null,null,"Reader UI thread is unavailable");
     }
     private void openDocument(int kind, long id, String exportPath) {
         if (isFinishing() || isDestroyed()) {
@@ -256,10 +264,12 @@ public final class ReaderActivity extends NativeActivity {
         nativeDocumentResult(request.id,path,name,error);
     }
     @Override protected void onCreate(Bundle state) {
+        foreground=new WeakReference<>(this);
         super.onCreate(state);
         synchronized(LOCK) {if(active!=null)active.activity=new WeakReference<>(this);}
     }
     @Override protected void onDestroy() {
+        if(foreground.get()==this)foreground=new WeakReference<>(null);
         Request request; synchronized(LOCK){request=active;}
         if(request!=null && request.activity.get()==this && !isChangingConfigurations())cancelDocument(request.id);
         super.onDestroy();

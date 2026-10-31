@@ -11,7 +11,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `src/app.rs` | Worker orchestration, navigation, source/settings selection, visible-page loading, display tiles, lifecycle progress flush |
 | `src/services.rs` | Shared UI/test services: install, metadata conversion, library, downloads and local import |
 | `src/cli.rs`, `src/paths.rs` | Commands, bounded file input, independent application directory |
-| `src/android_documents.rs`, `android/java/dev/misob/nova/reader/ReaderActivity.java` | Android SAF document/tree import, staged backup export and JNI callbacks |
+| `src/android_documents.rs`, `android/java/dev/misob/nova/reader/ReaderActivity.java` | Application-context JNI, registered callbacks and current-activity SAF import/export on Java main |
 | `src/updates.rs` | Optional reader application release discovery |
 | `crates/ui/app.slint` | Shared pages/reader models, safe-area layout, platform/width shell selection, detail origin and translated text |
 | `crates/ui/navigation.slint` | Nova’s 64px icon rail, flat five-tab bottom bar, icon feedback and keyboard navigation |
@@ -29,6 +29,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `examples/addons/neutral-fixture` | Installable network-free fixture, bundled geometric PNGs and 320-page chapter |
 | `tests/reading_journey.rs` | Process-boundary install/read/progress/interrupted download/recovery/source-removal/offline journey |
 | `tests/ui_navigation.rs`, `tests/mobile_layout.rs` | Headless reader models, phone/landscape/tablet/desktop control bounds, tab taps, accessible activation and back navigation |
+| `tools/test-android-documents.py`, `tests/android-documents` | Production Java/JNI host regression with checked JNI and deterministic main-queue/lifecycle fixtures |
 | `tools/package-addon.py` | Deterministic manifest-declared reader addon ZIP builder |
 | `.github/scripts`, `.github/workflows` | Nova's copied platform packagers and PR/main-check versus tag-build split, required Reader identity/license/signing integration |
 | `.github/scripts/test_package_nova_parity.py` | Immutable Nova-source parity for all three packaging scripts, masking only documented app metadata/media-license differences |
@@ -78,6 +79,7 @@ Source examples are intended for independent future publication in nova-addons.
 ## Where to look
 
 - Nova design reuse and destination behavior: [UI design](ui-design.md).
+- Android picker context, callbacks and host JVM regression: [Android documents](android-documents.md).
 - Android/desktop shells and touch layout checks: `crates/ui/navigation.slint`, `crates/ui/app.slint`, `tests/mobile_layout.rs`.
 - Static review scope and outcome: [review record](../REVIEW.md).
 - Run/build/install and CLI: [README](../README.md), [packaging](packaging.md).
