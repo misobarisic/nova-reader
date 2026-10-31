@@ -492,6 +492,7 @@ impl Controller {
         });
     }
     fn open_series(self: &Arc<Self>, ui: &AppWindow, series: Series) {
+        ui.set_detail_origin(self.view().section);
         self.flush();
         {
             let mut view = self.view();
@@ -523,6 +524,10 @@ impl Controller {
         );
     }
     fn open_chapter(self: &Arc<Self>, ui: &AppWindow, chapter: ChapterId) {
+        let origin = self.view().section;
+        if origin != 5 && origin != 6 {
+            ui.set_detail_origin(origin);
+        }
         self.task(
             ui,
             move |app, cancel| {

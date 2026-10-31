@@ -12,8 +12,10 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `src/cli.rs`, `src/paths.rs` | Commands, bounded file input, independent application directory |
 | `src/android_documents.rs`, `android/java/dev/misob/nova/reader/ReaderActivity.java` | Android SAF document/tree import, staged backup export and JNI callbacks |
 | `src/updates.rs` | Optional reader application release discovery |
-| `crates/ui` | Slint application window, responsive navigation, reader/page models, application version binding and translated text |
-| `assets/icons/navigation` | Embedded SVG sidebar icons, independent of system font glyph coverage |
+| `crates/ui/app.slint` | Shared pages/reader models, safe-area layout, platform/width shell selection, detail origin and translated text |
+| `crates/ui/navigation.slint` | Separate desktop sidebar and Android/compact bottom tabs; Android keeps the mobile shell at every width |
+| `crates/ui/controls.slint` | Keyboard and screen-reader accessible actions with 48px touch targets |
+| `assets/icons/navigation` | Embedded SVG navigation and reader controls, independent of system font glyph coverage |
 | `crates/reader-domain` | Source-local identities, schema-1 state, library/categories, progress/history/bookmarks, backup/restore |
 | `crates/reader-sources` | Reader v2 ZIP validation, durable registry, typed profile settings, QuickJS host, HTML/URL capabilities and checked source HTTP |
 | `crates/reader-engine` | Dimension probing, bounded PNG/JPEG/WebP decode, display downscale, geometry, resume anchors and decoded cache utility |
@@ -22,7 +24,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `examples/addons/manhwa18cc` | Thin Manhwa18 configuration, reusable YiiMadara helper, Apache license/provenance and synthetic parser fixtures |
 | `examples/addons/neutral-fixture` | Installable network-free fixture, bundled geometric PNGs and 320-page chapter |
 | `tests/reading_journey.rs` | Process-boundary install/read/progress/interrupted download/recovery/source-removal/offline journey |
-| `tests/ui_navigation.rs` | Headless Slint navigation and reader model checks |
+| `tests/ui_navigation.rs`, `tests/mobile_layout.rs` | Headless reader models, phone/landscape/tablet/desktop control bounds, tab taps, accessible activation and back navigation |
 | `tools/package-addon.py` | Deterministic manifest-declared reader addon ZIP builder |
 | `.github/scripts`, `.github/workflows` | Nova's parallel Android build/assembly, compiler-closure Windows staging, Linux packaging, Rust caches, license inventory and Nova’s PR/main-check versus tag-build split |
 | `android` | Android resources, platform document bridge and intentionally public local debug signing key |
@@ -70,6 +72,7 @@ Source examples are intended for independent future publication in nova-addons.
 
 ## Where to look
 
+- Android/desktop shells and touch layout checks: `crates/ui/navigation.slint`, `crates/ui/app.slint`, `tests/mobile_layout.rs`.
 - Static review scope and outcome: [review record](../REVIEW.md).
 - Run/build/install and CLI: [README](../README.md), [packaging](packaging.md).
 - Source manifest, HTTP permissions, limits and error contract: [source API](source-api.md).

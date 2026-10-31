@@ -1,0 +1,63 @@
+import { ComboBox } from "std-widgets.slint";
+
+// Shared actions keep a 48 logical-pixel target on touch screens and accept
+// keyboard activation on desktop. Text never forces a page wider than its host.
+export component ActionButton inherits Rectangle {
+    in property <string> text;
+    in property <image> icon;
+    in property <bool> icon-only;
+    in property <bool> accent;
+    in property <bool> enabled: true;
+    callback clicked;
+    min-width: 0px;
+    min-height: 48px;
+    preferred-height: 48px;
+    vertical-stretch: 0;
+    border-radius: 8px;
+    background: !root.enabled ? #ffffff04 : touch.pressed ? #aca0ff30 : root.accent ? #aca0ff24 : touch.has-hover ? #ffffff14 : #ffffff09;
+    border-width: focus.has-focus ? 2px : 1px;
+    border-color: focus.has-focus ? #c1b5ff : #ffffff0c;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    if root.icon-only: Image {
+        source: root.icon; width: 22px; height: 22px;
+        x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+        colorize: root.enabled ? #d9d2e7 : #66616f;
+        image-fit: contain;
+    }
+    if !root.icon-only: Text {
+        x: 10px; width: max(0px, parent.width - 20px); height: parent.height;
+        text: root.text; color: root.enabled ? #ddd7e7 : #66616f;
+        font-size: 14px; horizontal-alignment: center; vertical-alignment: center;
+        wrap: word-wrap; overflow: elide;
+    }
+    focus := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == " " {
+                if !event.repeat { root.clicked(); }
+                return accept;
+            }
+            return reject;
+        }
+    }
+    touch := TouchArea { enabled: root.enabled; clicked => { focus.focus(); root.clicked(); } }
+    forward-focus: focus;
+}
+
+export component IconAction inherits ActionButton { icon-only: true; width: 48px; }
+
+export component CategoryPicker inherits Rectangle {
+    in property <string> label;
+    in property <[string]> model;
+    in-out property <int> current-index;
+    callback selected(int);
+    min-width: 0px; height: 72px;
+    VerticalLayout {
+        spacing: 8px;
+        Text { min-width: 0px; text: root.label; color: #8d849b; font-size: 12px; }
+        ComboBox { min-width: 0px; height: 48px; model: root.model; current-index <=> root.current-index; selected(value) => { root.selected(self.current-index); } }
+    }
+}

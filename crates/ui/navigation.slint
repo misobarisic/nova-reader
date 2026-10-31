@@ -1,0 +1,82 @@
+component NavigationItem inherits Rectangle {
+    in property <string> label;
+    in property <image> icon;
+    in property <bool> active;
+    in property <bool> bottom;
+    callback clicked;
+    min-width: 0px;
+    height: root.bottom ? 64px : 48px;
+    border-radius: 10px;
+    background: root.active ? #aca0ff18 : touch.has-hover ? #ffffff08 : transparent;
+    border-width: focus.has-focus ? 2px : 0px; border-color: #c1b5ff;
+    accessible-role: tab;
+    accessible-label: root.label;
+    accessible-item-selectable: true;
+    accessible-item-selected: root.active;
+    accessible-action-default => { root.clicked(); }
+    Image {
+        source: root.icon; width: 22px; height: 22px;
+        x: root.bottom ? (parent.width - self.width) / 2 : 16px;
+        y: root.bottom ? 9px : (parent.height - self.height) / 2;
+        image-fit: contain; colorize: root.active ? #c1b5ff : #84858e;
+    }
+    Text {
+        x: root.bottom ? 2px : 50px; y: root.bottom ? 35px : 0px;
+        width: max(0px, parent.width - self.x - (root.bottom ? 2px : 8px));
+        height: root.bottom ? 22px : parent.height;
+        text: root.label; color: root.active ? #ede8ff : #a9aab3;
+        font-size: root.bottom ? 11px : 14px; font-weight: root.active ? 600 : 400;
+        vertical-alignment: center; horizontal-alignment: root.bottom ? center : left;
+        overflow: elide;
+    }
+    focus := FocusScope {
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == " " {
+                if !event.repeat { root.clicked(); }
+                return accept;
+            }
+            return reject;
+        }
+    }
+    touch := TouchArea { clicked => { focus.focus(); root.clicked(); } }
+    forward-focus: focus;
+}
+
+export component DesktopSidebar inherits Rectangle {
+    in property <int> section;
+    in property <string> app-version;
+    callback navigate(int);
+    width: 216px; background: #131317;
+    // Keep all destinations reachable on short desktop windows too.
+    Flickable {
+        width: parent.width; height: parent.height;
+        content-width: self.width; content-height: max(self.height, 388px);
+        VerticalLayout {
+            width: parent.width; height: parent.content-height;
+            padding: 16px; spacing: 6px;
+            NavigationItem { label: @tr("Library"); icon: @image-url("../../assets/icons/navigation/library.svg"); active: root.section == 0; clicked => { root.navigate(0); } }
+            NavigationItem { label: @tr("Updates"); icon: @image-url("../../assets/icons/navigation/updates.svg"); active: root.section == 1; clicked => { root.navigate(1); } }
+            NavigationItem { label: @tr("History"); icon: @image-url("../../assets/icons/navigation/history.svg"); active: root.section == 2; clicked => { root.navigate(2); } }
+            NavigationItem { label: @tr("Browse"); icon: @image-url("../../assets/icons/navigation/browse.svg"); active: root.section == 3; clicked => { root.navigate(3); } }
+            Rectangle { height: 1px; background: #ffffff0c; }
+            NavigationItem { label: @tr("Downloads"); icon: @image-url("../../assets/icons/navigation/downloads.svg"); active: root.section == 7; clicked => { root.navigate(7); } }
+            NavigationItem { label: @tr("More"); icon: @image-url("../../assets/icons/navigation/more.svg"); active: root.section == 4; clicked => { root.navigate(4); } }
+            Rectangle { vertical-stretch: 1; }
+            Text { text: root.app-version + " · GPL-3.0+"; color: #53535e; font-size: 10px; }
+        }
+    }
+}
+
+export component MobileNavigation inherits Rectangle {
+    in property <int> section;
+    callback navigate(int);
+    height: 68px; vertical-stretch: 0; background: #131317;
+    HorizontalLayout {
+        padding: 2px; spacing: 2px;
+        NavigationItem { bottom: true; label: @tr("Library"); icon: @image-url("../../assets/icons/navigation/library.svg"); active: root.section == 0 || root.section == 5; clicked => { root.navigate(0); } }
+        NavigationItem { bottom: true; label: @tr("Updates"); icon: @image-url("../../assets/icons/navigation/updates.svg"); active: root.section == 1; clicked => { root.navigate(1); } }
+        NavigationItem { bottom: true; label: @tr("History"); icon: @image-url("../../assets/icons/navigation/history.svg"); active: root.section == 2; clicked => { root.navigate(2); } }
+        NavigationItem { bottom: true; label: @tr("Browse"); icon: @image-url("../../assets/icons/navigation/browse.svg"); active: root.section == 3 || root.section == 8; clicked => { root.navigate(3); } }
+        NavigationItem { bottom: true; label: @tr("More"); icon: @image-url("../../assets/icons/navigation/more.svg"); active: root.section == 4 || root.section == 7; clicked => { root.navigate(4); } }
+    }
+}

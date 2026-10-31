@@ -4,6 +4,8 @@ fn main() {
         "app.slint",
         slint_build::CompilerConfiguration::new()
             .with_include_paths(vec![shared])
+            // Layout regressions inspect element bounds in development builds.
+            .with_debug_info(std::env::var("PROFILE").as_deref() == Ok("debug"))
             .with_style("fluent-dark".into())
             .embed_resources(slint_build::EmbedResourcesKind::EmbedFiles)
             .with_default_translation_context(slint_build::DefaultTranslationContext::None),

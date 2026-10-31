@@ -58,3 +58,25 @@ run only on PR/main; tag builds start directly and publication waits only for
 the platform artifacts. The earlier exact-tag check gates are removed.
 Only reader identities, absent video subsystems, license files and existing
 signing overrides require adaptation. A packaging regression guards this split.
+
+## Android and desktop layouts for 0.1.5
+
+Reader now has separate desktop sidebar and mobile bottom-navigation components.
+Android selects the mobile shell at every width; narrow desktop windows can also
+use it. Both respect Window system-bar/cutout insets. Shared pages scroll their
+headers, filters and content together; mobile filters stack while desktop filters
+sit side by side. Actions and fields have 48px touch targets, and chapter/queue
+actions occupy their own rows. Reader options expand separately from chapter/page
+navigation and scroll in short windows. Back navigation retains the entry section
+for details, including chapters opened directly from History/Updates/Downloads.
+
+Astra 6 at medium reviewed this change. Its findings about accessible default
+actions, direct-chapter back origins, options-panel sizing and scroll reset were
+fixed. Regression tests cover actual pointer/default-action activation, disabled
+actions, focused Back handling, section scroll reset versus same-page loading,
+phone/landscape/tablet layouts and desktop selection. Formatting, workspace check,
+Clippy for all targets with warnings denied, and all workspace tests passed.
+Linux Xvfb visual checks covered 320px/390px phones, 844px landscape reader options
+and the 1120px desktop sidebar. These exercise the mobile Slint layout on Linux;
+Android system insets, software keyboard and physical-device interaction still
+require device validation. No local Android SDK/NDK/device was available.
