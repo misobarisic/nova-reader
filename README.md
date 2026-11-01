@@ -15,9 +15,9 @@ styling and transparent bottom bar. **Display** controls poster/list layouts and
 grid columns; **Look and feel** controls animations. **Cache** controls separate
 chapter-page and artwork caches, disk limits, decoded artwork memory and poster
 resolution. Clearing either cache preserves explicit downloads and library data.
-It also controls JPEG/WebP/AVIF compression of newly cached images and new offline downloads;
+It also controls JPEG/WebP/AVIF/JPEG XL compression of newly cached images and new offline downloads;
 existing files stay unchanged. **Screenshots** controls capture format (including
-AVIF), quality, screencap resolution, optional series folders and duplicate handling. Screencaps can
+AVIF and JPEG XL lossless/lossy), quality, screencap resolution, optional series folders and duplicate handling. Screencaps can
 use device pixels or the original chapter image's pixel scale for the visible area.
 These device preferences are saved separately from library backups.
 Browse groups sources by last used, pins and language; Extensions manages installed

@@ -691,3 +691,35 @@ packaging regressions. Final focused refresh tests/check/Clippy also pass after
 monotonic batch spacing, cancellation cooldown retention and local-import
 exclusion. The final title-menu tests pass at phone and desktop widths, including
 all six status choices and full source-qualified identities.
+
+
+## JPEG XL screencaps and adjacent compression controls
+
+Capture formats append JPEG XL lossless/lossy at indices 5/6 while retaining
+existing indices. Independent `jxl_quality` defaults to 85 for old saved capture
+settings; all draft rollback and validation paths include it. Both device and
+chapter-resolution screencaps pass through the shared Kit encoder and Reader
+JXL decode admission before file/clipboard delivery. File extension and MIME
+are `.jxl`/`image/jxl`; original-page exports retain source bytes.
+
+Astra 6 medium reviewed/reordered Cache to keep quality directly after format,
+followed by optional JPEG transcoding. Chapter cache/compression, artwork/memory
+and explicit download compression remain distinct. A real raster review found
+artwork clearing was still appended by MorePage after Downloads; it now lives
+with artwork settings, using the existing callback and independent busy gating.
+Capture quality similarly follows its format selector. Shared Nova/Kit controls,
+theme, row layout and all persisted cache values are unchanged.
+
+Capture regression coverage includes saved/reloaded JXL choice and independent
+quality, old settings migration, invalid values, actual dropdown/slider actions,
+lossless pixel/alpha roundtrip, lossy quality effect and output MIME/extension.
+Responsive cache checks cover format/quality/transcode adjacency, artwork action
+placement/callback isolation and busy behavior. Native software raster previews
+cover phone and desktop; the X11 clipboard regression exercises both JXL modes.
+
+Final v0.1.19 validation passed formatting, locked workspace check, workspace
+Clippy with warnings denied, full workspace tests/doc tests and all 33 packaging
+regressions. Focused capture encoding/alpha tests and the actual X11 clipboard
+ownership test pass for JPEG XL modes. The opt-in native software previews ran
+at phone/desktop sizes; the final confirmation shows artwork clearing in its
+artwork group and quality immediately below each format.

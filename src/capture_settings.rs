@@ -44,6 +44,8 @@ pub enum CaptureFormat {
     WebpLossless = 2,
     WebpLossy = 3,
     Avif = 4,
+    JxlLossless = 5,
+    JxlLossy = 6,
 }
 
 impl TryFrom<i32> for CaptureFormat {
@@ -56,6 +58,8 @@ impl TryFrom<i32> for CaptureFormat {
             2 => Ok(Self::WebpLossless),
             3 => Ok(Self::WebpLossy),
             4 => Ok(Self::Avif),
+            5 => Ok(Self::JxlLossless),
+            6 => Ok(Self::JxlLossy),
             _ => Err("unsupported screenshot format"),
         }
     }
@@ -102,6 +106,7 @@ pub struct CapturePreferences {
     pub jpeg_quality: u8,
     pub webp_quality: u8,
     pub avif_quality: u8,
+    pub jxl_quality: u8,
     pub series_folders: bool,
     pub conflict: ConflictPolicy,
 }
@@ -114,6 +119,7 @@ impl Default for CapturePreferences {
             jpeg_quality: 85,
             webp_quality: 85,
             avif_quality: 85,
+            jxl_quality: 85,
             series_folders: false,
             conflict: ConflictPolicy::Ask,
         }
@@ -125,6 +131,7 @@ impl CapturePreferences {
         (1..=100).contains(&self.jpeg_quality)
             && (1..=100).contains(&self.webp_quality)
             && (1..=100).contains(&self.avif_quality)
+            && (1..=100).contains(&self.jxl_quality)
     }
 
     fn apply(&self, ui: &AppWindow) {
@@ -134,6 +141,7 @@ impl CapturePreferences {
         settings.set_jpeg_quality(f32::from(self.jpeg_quality));
         settings.set_webp_quality(f32::from(self.webp_quality));
         settings.set_avif_quality(f32::from(self.avif_quality));
+        settings.set_jxl_quality(f32::from(self.jxl_quality));
         settings.set_series_folders(self.series_folders);
         settings.set_conflict_policy(self.conflict.into());
     }
@@ -155,6 +163,7 @@ impl CapturePreferences {
             "jpeg_quality" if (1..=100).contains(&value) => self.jpeg_quality = value as u8,
             "webp_quality" if (1..=100).contains(&value) => self.webp_quality = value as u8,
             "avif_quality" if (1..=100).contains(&value) => self.avif_quality = value as u8,
+            "jxl_quality" if (1..=100).contains(&value) => self.jxl_quality = value as u8,
             "series_folders" if value == 0 || value == 1 => self.series_folders = value == 1,
             _ => return false,
         }
@@ -179,6 +188,7 @@ pub fn preferences(ui: &AppWindow) -> CapturePreferences {
         jpeg_quality: quality(settings.get_jpeg_quality()),
         webp_quality: quality(settings.get_webp_quality()),
         avif_quality: quality(settings.get_avif_quality()),
+        jxl_quality: quality(settings.get_jxl_quality()),
         series_folders: settings.get_series_folders(),
         conflict: ConflictPolicy::try_from(settings.get_conflict_policy()).unwrap_or_default(),
     }
@@ -257,6 +267,7 @@ mod tests {
         let old = r#"{"format":0,"resolution":0,"jpeg_quality":85,"webp_quality":85,"avif_quality":85,"series_folders":false}"#;
         let loaded: CapturePreferences = serde_json::from_str(old).unwrap();
         assert_eq!(loaded.conflict, ConflictPolicy::Ask);
+        assert_eq!(loaded.jxl_quality, 85);
         for policy in [
             ConflictPolicy::Ask,
             ConflictPolicy::Overwrite,
@@ -287,9 +298,10 @@ mod tests {
         previous.apply(&ui);
         let state = RefCell::new(previous);
         let next = CapturePreferences {
-            format: CaptureFormat::Jpeg,
+            format: CaptureFormat::JxlLossy,
             resolution: CaptureResolution::Chapter,
             jpeg_quality: 70,
+            jxl_quality: 69,
             series_folders: true,
             conflict: ConflictPolicy::Overwrite,
             ..previous

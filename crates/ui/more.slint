@@ -347,17 +347,12 @@ export component MorePage inherits Rectangle {
                     if root.detail-section == 14: ThemeSettings { narrow: root.width < 700px; phone-layout: root.narrow; interactive: root.detail-active; }
                     if root.detail-section == 16: DisplaySettings { interactive: root.detail-active; }
                     if root.detail-section == 18: CaptureSettingsPage { interactive: root.detail-active; }
-                    if root.detail-section == 17: VerticalLayout {
-                        spacing: 16px;
-                        ImageStorageSettingsPage { interactive: root.detail-active; busy: root.image-cache-busy; }
-                        SettingsCard { VerticalLayout {
-                            padding: 16px; spacing: 12px;
-                            Text { text: @tr("Artwork cache"); font-size: 18px; font-weight: 600; color: Theme.current.text_bright; }
-                            Text { text: root.image-cache-info; color: Theme.current.text_settings; wrap: word-wrap; min-width: 0px; }
-                            Text { text: @tr("Covers are temporary and can be downloaded again. Downloaded chapters, imports and library data stay intact when you clear this cache."); color: Theme.current.text_secondary; wrap: word-wrap; min-width: 0px; }
-                            ActionButton { text: @tr("Clear artwork cache"); enabled: root.detail-active && !root.image-cache-busy; clicked => { root.image-cache-clear(); } }
-                            if root.image-cache-status != "": Text { text: root.image-cache-status; color: Theme.current.text_settings; wrap: word-wrap; min-width: 0px; }
-                        } }
+                    if root.detail-section == 17: ImageStorageSettingsPage {
+                        interactive: root.detail-active;
+                        busy: root.image-cache-busy;
+                        image-cache-info: root.image-cache-info;
+                        image-cache-status: root.image-cache-status;
+                        image-cache-clear => { root.image-cache-clear(); }
                     }
                     if root.detail-section == 15: MotionSettings { interactive: root.detail-active; }
                 }

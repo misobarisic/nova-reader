@@ -110,6 +110,37 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
                 quality(&ui, "Download quality").invoke_accessible_increment_action();
                 assert_eq!(image_storage::load().cache.quality, 86);
                 assert_eq!(image_storage::load().downloads.quality, 86);
+                // Check actual row adjacency, including the narrow stacked layout:
+                // the optional JPEG transcode row must never separate format/quality.
+                for width in [390., 1120.] {
+                    ui.window().set_size(slint::LogicalSize::new(width, 3000.));
+                    settle();
+                    for prefix in ["cache", "downloads"] {
+                        let row = |kind: &str| {
+                            ElementHandle::find_by_element_id(
+                                &ui,
+                                &format!("ImageStorageSettingsPage::{prefix}_{kind}_row"),
+                            )
+                            .next()
+                            .unwrap_or_else(|| panic!("missing {prefix} {kind} row"))
+                        };
+                        let format = row("format");
+                        let quality = row("quality");
+                        let transcode = row("transcode");
+                        for (before, after) in [(&format, &quality), (&quality, &transcode)] {
+                            assert!(
+                                (after.absolute_position().y
+                                    - before.absolute_position().y
+                                    - before.size().height)
+                                    .abs()
+                                    < 1.,
+                                "{prefix} format, quality and transcode rows must be adjacent at {width}px"
+                            );
+                        }
+                    }
+                }
+                ui.window().set_size(slint::LogicalSize::new(390., 3000.));
+                settle();
                 for (id, index) in [("cache_format", 3), ("downloads_format", 3)] {
                     let dropdown = ElementHandle::find_by_element_id(
                         &ui,
@@ -150,7 +181,7 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
                 toggle(&ui, "Compress new cached images");
                 assert!(!image_storage::load().cache.enabled);
                 assert!(image_storage::load().downloads.enabled);
-                for width in [320., 390., 768.] {
+                for width in [320., 390., 768., 1120.] {
                     ui.window().set_size(slint::LogicalSize::new(width, 3000.));
                     settle();
                     for id in ["cache_format", "downloads_format"] {
@@ -385,6 +416,15 @@ fn cache_policy_migrates_persists_and_publishes_cached_snapshots_after_commits()
                     0,
                     "chapter maintenance must not dispatch artwork-only clear"
                 );
+                button("Clear artwork cache").invoke_accessible_default_action();
+                assert_eq!(artwork_clear.get(), 1, "artwork clear must dispatch once");
+                assert_eq!(clear.get(), 1, "artwork clear must not clear chapter pages");
+                ui.set_image_cache_busy(true);
+                assert_eq!(
+                    button("Clear artwork cache").accessible_enabled(),
+                    Some(false)
+                );
+                ui.set_image_cache_busy(false);
                 toggle(&ui, "Disk caching");
                 assert!(!image_storage::cache_policy(CacheKind::Chapters).enabled);
                 assert!(!image_storage::cache_policy(CacheKind::Artwork).enabled);
@@ -436,9 +476,36 @@ fn cache_policy_migrates_persists_and_publishes_cached_snapshots_after_commits()
                     "memory remains adjustable during disk maintenance as in Nova"
                 );
                 settings.set_chapter_cache_busy(false);
-                for width in [320., 390., 768.] {
+                for width in [320., 390., 768., 1120.] {
                     ui.window().set_size(slint::LogicalSize::new(width, 3000.));
                     settle();
+                    let artwork = button("Artwork disk-cache limit");
+                    let poster = button("Poster resolution");
+                    let memory = quality(&ui, "Decoded-image budget");
+                    let artwork_clear = button("Clear artwork cache");
+                    let download_format = ElementHandle::find_by_element_id(
+                        &ui,
+                        "ImageStorageSettingsPage::downloads_format",
+                    )
+                    .next()
+                    .unwrap();
+                    assert!(memory.absolute_position().y < artwork_clear.absolute_position().y);
+                    assert!(
+                        artwork_clear.absolute_position().y < download_format.absolute_position().y,
+                        "artwork maintenance belongs with artwork settings before downloads"
+                    );
+                    assert!(artwork.absolute_position().y < poster.absolute_position().y);
+                    assert!(poster.absolute_position().y < memory.absolute_position().y);
+                    assert!(
+                        quality(&ui, "Cache quality").absolute_position().y
+                            < artwork.absolute_position().y,
+                        "cache compression stays with chapter cache before artwork settings"
+                    );
+                    assert!(
+                        memory.absolute_position().y
+                            < quality(&ui, "Download quality").absolute_position().y,
+                        "independent downloads follow temporary cache settings"
+                    );
                     for label in [
                         "Chapter disk-cache limit",
                         "Artwork disk-cache limit",

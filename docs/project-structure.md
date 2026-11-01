@@ -19,7 +19,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `src/export_names.rs` | Portable UTF-8 series folders and bounded title/chapter/page/vertical-position filenames, including duplicate numbering |
 | `crates/ui/save-conflict-sheet.slint` | Retained modal Overwrite/Add number/Cancel sheet; `app.slint` owns name/open/choice properties and callbacks |
 | `src/chapter_capture.rs` | Bounded source-resolution compositor for visible chapter areas; captures original pixels rather than enlarging a device snapshot |
-| `src/capture_settings.rs`, `crates/ui/capture-settings.slint` | Validated device capture preferences and retained More → Settings → Screenshots controls for format, quality, Device/Chapter screencap resolution, per-series folders and duplicate policy |
+| `src/capture_settings.rs`, `crates/ui/capture-settings.slint` | Validated device capture preferences and retained More → Settings → Screenshots controls for format (including JPEG XL lossless/lossy), adjacent quality, Device/Chapter screencap resolution, per-series folders and duplicate policy |
 | `src/image_storage.rs`, `crates/ui/image-storage-settings.slint` | Durable cache policy and independent JPEG/WebP/AVIF compression; shared Kit cache controls with chapter-first maintenance and separate artwork settings |
 | `src/source_catalogs.rs` | Host-owned per-addon catalogue switches under `reader:disabled-catalogs:<JSON package ID>`; filters Browse while preserving direct/history/offline access |
 | `src/reading_preferences.rs` | Fallible Nova KV persistence for adult-source visibility and chapter order keyed by full source-local series identity |
@@ -332,3 +332,20 @@ Progress, history and disappeared chapters survive successful merges.
 Automatic Completed requires source Completed plus every known chapter read;
 ongoing/unknown caught-up entries stay Reading. Explicit Completed overrides the
 source/progress decision. It is independent of the user's `reading_status` pin.
+
+
+Capture format indices append JPEG XL lossless/lossy at 5/6, preserving 0–4.
+`CapturePreferences.jxl_quality` defaults to 85 for older `reader:captures` values,
+persists independently of JPEG/WebP/AVIF and applies only to lossy JPEG XL. Shared
+Kit encoding produces `.jxl` / `image/jxl` screencaps at either capture resolution;
+Reader decode admission is checked before delivery. Original page exports keep
+source bytes. Screenshot quality sits immediately after format. Cache settings
+follow chapter cache → cache compression → artwork/memory → downloads; each
+compression quality row directly follows its format, before optional transcode.
+
+Artwork cache usage/clear/status are owned by `ImageStorageSettingsPage` beside
+artwork disk/resolution/memory controls, before downloads. `MorePage` forwards
+its existing artwork usage/status/busy properties and clear callback into that
+page; chapter maintenance retains its independent callback and busy state.
+`tests/capture_settings.rs::render_capture_and_cache_settings_previews` is an
+opt-in software-rendered phone/desktop capture helper for reviewing these pages.

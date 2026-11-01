@@ -34,6 +34,9 @@ export global ImageStorageSettings {
 export component ImageStorageSettingsPage inherits VerticalLayout {
     in property <bool> interactive: true;
     in property <bool> busy: false;
+    in property <string> image-cache-info;
+    in property <string> image-cache-status;
+    callback image-cache-clear();
     private property <bool> maintenance: root.busy || ImageStorageSettings.chapter-cache-busy;
     spacing: 16px; alignment: start;
     init => { if root.interactive { ImageStorageSettings.chapter-cache-refresh(); } }
@@ -75,6 +78,50 @@ export component ImageStorageSettingsPage inherits VerticalLayout {
         text: ImageStorageSettings.chapter-cache-status;
         color: Theme.current.text_settings; wrap: word-wrap; min-width: 0px;
     }
+    SectionHeader { label: @tr("Cache compression"); }
+    SettingsCard {
+        SettingsRow {
+            row-title: @tr("Compress new cached images");
+            row-desc: @tr("Compress new temporary chapter pages and artwork. Existing files stay unchanged; unsupported images keep their original encoding.");
+            CacheCompressionToggle {
+                name: @tr("Compress new cached images");
+                disk-enabled: ImageStorageSettings.disk-enabled; busy: !root.interactive || root.maintenance;
+                checked <=> ImageStorageSettings.cache-enabled;
+                toggled => { ImageStorageSettings.settings-changed("cache_enabled", self.checked ? 1 : 0); }
+            }
+        }
+        cache_format_row := SettingsRow {
+            row-title: @tr("Cache format"); row-desc: @tr("JPEG, WebP, AVIF or JPEG XL for newly cached images.");
+            cache_format := Dropdown {
+                width: Math.min(252px, Math.max(0px, root.width - 32px)); roomy: true;
+                model: [@tr("JPEG"), @tr("WebP"), @tr("AVIF"), @tr("JPEG XL (lossless)"), @tr("JPEG XL (lossy)")];
+                enabled: !(!root.interactive || root.maintenance || !ImageStorageSettings.disk-enabled) && ImageStorageSettings.cache-enabled;
+                current-index <=> ImageStorageSettings.cache-format;
+                selected(i) => { ImageStorageSettings.settings-changed("cache_format", self.current-index); }
+            }
+        }
+        if ImageStorageSettings.cache-format != 3: cache_quality_row := SettingsRow {
+            row-title: @tr("Cache quality"); row-desc: @tr("Higher values retain more detail and use more disk space.");
+            CacheQualityControl {
+                width: Math.min(InterfaceStyle.tv ? 320px : 252px, Math.max(0px, root.width - 32px));
+                disk-enabled: ImageStorageSettings.disk-enabled; compression-enabled: ImageStorageSettings.cache-enabled;
+                busy: !root.interactive || root.maintenance;
+                name: @tr("Cache quality"); increase-label: @tr("Increase cache quality"); decrease-label: @tr("Decrease cache quality");
+                value <=> ImageStorageSettings.cache-quality;
+                changed(v) => { ImageStorageSettings.settings-changed("cache_quality", Math.round(v)); }
+            }
+        }
+        if ImageStorageSettings.cache-format == 3 || ImageStorageSettings.cache-format == 4: cache_transcode_row := SettingsRow {
+            row-title: @tr("Losslessly transcode JPEG");
+            row-desc: @tr("Preserve original JPEG data when no resize is needed. Other images and resized JPEGs use the selected quality.");
+            CacheCompressionToggle {
+                name: @tr("Losslessly transcode cache JPEG");
+                busy: !root.interactive || root.maintenance || !ImageStorageSettings.disk-enabled || !ImageStorageSettings.cache-enabled;
+                checked <=> ImageStorageSettings.cache-jxl-lossless-jpeg;
+                toggled => { ImageStorageSettings.settings-changed("cache_jxl_lossless_jpeg", self.checked ? 1 : 0); }
+            }
+        }
+    }
     SectionHeader { label: @tr("Artwork and memory"); }
     SettingsCard {
         SettingsRow {
@@ -90,6 +137,17 @@ export component ImageStorageSettingsPage inherits VerticalLayout {
             }
         }
         SettingsRow {
+            row-title: @tr("Poster resolution");
+            row-desc: @tr("Limit the longest side of newly processed artwork. Original keeps source dimensions. Chapter pages always keep their original dimensions.");
+            CacheResolutionControl {
+                width: 100%; name: @tr("Poster resolution"); keyboard-input-enabled: true;
+                model: ImageStorageSettings.poster-resolution-names;
+                current-index <=> ImageStorageSettings.poster-resolution-index;
+                busy: !root.interactive || root.maintenance;
+                selected(_) => { ImageStorageSettings.settings-changed("poster_resolution_index", self.current-index); }
+            }
+        }
+        SettingsRow {
             row-title: @tr("Decoded-image budget");
             row-desc: @tr("Memory available for decoded artwork, independent of disk caching.");
             CacheMemoryControl {
@@ -102,60 +160,19 @@ export component ImageStorageSettingsPage inherits VerticalLayout {
             }
         }
         SettingsRow {
-            row-title: @tr("Poster resolution");
-            row-desc: @tr("Limit the longest side of newly processed artwork. Original keeps source dimensions. Chapter pages always keep their original dimensions.");
-            CacheResolutionControl {
-                width: 100%; name: @tr("Poster resolution"); keyboard-input-enabled: true;
-                model: ImageStorageSettings.poster-resolution-names;
-                current-index <=> ImageStorageSettings.poster-resolution-index;
-                busy: !root.interactive || root.maintenance;
-                selected(_) => { ImageStorageSettings.settings-changed("poster_resolution_index", self.current-index); }
+            row-title: @tr("Artwork cache");
+            row-desc: (root.image-cache-info == "" ? "" : root.image-cache-info + "\n\n")
+                + @tr("Covers are temporary and can be downloaded again. Downloaded chapters, imports and library data stay intact when you clear this cache.");
+            CacheClearControl {
+                label: @tr("Clear artwork cache");
+                busy: !root.interactive || root.busy;
+                clicked => { root.image-cache-clear(); }
             }
         }
     }
-    SectionHeader { label: @tr("Cache compression"); }
-    SettingsCard {
-        SettingsRow {
-            row-title: @tr("Compress new cached images");
-            row-desc: @tr("Compress new temporary chapter pages and artwork. Existing files stay unchanged; unsupported images keep their original encoding.");
-            CacheCompressionToggle {
-                name: @tr("Compress new cached images");
-                disk-enabled: ImageStorageSettings.disk-enabled; busy: !root.interactive || root.maintenance;
-                checked <=> ImageStorageSettings.cache-enabled;
-                toggled => { ImageStorageSettings.settings-changed("cache_enabled", self.checked ? 1 : 0); }
-            }
-        }
-        SettingsRow {
-            row-title: @tr("Cache format"); row-desc: @tr("JPEG, WebP, AVIF or JPEG XL for newly cached images.");
-            cache_format := Dropdown {
-                width: Math.min(252px, Math.max(0px, root.width - 32px)); roomy: true;
-                model: [@tr("JPEG"), @tr("WebP"), @tr("AVIF"), @tr("JPEG XL (lossless)"), @tr("JPEG XL (lossy)")];
-                enabled: !(!root.interactive || root.maintenance || !ImageStorageSettings.disk-enabled) && ImageStorageSettings.cache-enabled;
-                current-index <=> ImageStorageSettings.cache-format;
-                selected(i) => { ImageStorageSettings.settings-changed("cache_format", self.current-index); }
-            }
-        }
-        if ImageStorageSettings.cache-format == 3 || ImageStorageSettings.cache-format == 4: SettingsRow {
-            row-title: @tr("Losslessly transcode JPEG");
-            row-desc: @tr("Preserve original JPEG data when no resize is needed. Other images and resized JPEGs use the selected quality.");
-            CacheCompressionToggle {
-                name: @tr("Losslessly transcode cache JPEG");
-                busy: !root.interactive || root.maintenance || !ImageStorageSettings.disk-enabled || !ImageStorageSettings.cache-enabled;
-                checked <=> ImageStorageSettings.cache-jxl-lossless-jpeg;
-                toggled => { ImageStorageSettings.settings-changed("cache_jxl_lossless_jpeg", self.checked ? 1 : 0); }
-            }
-        }
-        if ImageStorageSettings.cache-format != 3: SettingsRow {
-            row-title: @tr("Cache quality"); row-desc: @tr("Higher values retain more detail and use more disk space.");
-            CacheQualityControl {
-                width: Math.min(InterfaceStyle.tv ? 320px : 252px, Math.max(0px, root.width - 32px));
-                disk-enabled: ImageStorageSettings.disk-enabled; compression-enabled: ImageStorageSettings.cache-enabled;
-                busy: !root.interactive || root.maintenance;
-                name: @tr("Cache quality"); increase-label: @tr("Increase cache quality"); decrease-label: @tr("Decrease cache quality");
-                value <=> ImageStorageSettings.cache-quality;
-                changed(v) => { ImageStorageSettings.settings-changed("cache_quality", Math.round(v)); }
-            }
-        }
+    if root.image-cache-status != "": Text {
+        text: root.image-cache-status;
+        color: Theme.current.text_settings; wrap: word-wrap; min-width: 0px;
     }
     SectionHeader { label: @tr("Download compression"); }
     SettingsCard {
@@ -168,7 +185,7 @@ export component ImageStorageSettingsPage inherits VerticalLayout {
                 toggled => { ImageStorageSettings.settings-changed("downloads_enabled", self.checked ? 1 : 0); }
             }
         }
-        SettingsRow {
+        downloads_format_row := SettingsRow {
             row-title: @tr("Download format"); row-desc: @tr("JPEG, WebP, AVIF or JPEG XL for new offline chapter pages.");
             downloads_format := Dropdown {
                 width: Math.min(252px, Math.max(0px, root.width - 32px)); roomy: true;
@@ -178,17 +195,7 @@ export component ImageStorageSettingsPage inherits VerticalLayout {
                 selected(i) => { ImageStorageSettings.settings-changed("downloads_format", self.current-index); }
             }
         }
-        if ImageStorageSettings.downloads-format == 3 || ImageStorageSettings.downloads-format == 4: SettingsRow {
-            row-title: @tr("Losslessly transcode JPEG");
-            row-desc: @tr("Preserve original JPEG data when no resize is needed. Other images and resized JPEGs use the selected quality.");
-            CacheCompressionToggle {
-                name: @tr("Losslessly transcode download JPEG");
-                busy: !root.interactive || !ImageStorageSettings.downloads-enabled;
-                checked <=> ImageStorageSettings.downloads-jxl-lossless-jpeg;
-                toggled => { ImageStorageSettings.settings-changed("downloads_jxl_lossless_jpeg", self.checked ? 1 : 0); }
-            }
-        }
-        if ImageStorageSettings.downloads-format != 3: SettingsRow {
+        if ImageStorageSettings.downloads-format != 3: downloads_quality_row := SettingsRow {
             row-title: @tr("Download quality"); row-desc: @tr("Higher values retain more detail and use more disk space.");
             CacheQualityControl {
                 width: Math.min(InterfaceStyle.tv ? 320px : 252px, Math.max(0px, root.width - 32px));
@@ -196,6 +203,16 @@ export component ImageStorageSettingsPage inherits VerticalLayout {
                 name: @tr("Download quality"); increase-label: @tr("Increase download quality"); decrease-label: @tr("Decrease download quality");
                 value <=> ImageStorageSettings.downloads-quality;
                 changed(v) => { ImageStorageSettings.settings-changed("downloads_quality", Math.round(v)); }
+            }
+        }
+        if ImageStorageSettings.downloads-format == 3 || ImageStorageSettings.downloads-format == 4: downloads_transcode_row := SettingsRow {
+            row-title: @tr("Losslessly transcode JPEG");
+            row-desc: @tr("Preserve original JPEG data when no resize is needed. Other images and resized JPEGs use the selected quality.");
+            CacheCompressionToggle {
+                name: @tr("Losslessly transcode download JPEG");
+                busy: !root.interactive || !ImageStorageSettings.downloads-enabled;
+                checked <=> ImageStorageSettings.downloads-jxl-lossless-jpeg;
+                toggled => { ImageStorageSettings.settings-changed("downloads_jxl_lossless_jpeg", self.checked ? 1 : 0); }
             }
         }
     }

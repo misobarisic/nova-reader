@@ -48,24 +48,26 @@ fn capture_preferences_persist_recover_and_drive_accessible_controls() {
                     CapturePreferences::default()
                 );
                 for (key, value) in [
-                    ("format", 4),
+                    ("format", 6),
                     ("resolution", 1),
                     ("conflict", 1),
                     ("jpeg_quality", 73),
                     ("webp_quality", 64),
                     ("avif_quality", 61),
+                    ("jxl_quality", 72),
                     ("series_folders", 1),
                 ] {
                     settings.invoke_settings_changed(key.into(), value);
                 }
                 for (key, value) in [
-                    ("format", 5),
+                    ("format", 7),
                     ("resolution", 2),
                     ("conflict", 3),
                     ("resolution", -1),
                     ("jpeg_quality", 0),
                     ("webp_quality", 101),
                     ("avif_quality", 0),
+                    ("jxl_quality", 101),
                     ("series_folders", 2),
                     ("unknown", 1),
                 ] {
@@ -82,12 +84,13 @@ fn capture_preferences_persist_recover_and_drive_accessible_controls() {
             "reload" => assert_eq!(
                 capture_settings::preferences(&ui),
                 CapturePreferences {
-                    format: CaptureFormat::Avif,
+                    format: CaptureFormat::JxlLossy,
                     resolution: CaptureResolution::Chapter,
                     conflict: ConflictPolicy::Overwrite,
                     jpeg_quality: 73,
                     webp_quality: 64,
                     avif_quality: 61,
+                    jxl_quality: 72,
                     series_folders: true,
                 }
             ),
@@ -106,6 +109,7 @@ fn capture_preferences_persist_recover_and_drive_accessible_controls() {
                 assert_eq!(preferences.jpeg_quality, 73);
                 assert_eq!(preferences.webp_quality, 64);
                 assert_eq!(preferences.avif_quality, 85);
+                assert_eq!(preferences.jxl_quality, 85);
                 assert!(preferences.series_folders);
             }
             "controls" => {
@@ -116,6 +120,7 @@ fn capture_preferences_persist_recover_and_drive_accessible_controls() {
                     ("jpeg_quality", 85),
                     ("webp_quality", 85),
                     ("avif_quality", 85),
+                    ("jxl_quality", 85),
                     ("series_folders", 0),
                 ] {
                     settings.invoke_settings_changed(key.into(), value);
@@ -195,7 +200,29 @@ fn capture_preferences_persist_recover_and_drive_accessible_controls() {
                 assert_eq!(capture_settings::preferences(&ui).avif_quality, 87);
                 assert_eq!(capture_settings::preferences(&ui).jpeg_quality, 87);
                 assert_eq!(capture_settings::preferences(&ui).webp_quality, 84);
-                for width in [320., 390., 768.] {
+                select_format(&ui, "JPEG XL (lossy)");
+                assert_eq!(
+                    capture_settings::preferences(&ui).format,
+                    CaptureFormat::JxlLossy
+                );
+                let jxl = ElementHandle::find_by_accessible_label(&ui, "JPEG XL quality")
+                    .find(|element| element.accessible_role() == Some(AccessibleRole::Slider))
+                    .unwrap();
+                jxl.invoke_accessible_decrement_action();
+                assert_eq!(capture_settings::preferences(&ui).jxl_quality, 84);
+                select_format(&ui, "JPEG XL (lossless)");
+                assert_eq!(
+                    capture_settings::preferences(&ui).format,
+                    CaptureFormat::JxlLossless
+                );
+                assert!(
+                    !ElementHandle::find_by_accessible_label(&ui, "JPEG XL quality")
+                        .any(|element| element.accessible_role() == Some(AccessibleRole::Slider))
+                );
+                select_format(&ui, "JPEG XL (lossy)");
+                assert_eq!(capture_settings::preferences(&ui).jxl_quality, 84);
+                assert_eq!(capture_settings::preferences(&ui).avif_quality, 87);
+                for width in [320., 390., 768., 1120.] {
                     ui.window().set_size(slint::LogicalSize::new(width, 1800.));
                     settle();
                     let selector =
@@ -223,6 +250,15 @@ fn capture_preferences_persist_recover_and_drive_accessible_controls() {
                     assert!(
                         resolution.absolute_position().x + resolution.size().width <= width + 0.5
                     );
+                    let quality = ElementHandle::find_by_accessible_label(&ui, "JPEG XL quality")
+                        .find(|element| element.accessible_role() == Some(AccessibleRole::Slider))
+                        .unwrap();
+                    assert!(quality.absolute_position().y > selector.absolute_position().y);
+                    assert!(
+                        quality.absolute_position().y + quality.size().height
+                            <= resolution.absolute_position().y,
+                        "quality belongs immediately under format, before resolution/folder/conflicts"
+                    );
                     select_option(&ui, "Screencap resolution", "Chapter resolution");
                     assert_eq!(
                         capture_settings::preferences(&ui).resolution,
@@ -238,11 +274,12 @@ fn capture_preferences_persist_recover_and_drive_accessible_controls() {
             "corrupt" => {
                 for raw in [
                     "broken JSON",
-                    r#"{"format":5}"#,
+                    r#"{"format":7}"#,
                     r#"{"resolution":2}"#,
                     r#"{"conflict":3}"#,
                     r#"{"jpeg_quality":0}"#,
                     r#"{"avif_quality":0}"#,
+                    r#"{"jxl_quality":0}"#,
                     r#"{"unexpected":true}"#,
                 ] {
                     nova_storage::try_set_str("reader:captures", raw).unwrap();
@@ -303,6 +340,8 @@ fn capture_format_and_resolution_indices_roundtrip_compatibly() {
         CaptureFormat::WebpLossless,
         CaptureFormat::WebpLossy,
         CaptureFormat::Avif,
+        CaptureFormat::JxlLossless,
+        CaptureFormat::JxlLossy,
     ]
     .into_iter()
     .enumerate()
@@ -465,4 +504,51 @@ fn save_conflict_sheet_keeps_choices_modal_accessible_and_inside_small_viewports
         Some(2),
         "leaving the reader resolves pending work as Cancel"
     );
+}
+
+/// Optional native raster captures for reviewing the shared settings layout.
+#[test]
+#[ignore = "writes phone/desktop settings previews for visual review"]
+fn render_capture_and_cache_settings_previews() {
+    use i_slint_backend_testing::{TestingBackend, TestingBackendOptions};
+    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+        mock_time: true,
+        threading: false,
+        renderer_name: Some("software".into()),
+    })))
+    .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    nova_storage::init_at(directory.path());
+    let ui = AppWindow::new().unwrap();
+    nova_reader::appearance::init(&ui).unwrap();
+    capture_settings::init(&ui).unwrap();
+    nova_reader::image_storage::init(&ui).unwrap();
+    ui.global::<CaptureSettings>().set_format_index(6);
+    let cache = ui.global::<nova_reader::ImageStorageSettings>();
+    cache.set_cache_format(4);
+    cache.set_downloads_format(4);
+    cache.set_downloads_enabled(true);
+    ui.show().unwrap();
+    let output = std::path::PathBuf::from(
+        std::env::var("NOVA_READER_SETTINGS_PREVIEW_DIR")
+            .unwrap_or_else(|_| "/tmp/nova-reader-settings-previews".into()),
+    );
+    std::fs::create_dir_all(&output).unwrap();
+    for (section, name) in [(18, "screenshots"), (17, "cache")] {
+        ui.set_section(section);
+        for (width, height) in [(390, 844), (1120, 780), (390, 2800)] {
+            ui.window()
+                .set_size(slint::PhysicalSize::new(width, height));
+            settle();
+            let snapshot = ui.window().take_snapshot().unwrap();
+            image::save_buffer(
+                output.join(format!("{name}-{width}x{height}.png")),
+                snapshot.as_bytes(),
+                snapshot.width(),
+                snapshot.height(),
+                image::ColorType::Rgba8,
+            )
+            .unwrap();
+        }
+    }
 }

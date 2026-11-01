@@ -12,6 +12,7 @@ export global CaptureSettings {
     in-out property <float> jpeg-quality: 85;
     in-out property <float> webp-quality: 85;
     in-out property <float> avif-quality: 85;
+    in-out property <float> jxl-quality: 85;
     in-out property <bool> series-folders: false;
     callback settings-changed(string, int);
 }
@@ -68,15 +69,63 @@ export component CaptureSettingsPage inherits VerticalLayout {
     SettingsCard {
         SettingsRow {
             row-title: @tr("Screenshot format");
-            row-desc: @tr("PNG and lossless WebP preserve every pixel. JPEG, lossy WebP and AVIF use the quality setting.");
+            row-desc: @tr("Lossless formats preserve every pixel. Lossy formats use the quality setting below.");
             accessible-label: @tr("Screenshot format");
             ReaderSelect {
                 width: Math.min(252px, Math.max(0px, root.width - 32px));
                 enabled: root.interactive; roomy: true;
                 placeholder-text: @tr("Screenshot format");
-                model: [@tr("PNG (lossless)"), @tr("JPEG"), @tr("WebP (lossless)"), @tr("WebP (lossy)"), @tr("AVIF")];
+                model: [@tr("PNG (lossless)"), @tr("JPEG"), @tr("WebP (lossless)"), @tr("WebP (lossy)"), @tr("AVIF"), @tr("JPEG XL (lossless)"), @tr("JPEG XL (lossy)")];
                 current-index <=> CaptureSettings.format-index;
                 selected(_) => { CaptureSettings.settings-changed("format", self.current-index); }
+            }
+        }
+        if CaptureSettings.format-index == 1: SettingsRow {
+            row-title: @tr("JPEG quality");
+            row-desc: @tr("Higher values retain more detail and create larger files.");
+            accessible-label: @tr("JPEG quality");
+            NumericSetting {
+                width: Math.min(InterfaceStyle.tv ? 320px : 252px, Math.max(0px, root.width - 32px));
+                enabled: root.interactive; name: @tr("JPEG quality");
+                value <=> CaptureSettings.jpeg-quality;
+                minimum: 1; maximum: 100; step: 1; suffix: "%";
+                changed(v) => { CaptureSettings.settings-changed("jpeg_quality", Math.round(v)); }
+            }
+        }
+        if CaptureSettings.format-index == 3: SettingsRow {
+            row-title: @tr("WebP quality");
+            row-desc: @tr("Higher values retain more detail and create larger files.");
+            accessible-label: @tr("WebP quality");
+            NumericSetting {
+                width: Math.min(InterfaceStyle.tv ? 320px : 252px, Math.max(0px, root.width - 32px));
+                enabled: root.interactive; name: @tr("WebP quality");
+                value <=> CaptureSettings.webp-quality;
+                minimum: 1; maximum: 100; step: 1; suffix: "%";
+                changed(v) => { CaptureSettings.settings-changed("webp_quality", Math.round(v)); }
+            }
+        }
+        if CaptureSettings.format-index == 4: SettingsRow {
+            row-title: @tr("AVIF quality");
+            row-desc: @tr("Higher values retain more detail and create larger files.");
+            accessible-label: @tr("AVIF quality");
+            NumericSetting {
+                width: Math.min(InterfaceStyle.tv ? 320px : 252px, Math.max(0px, root.width - 32px));
+                enabled: root.interactive; name: @tr("AVIF quality");
+                value <=> CaptureSettings.avif-quality;
+                minimum: 1; maximum: 100; step: 1; suffix: "%";
+                changed(v) => { CaptureSettings.settings-changed("avif_quality", Math.round(v)); }
+            }
+        }
+        if CaptureSettings.format-index == 6: SettingsRow {
+            row-title: @tr("JPEG XL quality");
+            row-desc: @tr("Higher values retain more detail and create larger files.");
+            accessible-label: @tr("JPEG XL quality");
+            NumericSetting {
+                width: Math.min(InterfaceStyle.tv ? 320px : 252px, Math.max(0px, root.width - 32px));
+                enabled: root.interactive; name: @tr("JPEG XL quality");
+                value <=> CaptureSettings.jxl-quality;
+                minimum: 1; maximum: 100; step: 1; suffix: "%";
+                changed(v) => { CaptureSettings.settings-changed("jxl_quality", Math.round(v)); }
             }
         }
         SettingsRow {
@@ -114,42 +163,6 @@ export component CaptureSettingsPage inherits VerticalLayout {
                 model: [@tr("Ask"), @tr("Overwrite"), @tr("Do nothing")];
                 current-index <=> CaptureSettings.conflict-policy;
                 selected(_) => { CaptureSettings.settings-changed("conflict", self.current-index); }
-            }
-        }
-        if CaptureSettings.format-index == 1: SettingsRow {
-            row-title: @tr("JPEG quality");
-            row-desc: @tr("Higher values retain more detail and create larger files.");
-            accessible-label: @tr("JPEG quality");
-            NumericSetting {
-                width: Math.min(InterfaceStyle.tv ? 320px : 252px, Math.max(0px, root.width - 32px));
-                enabled: root.interactive; name: @tr("JPEG quality");
-                value <=> CaptureSettings.jpeg-quality;
-                minimum: 1; maximum: 100; step: 1; suffix: "%";
-                changed(v) => { CaptureSettings.settings-changed("jpeg_quality", Math.round(v)); }
-            }
-        }
-        if CaptureSettings.format-index == 3: SettingsRow {
-            row-title: @tr("WebP quality");
-            row-desc: @tr("Higher values retain more detail and create larger files.");
-            accessible-label: @tr("WebP quality");
-            NumericSetting {
-                width: Math.min(InterfaceStyle.tv ? 320px : 252px, Math.max(0px, root.width - 32px));
-                enabled: root.interactive; name: @tr("WebP quality");
-                value <=> CaptureSettings.webp-quality;
-                minimum: 1; maximum: 100; step: 1; suffix: "%";
-                changed(v) => { CaptureSettings.settings-changed("webp_quality", Math.round(v)); }
-            }
-        }
-        if CaptureSettings.format-index == 4: SettingsRow {
-            row-title: @tr("AVIF quality");
-            row-desc: @tr("Higher values retain more detail and create larger files.");
-            accessible-label: @tr("AVIF quality");
-            NumericSetting {
-                width: Math.min(InterfaceStyle.tv ? 320px : 252px, Math.max(0px, root.width - 32px));
-                enabled: root.interactive; name: @tr("AVIF quality");
-                value <=> CaptureSettings.avif-quality;
-                minimum: 1; maximum: 100; step: 1; suffix: "%";
-                changed(v) => { CaptureSettings.settings-changed("avif_quality", Math.round(v)); }
             }
         }
     }

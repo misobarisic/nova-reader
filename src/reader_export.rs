@@ -77,6 +77,7 @@ impl ExportImage {
         let quality = match preferences.format {
             CaptureFormat::Jpeg => preferences.jpeg_quality,
             CaptureFormat::Avif => preferences.avif_quality,
+            CaptureFormat::JxlLossless | CaptureFormat::JxlLossy => preferences.jxl_quality,
             _ => preferences.webp_quality,
         };
         let bytes = encode_rgba(
@@ -91,11 +92,20 @@ impl ExportImage {
             reader_engine::inspect_image(&bytes, reader_engine::DecodeLimits::default())
                 .map_err(|error| format!("AVIF screenshot exceeds decode admission: {error}"))?;
         }
+        if matches!(
+            preferences.format,
+            CaptureFormat::JxlLossless | CaptureFormat::JxlLossy
+        ) {
+            // Clipboard decoding and later Reader imports use the same bounds.
+            reader_engine::decode_image(&bytes, reader_engine::DecodeLimits::default())
+                .map_err(|error| format!("JPEG XL screencap exceeds decode admission: {error}"))?;
+        }
         let (mime, extension) = match preferences.format {
             CaptureFormat::Png => ("image/png", "png"),
             CaptureFormat::Jpeg => ("image/jpeg", "jpg"),
             CaptureFormat::WebpLossless | CaptureFormat::WebpLossy => ("image/webp", "webp"),
             CaptureFormat::Avif => ("image/avif", "avif"),
+            CaptureFormat::JxlLossless | CaptureFormat::JxlLossy => ("image/jxl", "jxl"),
         };
         Ok(Self {
             bytes,
@@ -231,6 +241,15 @@ fn encode_rgba(
                 .encode_simple(format == CaptureFormat::WebpLossless, f32::from(quality))
                 .map_err(|error| format!("Cannot encode image: {error:?}"))?
                 .to_vec();
+        }
+        CaptureFormat::JxlLossless | CaptureFormat::JxlLossy => {
+            let encoding = if format == CaptureFormat::JxlLossless {
+                nova_image::JxlEncoding::Lossless
+            } else {
+                nova_image::JxlEncoding::Lossy { quality }
+            };
+            bytes = nova_image::encode_jxl(width, height, pixels, encoding, limits)
+                .map_err(|error| format!("Cannot encode JPEG XL image: {error}"))?;
         }
         CaptureFormat::Avif => {
             bytes = nova_image::encode_avif(width, height, pixels, quality, limits)
@@ -781,6 +800,38 @@ mod tests {
     }
 
     #[test]
+    fn jpeg_xl_captures_preserve_alpha_and_lossless_pixels() {
+        let pixels = [
+            255, 0, 0, 255, 0, 255, 0, 128, 0, 0, 255, 0, 17, 31, 47, 255,
+        ];
+        for format in [CaptureFormat::JxlLossless, CaptureFormat::JxlLossy] {
+            let preferences = CapturePreferences {
+                format,
+                jxl_quality: 90,
+                ..Default::default()
+            };
+            let capture =
+                ExportImage::from_rgba_with_preferences(2, 2, &pixels, &preferences).unwrap();
+            assert_eq!(capture.mime, "image/jxl");
+            assert_eq!(capture.name, "screencap.jxl");
+            let decoded =
+                reader_engine::decode_image(&capture.bytes, reader_engine::DecodeLimits::default())
+                    .unwrap();
+            assert_eq!(decoded.dimensions(), (2, 2));
+            assert!(
+                decoded
+                    .as_raw()
+                    .chunks_exact(4)
+                    .zip(pixels.chunks_exact(4))
+                    .all(|(a, b)| a[3] == b[3])
+            );
+            if format == CaptureFormat::JxlLossless {
+                assert_eq!(decoded.as_raw(), &pixels);
+            }
+        }
+    }
+
+    #[test]
     fn capture_formats_and_quality_preferences_reach_the_encoder() {
         let pixels = detailed_pixels();
         for (format, mime, extension) in [
@@ -789,6 +840,8 @@ mod tests {
             (CaptureFormat::WebpLossless, "image/webp", "webp"),
             (CaptureFormat::WebpLossy, "image/webp", "webp"),
             (CaptureFormat::Avif, "image/avif", "avif"),
+            (CaptureFormat::JxlLossless, "image/jxl", "jxl"),
+            (CaptureFormat::JxlLossy, "image/jxl", "jxl"),
         ] {
             let preferences = CapturePreferences {
                 format,
@@ -802,7 +855,10 @@ mod tests {
                 reader_engine::decode_image(&capture.bytes, reader_engine::DecodeLimits::default())
                     .unwrap();
             assert_eq!(decoded.dimensions(), (64, 64));
-            if matches!(format, CaptureFormat::Png | CaptureFormat::WebpLossless) {
+            if matches!(
+                format,
+                CaptureFormat::Png | CaptureFormat::WebpLossless | CaptureFormat::JxlLossless
+            ) {
                 assert_eq!(decoded.as_raw(), &pixels);
             }
         }
@@ -810,6 +866,7 @@ mod tests {
             CaptureFormat::Jpeg,
             CaptureFormat::WebpLossy,
             CaptureFormat::Avif,
+            CaptureFormat::JxlLossy,
         ] {
             let encode = |quality| {
                 ExportImage::from_rgba_with_preferences(
@@ -821,6 +878,7 @@ mod tests {
                         jpeg_quality: quality,
                         webp_quality: quality,
                         avif_quality: quality,
+                        jxl_quality: quality,
                         ..CapturePreferences::default()
                     },
                 )
@@ -1177,7 +1235,12 @@ mod tests {
     #[ignore = "requires a running X11 display, for example DISPLAY=:99 under Xvfb"]
     fn image_clipboard_remains_readable_after_delivery_callback() {
         let pixels = [255, 0, 0, 255, 0, 128, 255, 255];
-        for format in [CaptureFormat::Png, CaptureFormat::Avif] {
+        for format in [
+            CaptureFormat::Png,
+            CaptureFormat::Avif,
+            CaptureFormat::JxlLossless,
+            CaptureFormat::JxlLossy,
+        ] {
             let image = ExportImage::from_rgba_with_preferences(
                 2,
                 1,
