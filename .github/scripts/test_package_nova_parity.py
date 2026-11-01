@@ -34,6 +34,17 @@ def canonical_shell(source, platform):
     source = source.replace("nova-reader", "nova").replace("Nova-Reader", "Nova").replace("Nova Reader", "Nova")
     source = source.replace("Section: graphics", "Section: video").replace("Cross-platform comic reader", "Cross-platform media catalog and player").replace("Nova is a comic reader", "Nova is a media catalog and player")
     source = "\n".join(line for line in source.splitlines() if "DEPENDENCY_LICENSES.txt" not in line)
+    if platform == "linux":
+        # Only the reviewed resource pins differ from Nova's mutable continuous
+        # downloads. test_package_linux.py asserts these exact new values.
+        for reader, nova in {
+            "# Dated releases isolate packaging from continuous updates; verified SHA-256\n# pins still fail closed if upstream replaces a dated asset. See docs/packaging.md.": "# AppImage's continuous release assets are mutable, so pin their published\n# SHA-256 digests and fail closed if the upstream binaries change.",
+            "https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-x86_64.AppImage": "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage",
+            "c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d": "8aea8da0f7f7039d2a2cecb14657d752a222a5e1d3825caeef186c82f751cdd1",
+            "https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/1-alpha-20250213-1/linuxdeploy-plugin-appimage-x86_64.AppImage": "https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-x86_64.AppImage",
+            "992d502a248e14ab185448ddf6f6e7d25558cb84d4623c354c3af350c25fccb3": "49d6a17160675a6bd1781699aae6bdf7692d98552e02a3671d2183d10547842e",
+        }.items():
+            source = source.replace(reader, nova)
     if platform == "windows":
         source = source.replace('cp LICENSE THIRD_PARTY_NOTICES.md "$bundle/"', 'cp LICENSE "$bundle/LICENSE"')
         start = source.find('cp "$MPV_SOURCE/SOURCES"')

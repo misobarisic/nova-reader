@@ -1681,8 +1681,6 @@ dependencies = [
 [[package]]
 name = "ferri-pdf-rav1d"
 version = "1.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb4072634f94938773523af4005a080ff3e2b3a0328eaa9bd222eb52d85e2cd3"
 dependencies = [
  "assert_matches",
  "atomig",
@@ -3665,7 +3663,7 @@ checksum = "0676bb32a98c1a483ce53e500a81ad9c3d5b3f7c920c28c24e9cb0980d0b5bc8"
 
 [[package]]
 name = "nova-reader"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "arboard",
  "directories",

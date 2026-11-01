@@ -392,3 +392,31 @@ through the session proxy, but its actual Reader-host live smoke hit a DNS
 preflight deadline; live image downloading/decoding remains unverified. No
 captcha solving is claimed. The copied Nova workflow/tag-build split and
 platform packaging scripts are unchanged; release builds remain the CI gate.
+
+## Release build fixes (0.1.15)
+
+The 0.1.14 tag run failed in two places: stable ARMv7 compilation rejected the
+AVIF decoder's unconditional nightly feature attribute (E0554), and Linux
+packaging rejected a changed upstream `continuous` linuxdeploy asset. ARM64,
+Android x86_64 and Windows had built successfully.
+
+The complete published ferri-pdf-rav1d 1.1.2 source is now patched locally with
+only two feature predicates: ARM/RISC-V runtime feature-detection attributes are
+assembly-only, matching their existing implementations. Reader retains portable
+8-bit AVIF, stable Rust and the decoder's malformed-input hardening. Original
+licenses, archive checksum and source history remain in the vendor directory.
+Independent inventory comparison retained all 176 published files, with only
+those predicates and appended provenance notes differing. Linux tool downloads
+now use verified dated release URLs rather than moving continuous assets; exact
+pins and the unchanged fail-closed verifier have regression tests.
+
+Astra 6 medium reviewed the fixes and independent source/tool comparisons with
+no P1/P2 findings. Local verification passed workspace formatting, all-target
+Clippy, workspace check/tests, actual stable ARMv7 encoder/decoder compilation,
+three portability regressions, 698 isolated malformed-input probes, all 30
+packaging regressions and license inventories for all five release targets.
+The production Linux script also built/extracted both Debian and AppImage
+formats and executed their CLI using the existing local debug binary. That
+Debian 13 smoke is not an Ubuntu 22.04 release artifact or device acceptance.
+The copied workflow job graph and tag-build conditions are unchanged; the new
+release run remains the final platform build/assembly/publication gate.

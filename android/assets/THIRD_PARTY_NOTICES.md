@@ -15,6 +15,13 @@ Apache-2.0. Its JSON API adapter and VRF request signer, modifications, scoped
 CDN permissions and verification limits are recorded in
 `examples/addons/mangafire/NOTICE.md`; the full license ships inside its addon ZIP.
 
+The AVIF decoder uses the complete published ferri-pdf-rav1d 1.1.2 source
+under `vendor/ferri-pdf-rav1d`, with only ARM/RISC-V nightly-feature predicates
+gated by its existing assembly feature for stable portable builds. The original
+BSD-2-Clause license, source provenance and malformed-input fixes are retained;
+see its `COPYING` and appended `PATCHES.md`. Its full license is also included
+in each generated platform dependency inventory.
+
 ## AVIF adapter and test fixture attribution
 
 The plane-access and CICP conversion dispatch in src/avif.rs are adapted from

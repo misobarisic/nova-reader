@@ -1,9 +1,15 @@
 [workspace]
 members = ["crates/reader-domain", "crates/reader-sources", "crates/reader-engine", "crates/reader-downloads", "crates/reader-catalogue", "crates/ui"]
+exclude = ["vendor/ferri-pdf-rav1d"]
 resolver = "3"
 
 [workspace.package]
 license = "GPL-3.0-or-later"
+
+[patch.crates-io]
+# Keep the decoder's optional ARM/RISC-V CPU probes behind its assembly feature.
+# Reader uses the portable decoder on stable Rust; see vendor/ferri-pdf-rav1d/PATCHES.md.
+ferri-pdf-rav1d = { path = "vendor/ferri-pdf-rav1d" }
 
 [workspace.dependencies]
 nova-storage = { git = "https://github.com/misobarisic/nova-kit", rev = "63141dfc6abd39a247edde1f33ebaeb59dc7229a" }
@@ -13,7 +19,7 @@ slint-build = "=1.18.0"
 
 [package]
 name = "nova-reader"
-version = "0.1.14"
+version = "0.1.15"
 edition = "2024"
 license.workspace = true
 description = "A source-based manga and webtoon reader for desktop and Android"
