@@ -16,6 +16,7 @@ pub mod export_names;
 pub mod image_storage;
 mod metadata_refresh;
 mod paths;
+mod progress_checkpoint;
 mod reader_export;
 pub mod reader_modes;
 pub mod reading_preferences;

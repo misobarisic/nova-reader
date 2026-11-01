@@ -4,8 +4,8 @@ mod avif;
 mod display;
 mod jxl;
 pub use display::{
-    DISPLAY_WINDOW_BYTES, DisplayDecoder, DisplayWindow, DisplayWindowPlan, decode_display_image,
-    decode_display_window, plan_display_window,
+    DISPLAY_TILE_ROWS, DISPLAY_WINDOW_BYTES, DisplayDecoder, DisplayWindow, DisplayWindowPlan,
+    decode_display_image, decode_display_window, plan_display_window,
 };
 pub use nova_image::is_jpeg_xl;
 pub use nova_image::{DecodeLimits, PageDimensions};

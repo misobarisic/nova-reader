@@ -180,7 +180,7 @@ struct Job {
 }
 struct Active {
     generation: u64,
-    group: String,
+    chapter: ChapterId,
     _lease: blob::Lease,
 }
 pub struct ChapterCache {
@@ -403,17 +403,17 @@ impl ChapterCache {
         })
     }
     pub fn activate(&self, generation: u64, chapter: &ChapterId) {
-        let group = chapter_group(chapter);
         let mut active = self.active.lock().unwrap_or_else(|e| e.into_inner());
         if active
             .as_ref()
-            .is_some_and(|old| old.generation == generation && old.group == group)
+            .is_some_and(|old| old.generation == generation && old.chapter == *chapter)
         {
             return;
         }
+        let group = chapter_group(chapter);
         *active = Some(Active {
             generation,
-            group: group.clone(),
+            chapter: chapter.clone(),
             _lease: self.cache.pin([format!("{group}:active")]),
         });
     }

@@ -187,6 +187,68 @@ fn reader_shared_edges_cover_fractional_scroll_at_each_device_scale() {
         }
         ui.set_reading_mode(0);
     }
+    // A real 719×3500 source must fill the phone viewport horizontally at
+    // zoom 1, even when its native raster is narrower than the physical screen.
+    for dpr in [1., 1.25, 2.75, 3.] {
+        ui.window()
+            .dispatch_event(slint::platform::WindowEvent::ScaleFactorChanged { scale_factor: dpr });
+        let physical = slint::PhysicalSize::new((390. * dpr) as u32, (844. * dpr) as u32);
+        ui.window().set_size(physical);
+        ui.window()
+            .dispatch_event(slint::platform::WindowEvent::Resized {
+                size: LogicalSize::new(physical.width as f32 / dpr, physical.height as f32 / dpr),
+            });
+        ui.set_zoom(1.);
+        ui.set_scroll_y(0.);
+        let ratio = 3500. / 719.;
+        let rows = [0u32, 2048]
+            .into_iter()
+            .map(|top| TileRow {
+                image: light_tile(719, 2048.min(3500 - top)),
+                offset: top as f32 / 3500.,
+                fraction: 2048.min(3500 - top) as f32 / 3500.,
+                bottom: (top + 2048.min(3500 - top)) as f32 / 3500.,
+                right: 1.,
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        ui.set_pages(ModelRc::new(VecModel::from(vec![PageRow {
+            loaded: true,
+            ratio,
+            tiles: ModelRc::new(VecModel::from(rows)),
+            ..Default::default()
+        }])));
+        ui.set_total_ratio(ratio);
+        settle();
+        let viewport = element(&ui, "AppWindow::reader");
+        assert!((ui.get_reader_width() - viewport.size().width).abs() < 0.01);
+        for tile in tiles(&ui) {
+            assert!(
+                (tile.absolute_position().x - viewport.absolute_position().x).abs() * dpr < 0.025
+            );
+            assert!((tile.size().width - viewport.size().width).abs() * dpr < 0.025);
+        }
+        let snapshot = ui.window().take_snapshot().unwrap();
+        if let Ok(directory) = std::env::var("NOVA_READER_VIEWER_PREVIEW_DIR") {
+            std::fs::create_dir_all(&directory).unwrap();
+            image::save_buffer(
+                std::path::Path::new(&directory).join(format!("719x3500-dpr{dpr}.png")),
+                snapshot.as_bytes(),
+                snapshot.width(),
+                snapshot.height(),
+                image::ColorType::Rgba8,
+            )
+            .unwrap();
+        }
+        let row = snapshot.height() / 3;
+        for column in [0, snapshot.width() - 1] {
+            let pixel = snapshot.as_slice()[(row * snapshot.width() + column) as usize];
+            assert!(
+                pixel.r >= 220 && pixel.g >= 220 && pixel.b >= 220,
+                "719×3500 must reach horizontal edge {column} at DPR {dpr}: {pixel:?}"
+            );
+        }
+    }
     // A visible crop of a wide, tall original is three horizontal textures.
     // Its last row must stop at the crop's own endpoint, never stretch to the
     // logical page bottom; neighbouring columns must share physical edges too.

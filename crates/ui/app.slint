@@ -255,7 +255,7 @@ export component AppWindow inherits Window {
         if !root.reader-osd { root.show-reader-options = false; }
         root.immersive-changed(root.section == 6 && !root.reader-osd);
     }
-    out property <length> reader-width: min(1100px, max(100px, (root.width - (root.section == 6 ? 0px : root.safe-area-insets.left + root.safe-area-insets.right) - 16px) * root.zoom));
+    out property <length> reader-width: min(1100px, max(100px, (root.width - (root.section == 6 ? 0px : root.safe-area-insets.left + root.safe-area-insets.right)) * root.zoom));
     private property <length> reader-height: root.total-ratio * root.reader-width;
 
     callback request-artwork(int,int);

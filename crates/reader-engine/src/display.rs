@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 pub const DISPLAY_WINDOW_BYTES: usize = 32 * 1024 * 1024;
 const FULL_DISPLAY_BYTES: u64 = 64 * 1024 * 1024;
-const PREFETCH_ROWS: u32 = 2048;
+pub const DISPLAY_TILE_ROWS: u32 = 2048;
+const PREFETCH_ROWS: u32 = DISPLAY_TILE_ROWS;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DisplayWindowPlan {
@@ -131,6 +132,19 @@ pub fn plan_display_window(
     let first_row = first
         .saturating_sub((rows - required) / 2)
         .min(full_height - rows);
+    // Stable global strips let the renderer retain overlapping textures.
+    // A tight budget keeps the exact admitted window rather than dropping any
+    // visible rows or increasing its allocation allowance.
+    let aligned_first = first_row / DISPLAY_TILE_ROWS * DISPLAY_TILE_ROWS;
+    let aligned_last = (first_row + rows)
+        .div_ceil(DISPLAY_TILE_ROWS)
+        .saturating_mul(DISPLAY_TILE_ROWS)
+        .min(full_height);
+    let (first_row, rows) = if aligned_last - aligned_first <= max_rows {
+        (aligned_first, aligned_last - aligned_first)
+    } else {
+        (first_row, rows)
+    };
     Ok(DisplayWindowPlan {
         width,
         full_height,
@@ -480,6 +494,30 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn strip_alignment_preserves_visible_rows_and_tight_budget_admission() {
+        let dimensions = PageDimensions {
+            width: 720,
+            height: 25000,
+        };
+        for first in (0..23400).step_by(61) {
+            let start = first as f64 / 25000.;
+            let end = (first + 1600) as f64 / 25000.;
+            let plan =
+                plan_display_window(dimensions, 1080, start, end, DISPLAY_WINDOW_BYTES).unwrap();
+            assert_eq!(plan.first_row % DISPLAY_TILE_ROWS, 0);
+            assert!(
+                plan.first_row + plan.rows == 25000
+                    || (plan.first_row + plan.rows).is_multiple_of(DISPLAY_TILE_ROWS)
+            );
+            assert!(plan.covers(start, end));
+            assert!(plan.byte_len() <= DISPLAY_WINDOW_BYTES);
+            let tight = plan_display_window(dimensions, 1080, start, end, 1602 * 720 * 4).unwrap();
+            assert!(tight.covers(start, end));
+            assert!(tight.byte_len() <= 1602 * 720 * 4);
+        }
+    }
+
     #[test]
     fn window_admission_keeps_width_and_guarantees_two_outputs_fit() {
         for dpr in [1., 1.25, 1.5, 2.75, 3.] {

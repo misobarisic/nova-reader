@@ -50,17 +50,43 @@ global resampling coordinates and physical-pixel shared drawing edges remain
 the same. Bilinear row selection now runs once per output row; a regression
 compares all output bytes with the previous per-pixel formula.
 
-The image worker now prepares the Slint pixel buffers before publishing a
-completion. The UI event loop creates image handles and updates models. Output
+The image worker prepares Slint pixel buffers before publishing a completion.
+Windows align to a global 2,048-row strip grid when the existing budget permits;
+tight budgets keep an exact admitted window covering all visible rows. An exact
+encoded-response identity, output width/full height and strip rectangle allow
+overlapping image handles and their existing Slint delegates to survive through
+in-place `VecModel` edge insertions/removals. Only entering strips receive new
+pixel buffers. An evicted or replaced backing window rejects a stale completion
+and retries without blanking current art. Unchanged dimensions skip chapter-wide
+ratio/position notifications and scroll restoration. Ordinary covered scroll ticks
+also skip navigation labels, chapter ID cloning and image task/set work. Output
 admission reserves space for both the row window and prepared buffers beside
 the retained original, and the worker waits for UI acknowledgement before
 preparing another completion. Idle lifecycle checks clear the original and
 encoded response when the reader closes or its generation/source is invalidated.
 
+The previous 600 ms progress timer also committed the domain store synchronously
+on the Slint event loop, making periodic stalls possible even when no image
+window changed. `src/progress_checkpoint.rs` now coalesces latest chapter
+positions on a storage worker. Timer handoff is nonblocking; explicit navigation,
+shutdown and lifecycle flushes use a durability barrier after that handoff. Tests
+cover busy storage, failed writes/retry, final pending work and actual process
+restart persistence. This removes storage commits from ordinary scrolling, while
+physical-device frame measurements remain necessary to quantify the result.
+
 Unlike Mihon, Reader retains a bounded row window rather than every strip of an
 attached page. This avoids expanding the current 32 MiB retained model budget.
-Replacing a window can still replace overlapping GPU textures. Stable tile reuse
-would require a separate implementation and device measurements.
+The worker still extracts a full admitted CPU row window before preparing only
+new strip buffers. Offscreen page decoding waits while a visible long page has
+not reached its final admitted window, including tasks queued before dimensions
+were known. This keeps speculative prefetch from evicting the worker's one
+original; final windows and short pages retain normal next-page prefetch.
+Renderer cache reuse depends on preserving repeated-item
+identity as well as image identity: recreating delegates can re-upload dynamic
+images. Slow-scroll regressions assert unchanged pixel allocations/model identity,
+no reset or overlap row-change events and at most one entering 720×2,048 strip
+per window shift for a 720×25,000 page. These are deterministic work/retention
+checks; Android GPU frame times still require physical-device measurements.
 
 ## Reproduce the CPU profile
 
@@ -82,7 +108,7 @@ The profile runs on an x86-64 Xeon Platinum 8573C host. It measures CPU decoding
 and row extraction/resampling only. It does not measure Android frame times,
 GPU uploads, renderer memory or physical-device acceptance.
 
-One optimized run produced the following times. Host scheduling affects these
+Before global strip alignment/reuse, one optimized run produced these times. Host scheduling affects these
 values; they are evidence for the repeated work removed, not device guarantees.
 Both loops use the current bit-exact row resampler, so the comparison isolates
 decoded-original reuse.
@@ -97,7 +123,8 @@ still spends substantial time resampling every row window. Texture upload
 costs require a separate Android measurement, as do overlap reuse or smaller
 upload batches.
 
-The native-width profile's largest output is 16,119,360 bytes. Its retained
+That earlier native-width profile's largest output was 16,119,360 bytes; aligned
+windows can retain more rows within the same admission limits. Its retained
 original plus output occupies 88,119,360 bytes, below the 134,217,728-byte phase
 limit. Native decoding of RGB uses at most the existing 54,000,000-byte decoder
 output plus 72,000,000-byte RGBA conversion admission. An RGBA-encoded source of

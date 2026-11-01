@@ -15,6 +15,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `src/addon_icons.rs`, `crates/ui/addon-icon.slint` | Verified bundled addon PNGs decoded on workers, retained UI-thread image handles shared by language variants, Sources/Extensions decoration and Kit fallback |
 | `src/artwork.rs` | Kit decoded-poster LRU and encoded variants, synchronous cross-page hits, source permits, UI handles, bounded worker and legacy artwork migration |
 | `src/chapter_cache.rs` | Kit-backed disposable viewed pages, authorization scopes, chapter-group eviction/active leases and bounded background encoding |
+| `src/progress_checkpoint.rs` | One background checkpoint writer, latest offsets coalesced per chapter, failure retry and ordered durable navigation/lifecycle barriers; the 600 ms UI timer only queues progress |
 | `src/reader_export.rs` | Original-image validation, screencap encoding, bounded platform save/clipboard delivery and persistent desktop clipboard ownership; `src/app.rs` captures the clean pre-menu viewport with an 8-million-pixel limit and fetches source page bytes |
 | `src/export_names.rs` | Portable UTF-8 series folders and bounded title/chapter/page/vertical-position filenames, including duplicate numbering |
 | `crates/ui/save-conflict-sheet.slint` | Retained modal Overwrite/Add number/Cancel sheet; `app.slint` owns name/open/choice properties and callbacks |
@@ -215,17 +216,25 @@ within their 64 MiB accounting budget for replacement references. Display output
 uses bounded visible-row windows at the requested physical width, rather than
 shrinking tall-page width to fit a full-page texture. Each window is capped at
 32 MiB, reduced to a share of the 32 MiB model budget when multiple pages are visible,
-with up to 2,048 prefetched rows on either side when the budget permits. Refresh
-starts before the window boundary, with up to 512 rows of advance coverage; the
+with 4,096 total prefetch rows and global 2,048-row strip alignment when the
+budget permits; tight budgets retain an unaligned window covering every visible
+row. Matching response identity and output dimensions retain overlapping Slint
+images and repeated delegates through in-place tile-model changes; workers only
+prepare buffers for entering strips. Unchanged dimensions avoid chapter-wide
+geometry writes and scroll restoration. Refresh starts before the window boundary,
+with up to 512 rows of advance coverage; the
 threshold contracts when the byte budget leaves less margin. Individual
 textures contain at most 2,048 × 2,048 pixels. Physical width targets use 128px buckets
-capped at the 16,384px decoder width ceiling; source pixels are never upscaled.
+capped at the 16,384px decoder width ceiling; source pixels are never upscaled
+in CPU buffers, while raster tiles fill the full phone viewport at zoom 1.
 The worker's `DisplayDecoder` retains one admitted original while extracting
 successive row windows from the same encoded response. Source response identity
 uses the encoded `Arc`, so replacement responses and changed source/authentication
 scopes cannot reuse old pixels. A different response releases that original
 before decoding; a full native-size display transfers ownership instead of
-retaining duplicate original pixels. This remains full CPU decoding, rather than
+retaining duplicate original pixels. Offscreen decode/prefetch waits until visible
+long pages reach their final window, preserving that one-original cache across
+scrolling; queued tasks recheck the same rule before fetching. This remains full CPU decoding, rather than
 region/streaming decoding or a total process-memory bound. Decoder/native
 conversion and original-RGBA-plus-window-output phases are admitted separately
 within 128 MiB each. The worker also keeps a 32 MiB generation-scoped, memory-only

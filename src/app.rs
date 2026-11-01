@@ -114,6 +114,8 @@ struct Reader {
     // pixel limit can produce a texture narrower than that request.
     decoded_widths: BTreeMap<usize, u32>,
     decoded_windows: BTreeMap<usize, reader_engine::DisplayWindowPlan>,
+    // Weak identity never extends the encoded-response memory cache budget.
+    decoded_responses: BTreeMap<usize, Weak<Vec<u8>>>,
     native_dimensions: BTreeMap<usize, reader_engine::PageDimensions>,
     target_width: u32,
     viewport_width: f32,
@@ -248,6 +250,32 @@ impl Reader {
             let (start, end) = self.visible_span(index);
             !plan.covers_with_margin(start, end) || plan.byte_len() > self.window_budget()
         })
+    }
+
+    // The worker retains one decoded original. Decoding an offscreen page
+    // before a long visible page's final window would evict that original and
+    // make its next scroll window decompress the entire source again.
+    fn defers_prefetch(&self, target: usize) -> bool {
+        if self.pages.is_empty() {
+            return false;
+        }
+        let visible = self.anchor.page_index.min(self.pages.len() - 1)..=self.visible_end();
+        !visible.contains(&target)
+            && visible.into_iter().any(|index| {
+                self.retained.contains(&index)
+                    && self
+                        .decoded_windows
+                        .get(&index)
+                        .is_some_and(|plan| plan.first_row + plan.rows < plan.full_height)
+            })
+    }
+    fn start_image(&mut self, index: usize) -> bool {
+        if !self.desired.contains(&index) || self.defers_prefetch(index) {
+            self.requested.remove(&index);
+            false
+        } else {
+            true
+        }
     }
 
     fn retained_bytes_without(&self, index: usize) -> usize {
@@ -504,6 +532,7 @@ fn update_entry_membership(
 }
 struct Controller {
     services: Services,
+    progress_checkpoint: crate::progress_checkpoint::ProgressWriter,
     artwork: crate::artwork::ArtworkLoader,
     chapter_cache: Arc<crate::chapter_cache::ChapterCache>,
     image_worker_live: AtomicBool,
@@ -609,13 +638,20 @@ impl Controller {
         });
     }
     fn flush(&self) {
-        if let Some(progress) = self.view().pending.take()
-            && let Err(error) = self.services.domain.update(|state| {
-                state.set_progress(progress);
-                Ok(())
-            })
-        {
+        self.checkpoint_progress();
+        if let Err(error) = self.progress_checkpoint.flush(None) {
             eprintln!("Nova Reader: could not save reading position: {error}");
+        }
+    }
+    fn checkpoint_progress(&self) {
+        // Keep the take/enqueue handoff ordered with scroll updates and Android
+        // lifecycle flushes. Enqueue only changes memory; the blocking barrier
+        // in flush() runs after this view guard has been released.
+        let mut view = self.view();
+        if let Some(progress) = view.pending.take()
+            && let Err(error) = self.progress_checkpoint.enqueue(progress)
+        {
+            eprintln!("Nova Reader: could not queue reading position: {error}");
         }
     }
     fn task<T: Send + 'static>(
@@ -1746,6 +1782,7 @@ impl Controller {
                         decoded_bytes: BTreeMap::new(),
                         decoded_widths: BTreeMap::new(),
                         decoded_windows: BTreeMap::new(),
+                        decoded_responses: BTreeMap::new(),
                         native_dimensions: BTreeMap::new(),
                         target_width: 0,
                         viewport_width: 0.,
@@ -1790,6 +1827,7 @@ impl Controller {
                         decoded_bytes: BTreeMap::new(),
                         decoded_widths: BTreeMap::new(),
                         decoded_windows: BTreeMap::new(),
+                        decoded_responses: BTreeMap::new(),
                         native_dimensions: BTreeMap::new(),
                         target_width: 0,
                         viewport_width: 0.,
@@ -2009,11 +2047,20 @@ impl Controller {
         if view.section != 6 {
             return;
         }
-        let chapter_ids = view
-            .chapters
-            .iter()
-            .map(|c| c.id.clone())
-            .collect::<Vec<_>>();
+        let chapter_navigation = view
+            .reader
+            .as_ref()
+            .filter(|reader| reader.desired_anchor != index)
+            .map(|reader| {
+                let position = view
+                    .chapters
+                    .iter()
+                    .position(|chapter| chapter.id == reader.chapter);
+                (
+                    position.is_some_and(|i| i > 0),
+                    position.is_some_and(|i| i + 1 < view.chapters.len()),
+                )
+            });
         let Some(reader) = &mut view.reader else {
             return;
         };
@@ -2031,14 +2078,42 @@ impl Controller {
             reader.viewport_width.max(ui.get_reader_width()),
             ui.window().scale_factor(),
         );
-        if reader.desired_anchor != index || reader.target_width != target_width {
+        let anchor_changed = reader.desired_anchor != index;
+        let width_changed = reader.target_width != target_width;
+        if anchor_changed || width_changed {
             reader.budget_blocked.clear();
             reader.desired_anchor = index;
             reader.target_width = target_width;
         }
         let end = reader.visible_end();
-        let keep = (index.saturating_sub(1)..=(end + 1).min(reader.pages.len() - 1))
-            .collect::<BTreeSet<_>>();
+        let first_desired = index.saturating_sub(1);
+        let last_desired = (end + 1).min(reader.pages.len() - 1);
+        // Scroll ticks within already covered strips do no model, navigation,
+        // set-allocation or task work. Visible coverage still gets checked on
+        // every tick, including the advance margin before a strip runs out.
+        if !anchor_changed
+            && !width_changed
+            && reader.desired.first() == Some(&first_desired)
+            && reader.desired.last() == Some(&last_desired)
+            && reader.desired.iter().all(|target| {
+                reader.defers_prefetch(*target)
+                    || reader.requested.contains(target)
+                    || reader.failed.contains(target)
+                    || (reader.budget_blocked.contains(target) && !(index..=end).contains(target))
+                    || (reader.retained.contains(target)
+                        && reader.decoded_widths.get(target).copied().unwrap_or(0)
+                            >= reader.quality_width(*target)
+                        && !reader.needs_window(*target))
+            })
+        {
+            return;
+        }
+        // A blocked prefetch becomes eligible as soon as it is visible. Failed
+        // network/codec pages remain governed by the explicit Retry action.
+        reader
+            .budget_blocked
+            .retain(|target| !(index..=end).contains(target));
+        let keep = (first_desired..=last_desired).collect::<BTreeSet<_>>();
         reader.desired = keep.clone();
         if let Some((active, cancel)) = self
             .active_image
@@ -2065,10 +2140,14 @@ impl Controller {
             reader.decoded_bytes.remove(&old);
             reader.decoded_widths.remove(&old);
             reader.decoded_windows.remove(&old);
+            reader.decoded_responses.remove(&old);
         }
         reader.retained.retain(|i| keep.contains(i));
         // Visible images precede the one-page prefetch window.
         for target in (index..=end).chain(keep.iter().copied().filter(|i| *i < index || *i > end)) {
+            if reader.defers_prefetch(target) {
+                continue;
+            }
             if !reader.requested.contains(&target)
                 && (!reader.retained.contains(&target)
                     || reader.decoded_widths.get(&target).copied().unwrap_or(0)
@@ -2084,10 +2163,13 @@ impl Controller {
                 });
             }
         }
-        ui.set_position_label(text::page_position(index, reader.pages.len()).into());
-        let position = chapter_ids.iter().position(|c| *c == reader.chapter);
-        ui.set_can_previous(position.is_some_and(|i| i > 0));
-        ui.set_can_next(position.is_some_and(|i| i + 1 < chapter_ids.len()));
+        if anchor_changed {
+            ui.set_position_label(text::page_position(index, reader.pages.len()).into());
+            if let Some((previous, next)) = chapter_navigation {
+                ui.set_can_previous(previous);
+                ui.set_can_next(next);
+            }
+        }
     }
     fn image_worker(
         app: Weak<Self>,
@@ -2147,8 +2229,10 @@ impl Controller {
                     continue;
                 }
                 view.reader.as_mut().and_then(|r| {
-                    if !r.desired.contains(&task.index) {
-                        r.requested.remove(&task.index);
+                    // A task may have been queued before the visible page's
+                    // actual dimensions/window were published. Recheck here,
+                    // before fetching or replacing the worker's original.
+                    if !r.start_image(task.index) {
                         return None;
                     }
                     r.pages
@@ -2256,12 +2340,22 @@ impl Controller {
                     )
                     .map_err(error)?;
                 cancel.check().map_err(error)?;
+                let response = Arc::downgrade(&bytes);
+                let reuse = {
+                    let view = app.view();
+                    view.reader.as_ref().and_then(|reader| {
+                        same_response(reader.decoded_responses.get(&task.index), &response)
+                            .then(|| reader.decoded_windows.get(&task.index).copied())
+                            .flatten()
+                    })
+                };
                 let prepared = prepare_display_tiles(
                     window.image.as_raw(),
                     window.image.width(),
                     window.image.height(),
                     window.plan.first_row,
                     window.plan.full_height,
+                    reuse,
                 );
                 let plan = window.plan;
                 drop(window);
@@ -2273,6 +2367,8 @@ impl Controller {
                     display_width,
                     write,
                     cache_request,
+                    reuse,
+                    response,
                 ))
             })();
             let pending = Arc::new(Mutex::new(Some(result)));
@@ -2303,8 +2399,18 @@ impl Controller {
                     return;
                 }
                 let mut loaded = false;
+                let mut geometry_updated = false;
                 match result {
-                    Ok((dimensions, plan, prepared, display_width, write, cache_request)) => {
+                    Ok((
+                        dimensions,
+                        plan,
+                        prepared,
+                        display_width,
+                        write,
+                        cache_request,
+                        reuse,
+                        response,
+                    )) => {
                         if cache_request.as_ref().is_some_and(|(request, reused)| {
                             request.validate_for_publication(*reused).is_err()
                         }) {
@@ -2320,6 +2426,22 @@ impl Controller {
                             .map(|r| r.2)
                             .unwrap_or(0);
                         if !plan.covers(start, end) || plan.byte_len() > current_budget {
+                            let current = reader.anchor.page_index;
+                            drop(view);
+                            app.request_images(&ui, current);
+                            return;
+                        }
+                        // A scroll/source transition may have evicted the old
+                        // strips while this completion was being prepared.
+                        // Retry from current state without blanking visible art.
+                        if reuse.is_some_and(|previous| {
+                            reader.decoded_windows.get(&task.index) != Some(&previous)
+                                || !same_response(
+                                    reader.decoded_responses.get(&task.index),
+                                    &response,
+                                )
+                        }) {
+                            reader.decoded_responses.remove(&task.index);
                             let current = reader.anchor.page_index;
                             drop(view);
                             app.request_images(&ui, current);
@@ -2345,6 +2467,7 @@ impl Controller {
                                 reader.retained.remove(&victim);
                                 reader.decoded_widths.remove(&victim);
                                 reader.decoded_windows.remove(&victim);
+                                reader.decoded_responses.remove(&victim);
                                 reader.budget_blocked.insert(victim);
                                 if let Some(mut old) = model.row_data(victim) {
                                     old.tiles = ModelRc::default();
@@ -2358,36 +2481,53 @@ impl Controller {
                             reader.budget_blocked.insert(task.index);
                             return;
                         }
+                        let previous = reader.decoded_windows.get(&task.index).copied();
+                        let Some(tiles) = reconcile_display_tiles(&row.tiles, previous, prepared)
+                        else {
+                            reader.decoded_responses.remove(&task.index);
+                            let current = reader.anchor.page_index;
+                            drop(view);
+                            app.request_images(&ui, current);
+                            return;
+                        };
                         loaded = true;
-                        // Free the old Slint buffers BEFORE allocating replacement
-                        // tiles. Both writes happen in one UI turn, so a frame
-                        // never observes an empty replacement between them.
-                        row.tiles = ModelRc::default();
-                        row.image = slint::Image::default();
-                        model.set_row_data(task.index, row.clone());
-                        reader.decoded_bytes.remove(&task.index);
+                        let geometry_changed =
+                            reader.native_dimensions.get(&task.index) != Some(&dimensions);
+                        let parent_changed =
+                            !row.loaded || !row.error.is_empty() || row.tiles != tiles;
                         reader.decoded_bytes.insert(task.index, plan.byte_len());
                         reader.decoded_widths.insert(task.index, display_width);
                         reader.decoded_windows.insert(task.index, plan);
+                        reader.decoded_responses.insert(task.index, response);
                         reader.native_dimensions.insert(task.index, dimensions);
-                        reader.budget_blocked.clear();
-                        reader.ratios[task.index] =
-                            dimensions.height as f32 / dimensions.width as f32;
-                        row.tiles = ModelRc::new(VecModel::from(mount_display_tiles(prepared)));
+                        reader.budget_blocked.remove(&task.index);
+                        if geometry_changed {
+                            reader.budget_blocked.clear();
+                        }
+                        row.tiles = tiles;
                         row.loaded = true;
                         row.error = "".into();
                         reader.retained.insert(task.index);
-                        model.set_row_data(task.index, row);
-                        let mut position = 0.0;
-                        for (i, ratio) in reader.ratios.iter().enumerate() {
-                            if let Some(mut row) = model.row_data(i) {
-                                row.position = position;
-                                row.ratio = *ratio;
-                                model.set_row_data(i, row);
-                            }
-                            position += ratio;
+                        if parent_changed {
+                            model.set_row_data(task.index, row);
                         }
-                        ui.set_total_ratio(position);
+                        if geometry_changed {
+                            reader.ratios[task.index] =
+                                dimensions.height as f32 / dimensions.width as f32;
+                            let mut position = 0.0;
+                            for (i, ratio) in reader.ratios.iter().enumerate() {
+                                if let Some(mut row) = model.row_data(i)
+                                    && (row.position != position || row.ratio != *ratio)
+                                {
+                                    row.position = position;
+                                    row.ratio = *ratio;
+                                    model.set_row_data(i, row);
+                                }
+                                position += ratio;
+                            }
+                            ui.set_total_ratio(position);
+                            geometry_updated = true;
+                        }
                         if let Some((pending, bytes)) = write {
                             app.chapter_cache.enqueue(pending, bytes);
                         }
@@ -2405,7 +2545,9 @@ impl Controller {
                     }
                 }
                 drop(view);
-                app.restore_position(&ui);
+                if geometry_updated {
+                    app.restore_position(&ui);
+                }
                 if loaded {
                     let mode = { app.view().reader.as_ref().map(|r| r.mode) };
                     if mode == Some(ReadingMode::Webtoon) {
@@ -2911,26 +3053,129 @@ impl Controller {
 fn display_tiles(pixels: &[u8], width: u32, height: u32) -> Vec<TileRow> {
     display_window_tiles(pixels, width, height, 0, height)
 }
-struct PreparedTile {
-    pixels: slint::SharedPixelBuffer<slint::Rgba8Pixel>,
-    offset: f32,
-    fraction: f32,
-    left: f32,
-    right: f32,
-    bottom: f32,
+fn same_response(previous: Option<&Weak<Vec<u8>>>, current: &Weak<Vec<u8>>) -> bool {
+    previous.is_some_and(|previous| previous.strong_count() > 0 && Weak::ptr_eq(previous, current))
 }
-fn mount_display_tiles(tiles: Vec<PreparedTile>) -> Vec<TileRow> {
-    tiles
-        .into_iter()
-        .map(|tile| TileRow {
-            image: slint::Image::from_rgba8(tile.pixels),
-            offset: tile.offset,
-            fraction: tile.fraction,
-            left: tile.left,
-            right: tile.right,
-            bottom: tile.bottom,
-        })
-        .collect()
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct TileRect {
+    left: u32,
+    top: u32,
+    width: u32,
+    height: u32,
+    full_width: u32,
+    full_height: u32,
+}
+struct PreparedTile {
+    rect: TileRect,
+    // None retains the existing strip's image AND its Slint delegate.
+    pixels: Option<slint::SharedPixelBuffer<slint::Rgba8Pixel>>,
+}
+fn tile_rects(plan: reader_engine::DisplayWindowPlan) -> Vec<TileRect> {
+    let mut result = Vec::new();
+    let mut top = plan.first_row;
+    let end = plan.first_row + plan.rows;
+    while top < end {
+        let bottom =
+            (top / reader_engine::DISPLAY_TILE_ROWS + 1) * reader_engine::DISPLAY_TILE_ROWS;
+        let height = (bottom.min(end) - top).min(2048);
+        for left in (0..plan.width).step_by(2048) {
+            result.push(TileRect {
+                left,
+                top,
+                width: 2048.min(plan.width - left),
+                height,
+                full_width: plan.width,
+                full_height: plan.full_height,
+            });
+        }
+        top += height;
+    }
+    result
+}
+fn mount_tile(tile: PreparedTile) -> TileRow {
+    let rect = tile.rect;
+    TileRow {
+        image: slint::Image::from_rgba8(tile.pixels.expect("new tile has pixels")),
+        offset: rect.top as f32 / rect.full_height as f32,
+        fraction: rect.height as f32 / rect.full_height as f32,
+        left: rect.left as f32 / rect.full_width as f32,
+        right: (rect.left + rect.width) as f32 / rect.full_width as f32,
+        bottom: (rect.top + rect.height) as f32 / rect.full_height as f32,
+    }
+}
+/// Preserve the model and surviving repeated items. Slint's renderer can cache
+/// a dynamic image on its item, so a new model defeats image-handle reuse.
+fn reconcile_display_tiles(
+    current: &ModelRc<TileRow>,
+    previous: Option<reader_engine::DisplayWindowPlan>,
+    prepared: Vec<PreparedTile>,
+) -> Option<ModelRc<TileRow>> {
+    let mut keys = previous.map(tile_rects).unwrap_or_default();
+    let has_reuse = prepared.iter().any(|tile| tile.pixels.is_none());
+    if has_reuse
+        && (keys.len() != current.row_count()
+            || prepared
+                .iter()
+                .any(|tile| tile.pixels.is_none() && !keys.contains(&tile.rect)))
+    {
+        return None;
+    }
+    let model = current.as_any().downcast_ref::<VecModel<TileRow>>();
+    let owned = model
+        .is_none()
+        .then(|| ModelRc::new(VecModel::<TileRow>::default()));
+    let model = match model {
+        Some(model) => model,
+        None if has_reuse => return None,
+        None => owned
+            .as_ref()
+            .unwrap()
+            .as_any()
+            .downcast_ref::<VecModel<TileRow>>()
+            .unwrap(),
+    };
+    if keys.len() != model.row_count() {
+        // This is an initial mount or a fully new response, never a reused
+        // completion with missing backing rows (validated above).
+        while model.row_count() > 0 {
+            model.remove(model.row_count() - 1);
+        }
+        keys.clear();
+    }
+    // Drop outgoing model references before allocating entering image handles.
+    // In particular, reverse scrolling and disjoint jumps must not temporarily
+    // append a second window alongside the complete old one.
+    let desired = prepared
+        .iter()
+        .map(|tile| tile.rect)
+        .collect::<BTreeSet<_>>();
+    for index in (0..keys.len()).rev() {
+        if !desired.contains(&keys[index]) {
+            model.remove(index);
+            keys.remove(index);
+        }
+    }
+    let count = prepared.len();
+    for (index, tile) in prepared.into_iter().enumerate() {
+        if let Some(found) = keys[index..].iter().position(|key| *key == tile.rect) {
+            for _ in 0..found {
+                model.remove(index);
+                keys.remove(index);
+            }
+            if tile.pixels.is_some() {
+                model.set_row_data(index, mount_tile(tile));
+            }
+        } else {
+            let key = tile.rect;
+            model.insert(index, mount_tile(tile));
+            keys.insert(index, key);
+        }
+    }
+    while keys.len() > count {
+        model.remove(count);
+        keys.remove(count);
+    }
+    Some(owned.unwrap_or_else(|| current.clone()))
 }
 #[cfg(test)]
 fn display_window_tiles(
@@ -2940,13 +3185,10 @@ fn display_window_tiles(
     first_row: u32,
     full_height: u32,
 ) -> Vec<TileRow> {
-    mount_display_tiles(prepare_display_tiles(
-        pixels,
-        width,
-        height,
-        first_row,
-        full_height,
-    ))
+    prepare_display_tiles(pixels, width, height, first_row, full_height, None)
+        .into_iter()
+        .map(mount_tile)
+        .collect()
 }
 fn prepare_display_tiles(
     pixels: &[u8],
@@ -2954,33 +3196,37 @@ fn prepare_display_tiles(
     height: u32,
     first_row: u32,
     full_height: u32,
+    previous: Option<reader_engine::DisplayWindowPlan>,
 ) -> Vec<PreparedTile> {
     let stride = width as usize * 4;
-    let tile_height = 2048usize;
-    let mut tiles = Vec::new();
-    for top in (0..height).step_by(tile_height) {
-        let rows = 2048.min(height - top);
-        for left in (0..width).step_by(2048) {
-            let columns = 2048.min(width - left);
-            let mut buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(columns, rows);
-            for row in 0..rows as usize {
-                let source = (top as usize + row) * stride + left as usize * 4;
-                let target = row * columns as usize * 4;
-                buffer.make_mut_bytes()[target..target + columns as usize * 4]
-                    .copy_from_slice(&pixels[source..source + columns as usize * 4]);
+    let old = previous.map(tile_rects).unwrap_or_default();
+    tile_rects(reader_engine::DisplayWindowPlan {
+        width,
+        full_height,
+        first_row,
+        rows: height,
+    })
+    .into_iter()
+    .map(|rect| {
+        let pixels = if old.contains(&rect) {
+            None
+        } else {
+            let mut buffer =
+                slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(rect.width, rect.height);
+            for row in 0..rect.height as usize {
+                let source = (rect.top as usize - first_row as usize + row) * stride
+                    + rect.left as usize * 4;
+                let target = row * rect.width as usize * 4;
+                buffer.make_mut_bytes()[target..target + rect.width as usize * 4]
+                    .copy_from_slice(&pixels[source..source + rect.width as usize * 4]);
             }
-            tiles.push(PreparedTile {
-                pixels: buffer,
-                offset: (first_row + top) as f32 / full_height as f32,
-                fraction: rows as f32 / full_height as f32,
-                bottom: (first_row + top + rows) as f32 / full_height as f32,
-                left: left as f32 / width as f32,
-                right: (left + columns) as f32 / width as f32,
-            });
-        }
-    }
-    tiles
+            Some(buffer)
+        };
+        PreparedTile { rect, pixels }
+    })
+    .collect()
 }
+
 fn mode_index(mode: ReadingMode) -> i32 {
     match mode {
         ReadingMode::Webtoon => 0,
@@ -3511,6 +3757,10 @@ pub fn run(services: Services) -> Result<()> {
         crate::paths::cache_dir()?.join("posters"),
     );
     let app = Arc::new(Controller {
+        progress_checkpoint: crate::progress_checkpoint::ProgressWriter::new(
+            services.domain.clone(),
+        )
+        .map_err(error)?,
         services,
         artwork,
         chapter_cache: Arc::new(crate::chapter_cache::ChapterCache::new(
@@ -4091,7 +4341,7 @@ pub fn run(services: Services) -> Result<()> {
         slint::TimerMode::Repeated,
         std::time::Duration::from_millis(600),
         move || {
-            checkpoint.flush();
+            checkpoint.checkpoint_progress();
             if let Some(ui) = refresh_ui.upgrade()
                 && !checkpoint.metadata_refresh_allowed(&ui)
             {
@@ -4176,6 +4426,10 @@ mod tests {
         let services = Services::open(&dir.path().join("data")).unwrap();
         let (images, _receiver) = mpsc::channel();
         let app = Controller {
+            progress_checkpoint: crate::progress_checkpoint::ProgressWriter::new(
+                services.domain.clone(),
+            )
+            .unwrap(),
             artwork: crate::artwork::ArtworkLoader::new(
                 services.clone(),
                 ui.as_weak(),
@@ -4355,6 +4609,7 @@ mod tests {
             decoded_bytes: BTreeMap::new(),
             decoded_widths: BTreeMap::new(),
             decoded_windows: BTreeMap::new(),
+            decoded_responses: BTreeMap::new(),
             native_dimensions: BTreeMap::new(),
             target_width: 1280,
             viewport_width: 390.,
@@ -4492,6 +4747,67 @@ mod tests {
         );
     }
     #[test]
+    fn long_visible_window_defers_already_queued_prefetch_until_final_window() {
+        let mut reader = tall_reader();
+        reader.ratios[0] = 25000. / 720.;
+        reader.desired.extend([0, 1]);
+        reader.requested.extend([0, 1]);
+        // Both tasks are initially queued before dimensions are known.
+        assert!(!reader.defers_prefetch(1));
+        let dimensions = reader_engine::PageDimensions {
+            width: 720,
+            height: 25000,
+        };
+        let (width, (start, end), budget) = reader.window_request(0, dimensions).unwrap();
+        let plan =
+            reader_engine::plan_display_window(dimensions, width, start, end, budget).unwrap();
+        assert!(plan.first_row + plan.rows < plan.full_height);
+        reader.decoded_windows.insert(0, plan);
+        reader.retained.insert(0);
+        reader.requested.remove(&0);
+        assert!(reader.defers_prefetch(1));
+        assert!(!reader.defers_prefetch(0), "visible work is never delayed");
+        assert!(
+            !reader.start_image(1),
+            "the queued worker task must recheck after publication"
+        );
+        assert!(
+            !reader.requested.contains(&1),
+            "a suppressed task must not leave a stuck request marker"
+        );
+        assert!(
+            reader.defers_prefetch(1),
+            "ordinary scroll ticks intentionally skip this target"
+        );
+        // Its last admitted window enables normal prefetch before the next page
+        // becomes visible, without replacing the long page's display strips.
+        reader.anchor = ResumeAnchor::new("page-0", 0, 0.9).unwrap();
+        let (width, (start, end), budget) = reader.window_request(0, dimensions).unwrap();
+        let last =
+            reader_engine::plan_display_window(dimensions, width, start, end, budget).unwrap();
+        assert_eq!(reader.visible_end(), 0);
+        assert_eq!(last.first_row + last.rows, last.full_height);
+        reader.decoded_windows.insert(0, last);
+        assert!(!reader.defers_prefetch(1));
+        reader.requested.insert(1);
+        assert!(reader.start_image(1));
+        // The reported 719×3500 page fits its admitted window, so its usual
+        // next-page prefetch stays active from the start.
+        reader.anchor = ResumeAnchor::new("page-0", 0, 0.).unwrap();
+        reader.ratios[0] = 3500. / 719.;
+        let short = reader_engine::PageDimensions {
+            width: 719,
+            height: 3500,
+        };
+        let (width, (start, end), budget) = reader.window_request(0, short).unwrap();
+        let plan = reader_engine::plan_display_window(short, width, start, end, budget).unwrap();
+        assert_eq!(plan.rows, plan.full_height);
+        reader.decoded_windows.insert(0, plan);
+        assert!(!reader.defers_prefetch(1));
+        assert!(reader.start_image(1));
+    }
+
+    #[test]
     fn stale_generation_and_shorter_reader_cannot_plan_old_page() {
         let mut reader = tall_reader();
         reader.pages.truncate(1);
@@ -4573,6 +4889,191 @@ mod tests {
         assert_eq!(requests, 3);
         assert!(cache.bytes <= 32 * 1024 * 1024);
     }
+    #[test]
+    fn slow_scrolling_720_by_25000_retains_overlapping_tiles_and_model_delegates() {
+        use i_slint_core::model::{ModelChangeListener, ModelChangeListenerContainer};
+        use std::{cell::Cell, pin::Pin};
+        #[derive(Default)]
+        struct Changes {
+            changed: Cell<usize>,
+            added: Cell<usize>,
+            removed: Cell<usize>,
+            reset: Cell<usize>,
+            current_count: Cell<usize>,
+            high_water: Cell<usize>,
+        }
+        impl ModelChangeListener for Changes {
+            fn row_changed(self: Pin<&Self>, _: usize) {
+                self.changed.set(self.changed.get() + 1);
+            }
+            fn row_added(self: Pin<&Self>, _: usize, count: usize) {
+                self.added.set(self.added.get() + count);
+                self.current_count.set(self.current_count.get() + count);
+                self.high_water
+                    .set(self.high_water.get().max(self.current_count.get()));
+            }
+            fn row_removed(self: Pin<&Self>, _: usize, count: usize) {
+                self.removed.set(self.removed.get() + count);
+                self.current_count.set(self.current_count.get() - count);
+            }
+            fn reset(self: Pin<&Self>) {
+                self.reset.set(self.reset.get() + 1);
+            }
+        }
+        let changes = Box::pin(ModelChangeListenerContainer::<Changes>::default());
+        let model = ModelRc::new(VecModel::<TileRow>::default());
+        model
+            .model_tracker()
+            .attach_peer(changes.as_ref().model_peer());
+        let dimensions = reader_engine::PageDimensions {
+            width: 720,
+            height: 25000,
+        };
+        let budget = READER_MODEL_BYTES.min(
+            (reader_engine::DecodeLimits::default().max_decoded_bytes as usize - 720 * 25000 * 4)
+                / 2,
+        );
+        let mut previous: Option<reader_engine::DisplayWindowPlan> = None;
+        let mut refreshed = 0;
+        let tight_budget = 1602 * 720 * 4;
+        let cases = (0usize..23400)
+            .step_by(64)
+            .map(|first| (first, budget, true))
+            .chain(
+                (0usize..23400)
+                    .step_by(64)
+                    .rev()
+                    .map(|first| (first, budget, true)),
+            )
+            .chain([20000, 1000, 23000, 3000].map(|first| (first, budget, false)))
+            .chain([3010, 3074, 3138, 4010, 4074, 3010].map(|first| (first, tight_budget, false)));
+        for (first, current_budget, incremental) in cases {
+            let start = first as f64 / 25000.;
+            let end = (first + 1600) as f64 / 25000.;
+            if previous.is_some_and(|plan| {
+                plan.covers_with_margin(start, end) && plan.byte_len() <= current_budget
+            }) {
+                continue;
+            }
+            let plan =
+                reader_engine::plan_display_window(dimensions, 1280, start, end, current_budget)
+                    .unwrap();
+            assert_eq!(plan.width, 720);
+            assert!(plan.covers(start, end));
+            assert!(plan.byte_len() <= current_budget);
+            if current_budget == tight_budget {
+                assert!(
+                    plan.first_row % reader_engine::DISPLAY_TILE_ROWS != 0
+                        || plan.rows < reader_engine::DISPLAY_TILE_ROWS,
+                    "exercise budget-limited partial strip edges"
+                );
+            }
+            let mut pixels = vec![255; plan.byte_len()];
+            for row in 0..plan.rows {
+                let index = row as usize * 720 * 4;
+                pixels[index] = ((plan.first_row + row) % 251) as u8;
+            }
+            let old = previous
+                .map(tile_rects)
+                .unwrap_or_default()
+                .into_iter()
+                .zip(model.iter().map(|row| row.image))
+                .collect::<BTreeMap<_, _>>();
+            let prepared = prepare_display_tiles(
+                &pixels,
+                720,
+                plan.rows,
+                plan.first_row,
+                plan.full_height,
+                previous,
+            );
+            let entering = prepared.iter().filter(|tile| tile.pixels.is_some()).count();
+            if incremental && previous.is_some() {
+                assert!(
+                    entering <= 1,
+                    "slow scroll must upload only its entering strip"
+                );
+            }
+            let keys = tile_rects(plan);
+            let leaving = old.keys().filter(|key| !keys.contains(key)).count();
+            let added_before = changes.added.get();
+            let removed_before = changes.removed.get();
+            let row_limit = model.row_count().max(keys.len());
+            changes.high_water.set(model.row_count());
+            let updated = reconcile_display_tiles(&model, previous, prepared).unwrap();
+            assert!(
+                changes.high_water.get() <= row_limit,
+                "drop outgoing strips before adding new ones, including reverse scroll and jumps"
+            );
+            assert_eq!(changes.current_count.get(), keys.len());
+            assert_eq!(updated, model, "keep the repeated model identity");
+            assert_eq!(changes.added.get() - added_before, entering);
+            assert_eq!(changes.removed.get() - removed_before, leaving);
+            assert_eq!(
+                changes.changed.get(),
+                0,
+                "overlap delegates must not be rebound"
+            );
+            assert_eq!(
+                changes.reset.get(),
+                0,
+                "never reset the repeated tile model"
+            );
+            for (key, row) in keys.iter().zip(model.iter()) {
+                let buffer = row.image.to_rgba8().unwrap();
+                assert_eq!(buffer.as_bytes()[0], (key.top % 251) as u8);
+                if let Some(old) = old.get(key) {
+                    assert_eq!(row.image, *old);
+                    assert_eq!(
+                        buffer.as_bytes().as_ptr(),
+                        old.to_rgba8().unwrap().as_bytes().as_ptr(),
+                        "keep the exact pixel allocation for overlap"
+                    );
+                }
+            }
+            assert_eq!(
+                model
+                    .iter()
+                    .map(|row| row.image.size().width as usize
+                        * row.image.size().height as usize
+                        * 4)
+                    .sum::<usize>(),
+                plan.byte_len()
+            );
+            previous = Some(plan);
+            refreshed += 1;
+        }
+        assert!(
+            refreshed >= 8,
+            "exercise repeated slow-scroll window transitions"
+        );
+        let source = Arc::new(vec![1]);
+        let identity = Arc::downgrade(&source);
+        assert!(same_response(Some(&identity), &identity));
+        let replacement = Arc::new(vec![1]);
+        assert!(
+            !same_response(Some(&identity), &Arc::downgrade(&replacement)),
+            "same bytes in a new response must not reuse old tiles"
+        );
+        let plan = previous.unwrap();
+        let prepared = prepare_display_tiles(
+            &vec![255; plan.byte_len()],
+            plan.width,
+            plan.rows,
+            plan.first_row,
+            plan.full_height,
+            previous,
+        );
+        assert!(
+            reconcile_display_tiles(&ModelRc::default(), previous, prepared).is_none(),
+            "reject evicted backing tiles before changing the model"
+        );
+        assert!(
+            model.row_count() > 0,
+            "a rejected completion must leave existing art intact"
+        );
+    }
+
     #[test]
     fn horizontal_tiles_preserve_source_pixels_and_partial_row_coordinates() {
         let image = image::RgbaImage::from_fn(5000, 8, |x, y| {
@@ -4834,6 +5335,7 @@ mod tests {
             decoded_bytes: BTreeMap::new(),
             decoded_widths: BTreeMap::new(),
             decoded_windows: BTreeMap::new(),
+            decoded_responses: BTreeMap::new(),
             native_dimensions: BTreeMap::new(),
             target_width: 0,
             viewport_width: 500.,
@@ -4847,6 +5349,10 @@ mod tests {
         };
         let services = Services::open(&dir.path().join("data")).unwrap();
         let app = Arc::new(Controller {
+            progress_checkpoint: crate::progress_checkpoint::ProgressWriter::new(
+                services.domain.clone(),
+            )
+            .unwrap(),
             artwork: crate::artwork::ArtworkLoader::new(
                 services.clone(),
                 ui.as_weak(),
