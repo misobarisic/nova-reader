@@ -3,6 +3,7 @@ fn main() {
     let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo OUT_DIR"));
     let dropdown = reader_dropdown(&shared, &out);
     let segmented = reader_segmented(&shared, &out);
+    let menu_sheet = reader_menu_sheet(&shared, &out);
     slint_build::compile_with_config(
         "app.slint",
         slint_build::CompilerConfiguration::new()
@@ -11,6 +12,7 @@ fn main() {
                 ("NovaUiBase".into(), shared.clone()),
                 ("ReaderDropdown".into(), dropdown),
                 ("ReaderSegmented".into(), segmented),
+                ("ReaderMenuSheet".into(), menu_sheet),
                 ("NovaUiShared".into(), shared.join("host-globals.slint")),
             ]))
             // Layout regressions inspect element bounds in development builds.
@@ -20,6 +22,34 @@ fn main() {
             .with_default_translation_context(slint_build::DefaultTranslationContext::None),
     )
     .expect("compile Nova Reader UI");
+}
+
+// Retain Nova's exact sheet visuals while wiring its semantic action targets.
+fn reader_menu_sheet(shared: &std::path::Path, out: &std::path::Path) -> std::path::PathBuf {
+    let source = shared.join("menusheet.slint");
+    println!("cargo:rerun-if-changed={}", source.display());
+    let mut contents = std::fs::read_to_string(source).expect("read Kit MenuSheet");
+    contents = contents.replace(
+        "from \"scrollview.slint\"",
+        "from \"@NovaUiBase/scrollview.slint\"",
+    );
+    assert_eq!(
+        contents.matches("accessible-enabled: it.enabled;").count(),
+        2,
+        "Kit MenuSheet semantic rows changed"
+    );
+    contents=contents.replace("accessible-enabled: it.enabled;", "accessible-enabled: it.enabled;\n                                    accessible-action-default => { if root.open && it.enabled { root.picked(i); } }");
+    let cancel = "                    Rectangle {\n                        height: InterfaceStyle.tv ? 64px : 48px;";
+    assert!(
+        contents.contains(cancel),
+        "Kit MenuSheet Cancel contract changed"
+    );
+    contents=contents.replace(cancel,&format!("{cancel}\n                        accessible-role: button; accessible-label: @tr(\"Cancel\");\n                        accessible-action-default => {{ if root.open {{ root.closed(); }} }}"));
+    let destination = out.join("reader-menu-sheet.slint");
+    if std::fs::read_to_string(&destination).ok().as_deref() != Some(&contents) {
+        std::fs::write(&destination, contents).expect("write adapted Kit MenuSheet");
+    }
+    destination
 }
 
 // Preserve the pinned Kit's complete segmented control. Only its repeated

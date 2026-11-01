@@ -8,3 +8,6 @@ license = "GPL-3.0-or-later"
 reader-domain = { path = "../reader-domain" }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 thiserror = "2"
+avif-parse = "=2.1.0"
+rav1d = { package = "ferri-pdf-rav1d", version = "=1.1.2", default-features = false, features = ["bitdepth_8"] }
+yuv = { version = "=0.8.19", default-features = false }

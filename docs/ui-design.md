@@ -78,6 +78,23 @@ responsive 160px/230px sizing; `title-artwork.slint` is Nova's original componen
 `detail-hero.slint` adapts the edge-to-edge artwork, baked palette scrims,
 responsive title/metadata, expandable synopsis and primary/library actions.
 Display settings retain the selected layout and minimum column counts.
+Library search reuses Nova’s retained 58px reveal and Kit `SearchField`. The
+search action or Ctrl+F exposes and focuses it, edits filter immediately, and
+Escape/Back closes it and clears the query. Deferred focus and viewport
+correction keep the field reachable in short windows and when layout changes.
+
+Library cards open a per-title menu on right-click or stationary hold; the detail
+toolbar’s three-dot action opens the same stable-identity target. Narrow layouts
+use Kit’s `MenuSheet`; desktop actions stay anchored to the selected title.
+Categories, refresh and add/remove operate on that title, with category assignment
+kept inside its menu. The Library toolbar no longer assigns categories through
+a global three-dot action. Dragging cancels the hold.
+
+Details publish the selected title, poster and known metadata before remote
+chapter loading finishes. Loading/error feedback sits below the hero; Continue
+is disabled until chapter rows are available. Opening a different series resets
+the detail viewport and synopsis; returning from its reader restores the retained
+scroll offset and expanded/collapsed synopsis.
 
 The supplied Mihon references define the compact chapter and dated activity
 structure: unread dot, chapter/date/scanlator, trailing download/options, and
@@ -91,6 +108,13 @@ language, with independent Latest/pin actions; a source opens Popular/Latest,
 search, provider-defined filters and a poster gallery. Catalogue Back retains
 its stable source identity, result/query/pagination/filter context and scroll.
 Source changes clear the old snapshot before a request can fail.
+Source galleries request the next page near the viewport end and continue
+filling a short viewport until the source finishes. Only one page request runs
+at a time; successful appends preserve scroll and deduplicate full series IDs.
+A failed page or a page claiming more results without new titles pauses automatic
+loading and exposes Retry for that same page. Adult-source visibility and each
+series’ chapter order persist through Nova KV; failed writes keep the saved
+choice rather than publishing an unsaved change.
 
 Chapter controls are hidden on entry. A tap/click reveals their overlay without
 resizing the reading viewport; a drag remains a scroll gesture. On Android the
@@ -115,10 +139,16 @@ then calls `reader-context-closed()` to release the cached capture. Cancellation
 also calls the close callback. Export work disables the four actions and exposes
 progress; success/error feedback appears in a reader toast for four seconds.
 More → Settings → Screenshots is a retained settings leaf with Nova rows and
-controls for format, encoding quality and separate series folders. Its
+controls for format, encoding quality, screencap resolution and separate series folders. Its
 `CaptureSettings` global publishes validated device preferences; they persist
 under `reader:captures`, independently of library backups and chapter bytes.
-Cache settings also expose independent switches, JPEG/WebP format and quality
+Device resolution remains the default. Chapter resolution captures the same
+visible chapter area at the clicked page's source-pixel scale, using original
+images and frozen viewer geometry. This applies to save and clipboard actions,
+supports scrolling, panning and paged letterboxing, and retains the eight-million-
+pixel export limit. A capture above that limit reports an error rather than
+silently reducing the selected source resolution.
+Cache settings also expose independent switches, JPEG/WebP/AVIF format and quality
 for new cache images and new downloads. Their `ImageStorageSettings` global and
 `reader:image-storage` preferences govern future writes; existing files are
 preserved when a preference changes. Screenshot export format remains separate.
@@ -127,11 +157,37 @@ Image cache maintenance uses Nova's platform-directory/worker pattern. Series
 posters are under the platform cache root on both desktop and Android; clearing
 More → Settings → Cache preserves library data and downloaded/imported chapters.
 Reading page images remain in memory unless explicitly downloaded/imported.
+Poster cache hits publish immediately across collection/detail routes. One
+128 MiB shared decoded-pixel LRU backs UI images, with visible artwork plus up to
+48 extra recently used UI cards retained; source access revocation invalidates
+cached hits. Worker decode memory is additional to that retained-pixel budget.
+
+Screenshots and cache/download compression also offer AVIF. The reader accepts
+8-bit still AVIF through its pure-Rust codec path; animated/multiframe, high-bit
+depth and transformed AVIF variants are rejected. AVIF/WebP preserve alpha;
+JPEG storage conversion keeps original bytes for transparent input. Lossy capture
+formats keep separate quality preferences, with AVIF defaulting to 85. Changing
+compression preferences never rewrites existing files.
+
+Reader drawing rounds shared page/tile edges in physical pixel coordinates,
+including fractional scroll, device scale and window origin. Adjacent tiles
+share an edge instead of independently rounding their heights; logical page
+positions and resume anchors remain unrounded. Tall-page display retains
+bounded visible row windows at the needed width, with neighboring rows admitted
+within the output budget; it does not squeeze the full page into a narrow
+texture. The source still passes a bounded full CPU decode before windowing.
 
 The detail header action displays `Continue chapter X`; there is no floating
 bottom-right duplicate. Its label and action
 share the same resume selection (most recent unfinished chapter, then first
 unread, then the first chapter); fractional chapter identifiers stay strings.
+
+Reader Options offers Automatic alongside the four manual reading modes. Its
+status displays the detected effective mode or a saved manual choice. Automatic
+uses the pinned J2K genre/source rules before image decoding; manual choices
+persist per full series ID across chapters and restarts. Choosing Automatic
+explicitly restores detection, and failed saves preserve the previous choice.
+See [reader mode selection](reader-modes.md) for upstream rules and adaptations.
 
 ## System bars and chapter downloads (0.1.13)
 

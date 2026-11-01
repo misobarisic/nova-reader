@@ -1,5 +1,11 @@
 //! Bounded CPU image decode and renderer-independent logical geometry.
 use image::ImageDecoder;
+mod avif;
+mod display;
+pub use display::{
+    DISPLAY_WINDOW_BYTES, DisplayWindow, DisplayWindowPlan, decode_display_image,
+    decode_display_window, plan_display_window,
+};
 use reader_domain::{ReadingMode, ResumeAnchor};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -15,6 +21,8 @@ pub enum Error {
     Layout,
     #[error(transparent)]
     Image(#[from] image::ImageError),
+    #[error("AVIF: {0}")]
+    Avif(String),
 }
 pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Clone, Copy, Debug)]
@@ -61,6 +69,9 @@ fn reader(bytes: &[u8], limits: DecodeLimits) -> Result<image::ImageReader<Curso
     Ok(reader)
 }
 pub fn inspect_image(bytes: &[u8], limits: DecodeLimits) -> Result<PageDimensions> {
+    if image::guess_format(bytes).is_ok_and(|format| format == image::ImageFormat::Avif) {
+        return avif::inspect(bytes, limits);
+    }
     let (width, height) = reader(bytes, limits)?.into_dimensions()?;
     let pixels = u64::from(width) * u64::from(height);
     if width == 0
@@ -80,6 +91,9 @@ pub fn inspect_image(bytes: &[u8], limits: DecodeLimits) -> Result<PageDimension
 /// supported budget fail explicitly; post-decode tiling is never used to claim
 /// a reduction in peak allocation.
 pub fn decode_image(bytes: &[u8], limits: DecodeLimits) -> Result<image::RgbaImage> {
+    if image::guess_format(bytes).is_ok_and(|format| format == image::ImageFormat::Avif) {
+        return avif::decode(bytes, limits);
+    }
     let dimensions = inspect_image(bytes, limits)?;
     let decoder = reader(bytes, limits)?.into_decoder()?;
     let rgba_bytes = u64::from(dimensions.width) * u64::from(dimensions.height) * 4;
@@ -92,51 +106,6 @@ pub fn decode_image(bytes: &[u8], limits: DecodeLimits) -> Result<image::RgbaIma
         return Err(Error::Limit);
     }
     Ok(image::DynamicImage::from_decoder(decoder)?.into_rgba8())
-}
-/// Bound GPU/display retention independently of original image admission.
-/// This still requires a bounded full CPU decode; unsupported originals fail
-/// before allocation rather than pretending that resizing removes that peak.
-pub fn decode_display_image(
-    bytes: &[u8],
-    limits: DecodeLimits,
-    max_width: u32,
-    max_height: u32,
-) -> Result<image::RgbaImage> {
-    if max_width == 0 || max_height == 0 {
-        return Err(Error::Limit);
-    }
-    let dimensions = inspect_image(bytes, limits)?;
-    const DISPLAY_PIXELS: u64 = 8_000_000;
-    let pixels = u64::from(dimensions.width) * u64::from(dimensions.height);
-    if dimensions.width <= max_width && dimensions.height <= max_height && pixels <= DISPLAY_PIXELS
-    {
-        return decode_image(bytes, limits);
-    }
-    let scale = (f64::from(max_width) / f64::from(dimensions.width))
-        .min(f64::from(max_height) / f64::from(dimensions.height))
-        .min((DISPLAY_PIXELS as f64 / pixels as f64).sqrt())
-        .min(1.0);
-    let width = (f64::from(dimensions.width) * scale).floor().max(1.0) as u32;
-    let height = (f64::from(dimensions.height) * scale).floor().max(1.0) as u32;
-    let display_bytes = u64::from(width) * u64::from(height) * 4;
-    let decode_budget = limits
-        .max_decoded_bytes
-        .checked_sub(display_bytes)
-        .ok_or(Error::Limit)?;
-    let original = decode_image(
-        bytes,
-        DecodeLimits {
-            max_decoded_bytes: decode_budget,
-            ..limits
-        },
-    )?;
-    // image::resize uses an intermediate floating point bitmap. Sample directly
-    // so display output is the only allocation added to the admitted original.
-    Ok(image::RgbaImage::from_fn(width, height, |x, y| {
-        let sx = (u64::from(x) * u64::from(original.width()) / u64::from(width)) as u32;
-        let sy = (u64::from(y) * u64::from(original.height()) / u64::from(height)) as u32;
-        *original.get_pixel(sx, sy)
-    }))
 }
 #[derive(Clone, Debug)]
 pub struct PageLayout {

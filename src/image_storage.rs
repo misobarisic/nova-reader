@@ -14,6 +14,7 @@ pub enum ImageStorageFormat {
     Jpeg = 0,
     #[default]
     Webp = 1,
+    Avif = 2,
 }
 
 impl TryFrom<i32> for ImageStorageFormat {
@@ -22,6 +23,7 @@ impl TryFrom<i32> for ImageStorageFormat {
         match value {
             0 => Ok(Self::Jpeg),
             1 => Ok(Self::Webp),
+            2 => Ok(Self::Avif),
             _ => Err("unsupported image storage format"),
         }
     }

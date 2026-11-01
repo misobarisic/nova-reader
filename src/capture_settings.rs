@@ -10,12 +10,40 @@ const KEY: &str = "reader:captures";
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "i32", into = "i32")]
 #[repr(i32)]
+pub enum CaptureResolution {
+    #[default]
+    Device = 0,
+    Chapter = 1,
+}
+
+impl TryFrom<i32> for CaptureResolution {
+    type Error = &'static str;
+
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Device),
+            1 => Ok(Self::Chapter),
+            _ => Err("unsupported screenshot resolution"),
+        }
+    }
+}
+
+impl From<CaptureResolution> for i32 {
+    fn from(value: CaptureResolution) -> Self {
+        value as Self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "i32", into = "i32")]
+#[repr(i32)]
 pub enum CaptureFormat {
     #[default]
     Png = 0,
     Jpeg = 1,
     WebpLossless = 2,
     WebpLossy = 3,
+    Avif = 4,
 }
 
 impl TryFrom<i32> for CaptureFormat {
@@ -27,6 +55,7 @@ impl TryFrom<i32> for CaptureFormat {
             1 => Ok(Self::Jpeg),
             2 => Ok(Self::WebpLossless),
             3 => Ok(Self::WebpLossy),
+            4 => Ok(Self::Avif),
             _ => Err("unsupported screenshot format"),
         }
     }
@@ -42,8 +71,10 @@ impl From<CaptureFormat> for i32 {
 #[serde(default, deny_unknown_fields)]
 pub struct CapturePreferences {
     pub format: CaptureFormat,
+    pub resolution: CaptureResolution,
     pub jpeg_quality: u8,
     pub webp_quality: u8,
+    pub avif_quality: u8,
     pub series_folders: bool,
 }
 
@@ -51,8 +82,10 @@ impl Default for CapturePreferences {
     fn default() -> Self {
         Self {
             format: CaptureFormat::Png,
+            resolution: CaptureResolution::Device,
             jpeg_quality: 85,
             webp_quality: 85,
+            avif_quality: 85,
             series_folders: false,
         }
     }
@@ -60,14 +93,18 @@ impl Default for CapturePreferences {
 
 impl CapturePreferences {
     fn valid(&self) -> bool {
-        (1..=100).contains(&self.jpeg_quality) && (1..=100).contains(&self.webp_quality)
+        (1..=100).contains(&self.jpeg_quality)
+            && (1..=100).contains(&self.webp_quality)
+            && (1..=100).contains(&self.avif_quality)
     }
 
     fn apply(&self, ui: &AppWindow) {
         let settings = ui.global::<CaptureSettings>();
         settings.set_format_index(self.format.into());
+        settings.set_resolution_index(self.resolution.into());
         settings.set_jpeg_quality(f32::from(self.jpeg_quality));
         settings.set_webp_quality(f32::from(self.webp_quality));
+        settings.set_avif_quality(f32::from(self.avif_quality));
         settings.set_series_folders(self.series_folders);
     }
 
@@ -77,8 +114,13 @@ impl CapturePreferences {
                 Ok(format) => self.format = format,
                 Err(_) => return false,
             },
+            "resolution" => match CaptureResolution::try_from(value) {
+                Ok(resolution) => self.resolution = resolution,
+                Err(_) => return false,
+            },
             "jpeg_quality" if (1..=100).contains(&value) => self.jpeg_quality = value as u8,
             "webp_quality" if (1..=100).contains(&value) => self.webp_quality = value as u8,
+            "avif_quality" if (1..=100).contains(&value) => self.avif_quality = value as u8,
             "series_folders" if value == 0 || value == 1 => self.series_folders = value == 1,
             _ => return false,
         }
@@ -98,8 +140,11 @@ pub fn preferences(ui: &AppWindow) -> CapturePreferences {
     };
     CapturePreferences {
         format: CaptureFormat::try_from(settings.get_format_index()).unwrap_or_default(),
+        resolution: CaptureResolution::try_from(settings.get_resolution_index())
+            .unwrap_or_default(),
         jpeg_quality: quality(settings.get_jpeg_quality()),
         webp_quality: quality(settings.get_webp_quality()),
+        avif_quality: quality(settings.get_avif_quality()),
         series_folders: settings.get_series_folders(),
     }
 }
@@ -181,6 +226,7 @@ mod tests {
         let state = RefCell::new(previous);
         let next = CapturePreferences {
             format: CaptureFormat::Jpeg,
+            resolution: CaptureResolution::Chapter,
             jpeg_quality: 70,
             series_folders: true,
             ..previous

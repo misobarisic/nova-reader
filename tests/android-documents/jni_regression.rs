@@ -24,6 +24,15 @@ fn fixture_text(env: &mut JNIEnv<'_>, method: &str) -> String {
         .unwrap();
     env.get_string(&JString::from(value)).unwrap().into()
 }
+fn fixture_data(env: &mut JNIEnv<'_>, method: &str) -> Vec<u8> {
+    let value = env
+        .call_static_method(FIXTURE, method, "()[B", &[])
+        .unwrap()
+        .l()
+        .unwrap();
+    env.convert_byte_array(jni::objects::JByteArray::from(value))
+        .unwrap()
+}
 fn fixture_run(env: &mut JNIEnv<'_>, method: &str) {
     env.call_static_method(FIXTURE, method, "()V", &[]).unwrap();
 }
@@ -173,6 +182,71 @@ fn image_export_and_clipboard_have_real_readable_bytes(env: &mut JNIEnv<'_>) {
     );
     assert!(fixture_bool(env, "retentionAndBounds"));
     std::fs::remove_file(staged).unwrap();
+}
+
+fn avif_save_and_clipboard_preserve_encoded_bytes(env: &mut JNIEnv<'_>) {
+    let encoded = include_bytes!("../../crates/reader-engine/tests/fixtures/tiny.avif");
+    let staged = cache_dir().unwrap().join("avif-transfer.avif");
+    for api in [26, 35] {
+        env.call_static_method(FIXTURE, "setApi", "(I)V", &[JValue::Int(api)])
+            .unwrap();
+        fixture_run(env, "resetMedia");
+        std::fs::write(&staged, encoded).unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        publish_image(
+            staged.clone(),
+            "capture",
+            "image/avif",
+            Some("Series"),
+            move |result| {
+                let _ = send.send(result);
+            },
+        );
+        fixture_run(env, "drain");
+        if api < 29 {
+            assert_eq!(fixture_text(env, "mime"), "image/avif");
+            assert_eq!(fixture_text(env, "title"), "capture.avif");
+            fixture_run(env, "exportResult");
+        }
+        fixture_run(env, "awaitCopies");
+        receive
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        assert_eq!(fixture_data(env, "exportedData"), encoded);
+        if api >= 29 {
+            assert_eq!(fixture_text(env, "mediaMime"), "image/avif");
+            assert_eq!(fixture_text(env, "mediaName"), "capture.avif");
+            assert_eq!(
+                fixture_text(env, "mediaPath"),
+                "Pictures/Nova Reader/Series/"
+            );
+            assert!(fixture_bool(env, "mediaAllVisible"));
+        }
+
+        // Clipboard consumers receive the actual encoded AVIF, including on an
+        // older OS whose image decoder may not support it. No silent transcoding.
+        let (send, receive) = std::sync::mpsc::channel();
+        copy_image(staged.clone(), "image/avif", move |result| {
+            let _ = send.send(result);
+        });
+        fixture_run(env, "drain");
+        fixture_run(env, "awaitCopies");
+        fixture_run(env, "drain");
+        receive
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        assert_eq!(fixture_text(env, "clipboardMime"), "image/avif");
+        assert_eq!(
+            fixture_text(env, "clipboardDisplayName"),
+            "Reader image.avif"
+        );
+        assert!(fixture_text(env, "clipboardUri").ends_with(".avif"));
+        std::fs::remove_file(&staged).unwrap();
+        fixture_run(env, "restartProvider");
+        assert_eq!(fixture_data(env, "clipboardData"), encoded);
+    }
 }
 
 fn media_store_publishes_complete_images_and_rolls_back_failures(env: &mut JNIEnv<'_>) {
@@ -505,6 +579,7 @@ fn application_context_launches_and_callbacks_resolve() {
     reader_immersive_follows_controls_and_activity_lifecycle(&mut env);
     image_export_and_clipboard_have_real_readable_bytes(&mut env);
     media_store_publishes_complete_images_and_rolls_back_failures(&mut env);
+    avif_save_and_clipboard_preserve_encoded_bytes(&mut env);
 
     // The bridge receives a real Application, not an Activity. Each launch
     // queues to Java main, and the explicitly registered native callback runs.

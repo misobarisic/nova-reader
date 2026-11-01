@@ -41,16 +41,16 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
                 assert_eq!(image_storage::load(), ImageStoragePreferences::default());
                 for (key, value) in [
                     ("cache_enabled", 0),
-                    ("cache_format", 0),
+                    ("cache_format", 2),
                     ("cache_quality", 64),
                     ("downloads_enabled", 1),
-                    ("downloads_format", 1),
+                    ("downloads_format", 2),
                     ("downloads_quality", 73),
                 ] {
                     settings.invoke_settings_changed(key.into(), value);
                 }
                 for (key, value) in [
-                    ("cache_format", 2),
+                    ("cache_format", 3),
                     ("cache_quality", 0),
                     ("downloads_quality", 101),
                     ("downloads_enabled", 2),
@@ -67,12 +67,12 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
                 ImageStoragePreferences {
                     cache: ImageCompression {
                         enabled: false,
-                        format: ImageStorageFormat::Jpeg,
+                        format: ImageStorageFormat::Avif,
                         quality: 64
                     },
                     downloads: ImageCompression {
                         enabled: true,
-                        format: ImageStorageFormat::Webp,
+                        format: ImageStorageFormat::Avif,
                         quality: 73
                     },
                 }
@@ -100,6 +100,15 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
                 );
                 quality(&ui, "Cache quality").invoke_accessible_increment_action();
                 assert_eq!(image_storage::load().cache.quality, 86);
+                ElementHandle::find_by_accessible_label(&ui, "AVIF")
+                    .find(|element| element.accessible_enabled() == Some(false))
+                    .unwrap()
+                    .invoke_accessible_default_action();
+                assert_eq!(
+                    image_storage::load().downloads.format,
+                    ImageStorageFormat::Webp,
+                    "disabled AVIF option rejects activation"
+                );
                 ElementHandle::find_by_accessible_label(&ui, "JPEG")
                     .find(|element| {
                         element.accessible_checkable() == Some(true)
@@ -108,6 +117,11 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
                     .unwrap()
                     .invoke_accessible_default_action();
                 assert_eq!(image_storage::load().cache.format, ImageStorageFormat::Jpeg);
+                ElementHandle::find_by_accessible_label(&ui, "AVIF")
+                    .find(|element| element.accessible_enabled() == Some(true))
+                    .unwrap()
+                    .invoke_accessible_default_action();
+                assert_eq!(image_storage::load().cache.format, ImageStorageFormat::Avif);
                 toggle(&ui, "Compress new cached images");
                 assert!(!image_storage::load().cache.enabled);
                 quality(&ui, "Cache quality").invoke_accessible_increment_action();
@@ -125,6 +139,14 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
                     image_storage::load().downloads.format,
                     ImageStorageFormat::Jpeg
                 );
+                ElementHandle::find_by_accessible_label(&ui, "AVIF")
+                    .find(|element| element.accessible_enabled() == Some(true))
+                    .unwrap()
+                    .invoke_accessible_default_action();
+                assert_eq!(
+                    image_storage::load().downloads.format,
+                    ImageStorageFormat::Avif
+                );
                 ElementHandle::find_by_accessible_label(&ui, "Increase download quality")
                     .find(|element| element.accessible_role() == Some(AccessibleRole::Button))
                     .unwrap()
@@ -135,12 +157,20 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
                     ui.window().set_size(slint::LogicalSize::new(width, 2400.));
                     settle();
                     assert!(quality(&ui, "Download quality").size().width > 0.);
+                    let option = ElementHandle::find_by_accessible_label(&ui, "AVIF")
+                        .find(|element| element.accessible_enabled() == Some(true))
+                        .unwrap();
+                    assert!(option.absolute_position().x >= 0.);
+                    assert!(
+                        option.absolute_position().x + option.size().width <= width + 1.,
+                        "AVIF option must fit a {width}px window"
+                    );
                 }
             }
             "corrupt" => {
                 for raw in [
                     "broken JSON",
-                    r#"{"cache":{"format":2}}"#,
+                    r#"{"cache":{"enabled":true,"format":3,"quality":85}}"#,
                     r#"{"downloads":{"quality":0}}"#,
                     r#"{"downloads":{"format":1,"quality":85}}"#,
                     r#"{"unknown":true}"#,
@@ -193,6 +223,25 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
             "{mode}: {}\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn image_storage_format_indices_roundtrip_without_changing_existing_values() {
+    for (index, format) in [
+        ImageStorageFormat::Jpeg,
+        ImageStorageFormat::Webp,
+        ImageStorageFormat::Avif,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let encoded = serde_json::to_string(&format).unwrap();
+        assert_eq!(encoded, index.to_string());
+        assert_eq!(
+            serde_json::from_str::<ImageStorageFormat>(&encoded).unwrap(),
+            format
         );
     }
 }

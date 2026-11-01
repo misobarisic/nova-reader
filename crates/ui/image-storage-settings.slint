@@ -69,9 +69,9 @@ export component ImageStorageSettingsPage inherits VerticalLayout {
             }
         }
         SettingsRow {
-            row-title: @tr("Cache format"); row-desc: @tr("JPEG or WebP for newly cached artwork.");
+            row-title: @tr("Cache format"); row-desc: @tr("JPEG, WebP or AVIF for newly cached artwork.");
             Segmented {
-                labels: [@tr("JPEG"), @tr("WebP")];
+                labels: [@tr("JPEG"), @tr("WebP"), @tr("AVIF")];
                 enabled: root.interactive && ImageStorageSettings.cache-enabled;
                 current-index: ImageStorageSettings.cache-format;
                 picked(i) => { ImageStorageSettings.settings-changed("cache_format", i); }
@@ -101,9 +101,9 @@ export component ImageStorageSettingsPage inherits VerticalLayout {
             }
         }
         SettingsRow {
-            row-title: @tr("Download format"); row-desc: @tr("JPEG or WebP for new offline chapter pages.");
+            row-title: @tr("Download format"); row-desc: @tr("JPEG, WebP or AVIF for new offline chapter pages.");
             Segmented {
-                labels: [@tr("JPEG"), @tr("WebP")];
+                labels: [@tr("JPEG"), @tr("WebP"), @tr("AVIF")];
                 enabled: root.interactive && ImageStorageSettings.downloads-enabled;
                 current-index: ImageStorageSettings.downloads-format;
                 picked(i) => { ImageStorageSettings.settings-changed("downloads_format", i); }

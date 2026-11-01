@@ -3,10 +3,11 @@ use crate::{AppWindow, services::Services};
 use nova_reader_ui::backend_text as text;
 use reader_domain::Series;
 use reader_engine::{DecodeLimits, decode_display_image};
-use reader_sources::CancelToken;
+use reader_sources::{CancelToken, SourceAvailability};
 use sha2::{Digest, Sha256};
 use slint::{Image, Model, Rgba8Pixel, SharedPixelBuffer};
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs,
     io::Read,
@@ -21,8 +22,9 @@ use std::{
 
 const MAX_REQUESTS: usize = 32;
 const ENCODED_LIMIT: usize = 8 * 1024 * 1024;
-const DECODED_CACHE_LIMIT: usize = 12 * 1024 * 1024;
-const UI_IMAGE_LIMIT: u64 = 32 * 1024 * 1024;
+// Nova's decoded LRU default and retained-card allowance (media/src/cache.rs).
+const DECODED_CACHE_LIMIT: usize = 128 * 1024 * 1024;
+const UNLOAD_EXTRA_CARDS: usize = 48;
 const DISK_CACHE_LIMIT: u64 = 32 * 1024 * 1024;
 const DISK_CACHE_FILES: usize = 256;
 const COVER_LIMITS: DecodeLimits = DecodeLimits {
@@ -32,6 +34,14 @@ const COVER_LIMITS: DecodeLimits = DecodeLimits {
     max_pixels: 8_000_000,
     max_decoded_bytes: 72 * 1024 * 1024,
 };
+
+type Pixels = SharedPixelBuffer<Rgba8Pixel>;
+static NEXT_LOADER: AtomicU64 = AtomicU64::new(1);
+thread_local! {
+    // Image handles remain on the event loop. Their pixels are shared with the
+    // single decoded LRU, never copied into a second full-size image cache.
+    static UI_IMAGES: RefCell<BTreeMap<u64, BTreeMap<String, Image>>> = RefCell::default();
+}
 
 /// Source identity, local identity and the complete URL all isolate cache entries.
 /// Length prefixes avoid ambiguity even when source-local IDs contain separators.
@@ -65,6 +75,8 @@ struct Shared {
     maintenance: Mutex<Maintenance>,
     clearing: AtomicBool,
     worker_available: AtomicBool,
+    shutdown: AtomicBool,
+    decoded: Mutex<DecodedCache>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -147,26 +159,27 @@ pub struct ArtworkLoader {
     sender: SyncSender<Task>,
     shared: Arc<Shared>,
     ui: slint::Weak<AppWindow>,
+    id: u64,
 }
 
 impl ArtworkLoader {
     pub fn new(services: Services, ui: slint::Weak<AppWindow>, cache_dir: PathBuf) -> Self {
         let (sender, receiver) = mpsc::sync_channel::<Task>(MAX_REQUESTS);
         let shared = Arc::new(Shared::default());
+        let id = NEXT_LOADER.fetch_add(1, Ordering::Relaxed);
         let worker_shared = shared.clone();
         let worker_ui = ui.clone();
         // Failure to start this optional worker leaves the UI's title fallback intact.
         let started = std::thread::Builder::new()
             .name("reader-artwork".into())
             .spawn(move || {
-                let mut decoded = DecodedCache::default();
                 let mut maintenance_status = None::<String>;
                 prune_disk(&cache_dir);
                 loop {
                     if let Some(command) = worker_shared.take_maintenance() {
                         if command.clear {
                             maintenance_status =
-                                Some(match clear_cache(&cache_dir, &mut decoded) {
+                                Some(match clear_cache(&cache_dir, &worker_shared.decoded) {
                                     Ok(()) => text::tr("Image cache cleared."),
                                     Err(error) => format!(
                                         "{}: {error}",
@@ -225,46 +238,45 @@ impl ArtworkLoader {
                     if !worker_shared.current(&task) {
                         continue;
                     }
-                    let result = load(&services, &cache_dir, &mut decoded, &task);
+                    let result = load(&services, &cache_dir, &worker_shared, &task);
                     if !worker_shared.current(&task) {
                         continue;
                     }
                     let shared = worker_shared.clone();
+                    let (acknowledge, receipt) = mpsc::sync_channel(1);
                     // Keep pending entries until publication so queued event-loop
                     // closures count toward the same 32-request memory bound.
                     let _ = worker_ui.upgrade_in_event_loop(move |ui| {
+                        // One decoded completion at a time keeps transient pixel
+                        // ownership bounded independently of the request queue.
+                        let _receipt = Completion(acknowledge);
                         if !shared.current(&task) {
                             return;
                         }
                         shared.finish(&task, result.is_err());
-                        let Ok(pixels) = result else { return };
-                        let image =
-                            Image::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
-                                &pixels.bytes,
-                                pixels.width,
-                                pixels.height,
-                            ));
-                        let model = ui.get_items();
-                        let mut target = 0;
-                        for index in 0..model.row_count() {
-                            if let Some(mut row) = model.row_data(index)
-                                && row.artwork_key.as_str() == task.key
-                            {
-                                target = index;
-                                row.poster = image.clone();
-                                model.set_row_data(index, row);
-                            }
-                        }
-                        if ui.get_series_artwork_key().as_str() == task.key {
-                            ui.set_series_poster(image);
-                        }
-                        trim_ui(&ui, &task.key, target);
+                        let Ok(loaded) = result else { return };
+                        admit(&ui, id, &shared, &task.key, loaded);
                     });
+                    // Do not pile up decoded closures while the UI is busy.
+                    loop {
+                        match receipt.recv_timeout(Duration::from_millis(100)) {
+                            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                            Err(mpsc::RecvTimeoutError::Timeout) => {}
+                        }
+                        if worker_shared.shutdown.load(Ordering::Acquire) {
+                            break;
+                        }
+                    }
                 }
             })
             .is_ok();
         shared.worker_available.store(started, Ordering::Release);
-        Self { sender, shared, ui }
+        Self {
+            sender,
+            shared,
+            ui,
+            id,
+        }
     }
 
     /// Cancel before replacing rows, changing profiles, or changing source access.
@@ -276,6 +288,22 @@ impl ArtworkLoader {
     /// keeping the generation of still-visible artwork intact.
     pub fn retain(&self, desired: &BTreeSet<String>) {
         self.shared.retain(desired);
+        self.shared
+            .decoded
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain_visible(desired);
+        if let Some(ui) = self.ui.upgrade() {
+            trim_ui(&ui, self.id, &self.shared);
+        }
+    }
+
+    /// Restore an authorized decoded poster synchronously on the event loop.
+    /// This performs no filesystem, network or decoding work.
+    pub fn cached_image(&self, series: &Series) -> Option<Image> {
+        // Weak upgrades also enforce the component's event-loop thread.
+        self.ui.upgrade()?;
+        cached_image(&self.shared, self.id, &key(series), &series.id.source_id)
     }
 
     /// Read actual poster cache usage on the worker. Repeated requests coalesce.
@@ -286,6 +314,15 @@ impl ArtworkLoader {
     /// Cancel all older artwork work before clearing only owned poster files.
     pub fn clear(&self) {
         self.invalidate();
+        if let Some(ui) = self.ui.upgrade() {
+            let keys = self
+                .shared
+                .decoded
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .keys();
+            forget_images(&ui, self.id, &keys);
+        }
         self.maintenance(true);
     }
 
@@ -311,6 +348,18 @@ impl ArtworkLoader {
         }
         let key = key(series);
         if key.is_empty() {
+            return;
+        }
+        self.shared
+            .decoded
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .protected
+            .insert(key.clone());
+        if let Some(image) = self.cached_image(series) {
+            if let Some(ui) = self.ui.upgrade() {
+                publish(&ui, &key, image);
+            }
             return;
         }
         let mut requests = self
@@ -341,132 +390,284 @@ impl ArtworkLoader {
 
 impl Drop for ArtworkLoader {
     fn drop(&mut self) {
+        self.shared.shutdown.store(true, Ordering::Release);
         self.invalidate();
+        let id = self.id;
+        if self.ui.upgrade().is_some() {
+            UI_IMAGES.with(|images| {
+                images.borrow_mut().remove(&id);
+            });
+        } else {
+            let _ = self.ui.upgrade_in_event_loop(move |_| {
+                UI_IMAGES.with(|images| {
+                    images.borrow_mut().remove(&id);
+                });
+            });
+        }
+    }
+}
+
+struct Completion(SyncSender<()>);
+impl Drop for Completion {
+    fn drop(&mut self) {
+        let _ = self.0.try_send(());
     }
 }
 
-fn image_bytes(image: &Image) -> u64 {
-    let size = image.size();
-    u64::from(size.width) * u64::from(size.height) * 4
-}
-
-/// Model images are shared by key; evict complete groups so duplicate history or
-/// update rows cannot keep an otherwise evicted texture alive.
-fn trim_ui(ui: &AppWindow, incoming: &str, target: usize) {
-    let selected = ui.get_series_artwork_key();
-    let model = ui.get_items();
-    let mut groups = BTreeMap::<String, (u64, Vec<usize>)>::new();
-    for index in 0..model.row_count() {
-        if let Some(row) = model.row_data(index) {
-            let bytes = image_bytes(&row.poster);
-            if bytes == 0 {
-                continue;
-            }
-            let group = groups.entry(row.artwork_key.to_string()).or_default();
-            group.0 = group.0.max(bytes);
-            group.1.push(index);
-        }
+fn cached_image(shared: &Shared, id: u64, key: &str, source_id: &str) -> Option<Image> {
+    if shared.clearing.load(Ordering::Acquire) {
+        return None;
     }
-    // Counting the selected image separately is conservative when it shares the
-    // same image as a row, and covers the detail-only presentation too.
-    let mut bytes = image_bytes(&ui.get_series_poster())
-        + groups.values().map(|(bytes, _)| *bytes).sum::<u64>();
-    let mut victims = groups
-        .into_iter()
-        .filter(|(key, _)| key != incoming && key != selected.as_str())
-        .collect::<Vec<_>>();
-    victims.sort_by_key(|(_, (_, indices))| {
-        std::cmp::Reverse(
-            indices
-                .iter()
-                .map(|index| index.abs_diff(target))
-                .min()
-                .unwrap_or(0),
-        )
-    });
-    for (_, (size, indices)) in victims {
-        if bytes <= UI_IMAGE_LIMIT {
-            break;
-        }
-        for index in indices {
-            if let Some(mut row) = model.row_data(index) {
-                row.poster = Image::default();
-                model.set_row_data(index, row);
-            }
-        }
-        bytes = bytes.saturating_sub(size);
-    }
-}
-
-struct Pixels {
-    width: u32,
-    height: u32,
-    bytes: Vec<u8>,
-}
-
-fn decode(bytes: &[u8]) -> Result<Arc<Pixels>, String> {
-    let image = decode_display_image(bytes, COVER_LIMITS, 460, 690).map_err(|e| e.to_string())?;
-    Ok(Arc::new(Pixels {
-        width: image.width(),
-        height: image.height(),
-        bytes: image.into_raw(),
+    let pixels = shared
+        .decoded
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(key, source_id)?;
+    Some(UI_IMAGES.with(|images| {
+        images
+            .borrow_mut()
+            .entry(id)
+            .or_default()
+            .entry(key.into())
+            .or_insert_with(|| Image::from_rgba8(pixels))
+            .clone()
     }))
 }
 
-#[derive(Default)]
+fn admit(ui: &AppWindow, id: u64, shared: &Shared, key: &str, loaded: Loaded) {
+    if !loaded.access.is_available() {
+        return;
+    }
+    let source_id = loaded.source_id.clone();
+    let evicted = shared
+        .decoded
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(key.into(), loaded);
+    // Release every UI reference to evicted pixels in this same event-loop
+    // turn; the LRU budget cannot hide a second cache of older model images.
+    forget_images(ui, id, &evicted);
+    if let Some(image) = cached_image(shared, id, key, &source_id) {
+        publish(ui, key, image);
+    }
+    trim_ui(ui, id, shared);
+}
+
+fn publish(ui: &AppWindow, key: &str, image: Image) {
+    let model = ui.get_items();
+    for index in 0..model.row_count() {
+        if let Some(mut row) = model.row_data(index)
+            && row.artwork_key.as_str() == key
+            && row.poster != image
+        {
+            row.poster = image.clone();
+            model.set_row_data(index, row);
+        }
+    }
+    if ui.get_series_artwork_key().as_str() == key {
+        ui.set_series_poster(image);
+    }
+}
+
+fn forget_images(ui: &AppWindow, id: u64, keys: &BTreeSet<String>) {
+    if keys.is_empty() {
+        return;
+    }
+    UI_IMAGES.with(|images| {
+        if let Some(images) = images.borrow_mut().get_mut(&id) {
+            images.retain(|key, _| !keys.contains(key));
+        }
+    });
+    let model = ui.get_items();
+    for index in 0..model.row_count() {
+        if let Some(mut row) = model.row_data(index)
+            && keys.contains(row.artwork_key.as_str())
+            && row.poster.size().width > 0
+        {
+            row.poster = Image::default();
+            model.set_row_data(index, row);
+        }
+    }
+    if keys.contains(ui.get_series_artwork_key().as_str()) {
+        ui.set_series_poster(Image::default());
+    }
+}
+
+fn trim_ui(ui: &AppWindow, id: u64, shared: &Shared) {
+    let keep = shared
+        .decoded
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .ui_keys(ui.get_series_artwork_key().as_str());
+    let mut remove = UI_IMAGES.with(|images| {
+        images
+            .borrow()
+            .get(&id)
+            .into_iter()
+            .flat_map(|images| images.keys())
+            .filter(|key| !keep.contains(*key))
+            .cloned()
+            .collect::<BTreeSet<_>>()
+    });
+    remove.extend(
+        ui.get_items()
+            .iter()
+            .filter(|row| !keep.contains(row.artwork_key.as_str()))
+            .map(|row| row.artwork_key.to_string()),
+    );
+    if !keep.contains(ui.get_series_artwork_key().as_str()) {
+        remove.insert(ui.get_series_artwork_key().to_string());
+    }
+    forget_images(ui, id, &remove);
+}
+
+fn decode(bytes: &[u8]) -> Result<Pixels, String> {
+    let image = decode_display_image(bytes, COVER_LIMITS, 460, 690).map_err(|e| e.to_string())?;
+    Ok(Pixels::clone_from_slice(
+        image.as_raw(),
+        image.width(),
+        image.height(),
+    ))
+}
+
+struct Loaded {
+    pixels: Pixels,
+    source_id: String,
+    access: SourceAvailability,
+}
+
 struct DecodedCache {
-    entries: VecDeque<(String, Arc<Pixels>)>,
+    entries: VecDeque<(String, Loaded)>,
     bytes: usize,
+    max_bytes: usize,
+    protected: BTreeSet<String>,
+}
+
+impl Default for DecodedCache {
+    fn default() -> Self {
+        Self {
+            entries: VecDeque::new(),
+            bytes: 0,
+            max_bytes: DECODED_CACHE_LIMIT,
+            protected: BTreeSet::new(),
+        }
+    }
 }
 
 impl DecodedCache {
-    fn get(&mut self, key: &str) -> Option<Arc<Pixels>> {
+    fn get(&mut self, key: &str, source_id: &str) -> Option<Pixels> {
         let index = self.entries.iter().position(|(entry, _)| entry == key)?;
+        let entry = &self.entries[index].1;
+        if entry.source_id != source_id || !entry.access.is_available() {
+            return None;
+        }
         let entry = self.entries.remove(index)?;
-        let pixels = entry.1.clone();
+        let pixels = entry.1.pixels.clone();
         self.entries.push_back(entry);
         Some(pixels)
     }
 
-    fn insert(&mut self, key: String, pixels: Arc<Pixels>) {
-        if pixels.bytes.len() > DECODED_CACHE_LIMIT {
-            return;
+    fn insert(&mut self, key: String, loaded: Loaded) -> BTreeSet<String> {
+        let mut evicted = BTreeSet::new();
+        if loaded.pixels.as_bytes().len() > self.max_bytes {
+            return evicted;
         }
         if let Some(index) = self.entries.iter().position(|(entry, _)| entry == &key)
             && let Some((_, old)) = self.entries.remove(index)
         {
-            self.bytes -= old.bytes.len();
+            self.bytes -= old.pixels.as_bytes().len();
         }
-        while self.bytes + pixels.bytes.len() > DECODED_CACHE_LIMIT {
-            let Some((_, old)) = self.entries.pop_front() else {
+        while self.bytes + loaded.pixels.as_bytes().len() > self.max_bytes {
+            let index = self
+                .entries
+                .iter()
+                .position(|(key, _)| !self.protected.contains(key))
+                .unwrap_or(0);
+            let Some((key, old)) = self.entries.remove(index) else {
                 break;
             };
-            self.bytes -= old.bytes.len();
+            self.bytes -= old.pixels.as_bytes().len();
+            evicted.insert(key);
         }
-        self.bytes += pixels.bytes.len();
-        self.entries.push_back((key, pixels));
+        self.bytes += loaded.pixels.as_bytes().len();
+        self.entries.push_back((key, loaded));
+        evicted
+    }
+
+    fn keys(&self) -> BTreeSet<String> {
+        self.entries.iter().map(|(key, _)| key.clone()).collect()
+    }
+
+    fn retain_visible(&mut self, desired: &BTreeSet<String>) {
+        self.protected = desired.clone();
+        for key in desired {
+            if let Some(index) = self.entries.iter().position(|(entry, _)| entry == key)
+                && let Some(entry) = self.entries.remove(index)
+            {
+                self.entries.push_back(entry);
+            }
+        }
+    }
+
+    fn ui_keys(&self, selected: &str) -> BTreeSet<String> {
+        let mut keep = self
+            .entries
+            .iter()
+            .filter(|(key, entry)| {
+                entry.access.is_available() && (self.protected.contains(key) || key == selected)
+            })
+            .map(|(key, _)| key.clone())
+            .collect::<BTreeSet<_>>();
+        let extra = self
+            .entries
+            .iter()
+            .rev()
+            .filter(|(key, entry)| entry.access.is_available() && !keep.contains(key))
+            .take(UNLOAD_EXTRA_CARDS)
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        keep.extend(extra);
+        keep
     }
 }
 
 fn load(
     services: &Services,
     cache_dir: &Path,
-    decoded: &mut DecodedCache,
+    shared: &Shared,
     task: &Task,
-) -> Result<Arc<Pixels>, String> {
+) -> Result<Loaded, String> {
     task.cancel.check().map_err(|e| e.to_string())?;
     // Cached artwork must still respect source availability/adult/profile gates.
     let source = services.source(&task.source_id)?;
-    if let Some(pixels) = decoded.get(&task.key) {
-        return Ok(pixels);
+    let access = source.availability();
+    {
+        let mut cache = shared.decoded.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, entry)) = cache
+            .entries
+            .iter_mut()
+            .find(|(key, entry)| key == &task.key && entry.source_id == task.source_id)
+        {
+            entry.access = access.clone();
+        }
+        if let Some(pixels) = cache.get(&task.key, &task.source_id) {
+            return Ok(Loaded {
+                pixels,
+                source_id: task.source_id.clone(),
+                access,
+            });
+        }
     }
     let path = cache_dir.join(format!("{}.cover", task.key));
     if let Some(bytes) = read_cached(&path) {
         task.cancel.check().map_err(|e| e.to_string())?;
         if let Ok(pixels) = decode(&bytes) {
             task.cancel.check().map_err(|e| e.to_string())?;
-            decoded.insert(task.key.clone(), pixels.clone());
-            return Ok(pixels);
+            return Ok(Loaded {
+                pixels,
+                source_id: task.source_id.clone(),
+                access,
+            });
         }
         let _ = fs::remove_file(&path);
     }
@@ -483,8 +684,11 @@ fn load(
         &task.cancel,
         crate::image_storage::load().cache,
     );
-    decoded.insert(task.key.clone(), pixels.clone());
-    Ok(pixels)
+    Ok(Loaded {
+        pixels,
+        source_id: task.source_id.clone(),
+        access,
+    })
 }
 
 /// Compression applies only when a newly fetched image is first persisted.
@@ -573,9 +777,13 @@ fn disk_usage(directory: &Path) -> std::io::Result<(u64, usize)> {
     Ok((bytes, files))
 }
 
-fn clear_cache(directory: &Path, decoded: &mut DecodedCache) -> std::io::Result<()> {
-    decoded.entries.clear();
-    decoded.bytes = 0;
+fn clear_cache(directory: &Path, decoded: &Mutex<DecodedCache>) -> std::io::Result<()> {
+    {
+        let mut decoded = decoded.lock().unwrap_or_else(|e| e.into_inner());
+        decoded.entries.clear();
+        decoded.bytes = 0;
+        decoded.protected.clear();
+    }
     let entries = match fs::read_dir(directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -644,6 +852,7 @@ fn prune_disk(directory: &Path) {
 mod tests {
     use super::*;
     use reader_domain::SeriesId;
+    use slint::ComponentHandle;
 
     fn series(source: &str, id: &str, url: &str) -> Series {
         Series {
@@ -764,56 +973,362 @@ mod tests {
         assert!(!requests.failed.contains(&retry.key));
     }
 
-    #[test]
-    fn decoded_lru_evicts_oldest_and_bounds_bytes() {
-        let pixels = || {
-            Arc::new(Pixels {
-                width: 1,
-                height: 1,
-                bytes: vec![0; DECODED_CACHE_LIMIT / 2],
-            })
+    fn package(version: &str) -> Vec<u8> {
+        use std::io::{Cursor, Write};
+        let domains = if version == "1.0.0" {
+            vec!["example.test"]
+        } else {
+            vec!["example.test", "other.test"]
         };
-        let mut cache = DecodedCache::default();
-        cache.insert("first".into(), pixels());
-        cache.insert("second".into(), pixels());
-        assert!(cache.get("first").is_some());
-        cache.insert("third".into(), pixels());
-        assert!(cache.get("second").is_none());
-        assert!(cache.get("first").is_some());
-        assert!(cache.get("third").is_some());
-        assert_eq!(cache.bytes, DECODED_CACHE_LIMIT);
+        let manifest = serde_json::json!({"formatVersion":2,"contract":"nova-reader1","api":"^1.0","id":"fixture","name":"Fixture","version":version,"language":"en","entry":"main.js","permissions":{"domains":domains},"capabilities":["browse","search","filters","details","chapters","pages"]});
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for (name, bytes) in [
+            ("manifest.json", serde_json::to_vec(&manifest).unwrap()),
+            ("main.js", b"globalThis.source = {};".to_vec()),
+        ] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(&bytes).unwrap();
+        }
+        zip.finish().unwrap().into_inner()
+    }
+
+    fn source_fixture() -> (
+        tempfile::TempDir,
+        reader_sources::SourceRegistry,
+        SourceAvailability,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let registry = reader_sources::SourceRegistry::open(directory.path()).unwrap();
+        registry.install_zip(&package("1.0.0")).unwrap();
+        registry.set_enabled("fixture", true).unwrap();
+        let access = registry.source("fixture").unwrap().availability();
+        (directory, registry, access)
+    }
+
+    fn loaded(pixels: Pixels, access: &SourceAvailability) -> Loaded {
+        Loaded {
+            pixels,
+            source_id: "fixture".into(),
+            access: access.clone(),
+        }
     }
 
     #[test]
-    fn ui_retention_evicts_distant_artwork_and_preserves_selected_and_incoming() {
+    fn decoded_lru_evicts_oldest_and_preserves_visible_pixels_within_one_budget() {
+        let (_directory, _registry, access) = source_fixture();
+        let mut cache = DecodedCache {
+            max_bytes: 2 * 32 * 32 * 4,
+            ..DecodedCache::default()
+        };
+        cache.insert("first".into(), loaded(Pixels::new(32, 32), &access));
+        cache.insert("second".into(), loaded(Pixels::new(32, 32), &access));
+        assert!(cache.get("first", "fixture").is_some());
+        let evicted = cache.insert("third".into(), loaded(Pixels::new(32, 32), &access));
+        assert_eq!(evicted, BTreeSet::from(["second".into()]));
+        assert!(cache.get("second", "fixture").is_none());
+        cache.retain_visible(&BTreeSet::from(["first".into()]));
+        cache.insert("fourth".into(), loaded(Pixels::new(32, 32), &access));
+        assert!(cache.get("first", "fixture").is_some());
+        assert!(cache.get("third", "fixture").is_none());
+        assert_eq!(cache.bytes, cache.max_bytes);
+    }
+
+    #[test]
+    fn budget_eviction_releases_model_and_ui_handle_references_together() {
         use slint::{ModelRc, VecModel};
         i_slint_backend_testing::init_no_event_loop();
         let ui = AppWindow::new().unwrap();
-        let mut rows = (0..32)
-            .map(|index| crate::ItemRow {
-                artwork_key: index.to_string().into(),
-                poster: Image::from_rgba8(SharedPixelBuffer::new(460, 690)),
+        let (_directory, _registry, access) = source_fixture();
+        let shared = Shared::default();
+        shared.decoded.lock().unwrap().max_bytes = 2 * 32 * 32 * 4;
+        let id = NEXT_LOADER.fetch_add(1, Ordering::Relaxed);
+        ui.set_items(ModelRc::new(VecModel::from(
+            ["first", "second", "third"]
+                .into_iter()
+                .map(|key| crate::ItemRow {
+                    artwork_key: key.into(),
+                    ..crate::ItemRow::default()
+                })
+                .collect::<Vec<_>>(),
+        )));
+        admit(
+            &ui,
+            id,
+            &shared,
+            "first",
+            loaded(Pixels::new(32, 32), &access),
+        );
+        admit(
+            &ui,
+            id,
+            &shared,
+            "second",
+            loaded(Pixels::new(32, 32), &access),
+        );
+        shared
+            .decoded
+            .lock()
+            .unwrap()
+            .retain_visible(&BTreeSet::from(["first".into()]));
+        let first = ui.get_items().row_data(0).unwrap().poster;
+        admit(
+            &ui,
+            id,
+            &shared,
+            "third",
+            loaded(Pixels::new(32, 32), &access),
+        );
+        assert_eq!(ui.get_items().row_data(0).unwrap().poster, first);
+        assert_eq!(ui.get_items().row_data(1).unwrap().poster.size().width, 0);
+        assert_eq!(ui.get_items().row_data(2).unwrap().poster.size().width, 32);
+        let cache = shared.decoded.lock().unwrap();
+        assert_eq!(cache.bytes, cache.max_bytes);
+        assert_eq!(
+            UI_IMAGES.with(|images| images.borrow()[&id]
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>()),
+            cache.keys()
+        );
+        UI_IMAGES.with(|images| {
+            images.borrow_mut().remove(&id);
+        });
+    }
+
+    #[test]
+    fn sixty_posters_scroll_and_tab_restore_synchronously_without_worker_requests() {
+        use slint::{ModelRc, VecModel};
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = AppWindow::new().unwrap();
+        let (_directory, _registry, access) = source_fixture();
+        let shared = Arc::new(Shared::default());
+        let (sender, receiver) = mpsc::sync_channel(MAX_REQUESTS);
+        let loader = ArtworkLoader {
+            sender,
+            shared: shared.clone(),
+            ui: ui.as_weak(),
+            id: NEXT_LOADER.fetch_add(1, Ordering::Relaxed),
+        };
+        let series = (0..60)
+            .map(|i| {
+                series(
+                    "fixture",
+                    &i.to_string(),
+                    &format!("https://example.test/{i}.png"),
+                )
+            })
+            .collect::<Vec<_>>();
+        for item in &series {
+            shared
+                .decoded
+                .lock()
+                .unwrap()
+                .insert(key(item), loaded(Pixels::new(460, 690), &access));
+        }
+        let original = series
+            .iter()
+            .map(|series| loader.cached_image(series).unwrap())
+            .collect::<Vec<_>>();
+        ui.set_items(ModelRc::new(VecModel::from(
+            series
+                .iter()
+                .zip(&original)
+                .map(|(series, poster)| crate::ItemRow {
+                    artwork_key: key(series).into(),
+                    poster: poster.clone(),
+                    ..crate::ItemRow::default()
+                })
+                .collect::<Vec<_>>(),
+        )));
+        for visible in [48..60, 0..12] {
+            loader.retain(&visible.clone().map(|index| key(&series[index])).collect());
+            for index in visible {
+                loader.request(&series[index]);
+                assert_eq!(
+                    ui.get_items().row_data(index).unwrap().poster,
+                    original[index]
+                );
+            }
+        }
+        // A new Updates/History model receives pixels before publication, even
+        // when the old and new viewport ranges are identical and no timer fires.
+        let restored = series
+            .iter()
+            .map(|series| crate::ItemRow {
+                artwork_key: key(series).into(),
+                poster: loader.cached_image(series).unwrap(),
                 ..crate::ItemRow::default()
             })
             .collect::<Vec<_>>();
-        ui.set_series_artwork_key("0".into());
-        ui.set_series_poster(rows[0].poster.clone());
-        // A duplicate near the incoming row keeps that shared image nearby.
-        rows.push(rows[1].clone());
-        ui.set_items(ModelRc::new(VecModel::from(rows)));
-        trim_ui(&ui, "31", 31);
-        let model = ui.get_items();
-        assert!(image_bytes(&model.row_data(0).unwrap().poster) > 0);
-        assert!(image_bytes(&model.row_data(31).unwrap().poster) > 0);
-        assert!(image_bytes(&model.row_data(1).unwrap().poster) > 0);
-        assert_eq!(image_bytes(&model.row_data(2).unwrap().poster), 0);
-        let mut retained = BTreeMap::new();
-        for row in model.iter() {
-            retained.insert(row.artwork_key.to_string(), image_bytes(&row.poster));
-        }
+        assert!(restored.iter().all(|row| row.poster.size().width == 460));
+        ui.set_items(ModelRc::new(VecModel::from(restored)));
         assert!(
-            retained.values().sum::<u64>() + image_bytes(&ui.get_series_poster()) <= UI_IMAGE_LIMIT
+            receiver.try_recv().is_err(),
+            "cached scrolling must not enqueue fetch/decode work"
         );
+        assert_eq!(shared.decoded.lock().unwrap().bytes, 60 * 460 * 690 * 4);
+        assert!(shared.decoded.lock().unwrap().bytes <= DECODED_CACHE_LIMIT);
+        drop(original);
+        shared.worker_available.store(true, Ordering::Release);
+        loader.clear();
+        assert!(shared.take_maintenance().unwrap().clear);
+        clear_cache(&_directory.path().join("posters"), &shared.decoded).unwrap();
+        shared.clearing.store(false, Ordering::Release);
+        assert!(loader.cached_image(&series[0]).is_none());
+        assert!(
+            ui.get_items()
+                .iter()
+                .all(|row| row.poster.size().width == 0)
+        );
+        assert!(UI_IMAGES.with(|images| {
+            images
+                .borrow()
+                .get(&loader.id)
+                .is_none_or(|images| images.is_empty())
+        }));
+    }
+
+    #[test]
+    fn source_scroll_return_paints_cached_posters_before_any_retry_timer() {
+        use slint::{ModelRc, VecModel};
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = AppWindow::new().unwrap();
+        let (_directory, _registry, access) = source_fixture();
+        let shared = Arc::new(Shared::default());
+        let (sender, receiver) = mpsc::sync_channel(MAX_REQUESTS);
+        let loader = std::rc::Rc::new(ArtworkLoader {
+            sender,
+            shared: shared.clone(),
+            ui: ui.as_weak(),
+            id: NEXT_LOADER.fetch_add(1, Ordering::Relaxed),
+        });
+        let series = std::rc::Rc::new(
+            (0..60)
+                .map(|i| {
+                    series(
+                        "fixture",
+                        &i.to_string(),
+                        &format!("https://example.test/{i}.png"),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        );
+        for item in series.iter() {
+            shared
+                .decoded
+                .lock()
+                .unwrap()
+                .insert(key(item), loaded(Pixels::new(460, 690), &access));
+        }
+        ui.on_request_artwork({
+            let weak = ui.as_weak();
+            let loader = loader.clone();
+            let series = series.clone();
+            move |first, last| {
+                let ui = weak.unwrap();
+                for index in first.max(0) as usize..(last.max(0) as usize).min(series.len()) {
+                    if ui
+                        .get_items()
+                        .row_data(index)
+                        .is_some_and(|row| row.poster.size().width == 0)
+                    {
+                        loader.request(&series[index]);
+                    }
+                }
+            }
+        });
+        ui.set_items(ModelRc::new(VecModel::from(
+            series
+                .iter()
+                .map(|series| crate::ItemRow {
+                    title: series.id.local_id.clone().into(),
+                    artwork_key: key(series).into(),
+                    ..crate::ItemRow::default()
+                })
+                .collect::<Vec<_>>(),
+        )));
+        ui.set_section(3);
+        ui.set_source_catalog_open(true);
+        ui.show().unwrap();
+        ui.window().set_size(slint::LogicalSize::new(390., 844.));
+        for _ in 0..3 {
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(16));
+        }
+        let grid_height =
+            i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, "SeriesGrid")
+                .next()
+                .unwrap()
+                .size()
+                .height;
+        ui.set_catalogue_scroll_y(-grid_height * 0.85);
+        for _ in 0..3 {
+            i_slint_backend_testing::mock_elapsed_time(Duration::ZERO);
+        }
+        let _ =
+            i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, "LibraryCard")
+                .map(|card| card.absolute_position())
+                .collect::<Vec<_>>();
+        assert_eq!(
+            ui.get_items().row_data(55).unwrap().poster.size().width,
+            460
+        );
+        let model = ui.get_items();
+        let mut first = model.row_data(0).unwrap();
+        first.poster = Image::default();
+        model.set_row_data(0, first);
+        ui.set_catalogue_scroll_y(0.);
+        for _ in 0..3 {
+            i_slint_backend_testing::mock_elapsed_time(Duration::ZERO);
+        }
+        let _ =
+            i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, "LibraryCard")
+                .map(|card| card.absolute_position())
+                .collect::<Vec<_>>();
+        assert_eq!(
+            ui.get_items().row_data(0).unwrap().poster.size().width,
+            460,
+            "scroll return must paint without advancing the mock clock"
+        );
+        assert!(
+            receiver.try_recv().is_err(),
+            "cached viewport changes must not fetch or decode again"
+        );
+    }
+
+    #[test]
+    fn cached_pixels_cannot_bypass_source_disable_remove_or_update() {
+        i_slint_backend_testing::init_no_event_loop();
+        for action in ["disable", "remove", "update"] {
+            let (_directory, registry, access) = source_fixture();
+            let shared = Shared::default();
+            shared
+                .decoded
+                .lock()
+                .unwrap()
+                .insert("poster".into(), loaded(Pixels::new(1, 1), &access));
+            assert!(cached_image(&shared, 0, "poster", "fixture").is_some());
+            match action {
+                "disable" => registry.set_enabled("fixture", false).unwrap(),
+                "remove" => registry.remove("fixture").unwrap(),
+                "update" => {
+                    registry.install_zip(&package("1.0.1")).unwrap();
+                    assert!(
+                        registry.source("fixture").is_err(),
+                        "expanded permissions require renewed source approval"
+                    );
+                }
+                _ => unreachable!(),
+            }
+            assert!(!access.is_available());
+            assert!(
+                cached_image(&shared, 0, "poster", "fixture").is_none(),
+                "{action} must revoke immediate cache hits"
+            );
+            UI_IMAGES.with(|images| {
+                images.borrow_mut().remove(&0);
+            });
+        }
     }
 
     #[test]
@@ -903,23 +1418,17 @@ mod tests {
         std::os::unix::fs::symlink(&chapter, directory.join(format!("{:064x}.cover", 3))).unwrap();
         assert_eq!(disk_usage(&directory).unwrap(), (11, 2));
         let mut decoded = DecodedCache::default();
-        decoded.insert(
-            "old".into(),
-            Arc::new(Pixels {
-                width: 1,
-                height: 1,
-                bytes: vec![0; 4],
-            }),
-        );
-        clear_cache(&directory, &mut decoded).unwrap();
+        decoded.insert("old".into(), loaded(Pixels::new(1, 1), &source_fixture().2));
+        let decoded = Mutex::new(decoded);
+        clear_cache(&directory, &decoded).unwrap();
         assert_eq!(disk_usage(&directory).unwrap(), (0, 0));
-        assert_eq!(decoded.bytes, 0);
-        assert!(decoded.entries.is_empty());
+        assert_eq!(decoded.lock().unwrap().bytes, 0);
+        assert!(decoded.lock().unwrap().entries.is_empty());
         assert_eq!(fs::read(chapter).unwrap(), b"downloaded chapter");
         assert_eq!(fs::read(unrelated).unwrap(), b"keep");
         assert!(nested.join("keep.txt").exists());
-        clear_cache(&directory, &mut decoded).unwrap();
-        clear_cache(&root.path().join("missing"), &mut decoded).unwrap();
+        clear_cache(&directory, &decoded).unwrap();
+        clear_cache(&root.path().join("missing"), &decoded).unwrap();
     }
 
     #[test]
@@ -938,9 +1447,13 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let old = directory.path().join(format!("{:064x}.cover", 0));
         fs::write(&old, &png).unwrap();
-        for (index, format) in [ImageStorageFormat::Jpeg, ImageStorageFormat::Webp]
-            .into_iter()
-            .enumerate()
+        for (index, format) in [
+            ImageStorageFormat::Jpeg,
+            ImageStorageFormat::Webp,
+            ImageStorageFormat::Avif,
+        ]
+        .into_iter()
+        .enumerate()
         {
             let compression = ImageCompression {
                 enabled: true,
@@ -962,9 +1475,15 @@ mod tests {
                     assert_eq!(&bytes[..4], b"RIFF");
                     assert_eq!(&bytes[8..12], b"WEBP");
                 }
+                ImageStorageFormat::Avif => {
+                    assert_eq!(&bytes[4..8], b"ftyp");
+                    assert!(bytes.windows(4).any(|brand| brand == b"avif"));
+                }
             }
             let dimensions = reader_engine::inspect_image(&bytes, COVER_LIMITS).unwrap();
             assert_eq!((dimensions.width, dimensions.height), (64, 96));
+            let rendered = decode(&bytes).unwrap();
+            assert_eq!((rendered.width(), rendered.height()), (64, 96));
             write_fetched(
                 directory.path(),
                 &old,
@@ -974,7 +1493,7 @@ mod tests {
             );
             assert_eq!(fs::read(&old).unwrap(), png);
         }
-        let disabled = directory.path().join(format!("{:064x}.cover", 3));
+        let disabled = directory.path().join(format!("{:064x}.cover", 4));
         write_fetched(
             directory.path(),
             &disabled,
@@ -986,7 +1505,7 @@ mod tests {
             },
         );
         assert_eq!(fs::read(disabled).unwrap(), png);
-        let cancelled = directory.path().join(format!("{:064x}.cover", 4));
+        let cancelled = directory.path().join(format!("{:064x}.cover", 5));
         let cancel = CancelToken::default();
         cancel.cancel();
         write_fetched(
@@ -1007,7 +1526,7 @@ mod tests {
                 image::ExtendedColorType::Rgba8,
             )
             .unwrap();
-        let transparent = directory.path().join(format!("{:064x}.cover", 5));
+        let transparent = directory.path().join(format!("{:064x}.cover", 6));
         write_fetched(
             directory.path(),
             &transparent,
@@ -1039,8 +1558,8 @@ mod tests {
             )
             .unwrap();
         let pixels = decode(&png).unwrap();
-        assert_eq!((pixels.width, pixels.height), (460, 690));
-        assert_eq!(pixels.bytes.len(), 460 * 690 * 4);
+        assert_eq!((pixels.width(), pixels.height()), (460, 690));
+        assert_eq!(pixels.as_bytes().len(), 460 * 690 * 4);
         assert!(decode(b"not an image").is_err());
         assert!(decode(&vec![0; ENCODED_LIMIT + 1]).is_err());
         let mut too_wide = Vec::new();

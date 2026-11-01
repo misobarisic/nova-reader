@@ -19,6 +19,9 @@ import { SourceFilterPanel } from "source-filters.slint";
 import { TimelineList } from "timeline.slint";
 import { ReaderContextMenu, ReaderImageInteraction } from "reader-context-menu.slint";
 import { LibraryFilterChip } from "@NovaUiBase/filter-chip.slint";
+import { LibrarySearchReveal } from "library-search.slint";
+import { EntryMenu, EntryCategoryRow } from "entry-menu.slint";
+export { EntryCategoryRow } from "entry-menu.slint";
 import { MorePage } from "more.slint";
 export { Appearance } from "appearance.slint";
 export { CaptureSettings } from "capture-settings.slint";
@@ -26,11 +29,12 @@ export { ImageStorageSettings } from "image-storage-settings.slint";
 export { Theme, Anim } from "@NovaUiShared";
 import "../../assets/fonts/Roboto-Regular.ttf";
 import "../../assets/fonts/Roboto-Bold.ttf";
-import { ActionButton, IconAction, CategoryPicker, BackButton, MenuLink } from "controls.slint";
+import { ActionButton, IconAction, BackButton, MenuLink } from "controls.slint";
 import { DesktopSidebar, MobileNavigation } from "navigation.slint";
 
-export struct TileRow { image: image, offset: float, fraction: float }
+export struct TileRow { image: image, offset: float, fraction: float, left: float, right: float, bottom: float }
 export struct PageRow { tiles:[TileRow], page-id: string, image: image, ratio: float, position: float, loaded: bool, error: string }
+export struct ReaderCaptureViewport { x: float, y: float, width: float, height: float, content-x: float, content-y: float }
 export { SettingRow } from "media-models.slint";
 import { SettingRow } from "media-models.slint";
 
@@ -75,6 +79,7 @@ export component AppWindow inherits Window {
     in-out property <string> source-catalogue-kind: "popular";
     in-out property <length> catalogue-scroll-y: 0px;
     in-out property <string> source-query;
+    in property <string> catalogue-page-error;
     private property <bool> catalogue-restore-pending: false;
     public function prepare-catalogue-return() { root.catalogue-restore-pending = true; }
     public function reset-catalogue-scroll() { root.catalogue-restore-pending = false; root.catalogue-scroll-y = 0px; }
@@ -83,6 +88,15 @@ export component AppWindow inherits Window {
     callback source-filter-selected(string,int);
     callback source-filters-applied;
     in property <string> series-title;
+    in property <string> detail-series-key;
+    in-out property <length> detail-scroll-y: 0px;
+    in-out property <bool> detail-synopsis-expanded: false;
+    private property <bool> detail-restore-pending: false;
+    changed detail-series-key => {
+        root.detail-scroll-y = 0px;
+        root.detail-synopsis-expanded = false;
+        if root.section == 5 { root.detail-restore-pending = true; }
+    }
     in property <string> series-description;
     in property <string> resume-chapter;
     in property <string> series-metadata;
@@ -90,7 +104,6 @@ export component AppWindow inherits Window {
     in property <string> series-artwork-key;
     in-out property <image> series-poster;
     in-out property <bool> chapters-descending: true;
-    private property <bool> library-options-open: false;
     in property <bool> in-library;
     in property <bool> has-more;
     in-out property <bool> show-adult: false;
@@ -99,6 +112,8 @@ export component AppWindow inherits Window {
     in-out property <length> scroll-y: 0px;
     in-out property <int> current-page: 0;
     in-out property <int> reading-mode: 0;
+    // Actual renderer modes stay 0–3; index 4 is a persisted Automatic choice.
+    in-out property <int> reader-mode-choice: 4;
     in-out property <float> zoom: 1;
     in property <string> position-label;
     in property <bool> can-previous;
@@ -107,7 +122,29 @@ export component AppWindow inherits Window {
     in-out property <string> category-text;
     in property <[string]> categories;
     in-out property <int> category-index: 0;
-    in-out property <int> category-target: 0;
+    in-out property <bool> entry-menu-visible: false;
+    in property <[EntryCategoryRow]> entry-categories;
+    private property <string> entry-menu-key;
+    private property <string> entry-menu-title;
+    private property <bool> entry-menu-library;
+    private property <bool> entry-menu-editing;
+    private property <length> entry-menu-x;
+    private property <length> entry-menu-y;
+    callback entry-action(string,string);
+    public function open-entry-menu(key: string,title: string,in-library: bool,x: length,y: length) {
+        if key == "" { return; }
+        root.entry-menu-key = key; root.entry-menu-title = title;
+        root.entry-menu-library = in-library; root.entry-menu-editing = false;
+        root.entry-menu-x = x; root.entry-menu-y = y; root.entry-menu-visible = true;
+    }
+    public function close-entry-menu() { root.entry-menu-visible = false; root.entry-menu-editing = false; keyboard.focus(); }
+    function entry-menu-picked(action: string) {
+        // Dispatch before the conditional overlay is destroyed, including
+        // accessibility actions. Category toggles retain this captured ID.
+        root.entry-action(root.entry-menu-key,action);
+        if action == "categories" { root.entry-menu-editing = true; }
+        else { root.close-entry-menu(); }
+    }
     in property <[SettingRow]> settings;
     // Nova's responsive breakpoint applies equally to Android and desktop.
     out property <bool> mobile-ui: root.width < 700px;
@@ -126,6 +163,8 @@ export component AppWindow inherits Window {
     private property <bool> reader-context-capturing;
     private property <bool> reader-context-toast-open;
     callback reader-context-opening(int);
+    in-out property <ReaderCaptureViewport> reader-capture-viewport;
+    out property <color> reader-capture-background: Theme.current.artwork_canvas;
     callback reader-context-action(int, string);
     callback reader-context-closed;
     public function open-reader-context(page: int, x: length, y: length) {
@@ -195,7 +234,26 @@ export component AppWindow inherits Window {
 
     callback request-artwork(int,int);
     callback library-sort-changed;
+    in-out property <string> library-query;
+    private property <bool> library-search-open: false;
+    private property <int> library-search-focus-request: 0;
+    public function focus-library-search() {
+        if root.section != 0 { return; }
+        root.library-search-open = true;
+        root.library-search-focus-request += 1;
+    }
+    function close-library-search() {
+        root.library-search-open = false;
+        root.library-query = "";
+        keyboard.focus();
+        root.search("");
+    }
+    function toggle-library-search() {
+        if root.library-search-open { root.close-library-search(); }
+        else { root.focus-library-search(); }
+    }
     callback chapter-order-changed(bool);
+    callback adult-visibility-changed(bool);
     callback navigate(int);
     callback return-to-catalogue;
     callback open-item(int);
@@ -220,19 +278,22 @@ export component AppWindow inherits Window {
     callback page-step(int);
     callback add-category(string);
     callback category-selected(int);
-    callback category-assignment-selected(int);
     callback setting-changed(string, string);
     callback source-action(string);
     callback flush-progress;
 
     public function go-back() {
+        if root.entry-menu-visible { root.close-entry-menu(); return; }
         if root.reader-context-visible { root.close-reader-context(); return; }
+        if root.section == 0 && root.library-search-open { root.close-library-search(); return; }
         if ((root.section == 5 && root.detail-origin == 3) || root.section == 8) && root.source-catalog-open { root.return-to-catalogue(); return; }
         if root.section == 3 && root.source-catalog-open { root.source-catalog-open = false; root.navigate(3); return; }
         root.navigate(root.section == 6 ? 5 : root.section == 8 ? 3 : root.section == 11 || root.section == 12 || root.section == 14 || root.section == 15 || root.section == 16 || root.section == 17 || root.section == 18 ? 10 : root.section >= 9 || root.section == 7 ? 4 : root.section == 5 ? root.detail-origin : 0);
     }
 
     changed section => {
+        if root.entry-menu-visible { root.close-entry-menu(); }
+        root.detail-restore-pending = root.section == 5;
         if root.reader-context-visible { root.close-reader-context(); }
         root.reader-context-toast-open = false;
         if root.section == 6 { root.reader-osd = false; root.show-reader-options = false; }
@@ -287,13 +348,29 @@ export component AppWindow inherits Window {
                             }
                             in property <int> destination: root.section;
                             changed destination => {
-                                if root.section == 3 && root.source-catalog-open { root.catalogue-restore-pending = true; }
+                                if root.section == 5 { root.detail-restore-pending = true; }
+                                else if root.section == 3 && root.source-catalog-open { root.catalogue-restore-pending = true; }
                                 else { self.content-y = 0px; }
                             }
-                            changed content-y => { if root.section == 3 && root.source-catalog-open && !root.catalogue-restore-pending { root.catalogue-scroll-y = self.content-y; } }
+                            changed content-y => {
+                                if root.section == 3 && root.source-catalog-open && !root.catalogue-restore-pending { root.catalogue-scroll-y = self.content-y; }
+                                if root.section == 5 && !root.detail-restore-pending && !root.busy { root.detail-scroll-y = self.content-y; }
+                            }
                             in property <length> catalogue-position: root.catalogue-scroll-y;
                             changed catalogue-position => { if root.section == 3 && root.source-catalog-open && !root.catalogue-restore-pending && Math.abs(self.content-y - root.catalogue-scroll-y) > 0.5px { self.content-y = root.catalogue-scroll-y; } }
                             Timer { interval: 16ms; running: root.catalogue-restore-pending && root.section == 3 && root.source-catalog-open; triggered => { page-scroll.content-y = root.catalogue-scroll-y; root.catalogue-restore-pending = false; } }
+                            Timer {
+                                interval: 100ms;
+                                running: root.section == 3 && root.source-catalog-open;
+                                triggered => {
+                                    // Also fill a short first page; only request when the
+                                    // source can advance and the previous page succeeded.
+                                    if !root.catalogue-restore-pending && root.has-more && !root.busy && root.catalogue-page-error == "" && page-scroll.visible-height > 0px && page-scroll.content-height + page-scroll.content-y <= page-scroll.visible-height * 2 {
+                                        root.load-more();
+                                    }
+                                }
+                            }
+                            Timer { interval: 16ms; running: root.detail-restore-pending && root.section == 5; triggered => { page-scroll.content-y = root.detail-scroll-y; root.detail-restore-pending = false; } }
                             in property <bool> catalog-open: root.source-catalog-open;
                             changed catalog-open => { if root.section == 3 { self.content-y = 0px; } }
                             in property <string> catalogue: root.source-catalogue-kind;
@@ -312,7 +389,7 @@ export component AppWindow inherits Window {
                                     show-back: (root.section == 3 && root.source-catalog-open) || root.section == 5 || root.section == 7 || root.section == 8;
                                     back => { root.go-back(); }
                                 }
-                                if root.status != "": Rectangle {
+                                if root.status != "" && root.section != 5: Rectangle {
                                     min-height: status-text.preferred-height + 24px;
                                     background: Theme.current.selection_wash; border-radius: 8px;
                                     status-text := Text {
@@ -320,7 +397,7 @@ export component AppWindow inherits Window {
                                         x: 12px; y: 12px; width: max(0px, parent.width - 24px);
                                     }
                                 }
-                                if root.busy: HorizontalLayout {
+                                if root.busy && root.section != 5: HorizontalLayout {
                                     Spinner { width: 24px; height: 24px; }
                                     Text { min-width: 0px; text: @tr("Loading…"); color: Theme.current.text_secondary; }
                                 }
@@ -329,7 +406,7 @@ export component AppWindow inherits Window {
                                     Segmented { labels: [@tr("Sources"),@tr("Extensions ({})",root.extensions.length)]; current-index: root.browse-tab; picked(i) => { root.browse-tab = i; } }
                                     if root.browse-tab == 0: VerticalLayout {
                                         spacing: 12px;
-                                        CheckBox { text: @tr("Show adult sources"); checked <=> root.show-adult; toggled => { root.navigate(3); } }
+                                        CheckBox { text: @tr("Show adult sources"); checked <=> root.show-adult; toggled => { root.adult-visibility-changed(self.checked); } }
                                         SourceList {
                                             items: root.source-rows;
                                             picked(i) => { root.source-index = i; root.source-catalog-open = true; root.source-catalogue-kind = "popular"; root.source-selected(i); }
@@ -390,38 +467,62 @@ export component AppWindow inherits Window {
                                 }
                                 if root.section == 0: VerticalLayout {
                                     spacing: 12px;
-                                    HorizontalLayout {
-                                        spacing: 10px;
-                                        ComboBox {
-                                            model: [@tr("Recently added"), @tr("Title"), @tr("Unread chapters")];
-                                            current-index: Appearance.library-sort; min-width: 0px; max-width: 190px;
-                                            placeholder-text: @tr("Sort library");
-                                            selected(_) => { Appearance.setting-changed("library_sort", self.current-index); root.library-sort-changed(); }
+                                    library-controls := Rectangle {
+                                        min-width: 0px;
+                                        height: library-search.height + library-toolbar.preferred-height;
+                                        library-search := LibrarySearchReveal {
+                                            x: 0px; y: root.mobile-ui ? library-toolbar.preferred-height : 0px;
+                                            width: 100%; open: root.library-search-open;
+                                            viewport-height: page-scroll.visible-height;
+                                            query <=> root.library-query;
+                                            focus-request: root.library-search-focus-request;
+                                            reveal-requested => {
+                                                let top = library-search.absolute-position.y - page-scroll.absolute-position.y;
+                                                if top < 0px || top + 44px > page-scroll.visible-height {
+                                                    let target = root.mobile-ui ? min(library-toolbar.preferred-height, max(0px, page-scroll.visible-height - 44px)) : 0px;
+                                                    page-scroll.content-y += target - top;
+                                                }
+                                            }
+                                            close-requested => { root.close-library-search(); }
+                                            search(query) => { root.search(query); }
+                                            submitted => { if !root.mobile-ui { keyboard.focus(); } }
                                         }
-                                        Rectangle { min-width: 0px; horizontal-stretch: 1; }
-                                        LibraryViewSwitch { list-view: Appearance.library-list-view; picked(list) => { Appearance.setting-changed("library_list_view", list ? 1 : 0); } }
-                                        IconAction { width: 44px; text: @tr("Library options"); icon: @image-url("../../assets/icons/navigation/more.svg"); clicked => { root.library-options-open = !root.library-options-open; } }
-                                    }
-                                    ScrollView {
-                                        height: 44px; content-height: 44px;
-                                        content-width: categories-row.preferred-width;
-                                        mouse-drag-pan-enabled: true;
-                                        categories-row := HorizontalLayout {
-                                            spacing: 8px; alignment: start;
-                                            for category[i] in root.categories: LibraryFilterChip {
-                                                keyboard-focusable: true;
-                                                label: category; selected: i == root.category-index;
-                                                accessible-action-default => { root.category-index = i; root.category-selected(i); }
-                                                picked => { root.category-index = i; root.category-selected(i); }
+                                        library-toolbar := VerticalLayout {
+                                            x: 0px; y: root.mobile-ui ? 0px : library-search.height;
+                                            width: 100%; height: self.preferred-height; spacing: 12px;
+                                            HorizontalLayout {
+                                                spacing: 10px;
+                                                ComboBox {
+                                                    model: [@tr("Recently added"), @tr("Title"), @tr("Unread chapters")];
+                                                    current-index: Appearance.library-sort; min-width: 0px; max-width: 190px;
+                                                    placeholder-text: @tr("Sort library");
+                                                    selected(_) => { Appearance.setting-changed("library_sort", self.current-index); root.library-sort-changed(); }
+                                                }
+                                                Rectangle { min-width: 0px; horizontal-stretch: 1; }
+                                                LibraryViewSwitch { list-view: Appearance.library-list-view; picked(list) => { Appearance.setting-changed("library_list_view", list ? 1 : 0); } }
+                                                IconAction {
+                                                    width: 44px;
+                                                    text: root.library-search-open ? @tr("Close library search") : @tr("Search library");
+                                                    icon: root.library-search-open ? @image-url("../../assets/icons/navigation/close.svg") : @image-url("../../assets/icons/navigation/search.svg");
+                                                    clicked => { root.toggle-library-search(); }
+                                                }
+                                            }
+                                            ScrollView {
+                                                height: 44px; content-height: 44px;
+                                                content-width: categories-row.preferred-width;
+                                                mouse-drag-pan-enabled: true;
+                                                categories-row := HorizontalLayout {
+                                                    spacing: 8px; alignment: start;
+                                                    for category[i] in root.categories: LibraryFilterChip {
+                                                        keyboard-focusable: true;
+                                                        label: category; selected: i == root.category-index;
+                                                        accessible-action-default => { root.category-index = i; root.category-selected(i); }
+                                                        picked => { root.category-index = i; root.category-selected(i); }
+                                                    }
+                                                }
                                             }
                                         }
                                     }
-                                    HorizontalLayout {
-                                        spacing: 8px;
-                                        library-query := LineEdit { min-width: 0px; placeholder-text: @tr("Search your library…"); accepted => { root.search(self.text); } }
-                                        ActionButton { width: 80px; text: @tr("Search"); clicked => { root.search(library-query.text); } }
-                                    }
-                                    if root.library-options-open: CategoryPicker { label: @tr("Category to assign"); model: root.categories; current-index <=> root.category-target; selected(index) => { root.category-assignment-selected(index); } }
                                 }
                                 if root.section == 1: ActionButton { text: @tr("Refresh library"); clicked => { root.browse("refresh"); } }
                                 if root.section == 2: HorizontalLayout {
@@ -442,30 +543,37 @@ export component AppWindow inherits Window {
                                     safe-left: root.safe-area-insets.left; safe-right: root.safe-area-insets.right;
                                     title: root.series-title; description: root.series-description; resume-chapter: root.resume-chapter;
                                     metadata: root.series-metadata; genres: root.series-genres;
-                                    poster: root.series-poster; in-library: root.in-library;
+                                    poster: root.series-poster; in-library: root.in-library; can-resume: root.items.length > 0;
                                     narrow: root.mobile-ui; scroll-y: page-scroll.content-y;
-                                    resume => { root.chapter-step(0); } toggle-library => { root.toggle-library(); }
+                                    expanded <=> root.detail-synopsis-expanded;
+                                    resume => { root.detail-scroll-y = page-scroll.content-y; root.chapter-step(0); } toggle-library => { root.toggle-library(); }
                                     request-artwork => { root.request-artwork(-1,-1); }
                                 }
                                 if (root.section == 0 || (root.section == 3 && root.source-catalog-open)) && root.items.length > 0: SeriesGrid {
                                     items: root.items; list-view: Appearance.library-list-view;
                                     min-cols: root.section == 3 ? Appearance.browse-min-cols : Appearance.library-min-cols;
                                     overlay-caption: root.section == 3;
-                                    assign-category: root.section == 0 && root.category-target > 0;
+                                    context-enabled: root.section == 0;
                                     viewport-top: page-scroll.absolute-position.y; viewport-height: page-scroll.visible-height;
-                                    picked(i) => { root.open-item(i); } category-picked(i) => { root.item-action(i, "category"); }
+                                    picked(i) => { root.open-item(i); }
+                                    context-requested(key,title,in-library,x,y) => { root.open-entry-menu(key,title,in-library,x,y); }
                                     request-artwork(first,last) => { root.request-artwork(first,last); }
                                 }
                                 if root.section == 5: VerticalLayout {
                                     padding-left: root.safe-area-insets.left + (root.mobile-ui ? 20px : 64px);
                                     padding-right: root.safe-area-insets.right + (root.mobile-ui ? 20px : 64px);
                                     spacing: 4px;
+                                    if root.busy: HorizontalLayout {
+                                        Spinner { width: 24px; height: 24px; }
+                                        Text { min-width: 0px; text: @tr("Loading chapters…"); color: Theme.current.text_secondary; }
+                                    }
+                                    if root.status != "": Text { text: root.status; color: Theme.current.text_settings; wrap: word-wrap; min-width: 0px; }
                                     HorizontalLayout {
                                         Text { text: @tr("{n} chapter" | "{n} chapters" % root.items.length); font-size: 20px; font-weight: 600; color: Theme.current.text_bright; vertical-alignment: center; min-width: 0px; }
                                         IconAction { width: 44px; text: @tr("Reverse chapter order"); icon: @image-url("../../assets/icons/navigation/updates.svg"); clicked => { root.chapter-order-changed(!root.chapters-descending); } }
                                     }
                                     for chapter[i] in root.items: ChapterRow {
-                                        chapter: chapter; picked => { root.open-item(i); } action(action) => { root.item-action(i,action); }
+                                        chapter: chapter; picked => { root.detail-scroll-y = page-scroll.content-y; root.open-item(i); } action(action) => { root.item-action(i,action); }
                                     }
                                 }
                                 if root.section != 4 && root.section != 8: VerticalLayout {
@@ -473,7 +581,7 @@ export component AppWindow inherits Window {
                                     if root.section != 0 && root.section != 1 && root.section != 2 && root.section != 3 && root.section != 5: VerticalLayout {
                                     spacing: Theme.card_spacing;
                                     for row[index] in root.items: Rectangle {
-                                        height: (root.section == 5 || root.section == 7 || (root.section == 0 && root.category-target > 0)) ? 136px : 80px;
+                                        height: (root.section == 5 || root.section == 7) ? 136px : 80px;
                                         border-radius: Theme.card_corner_radius; background: hover.has-hover ? Theme.current.control_hover : Theme.current.card;
                                         border-width: 1px; border-color: Theme.current.border_soft;
                                         VerticalLayout {
@@ -492,7 +600,6 @@ export component AppWindow inherits Window {
                                                 }
                                                 hover := TouchArea { clicked => { root.open-item(index); } }
                                             }
-                                            if root.section == 0 && root.category-target > 0: ActionButton { text: @tr("Toggle category"); clicked => { root.item-action(index, "category"); } }
                                             if root.section == 5: HorizontalLayout {
                                                 spacing: 6px;
                                                 ActionButton { text: @tr("Read / unread"); clicked => { root.item-action(index, "read"); } }
@@ -525,7 +632,11 @@ export component AppWindow inherits Window {
                                             Text { min-width: 0px; text: root.section == 0 ? @tr("Install a source in Browse, or import a local chapter in More.") : @tr("Try refreshing or choosing another source."); color: Theme.current.text_secondary; wrap: word-wrap; horizontal-alignment: center; }
                                         }
                                     }
-                                    if root.has-more: ActionButton { text: @tr("Load more"); enabled: !root.busy; clicked => { root.load-more(); } }
+                                    if root.section == 3 && root.source-catalog-open && root.catalogue-page-error != "": VerticalLayout {
+                                        spacing: 8px;
+                                        Text { text: root.catalogue-page-error; color: Theme.current.text_secondary; wrap: word-wrap; }
+                                        ActionButton { text: @tr("Retry"); enabled: !root.busy; clicked => { root.load-more(); } }
+                                    }
                                 }
                                 if root.section == 8: VerticalLayout {
                                     spacing: 16px;
@@ -543,6 +654,8 @@ export component AppWindow inherits Window {
                         }
                         if root.section == 6: Rectangle {
                             reader := Flickable {
+                                private property <length> physical-pixel: 1phx;
+                                changed physical-pixel => {root.reader-reflow(root.reader-width / 1px,self.height / 1px);}
                                 width: parent.width; height: parent.height;
                                 content-y <=> root.scroll-y;
                                 changed content-y => {if root.reading-mode==0{root.reader-position(-self.content-y / 1px,root.reader-width / 1px,self.height / 1px);}}
@@ -557,24 +670,54 @@ export component AppWindow inherits Window {
                                     accessible-action-default => { root.toggle-reader-osd(); }
                                     tapped => { root.toggle-reader-osd(); }
                                 }
-                                for page[index] in root.pages: Rectangle {
+                                for page[index] in root.pages: page-frame := Rectangle {
                                     visible: root.reading-mode == 0 || index == root.current-page;
                                     x: (max(reader.width, root.reader-width) - self.width) / 2;
                                     y: root.reading-mode == 0 ? page.position * root.reader-width : 0px;
                                     width: root.reader-width;
                                     height: root.reading-mode == 0 ? root.reader-width * page.ratio : reader.height;
-                                    background: Theme.current.artwork_canvas;
-                                    if page.loaded: Rectangle {
+                                    // Loaded page frames stay transparent: a logical,
+                                    // unsnapped background could paint over its neighbour's
+                                    // snapped image edge while the chapter is scrolling.
+                                    if page.loaded: image-frame := Rectangle {
                                         width: root.reading-mode==0 ? parent.width : min(parent.width,parent.height/page.ratio);
                                         height: root.reading-mode==0 ? parent.height : min(parent.height,parent.width*page.ratio);
                                         x:(parent.width - self.width)/2; y:(parent.height - self.height)/2;
-                                        for tile in page.tiles: Image {source:tile.image;x:0px;y:tile.offset*parent.height;width:parent.width;height:tile.fraction*parent.height;image-fit:fill;}
+                                        // Keep layout/resume coordinates continuous. Only
+                                        // raster edges use physical pixels, including the
+                                        // fractional viewport scroll and window origin.
+                                        private property <length> raster-origin-y: root.reading-mode == 0 ? reader.absolute-position.y + reader.content-y + page.position * root.reader-width : self.absolute-position.y;
+                                        private property <length> raster-bottom-y: root.reading-mode == 0 ? reader.absolute-position.y + reader.content-y + (index + 1 < root.pages.length ? root.pages[index + 1].position : root.total-ratio) * root.reader-width : self.absolute-position.y + self.height;
+                                        for tile[tile-index] in page.tiles: reader-tile := Image {
+                                            source: tile.image;
+                                            private property <length> logical-top: image-frame.raster-origin-y + tile.offset * image-frame.height;
+                                            // The next tile/page owns the shared edge. Do
+                                            // not independently round offset + height.
+                                            private property <float> bottom-offset: tile.bottom > tile.offset ? tile.bottom : tile-index + 1 < page.tiles.length ? page.tiles[tile-index + 1].offset : tile.offset + tile.fraction;
+                                            private property <length> logical-bottom: self.bottom-offset >= 0.999999 ? image-frame.raster-bottom-y : image-frame.raster-origin-y + self.bottom-offset * image-frame.height;
+                                            private property <length> snapped-top: round(self.logical-top / 1phx) * 1phx;
+                                            private property <length> snapped-bottom: round(self.logical-bottom / 1phx) * 1phx;
+                                            private property <length> snapped-left: round((image-frame.absolute-position.x + tile.left * image-frame.width) / 1phx) * 1phx;
+                                            private property <length> snapped-right: round((image-frame.absolute-position.x + (tile.right > tile.left ? tile.right : 1) * image-frame.width) / 1phx) * 1phx;
+                                            x: self.snapped-left - image-frame.absolute-position.x;
+                                            y: self.snapped-top - image-frame.absolute-position.y;
+                                            width: self.snapped-right - self.snapped-left;
+                                            height: max(0px, self.snapped-bottom - self.snapped-top);
+                                            image-fit: fill;
+                                        }
                                         ReaderImageInteraction {
                                             width: 100%; height: 100%;
                                             accessible-role: button; accessible-label: @tr("Page {} image", index + 1);
-                                            accessible-action-default => { SettingsStyle.keyboard-mode = true; root.open-reader-context(index, self.absolute-position.x + self.width / 2, reader.absolute-position.y + reader.height / 2); }
+                                            accessible-action-default => {
+                                                SettingsStyle.keyboard-mode = true;
+                                                root.reader-capture-viewport = { x: reader.absolute-position.x / 1px, y: reader.absolute-position.y / 1px, width: reader.width / 1px, height: reader.height / 1px, content-x: reader.content-x / 1px, content-y: reader.content-y / 1px };
+                                                root.open-reader-context(index, self.absolute-position.x + self.width / 2, reader.absolute-position.y + reader.height / 2);
+                                            }
                                             tapped => { root.toggle-reader-osd(); }
-                                            context-requested(x,y) => { root.open-reader-context(index,x,y); }
+                                            context-requested(x,y) => {
+                                                root.reader-capture-viewport = { x: reader.absolute-position.x / 1px, y: reader.absolute-position.y / 1px, width: reader.width / 1px, height: reader.height / 1px, content-x: reader.content-x / 1px, content-y: reader.content-y / 1px };
+                                                root.open-reader-context(index,x,y);
+                                            }
                                         }
                                     }
                                     if !page.loaded: Text { text: page.error == "" ? @tr("Loading page {}", index + 1) : page.error; color: Theme.current.text_secondary; wrap: word-wrap; horizontal-alignment: center; vertical-alignment: center; }
@@ -606,7 +749,11 @@ export component AppWindow inherits Window {
                                     width: max(0px, parent.width - root.safe-area-insets.left - root.safe-area-insets.right); height: parent.height;
                                     VerticalLayout {
                                         padding: 8px; spacing: 8px;
-                                        ComboBox { min-width: 0px; model: [@tr("Webtoon"), @tr("Left to right"), @tr("Right to left"), @tr("Vertical paging")]; current-index <=> root.reading-mode; selected(value) => { root.mode-changed(self.current-index); } }
+                                        ComboBox { min-width: 0px; placeholder-text: @tr("Reading mode"); model: [@tr("Webtoon"), @tr("Left to right"), @tr("Right to left"), @tr("Vertical paging"), @tr("Automatic")]; current-index <=> root.reader-mode-choice; selected(value) => { root.mode-changed(self.current-index); } }
+                                        Text {
+                                            text: root.reader-mode-choice == 4 ? @tr("Automatic · {}", root.reading-mode == 0 ? @tr("Webtoon") : root.reading-mode == 1 ? @tr("Left to right") : root.reading-mode == 2 ? @tr("Right to left") : @tr("Vertical paging")) : @tr("Manual · saved for this series");
+                                            color: Theme.current.text_secondary; font-size: 12px; wrap: word-wrap;
+                                        }
                                         HorizontalLayout {
                                             spacing: 8px;
                                             IconAction { text: @tr("Zoom out"); icon: @image-url("../../assets/icons/navigation/minus.svg"); clicked => { root.zoom = max(0.5, root.zoom - 0.25); } }
@@ -647,7 +794,7 @@ export component AppWindow inherits Window {
                                 padding-bottom: root.mobile-ui ? 10px : 16px; spacing: root.mobile-ui ? 6px : 12px;
                                 BackButton { clicked => { root.go-back(); } }
                                 Rectangle { horizontal-stretch: 1; }
-                                IconAction { width: 44px; text: @tr("Refresh"); icon: @image-url("../../assets/icons/navigation/updates.svg"); clicked => { root.browse("chapters"); } }
+                                IconAction { width: 44px; text: @tr("Title options"); icon: @image-url("../../assets/icons/navigation/more.svg"); clicked => { root.open-entry-menu(root.detail-series-key,root.series-title,root.in-library,self.absolute-position.x,self.absolute-position.y + self.height); } }
                             }
                         }
                         more-page := MorePage {
@@ -679,6 +826,10 @@ export component AppWindow inherits Window {
             }
         }
         key-pressed(event) => {
+            if root.section == 0 && event.modifiers.control && (event.text == "f" || event.text == "F") {
+                if !event.repeat { root.focus-library-search(); }
+                return accept;
+            }
             if root.section == 6 && (event.text == Key.Menu || (event.text == Key.F10 && event.modifiers.shift)) {
                 if !event.repeat {
                     SettingsStyle.keyboard-mode = true;
@@ -725,6 +876,17 @@ export component AppWindow inherits Window {
         busy: root.reader-context-busy;
         picked(action) => { root.reader-context-picked(action); }
         dismissed => { root.close-reader-context(); }
+    }
+    if root.entry-menu-visible: EntryMenu {
+        width: root.width; height: root.height;
+        narrow: root.mobile-ui; editing: root.entry-menu-editing;
+        title: root.entry-menu-title; in-library: root.entry-menu-library;
+        categories: root.entry-categories;
+        anchor-x: root.entry-menu-x; anchor-y: root.entry-menu-y;
+        safe-bottom: root.safe-area-insets.bottom; safe-left: root.safe-area-insets.left; safe-right: root.safe-area-insets.right;
+        picked(action) => { root.entry-menu-picked(action); }
+        category-toggled(id) => { root.entry-action(root.entry-menu-key,"category:" + id); }
+        dismissed => { root.close-entry-menu(); }
     }
     forward-focus: keyboard;
 }

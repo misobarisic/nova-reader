@@ -222,7 +222,7 @@ pub fn upstream_state(
 }
 
 /// These exact upstream IDs were read from the live index and match the
-/// reference addon's three explicitly implemented source variants.
+/// reference addons' explicitly implemented language variants.
 pub fn reference_port_mappings() -> Vec<PortMapping> {
     serde_json::from_str(include_str!("../fixtures/port-mappings.json"))
         .expect("the checked-in mapping fixture must be valid")

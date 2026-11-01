@@ -1,0 +1,54 @@
+// Nova library.slint: retained 58px reveal, shared field and deferred focus.
+import { Anim } from "@NovaUiShared";
+import { SearchField } from "@NovaUiBase/searchfield.slint";
+
+export component LibrarySearchReveal inherits Rectangle {
+    in property <bool> open;
+    in property <int> focus-request;
+    in property <length> viewport-height;
+    in-out property <string> query;
+    callback search(string);
+    callback close-requested;
+    callback reveal-requested;
+    callback submitted;
+    private property <int> handled-focus-request: -1;
+    init => { root.handled-focus-request = root.focus-request; }
+    changed focus-request => {
+        if root.handled-focus-request >= 0 && root.handled-focus-request != root.focus-request && root.open {
+            root.reveal-requested();
+            focus-timer.start();
+        }
+        root.handled-focus-request = root.focus-request;
+    }
+    changed open => { if !root.open { focus-timer.stop(); } }
+    changed viewport-height => { if root.open && search-line.has-focus { root.reveal-requested(); } }
+    changed width => { if root.open && search-line.has-focus { root.reveal-requested(); } }
+    height: root.open ? 58px : 0px;
+    min-width: 0px;
+    visible: self.height > 0px;
+    opacity: root.open ? 1 : 0;
+    clip: true;
+    animate height { duration: Anim.transition_slide; easing: ease-out; }
+    animate opacity { duration: Anim.transition_fade; easing: ease-out; }
+    focus-timer := Timer {
+        interval: 80ms; running: false;
+        triggered => { self.stop(); if root.open { root.reveal-requested(); search-line.focus(); } }
+    }
+    FocusScope {
+        width: 100%; height: 100%; enabled: root.open;
+        key-pressed(event) => {
+            if event.text == Key.Escape || event.text == Key.Back {
+                root.close-requested(); return accept;
+            }
+            return reject;
+        }
+        search-line := SearchField {
+            width: 100%; height: 44px;
+            enabled: root.open; roomy: true; search-icon: true;
+            text <=> root.query;
+            placeholder-text: @tr("Search library");
+            edited(_) => { root.search(root.query); }
+            accepted(_) => { root.search(root.query); root.submitted(); }
+        }
+    }
+}

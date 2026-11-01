@@ -338,3 +338,57 @@ Android JNI/Clippy and production Java compilation against API35 passed with
 API26/28/29/30/35 window fixtures, including inherited fullscreen flags,
 attachment retry and recreation. Astra 6 medium's final recheck reported no
 residual P1/P2 findings. Physical-device rendering remains unverified locally.
+
+## Collection, image quality and source additions (0.1.14)
+
+Astra 6 medium independently reviewed this change set and its follow-up fixes,
+with no residual P1/P2 findings. Findings fixed during review included AVIF
+metadata-count allocation, keyboard category-row visibility, stale reader-worker
+indices, premature completion with partial image windows, and false challenge
+classification of legitimate MangaFire JSON text.
+
+Tall pages retain native reading width through bounded visible-row windows and
+2048×2048 texture tiles. Shared physical drawing edges remove fractional-scroll
+seams. The retained model allowance is 32 MiB with 32 MiB replacement headroom;
+encoded chapter bytes have a separate 32 MiB generation-scoped cache. Original
+CPU decoding remains bounded full-image decoding. Posters now share Nova's
+128 MiB decoded LRU and retain visible artwork plus 48 recent UI images.
+
+Other reviewed behavior includes Nova search reveal, retained detail scroll and
+synopsis, immediate detail presentation while chapters load, automatic catalogue
+paging with explicit Retry, stable per-entry menus/categories, durable adult
+visibility and chapter order, and J2K-derived Automatic reading mode with
+per-series manual overrides. Mode choices use full source-local identities,
+override historical chapter modes, and publish only after successful saves.
+
+AVIF supports bounded 8-bit still decode and screenshot/cache/download encoding.
+Screencaps offer Device or Chapter resolution; native captures use original
+source pixels and frozen geometry, with an aligned source-pixel grid rather than
+an enlarged device bitmap. Full applicable adapter/J2K notices accompany desktop
+and Android distributions. MangaFire is a separately installable native port
+with seven exact upstream language mappings and a deterministic licensed ZIP.
+
+Verification on 1 November 2026 passed:
+
+- Workspace formatting, all-target Clippy with warnings denied, workspace check,
+  desktop check without update checking, and all workspace tests/doc tests.
+- Both existing addon fixture suites, MangaFire Node/actual QuickJS/catalogue
+  fixtures, and 28 packaging regressions (one environment-specific test skipped).
+- Native 720×20000 lettering, viewport/zoom/DPR coverage, encoded-byte reuse,
+  partial-window completion, 2D texture reconstruction and physical-pixel seams.
+- Preference restart/migration/corruption/save-failure checks, short-window mode
+  options, stable category targeting, search/detail restoration and poster reuse.
+- Six source-resolution compositor tests; actual Linux software-OpenGL smoke of
+  collection/details/menu/settings and clean saved captures: Device 390×844,
+  Chapter 626×1355 for the same viewport of a 600-pixel-wide fixture.
+- AVIF offline/source-removal download roundtrip, real PNG/AVIF desktop clipboard
+  roundtrips, 698 process-isolated corrupt-input cases, Android Java/JNI AVIF
+  save/provider tests, and license inventories for Linux, Windows and three
+  Android targets.
+
+Physical Android rendering, Windows execution and total device memory/frame
+budgets remain unverified locally. MangaFire's safe API metadata probes succeeded
+through the session proxy, but its actual Reader-host live smoke hit a DNS
+preflight deadline; live image downloading/decoding remains unverified. No
+captcha solving is claimed. The copied Nova workflow/tag-build split and
+platform packaging scripts are unchanged; release builds remain the CI gate.

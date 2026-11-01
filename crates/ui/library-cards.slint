@@ -2,7 +2,7 @@
 import { Theme, Anim, SettingsStyle } from "@NovaUiShared";
 import { FeedbackProgress } from "@NovaUiBase/feedback-motion.slint";
 import { ItemRow } from "media-models.slint";
-import { IconAction } from "controls.slint";
+import { ReaderImageInteraction } from "reader-context-menu.slint";
 
 export component LibraryViewSwitch inherits Rectangle {
     in property <bool> list-view;
@@ -32,10 +32,10 @@ export component LibraryViewSwitch inherits Rectangle {
 export component LibraryCard inherits Rectangle {
     in property <ItemRow> card;
     in property <bool> list-view;
-    in property <bool> assign-category;
+    in property <bool> context-enabled;
     in property <bool> overlay-caption;
     callback picked;
-    callback category-picked;
+    callback context-requested(length,length);
     accessible-role: button; accessible-label: root.card.title;
     accessible-action-default => { root.picked(); }
     private property <length> poster-height: root.list-view ? root.height - 2px : root.width * 3 / 2;
@@ -88,13 +88,15 @@ export component LibraryCard inherits Rectangle {
     }
     scope := FocusScope {
         changed has-focus => { if self.has-focus { SettingsStyle.reveal_control(root.absolute-position.y, root.height, false); } }
-        key-pressed(e) => { if e.text == Key.Return || e.text == " " { if !e.repeat { root.picked(); } return accept; } return reject; }
+        key-pressed(e) => {
+            if root.context-enabled && (e.text == Key.Menu || (e.text == Key.F10 && e.modifiers.shift)) { if !e.repeat { SettingsStyle.keyboard-mode = true; root.context-requested(root.absolute-position.x + root.width / 2,root.absolute-position.y + root.height / 2); } return accept; }
+            if e.text == Key.Return || e.text == " " { if !e.repeat { root.picked(); } return accept; } return reject;
+        }
     }
-    hover := TouchArea { mouse-cursor: pointer; clicked => { root.picked(); } }
-    if root.assign-category: IconAction {
-        x: parent.width - 48px; y: 4px; width: 44px;
-        text: @tr("Toggle category"); icon: @image-url("../../assets/icons/navigation/more.svg");
-        clicked => { root.category-picked(); }
+    hover := ReaderImageInteraction {
+        context-enabled: root.context-enabled;
+        tapped => { root.picked(); }
+        context-requested(x,y) => { root.context-requested(x,y); }
     }
 }
 
@@ -103,12 +105,12 @@ export component SeriesGrid inherits Rectangle {
     in property <[ItemRow]> items;
     in property <bool> list-view;
     in property <int> min-cols: 2;
-    in property <bool> assign-category;
+    in property <bool> context-enabled;
     in property <bool> overlay-caption;
     in property <length> viewport-top;
     in property <length> viewport-height;
     callback picked(int);
-    callback category-picked(int);
+    callback context-requested(string,string,bool,length,length);
     callback request-artwork(int,int);
     out property <int> columns: root.list-view ? 1 : max(root.min-cols, Math.floor((root.width + Theme.card_spacing) / (160px + Theme.card_spacing)));
     private property <length> item-width: max(1px, min(root.list-view ? root.width : 230px, (root.width - (root.columns - 1) * Theme.card_spacing) / root.columns));
@@ -117,14 +119,29 @@ export component SeriesGrid inherits Rectangle {
     private property <int> first-row: max(0, Math.floor((root.viewport-top - root.absolute-position.y) / root.stride) - 2);
     private property <int> last-row: max(0, Math.ceil((root.viewport-top + root.viewport-height - root.absolute-position.y) / root.stride) + 2);
     height: root.items.length > 0 ? Math.ceil(root.items.length / root.columns) * root.stride - Theme.card_spacing + 4px : 0px;
+    function request-visible() {
+        if root.visible && root.items.length > 0 { root.request-artwork(root.first-row * root.columns, min(root.items.length, (root.last-row + 1) * root.columns)); }
+    }
+    // Memory hits publish synchronously before paint. A coalesced retry handles
+    // a callback received while Rust is still replacing the current model.
+    changed first-row => { root.request-visible(); artwork-admit.restart(); }
+    changed last-row => { root.request-visible(); artwork-admit.restart(); }
+    changed columns => { root.request-visible(); artwork-admit.restart(); }
+    changed items => { root.request-visible(); artwork-admit.restart(); }
+    changed visible => { root.request-visible(); artwork-admit.restart(); }
+    artwork-admit := Timer { interval: 1ms; running: false; triggered => {
+        self.stop();
+        root.request-visible();
+    } }
     Timer { interval: 150ms; running: root.visible && root.items.length > 0; triggered => { root.request-artwork(root.first-row * root.columns, min(root.items.length, (root.last-row + 1) * root.columns)); } }
     for item[i] in root.items: Rectangle {
         x: Math.mod(i, root.columns) * (root.item-width + Theme.card_spacing);
         y: Math.floor(i / root.columns) * root.stride + 4px;
         width: root.item-width; height: root.card-height;
         if Math.floor(i / root.columns) >= root.first-row && Math.floor(i / root.columns) <= root.last-row: LibraryCard {
-            card: item; list-view: root.list-view; overlay-caption: root.overlay-caption; assign-category: root.assign-category;
-            picked => { root.picked(i); } category-picked => { root.category-picked(i); }
+            card: item; list-view: root.list-view; overlay-caption: root.overlay-caption; context-enabled: root.context-enabled;
+            picked => { root.picked(i); }
+            context-requested(x,y) => { root.context-requested(item.series-key,item.title,item.bookmarked,x,y); }
         }
     }
 }

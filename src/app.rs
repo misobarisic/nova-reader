@@ -1,5 +1,6 @@
+use crate::reader_modes::{self, ModeChoice};
 use crate::{
-    AppWindow, Appearance, ExtensionRow, ItemRow, PageRow, SettingRow, TileRow,
+    AppWindow, Appearance, EntryCategoryRow, ExtensionRow, ItemRow, PageRow, SettingRow, TileRow,
     services::{Result, Services, error, now},
 };
 use nova_reader_ui::backend_text as text;
@@ -76,6 +77,9 @@ impl PageInput {
         Ok(bytes)
     }
 }
+// Leave half of the 64MiB display allowance for replacements: renderer/model
+// references can survive until the next frame even after a model update.
+const READER_MODEL_BYTES: usize = 32 * 1024 * 1024;
 struct Reader {
     chapter: ChapterId,
     source: Option<Source>,
@@ -91,19 +95,140 @@ struct Reader {
     // Track the requested quality, since source dimensions and the display
     // pixel limit can produce a texture narrower than that request.
     decoded_widths: BTreeMap<usize, u32>,
+    decoded_windows: BTreeMap<usize, reader_engine::DisplayWindowPlan>,
     target_width: u32,
     viewport_width: f32,
     viewport_height: f32,
     anchor: ResumeAnchor,
     mode: ReadingMode,
+    mode_choice: ModeChoice,
+    automatic_mode: ReadingMode,
+    mode_switching: bool,
     completed: bool,
 }
 impl Reader {
     fn decode_width(width: f32, scale_factor: f32) -> u32 {
         // Small layout changes share a decode, while high-density screens get
         // physical-pixel detail within a bounded display allocation.
-        let physical = (width * scale_factor).clamp(128., 2048.);
-        ((physical / 128.).ceil() as u32 * 128).clamp(128, 2048)
+        let physical = (width * scale_factor).clamp(128., 16384.);
+        ((physical / 128.).ceil() as u32 * 128).clamp(128, 16384)
+    }
+
+    fn visible_end(&self) -> usize {
+        let index = self.anchor.page_index.min(self.pages.len() - 1);
+        let mut end = index;
+        if self.mode == ReadingMode::Webtoon && self.viewport_width > 0. {
+            let mut covered =
+                self.ratios[index] * self.viewport_width * (1. - self.anchor.offset() as f32);
+            while end + 1 < self.pages.len() && covered < self.viewport_height {
+                end += 1;
+                covered += self.ratios[end] * self.viewport_width;
+            }
+        }
+        end
+    }
+    fn visible_span(&self, index: usize) -> (f64, f64) {
+        self.span_with_ratio(index, self.ratios[index])
+    }
+    fn span_with_ratio(&self, index: usize, actual_ratio: f32) -> (f64, f64) {
+        if self.mode != ReadingMode::Webtoon {
+            return if index == self.anchor.page_index {
+                (0., 1.)
+            } else {
+                (0., 0.)
+            };
+        }
+        let page_start = self.ratios[..index]
+            .iter()
+            .map(|r| f64::from(*r))
+            .sum::<f64>();
+        let anchor = self.anchor.page_index.min(self.pages.len() - 1);
+        let correction = if index < anchor {
+            f64::from(actual_ratio - self.ratios[index])
+        } else {
+            0.
+        };
+        let viewport_start = self.ratios[..anchor]
+            .iter()
+            .map(|r| f64::from(*r))
+            .sum::<f64>()
+            + correction
+            + f64::from(if index == anchor {
+                actual_ratio
+            } else {
+                self.ratios[anchor]
+            }) * self.anchor.offset();
+        let viewport_end =
+            viewport_start + f64::from(self.viewport_height / self.viewport_width.max(1.));
+        let ratio = f64::from(actual_ratio);
+        (
+            ((viewport_start - page_start) / ratio).clamp(0., 1.),
+            ((viewport_end - page_start) / ratio).clamp(0., 1.),
+        )
+    }
+    fn window_request(
+        &self,
+        index: usize,
+        dimensions: reader_engine::PageDimensions,
+    ) -> Option<(u32, (f64, f64), usize)> {
+        if index >= self.pages.len()
+            || self.ratios.len() != self.pages.len()
+            || dimensions.width == 0
+            || dimensions.height == 0
+        {
+            return None;
+        }
+        let ratio = dimensions.height as f32 / dimensions.width as f32;
+        let width = if self.mode == ReadingMode::Webtoon {
+            self.target_width
+        } else {
+            Self::decode_width(
+                self.target_width as f32
+                    * (self.viewport_height / (ratio * self.viewport_width.max(1.))).min(1.),
+                1.,
+            )
+        };
+        let anchor = self.anchor.page_index.min(self.pages.len() - 1);
+        let mut end = anchor;
+        if self.mode == ReadingMode::Webtoon {
+            let ratio_at = |i| if i == index { ratio } else { self.ratios[i] };
+            let mut covered =
+                ratio_at(anchor) * self.viewport_width * (1. - self.anchor.offset() as f32);
+            while end + 1 < self.pages.len() && covered < self.viewport_height {
+                end += 1;
+                covered += ratio_at(end) * self.viewport_width;
+            }
+        }
+        Some((
+            width,
+            self.span_with_ratio(index, ratio),
+            (READER_MODEL_BYTES / (end - anchor + 1)).min(reader_engine::DISPLAY_WINDOW_BYTES),
+        ))
+    }
+    fn has_visible_pixels(&self, index: usize) -> bool {
+        self.retained.contains(&index)
+            && self.decoded_windows.get(&index).is_some_and(|plan| {
+                let (start, end) = self.visible_span(index);
+                plan.covers(start, end)
+            })
+    }
+    fn quality_width(&self, index: usize) -> u32 {
+        if self.mode == ReadingMode::Webtoon {
+            return self.target_width;
+        }
+        let fitted =
+            (self.viewport_height / (self.ratios[index] * self.viewport_width.max(1.))).min(1.);
+        Self::decode_width(self.target_width as f32 * fitted, 1.)
+    }
+    fn window_budget(&self) -> usize {
+        let visible = self.visible_end() + 1 - self.anchor.page_index.min(self.pages.len() - 1);
+        (READER_MODEL_BYTES / visible).min(reader_engine::DISPLAY_WINDOW_BYTES)
+    }
+    fn needs_window(&self, index: usize) -> bool {
+        self.decoded_windows.get(&index).is_some_and(|plan| {
+            let (start, end) = self.visible_span(index);
+            !plan.covers_with_margin(start, end) || plan.byte_len() > self.window_budget()
+        })
     }
 
     fn retained_bytes_without(&self, index: usize) -> usize {
@@ -119,6 +244,64 @@ impl Reader {
             PageInput::Local { id, .. } => id.clone(),
             PageInput::Remote(p) => p.id.clone(),
         }
+    }
+}
+fn task_window_request(
+    reader: &Reader,
+    generation: u64,
+    task: &ImageTask,
+    dimensions: reader_engine::PageDimensions,
+) -> Result<(u32, (f64, f64), usize)> {
+    if generation != task.generation {
+        return Err(text::tr("Operation cancelled"));
+    }
+    reader
+        .window_request(task.index, dimensions)
+        .ok_or_else(|| text::tr("Operation cancelled"))
+}
+
+/// Encoded chapter bytes are lossless, generation-scoped and memory-only.
+/// Re-windowing a long page must not repeat a potentially slow source request.
+#[derive(Default)]
+struct EncodedPages {
+    generation: u64,
+    pages: BTreeMap<usize, Arc<Vec<u8>>>,
+    order: std::collections::VecDeque<usize>,
+    bytes: usize,
+}
+impl EncodedPages {
+    fn read(
+        &mut self,
+        generation: u64,
+        index: usize,
+        fetch: impl FnOnce() -> Result<Vec<u8>>,
+    ) -> Result<Arc<Vec<u8>>> {
+        if self.generation != generation {
+            self.pages.clear();
+            self.order.clear();
+            self.bytes = 0;
+            self.generation = generation;
+        }
+        if let Some(bytes) = self.pages.get(&index) {
+            self.order.retain(|i| *i != index);
+            self.order.push_back(index);
+            return Ok(bytes.clone());
+        }
+        let bytes = Arc::new(fetch()?);
+        while self.bytes + bytes.len() > 32 * 1024 * 1024 {
+            let Some(old) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(old) = self.pages.remove(&old) {
+                self.bytes -= old.len();
+            }
+        }
+        if bytes.len() <= 32 * 1024 * 1024 {
+            self.bytes += bytes.len();
+            self.pages.insert(index, bytes.clone());
+            self.order.push_back(index);
+        }
+        Ok(bytes)
     }
 }
 fn resume_chapter<'a>(
@@ -158,6 +341,7 @@ struct CatalogueState {
     catalogue: String,
     page: usize,
     has_more: bool,
+    page_error: String,
     selected: usize,
     filters_active: bool,
 }
@@ -178,9 +362,9 @@ struct View {
     query: String,
     page: usize,
     has_more: bool,
+    catalogue_page_error: String,
     pending: Option<ReadingProgress>,
     category: usize,
-    category_target: usize,
     settings_package: Option<String>,
     source_filters: crate::source_filters::FilterSet,
     source_browser: crate::source_browser::SourceBrowser,
@@ -201,6 +385,46 @@ fn reader_series_title(view: &View) -> Option<&str> {
 struct ImageTask {
     generation: u64,
     index: usize,
+}
+fn update_entry_membership(
+    state: &mut reader_domain::ReaderState,
+    series: &reader_domain::SeriesId,
+    action: &str,
+) -> reader_domain::Result<()> {
+    if let Some(category) = action.strip_prefix("category:") {
+        if !state.categories.iter().any(|entry| entry.id == category) {
+            return Err(reader_domain::Error::Invalid(text::tr(
+                "Category is no longer available.",
+            )));
+        }
+        let entry = state
+            .library
+            .iter_mut()
+            .find(|entry| &entry.series == series)
+            .ok_or_else(|| {
+                reader_domain::Error::Invalid(text::tr("Title is no longer in your library."))
+            })?;
+        if !entry.categories.remove(category) {
+            entry.categories.insert(category.to_owned());
+        }
+    } else if action == "remove" {
+        state.library.retain(|entry| &entry.series != series);
+    } else if action == "add" {
+        if !state.library.iter().any(|entry| &entry.series == series) {
+            state.library.push(reader_domain::LibraryEntry {
+                series: series.clone(),
+                categories: BTreeSet::new(),
+                preferences: None,
+                bookmarked: false,
+                added_at: now(),
+            });
+        }
+    } else {
+        return Err(reader_domain::Error::Invalid(text::tr(
+            "Unknown title action.",
+        )));
+    }
+    Ok(())
 }
 struct Controller {
     services: Services,
@@ -470,6 +694,14 @@ impl Controller {
             }
             5 => {
                 if let Some(series) = &view.series {
+                    let detail_key =
+                        serde_json::to_string(&series.id).expect("SeriesId serializes");
+                    if ui.get_detail_series_key().as_str() != detail_key {
+                        ui.set_chapters_descending(crate::reading_preferences::chapter_descending(
+                            &series.id,
+                        ));
+                    }
+                    ui.set_detail_series_key(detail_key.into());
                     ui.set_heading(series.title.clone().into());
                     ui.set_series_title(series.title.clone().into());
                     ui.set_series_description(series.description.clone().into());
@@ -489,10 +721,8 @@ impl Controller {
                             .collect::<Vec<_>>(),
                     )));
                     let key = crate::artwork::key(series);
-                    if ui.get_series_artwork_key().as_str() != key {
-                        ui.set_series_poster(slint::Image::default());
-                    }
                     ui.set_series_artwork_key(key.into());
+                    ui.set_series_poster(self.artwork.cached_image(series).unwrap_or_default());
                     ui.set_in_library(snapshot.library.iter().any(|l| l.series == series.id));
                     view.chapters = snapshot
                         .chapters
@@ -564,12 +794,6 @@ impl Controller {
         if view.section == 5 && ui.get_chapters_descending() {
             view.rows.reverse();
         }
-        let previous_posters = ui
-            .get_items()
-            .iter()
-            .filter(|r| r.poster.size().width > 0)
-            .map(|r| (r.artwork_key.to_string(), r.poster))
-            .collect::<BTreeMap<_, _>>();
         let clock = crate::timeline::TimelineClock::now();
         view.artwork_rows = view
             .rows
@@ -606,11 +830,12 @@ impl Controller {
                         .count();
                     let key = crate::artwork::key(s);
                     ItemRow {
+                        series_key: serde_json::to_string(&s.id).unwrap_or_default().into(),
                         title: s.title.clone().into(),
                         subtitle: text::chapter_count(unread, chapters.len()).into(),
                         badge: s.id.source_id.clone().into(),
                         bookmarked: snapshot.library.iter().any(|l| l.series == s.id),
-                        poster: previous_posters.get(&key).cloned().unwrap_or_default(),
+                        poster: self.artwork.cached_image(s).unwrap_or_default(),
                         artwork_key: key.into(),
                         completed: (chapters.len() - unread) as i32,
                         total: chapters.len() as i32,
@@ -680,7 +905,9 @@ impl Controller {
                         group: stamp.group.into(),
                         timestamp: stamp.timestamp.into(),
                         bookmarked: snapshot.bookmarks.iter().any(|b| b.chapter == c.id),
-                        poster: previous_posters.get(&key).cloned().unwrap_or_default(),
+                        poster: series
+                            .and_then(|series| self.artwork.cached_image(series))
+                            .unwrap_or_default(),
                         artwork_key: key.into(),
                         ..ItemRow::default()
                     }
@@ -705,6 +932,7 @@ impl Controller {
             ui.set_items(ModelRc::new(VecModel::from(items)));
         }
         ui.set_has_more(view.section == 3 && view.has_more);
+        ui.set_catalogue_page_error(view.catalogue_page_error.clone().into());
         ui.set_sources(ModelRc::new(VecModel::from(
             view.choices
                 .iter()
@@ -836,6 +1064,7 @@ impl Controller {
         ui.set_busy(false);
         ui.set_status("".into());
         ui.invoke_reset_catalogue_scroll();
+        ui.set_catalogue_page_error("".into());
         ui.set_source_query("".into());
         {
             let mut view = self.view();
@@ -854,6 +1083,7 @@ impl Controller {
             view.page = 0;
             view.has_more = false;
             view.saved_catalogue = None;
+            view.catalogue_page_error.clear();
             view.rows.clear();
             ui.set_source_title(choice.name.into());
             ui.set_source_has_filters(choice.filters && choice.enabled);
@@ -865,7 +1095,13 @@ impl Controller {
         self.browse(ui, kind, Some(String::new()), false);
     }
     fn request_artwork(&self, ui: &AppWindow, first: i32, last: i32) {
-        let mut view = self.view();
+        // Viewport changes can arrive while render publishes a new model.
+        // That render hydrates cached pixels itself; cold loads retry next turn.
+        let mut view = match self.view.try_lock() {
+            Ok(view) => view,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return,
+        };
         if view.section == 5 {
             let series = view.series.clone();
             drop(view);
@@ -907,18 +1143,6 @@ impl Controller {
                 .filter(|key| !key.is_empty())
                 .collect::<BTreeSet<_>>();
             self.artwork.retain(&desired);
-            for i in 0..model.row_count() {
-                if view
-                    .artwork_seen
-                    .get(&i)
-                    .is_none_or(|t| now.duration_since(*t).as_millis() > 600)
-                    && let Some(mut row) = model.row_data(i)
-                    && row.poster.size().width > 0
-                {
-                    row.poster = slint::Image::default();
-                    model.set_row_data(i, row);
-                }
-            }
             view.artwork_pruned = Some(now);
         }
         drop(view);
@@ -943,7 +1167,9 @@ impl Controller {
             let mut view = self.view();
             view.section = section;
             view.has_more = false;
-            if section != 3 {
+            if section == 0 {
+                view.query = ui.get_library_query().to_string();
+            } else if section != 3 {
                 view.query.clear();
             }
         }
@@ -1000,6 +1226,7 @@ impl Controller {
             view.rows.clear();
             view.has_more = false;
             view.page = 0;
+            view.catalogue_page_error.clear();
             if let Some(mut saved) = view.saved_catalogue.take()
                 && let Some(selected) = view.choices.iter().position(|c| c.id == saved.source_id)
             {
@@ -1009,6 +1236,7 @@ impl Controller {
                 view.catalogue = saved.catalogue.clone();
                 view.page = saved.page;
                 view.has_more = saved.has_more;
+                view.catalogue_page_error = saved.page_error.clone();
                 view.selected = saved.selected;
                 view.filters_active = saved.filters_active;
                 view.saved_catalogue = Some(saved);
@@ -1027,6 +1255,15 @@ impl Controller {
         if next && ui.get_busy() {
             return;
         }
+        if next {
+            let view = self.view();
+            if view.section != 3
+                || !ui.get_source_catalog_open()
+                || (!view.has_more && view.page > 0)
+            {
+                return;
+            }
+        }
         let choice = {
             let view = self.view();
             view.choices.get(view.selected).cloned()
@@ -1042,12 +1279,18 @@ impl Controller {
         let (op, query, page, catalogue, filters) = {
             let mut view = self.view();
             view.section = 3;
+            view.catalogue_page_error.clear();
+            if let Some(saved) = &mut view.saved_catalogue {
+                saved.page_error.clear();
+            }
+            ui.set_catalogue_page_error("".into());
             if let Some(query) = query {
                 view.query = query;
             }
             if !next {
                 view.page = 0;
                 view.has_more = false;
+                view.saved_catalogue = None;
                 ui.set_has_more(false);
                 ui.set_catalogue_scroll_y(0.);
                 view.rows.clear();
@@ -1078,25 +1321,117 @@ impl Controller {
             )
         };
         let source_id = choice.id.clone();
-        self.task(ui, move |app,cancel| {
-            let source=app.services.sources.source(&choice.package).map_err(error)?;
-            let response=source.call_cancelled(op,&json!({"sourceId":choice.id,"catalogue":catalogue,"query":query,"page":page,"filters":filters}),cancel).map_err(error)?;
-            let listing:reader_sources::Listing=serde_json::from_value(response).map_err(error)?;
-            let series=listing.items.into_iter().map(|s|app.services.series(&choice.id,s)).collect::<Vec<_>>();
-            Ok((series,listing.has_next_page))
-        },move |app,ui,(series,more)| {
-            let mut view=app.view();
-            if !next {view.rows.clear();}
-            for series in series {if !view.rows.iter().any(|r|matches!(r,Row::Series(s) if s.id == series.id)){view.rows.push(Row::Series(series));}}
-            view.has_more=more;view.page=page;
-            view.saved_catalogue=Some(CatalogueState {
-                source_id,
-                rows:view.rows.iter().filter_map(|r|if let Row::Series(s)=r {Some(s.clone())}else{None}).collect(),
-                query:view.query.clone(),catalogue:view.catalogue.clone(),page:view.page,
-                has_more:more,selected:view.selected,filters_active:view.filters_active,
-            });
-            drop(view);app.render(ui);
+        self.task(
+            ui,
+            move |app, cancel| {
+                // Keep source failures inside the successful task envelope so
+                // generation-checked completion owns pagination's retry state.
+                Ok((|| {
+                    let source = app
+                        .services
+                        .sources
+                        .source(&choice.package)
+                        .map_err(error)?;
+                    let response = source
+                        .call_cancelled(
+                            op,
+                            &json!({
+                                "sourceId": choice.id,
+                                "catalogue": catalogue,
+                                "query": query,
+                                "page": page,
+                                "filters": filters,
+                            }),
+                            cancel,
+                        )
+                        .map_err(error)?;
+                    let listing: reader_sources::Listing =
+                        serde_json::from_value(response).map_err(error)?;
+                    let series = listing
+                        .items
+                        .into_iter()
+                        .map(|s| app.services.series(&choice.id, s))
+                        .collect::<Vec<_>>();
+                    Ok((series, listing.has_next_page))
+                })())
+            },
+            move |app, ui, result| app.complete_browse(ui, source_id, page, next, result),
+        );
+    }
+    fn complete_browse(
+        &self,
+        ui: &AppWindow,
+        source_id: String,
+        page: usize,
+        next: bool,
+        result: Result<(Vec<Series>, bool)>,
+    ) {
+        let mut view = self.view();
+        let result = result.and_then(|(series, more)| {
+            if more
+                && !series.iter().any(|series| {
+                    !view
+                        .rows
+                        .iter()
+                        .any(|r| matches!(r, Row::Series(s) if s.id == series.id))
+                })
+            {
+                Err(text::tr(
+                    "The source returned no new titles. Retry to load this page again.",
+                ))
+            } else {
+                Ok((series, more))
+            }
         });
+        let (series, more) = match result {
+            Ok(result) => result,
+            Err(error) => {
+                view.catalogue_page_error = text::tr(&error);
+                if let Some(saved) = &mut view.saved_catalogue {
+                    saved.page_error = text::tr(&error);
+                }
+                ui.set_catalogue_page_error(view.catalogue_page_error.clone().into());
+                return;
+            }
+        };
+        view.catalogue_page_error.clear();
+        if !next {
+            view.rows.clear();
+        }
+        for series in series {
+            if !view
+                .rows
+                .iter()
+                .any(|r| matches!(r,Row::Series(s) if s.id == series.id))
+            {
+                view.rows.push(Row::Series(series));
+            }
+        }
+        view.has_more = more;
+        view.page = page;
+        view.saved_catalogue = Some(CatalogueState {
+            source_id,
+            rows: view
+                .rows
+                .iter()
+                .filter_map(|r| {
+                    if let Row::Series(s) = r {
+                        Some(s.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+            query: view.query.clone(),
+            catalogue: view.catalogue.clone(),
+            page: view.page,
+            has_more: more,
+            selected: view.selected,
+            filters_active: view.filters_active,
+            page_error: String::new(),
+        });
+        drop(view);
+        self.render(ui);
     }
     fn open_series(self: &Arc<Self>, ui: &AppWindow, series: Series) {
         ui.set_detail_origin(self.view().section);
@@ -1112,9 +1447,14 @@ impl Controller {
             .snapshot()
             .map(|s| s.chapters.iter().any(|c| c.id.series == series.id))
             .unwrap_or(false);
+        // The catalogue already gives us enough to show the hero. Publish it
+        // before starting provider work, so slow chapter lists never hold the
+        // user on Browse or leave the previous entry's chapters on screen.
+        ui.set_status("".into());
+        ui.set_busy(false);
+        self.render(ui);
         if cached {
             self.invalidate();
-            self.render(ui);
             self.refresh_download_states(ui);
             return;
         }
@@ -1148,15 +1488,14 @@ impl Controller {
                     .find(|p| p.chapter == chapter)
                     .cloned();
                 let completed = progress.as_ref().is_some_and(|p| p.completed);
-                let mode = progress.as_ref().map(|p| p.mode).unwrap_or_else(|| {
-                    state
-                        .library
-                        .iter()
-                        .find(|l| l.series == chapter.series)
-                        .and_then(|l| l.preferences.as_ref())
-                        .unwrap_or(&state.preferences)
-                        .mode
-                });
+                let mode_choice = reader_modes::load(
+                    &chapter.series,
+                    reader_modes::legacy_mode(&state, &chapter.series),
+                )
+                .map_err(error)?;
+                let automatic_mode =
+                    reader_modes::automatic_for_state(&state, &chapter.series, None);
+                let mode = mode_choice.resolve(automatic_mode);
                 let anchor = progress.map(|p| p.anchor).unwrap_or_default();
                 if let Ok(offline) = app.services.downloads.offline(&chapter) {
                     let pages = offline
@@ -1198,15 +1537,26 @@ impl Controller {
                         desired_anchor: usize::MAX,
                         decoded_bytes: BTreeMap::new(),
                         decoded_widths: BTreeMap::new(),
+                        decoded_windows: BTreeMap::new(),
                         target_width: 0,
                         viewport_width: 0.,
                         viewport_height: 0.,
                         anchor,
                         mode,
+                        mode_choice,
+                        automatic_mode,
+                        mode_switching: false,
                         completed,
                     })
                 } else {
                     let (source, pages) = app.services.pages(&chapter, cancel)?;
+                    let automatic_mode = reader_modes::automatic_for_state(
+                        &state,
+                        &chapter.series,
+                        Some(&source.descriptor().name),
+                    );
+                    let mode = mode_choice.resolve(automatic_mode);
+
                     let ratios = pages
                         .iter()
                         .map(|p| {
@@ -1230,11 +1580,15 @@ impl Controller {
                         desired_anchor: usize::MAX,
                         decoded_bytes: BTreeMap::new(),
                         decoded_widths: BTreeMap::new(),
+                        decoded_windows: BTreeMap::new(),
                         target_width: 0,
                         viewport_width: 0.,
                         viewport_height: 0.,
                         anchor,
                         mode,
+                        mode_choice,
+                        automatic_mode,
+                        mode_switching: false,
                         completed,
                     })
                 }
@@ -1246,6 +1600,22 @@ impl Controller {
                 reader.anchor =
                     reader_engine::resolve_anchor(&reader.anchor, &ids).unwrap_or_default();
                 let state = app.services.domain.snapshot().unwrap_or_default();
+                reader.mode_choice = match reader_modes::load(
+                    &reader.chapter.series,
+                    reader_modes::legacy_mode(&state, &reader.chapter.series),
+                ) {
+                    Ok(choice) => choice,
+                    Err(message) => {
+                        ui.set_status(message.into());
+                        return;
+                    }
+                };
+                reader.mode = reader.mode_choice.resolve(reader.automatic_mode);
+                // A manual selection while chapter metadata was loading must
+                // win, and old-visible-reader image tasks need a fresh epoch.
+                app.flush();
+                app.invalidate();
+
                 let mut view = app.view();
                 view.series = state
                     .series
@@ -1261,10 +1631,12 @@ impl Controller {
                 view.chapters.sort_by_key(|c| c.source_order);
                 let index = reader.anchor.page_index;
                 let mode = reader.mode;
+                let choice = reader.mode_choice;
                 view.reader = Some(reader);
                 view.section = 6;
                 drop(view);
                 app.mount_pages(ui);
+                ui.set_reader_mode_choice(choice.selection());
                 ui.set_reading_mode(mode_index(mode));
                 ui.set_current_page(index as i32);
                 app.restore_position(ui);
@@ -1314,6 +1686,50 @@ impl Controller {
             + reader.ratios[index] * reader.anchor.offset() as f32;
         ui.set_scroll_y(-offset * ui.get_reader_width());
     }
+    fn choose_reader_mode(
+        &self,
+        ui: &AppWindow,
+        index: i32,
+        write: impl FnOnce(&reader_domain::SeriesId, ModeChoice) -> Result<()>,
+    ) {
+        let (series, previous) = {
+            let view = self.view();
+            let Some(reader) = view.reader.as_ref() else {
+                return;
+            };
+            (reader.chapter.series.clone(), reader.mode_choice)
+        };
+        let Some(choice) = ModeChoice::from_selection(index) else {
+            ui.set_reader_mode_choice(previous.selection());
+            return;
+        };
+        if let Err(message) = write(&series, choice) {
+            ui.set_reader_mode_choice(previous.selection());
+            ui.set_status(format!("{}: {message}", text::tr("Could not save reading mode")).into());
+            return;
+        }
+        let mode = {
+            let mut view = self.view();
+            let Some(reader) = view.reader.as_mut() else {
+                return;
+            };
+            if reader.chapter.series != series {
+                return;
+            }
+            reader.mode_choice = choice;
+            reader.mode = choice.resolve(reader.automatic_mode);
+            reader.mode_switching = true;
+            reader.budget_blocked.clear();
+            reader.mode
+        };
+        ui.set_reader_mode_choice(choice.selection());
+        ui.set_reading_mode(mode_index(mode));
+        self.restore_position(ui);
+        if let Some(reader) = self.view().reader.as_mut() {
+            reader.mode_switching = false;
+        }
+        self.step_page(ui, 0);
+    }
     fn reflow(&self, ui: &AppWindow, width: f32, height: f32) {
         if !width.is_finite() || width <= 0. || !height.is_finite() || height <= 0. {
             return;
@@ -1342,7 +1758,7 @@ impl Controller {
         let Some(reader) = &mut view.reader else {
             return;
         };
-        if reader.mode != ReadingMode::Webtoon {
+        if reader.mode != ReadingMode::Webtoon || reader.mode_switching {
             return;
         }
         // A changed layout restores the logical anchor before interpreting pixels.
@@ -1362,7 +1778,7 @@ impl Controller {
         reader.anchor = ResumeAnchor::new(reader.page_id(index), index, f64::from(fraction))
             .unwrap_or_default();
         let last = reader.pages.len() - 1;
-        let complete = (index..=last).all(|i| reader.retained.contains(&i))
+        let complete = (index..=last).all(|i| reader.has_visible_pixels(i))
             && offset + viewport >= reader.ratios.iter().sum::<f32>() * width - 2.;
         reader.completed |= complete;
         let progress = ReadingProgress {
@@ -1388,6 +1804,12 @@ impl Controller {
         let Some(reader) = &mut view.reader else {
             return;
         };
+        if reader.viewport_width <= 0. {
+            reader.viewport_width = ui.get_reader_width();
+        }
+        if reader.viewport_height <= 0. {
+            reader.viewport_height = ui.get_reader_viewport_height();
+        }
         let index = index.min(reader.pages.len().saturating_sub(1));
         let target_width = Reader::decode_width(
             reader.viewport_width.max(ui.get_reader_width()),
@@ -1398,15 +1820,7 @@ impl Controller {
             reader.desired_anchor = index;
             reader.target_width = target_width;
         }
-        let mut end = index;
-        if reader.mode == ReadingMode::Webtoon && reader.viewport_width > 0. {
-            let mut covered =
-                reader.ratios[index] * reader.viewport_width * (1. - reader.anchor.offset() as f32);
-            while end + 1 < reader.pages.len() && covered < reader.viewport_height {
-                end += 1;
-                covered += reader.ratios[end] * reader.viewport_width;
-            }
-        }
+        let end = reader.visible_end();
         let keep = (index.saturating_sub(1)..=(end + 1).min(reader.pages.len() - 1))
             .collect::<BTreeSet<_>>();
         reader.desired = keep.clone();
@@ -1434,13 +1848,16 @@ impl Controller {
             }
             reader.decoded_bytes.remove(&old);
             reader.decoded_widths.remove(&old);
+            reader.decoded_windows.remove(&old);
         }
         reader.retained.retain(|i| keep.contains(i));
         // Visible images precede the one-page prefetch window.
         for target in (index..=end).chain(keep.iter().copied().filter(|i| *i < index || *i > end)) {
             if !reader.requested.contains(&target)
                 && (!reader.retained.contains(&target)
-                    || reader.decoded_widths.get(&target).copied().unwrap_or(0) < target_width)
+                    || reader.decoded_widths.get(&target).copied().unwrap_or(0)
+                        < reader.quality_width(target)
+                    || reader.needs_window(target))
                 && !reader.failed.contains(&target)
                 && !reader.budget_blocked.contains(&target)
             {
@@ -1461,6 +1878,7 @@ impl Controller {
         receiver: mpsc::Receiver<ImageTask>,
         ui: slint::Weak<AppWindow>,
     ) {
+        let mut encoded = EncodedPages::default();
         for task in receiver {
             let Some(app) = app.upgrade() else {
                 break;
@@ -1470,6 +1888,9 @@ impl Controller {
             }
             let input = {
                 let mut view = app.view();
+                if app.generation.load(Ordering::Acquire) != task.generation {
+                    continue;
+                }
                 view.reader.as_mut().and_then(|r| {
                     if !r.desired.contains(&task.index) {
                         r.requested.remove(&task.index);
@@ -1478,10 +1899,10 @@ impl Controller {
                     r.pages
                         .get(task.index)
                         .cloned()
-                        .map(|p| (p, r.source.clone(), r.target_width))
+                        .map(|p| (p, r.source.clone()))
                 })
             };
-            let Some((input, source, display_width)) = input else {
+            let Some((input, source)) = input else {
                 continue;
             };
             let cancel = CancelToken::default();
@@ -1491,18 +1912,41 @@ impl Controller {
                 cancel.cancel();
             }
             let result: Result<_> = (|| {
-                let bytes = input.read(source.as_ref(), &cancel)?;
+                let bytes = encoded.read(task.generation, task.index, || {
+                    input.read(source.as_ref(), &cancel)
+                })?;
+                cancel.check().map_err(error)?;
                 let dimensions =
                     reader_engine::inspect_image(&bytes, reader_engine::DecodeLimits::default())
                         .map_err(error)?;
-                let image = reader_engine::decode_display_image(
+                let (display_width, (start, end), budget) = {
+                    let view = app.view();
+                    if app.generation.load(Ordering::Acquire) != task.generation
+                        || cancel.is_cancelled()
+                    {
+                        return Err(text::tr("Operation cancelled"));
+                    }
+                    let reader = view
+                        .reader
+                        .as_ref()
+                        .ok_or_else(|| text::tr("Source unavailable"))?;
+                    task_window_request(
+                        reader,
+                        app.generation.load(Ordering::Acquire),
+                        &task,
+                        dimensions,
+                    )?
+                };
+                let image = reader_engine::decode_display_window(
                     &bytes,
                     reader_engine::DecodeLimits::default(),
                     display_width,
-                    65536,
+                    start,
+                    end,
+                    budget,
                 )
                 .map_err(error)?;
-                Ok((dimensions, image))
+                Ok((dimensions, image, display_width))
             })();
             let _ = ui.upgrade_in_event_loop(move |ui| {
                 if app.generation.load(Ordering::Acquire) != task.generation {
@@ -1522,20 +1966,34 @@ impl Controller {
                 }
                 let mut loaded = false;
                 match result {
-                    Ok((dimensions, image)) => {
-                        // Replacing a retained preview consumes only the new
-                        // image's accounting slot, not both versions' slots.
+                    Ok((dimensions, window, display_width)) => {
+                        let image = &window.image;
+                        let actual_ratio = dimensions.height as f32 / dimensions.width as f32;
+                        let (start, end) = reader.span_with_ratio(task.index, actual_ratio);
+                        let current_budget = reader
+                            .window_request(task.index, dimensions)
+                            .map(|r| r.2)
+                            .unwrap_or(0);
+                        if !window.plan.covers(start, end)
+                            || window.plan.byte_len() > current_budget
+                        {
+                            let current = reader.anchor.page_index;
+                            drop(view);
+                            app.request_images(&ui, current);
+                            return;
+                        }
                         let mut used = reader.retained_bytes_without(task.index);
-                        if task.index == reader.anchor.page_index {
+                        let visible = reader.anchor.page_index..=reader.visible_end();
+                        if visible.contains(&task.index) {
                             let mut victims = reader
                                 .retained
                                 .iter()
                                 .copied()
-                                .filter(|i| *i != task.index)
+                                .filter(|i| *i != task.index && !visible.contains(i))
                                 .collect::<Vec<_>>();
                             victims.sort_by_key(|i| std::cmp::Reverse(i.abs_diff(task.index)));
                             for victim in victims {
-                                if used.saturating_add(image.as_raw().len()) <= 64 * 1024 * 1024 {
+                                if used.saturating_add(image.as_raw().len()) <= READER_MODEL_BYTES {
                                     break;
                                 }
                                 used = used.saturating_sub(
@@ -1543,6 +2001,7 @@ impl Controller {
                                 );
                                 reader.retained.remove(&victim);
                                 reader.decoded_widths.remove(&victim);
+                                reader.decoded_windows.remove(&victim);
                                 reader.budget_blocked.insert(victim);
                                 if let Some(mut old) = model.row_data(victim) {
                                     old.tiles = ModelRc::default();
@@ -1552,21 +2011,32 @@ impl Controller {
                                 }
                             }
                         }
-                        if used.saturating_add(image.as_raw().len()) > 64 * 1024 * 1024 {
+                        if used.saturating_add(image.as_raw().len()) > READER_MODEL_BYTES {
                             reader.budget_blocked.insert(task.index);
                             return;
                         }
                         loaded = true;
+                        // Free the old Slint buffers BEFORE allocating replacement
+                        // tiles. Both writes happen in one UI turn, so a frame
+                        // never observes an empty replacement between them.
+                        row.tiles = ModelRc::default();
+                        row.image = slint::Image::default();
+                        model.set_row_data(task.index, row.clone());
+                        reader.decoded_bytes.remove(&task.index);
                         reader
                             .decoded_bytes
                             .insert(task.index, image.as_raw().len());
                         reader.decoded_widths.insert(task.index, display_width);
+                        reader.decoded_windows.insert(task.index, window.plan);
+                        reader.budget_blocked.clear();
                         reader.ratios[task.index] =
                             dimensions.height as f32 / dimensions.width as f32;
-                        row.tiles = ModelRc::new(VecModel::from(display_tiles(
+                        row.tiles = ModelRc::new(VecModel::from(display_window_tiles(
                             image.as_raw(),
                             image.width(),
                             image.height(),
+                            window.plan.first_row,
+                            window.plan.full_height,
                         )));
                         row.loaded = true;
                         row.error = "".into();
@@ -1611,7 +2081,7 @@ impl Controller {
                         if let Some(reader) = &mut view.reader {
                             let index = reader.anchor.page_index;
                             reader.completed |=
-                                index + 1 == reader.pages.len() && reader.retained.contains(&index);
+                                index + 1 == reader.pages.len() && reader.has_visible_pixels(index);
                             let progress = ReadingProgress {
                                 chapter: reader.chapter.clone(),
                                 anchor: reader.anchor.clone(),
@@ -1651,7 +2121,7 @@ impl Controller {
         };
         reader.anchor =
             ResumeAnchor::new(reader.page_id(index), index, fraction).unwrap_or_default();
-        reader.completed |= reader.retained.contains(&index)
+        reader.completed |= reader.has_visible_pixels(index)
             && index + 1 == reader.pages.len()
             && reader.mode != ReadingMode::Webtoon;
         let progress = ReadingProgress {
@@ -1777,6 +2247,71 @@ impl Controller {
             });
         });
     }
+    fn entry_action(self: &Arc<Self>, ui: &AppWindow, key: &str, action: &str) {
+        if action == "categories" {
+            ui.set_entry_categories(ModelRc::new(VecModel::from(Vec::<EntryCategoryRow>::new())));
+        }
+        let result = (|| -> Result<()> {
+            let id: reader_domain::SeriesId = serde_json::from_str(key).map_err(error)?;
+            let snapshot = self.services.domain.snapshot().map_err(error)?;
+            let series = snapshot
+                .series
+                .iter()
+                .find(|series| series.id == id)
+                .cloned()
+                .ok_or_else(|| text::tr("Title is no longer available."))?;
+            if action == "refresh" {
+                self.task(
+                    ui,
+                    move |app, cancel| app.services.details(&series, cancel),
+                    |app, ui, (series, chapters)| {
+                        let mut view = app.view();
+                        if view
+                            .series
+                            .as_ref()
+                            .is_some_and(|current| current.id == series.id)
+                        {
+                            view.series = Some(series);
+                            view.chapters = chapters;
+                        }
+                        drop(view);
+                        app.render(ui);
+                    },
+                );
+                return Ok(());
+            }
+            if action != "categories" {
+                self.services
+                    .domain
+                    .update(|state| update_entry_membership(state, &id, action))
+                    .map_err(error)?;
+                self.render(ui);
+            }
+            if action == "categories" || action.starts_with("category:") {
+                let snapshot = self.services.domain.snapshot().map_err(error)?;
+                let entry = snapshot
+                    .library
+                    .iter()
+                    .find(|entry| entry.series == id)
+                    .ok_or_else(|| text::tr("Title is no longer in your library."))?;
+                ui.set_entry_categories(ModelRc::new(VecModel::from(
+                    snapshot
+                        .categories
+                        .iter()
+                        .map(|category| EntryCategoryRow {
+                            id: category.id.clone().into(),
+                            label: category.name.clone().into(),
+                            checked: entry.categories.contains(&category.id),
+                        })
+                        .collect::<Vec<_>>(),
+                )));
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            ui.set_status(error.into());
+        }
+    }
     fn item_action(self: &Arc<Self>, ui: &AppWindow, index: usize, action: &str) {
         if action == "clear-history" {
             if let Err(e) = self.services.domain.update(|state| {
@@ -1795,27 +2330,6 @@ impl Controller {
                     state.history.retain(|h| h.chapter != chapter.id);
                     Ok(())
                 }) {
-                    ui.set_status(error(e).into());
-                }
-                self.render(ui);
-            }
-            return;
-        }
-        if action == "category" {
-            if let Some(Row::Series(series)) = row {
-                let category = self.view().category_target;
-                let result = self.services.domain.update(|state| {
-                    if category > 0
-                        && let Some(id) = state.categories.get(category - 1).map(|c| c.id.clone())
-                        && let Some(entry) =
-                            state.library.iter_mut().find(|l| l.series == series.id)
-                        && !entry.categories.remove(&id)
-                    {
-                        entry.categories.insert(id);
-                    }
-                    Ok(())
-                });
-                if let Err(e) = result {
                     ui.set_status(error(e).into());
                 }
                 self.render(ui);
@@ -2005,23 +2519,42 @@ impl Controller {
 }
 // Texture dimensions stay bounded while logical progress continues to refer
 // to the original page. Full decode admission remains the engine's responsibility.
+#[cfg(test)]
 fn display_tiles(pixels: &[u8], width: u32, height: u32) -> Vec<TileRow> {
+    display_window_tiles(pixels, width, height, 0, height)
+}
+fn display_window_tiles(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    first_row: u32,
+    full_height: u32,
+) -> Vec<TileRow> {
     let stride = width as usize * 4;
     let tile_height = 2048usize;
-    pixels
-        .chunks(stride * tile_height)
-        .enumerate()
-        .map(|(index, chunk)| {
-            let rows = (chunk.len() / stride) as u32;
-            let buffer =
-                slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(chunk, width, rows);
-            TileRow {
-                image: slint::Image::from_rgba8(buffer),
-                offset: (index * tile_height) as f32 / height as f32,
-                fraction: rows as f32 / height as f32,
+    let mut tiles = Vec::new();
+    for top in (0..height).step_by(tile_height) {
+        let rows = 2048.min(height - top);
+        for left in (0..width).step_by(2048) {
+            let columns = 2048.min(width - left);
+            let mut buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(columns, rows);
+            for row in 0..rows as usize {
+                let source = (top as usize + row) * stride + left as usize * 4;
+                let target = row * columns as usize * 4;
+                buffer.make_mut_bytes()[target..target + columns as usize * 4]
+                    .copy_from_slice(&pixels[source..source + columns as usize * 4]);
             }
-        })
-        .collect()
+            tiles.push(TileRow {
+                image: slint::Image::from_rgba8(buffer),
+                offset: (first_row + top) as f32 / full_height as f32,
+                fraction: rows as f32 / full_height as f32,
+                bottom: (first_row + top + rows) as f32 / full_height as f32,
+                left: left as f32 / width as f32,
+                right: (left + columns) as f32 / width as f32,
+            });
+        }
+    }
+    tiles
 }
 fn mode_index(mode: ReadingMode) -> i32 {
     match mode {
@@ -2031,19 +2564,104 @@ fn mode_index(mode: ReadingMode) -> i32 {
         ReadingMode::Vertical => 3,
     }
 }
-fn reading_mode(index: i32) -> ReadingMode {
-    match index {
-        1 => ReadingMode::LeftToRight,
-        2 => ReadingMode::RightToLeft,
-        3 => ReadingMode::Vertical,
-        _ => ReadingMode::Webtoon,
-    }
-}
-
 struct ReaderScreencap {
     width: u32,
     height: u32,
     pixels: Vec<u8>,
+}
+enum FrozenScreencap {
+    Device(ReaderScreencap),
+    Chapter(Box<ChapterScreencap>),
+}
+struct ChapterScreencap {
+    viewport: crate::chapter_capture::Rect,
+    reference: usize,
+    pages: Vec<crate::chapter_capture::PageRect>,
+    inputs: BTreeMap<usize, PageInput>,
+    source: Option<Source>,
+    background: [u8; 4],
+}
+fn capture_chapter_request(
+    app: &Controller,
+    ui: &AppWindow,
+    reference: i32,
+) -> Result<ChapterScreencap> {
+    use crate::chapter_capture::{PageRect, Rect};
+    let frame = ui.get_reader_capture_viewport();
+    let viewport = Rect {
+        x: f64::from(frame.x),
+        y: f64::from(frame.y),
+        width: f64::from(frame.width),
+        height: f64::from(frame.height),
+    };
+    let reference = usize::try_from(reference).map_err(error)?;
+    let view = app.view();
+    let reader = view
+        .reader
+        .as_ref()
+        .ok_or_else(|| text::tr("Chapter image is unavailable"))?;
+    let width = f64::from(ui.get_reader_width());
+    let model = ui.get_pages();
+    let mut pages = Vec::new();
+    let mut inputs = BTreeMap::new();
+    for index in 0..model.row_count() {
+        let Some(row) = model.row_data(index).filter(|row| row.loaded) else {
+            continue;
+        };
+        if ui.get_reading_mode() != 0 && index != ui.get_current_page() as usize {
+            continue;
+        }
+        let rect = chapter_capture_rect(&frame, width, ui.get_reading_mode(), &row);
+        if rect.x < viewport.x + viewport.width
+            && rect.x + rect.width > viewport.x
+            && rect.y < viewport.y + viewport.height
+            && rect.y + rect.height > viewport.y
+            && let Some(input) = reader.pages.get(index)
+        {
+            pages.push(PageRect { index, rect });
+            inputs.insert(index, input.clone());
+        }
+    }
+    let color = ui.get_reader_capture_background();
+    Ok(ChapterScreencap {
+        viewport,
+        reference,
+        pages,
+        inputs,
+        source: reader.source.clone(),
+        background: [color.red(), color.green(), color.blue(), color.alpha()],
+    })
+}
+// Match the reader's actual fit/centering geometry. The viewport and pan are
+// frozen by Slint immediately before opening the menu, rather than guessed
+// from a saved logical reading anchor or the device's physical resolution.
+fn chapter_capture_rect(
+    viewport: &crate::ReaderCaptureViewport,
+    width: f64,
+    mode: i32,
+    row: &PageRow,
+) -> crate::chapter_capture::Rect {
+    let x = f64::from(viewport.x + viewport.content_x)
+        + (f64::from(viewport.width).max(width) - width) / 2.;
+    let y = f64::from(viewport.y + viewport.content_y);
+    if mode == 0 {
+        crate::chapter_capture::Rect {
+            x,
+            y: y + f64::from(row.position) * width,
+            width,
+            height: width * f64::from(row.ratio),
+        }
+    } else {
+        let height = f64::from(viewport.height);
+        let image_width = width.min(height / f64::from(row.ratio));
+        let image_height = height.min(width * f64::from(row.ratio));
+        crate::chapter_capture::Rect {
+            x: x + (width - image_width) / 2.,
+            y: y + (height - image_height) / 2.,
+            width: image_width,
+            height: image_height,
+        }
+    }
 }
 fn capture_reader(ui: &AppWindow) -> Result<ReaderScreencap> {
     let size = ui.window().size();
@@ -2064,11 +2682,20 @@ fn wire_reader_context(app: &Arc<Controller>, ui: &AppWindow) {
     let screencap = Rc::new(RefCell::new(None));
     let exporting = Arc::new(AtomicBool::new(false));
     ui.on_reader_context_opening({
+        let app = app.clone();
         let weak = ui.as_weak();
         let screencap = screencap.clone();
-        move |_| {
+        move |index| {
             if let Some(ui) = weak.upgrade() {
-                *screencap.borrow_mut() = Some(capture_reader(&ui));
+                let capture = if crate::capture_settings::preferences(&ui).resolution
+                    == crate::capture_settings::CaptureResolution::Chapter
+                {
+                    capture_chapter_request(&app, &ui, index)
+                        .map(|capture| FrozenScreencap::Chapter(Box::new(capture)))
+                } else {
+                    capture_reader(&ui).map(FrozenScreencap::Device)
+                };
+                *screencap.borrow_mut() = Some((app.generation.load(Ordering::Acquire), capture));
             }
         }
     });
@@ -2145,8 +2772,37 @@ fn wire_reader_context(app: &Arc<Controller>, ui: &AppWindow) {
                 let image = (|| {
                     cancel.check().map_err(error)?;
                     if screen {
-                        let capture = snapshot
-                            .ok_or_else(|| text::tr("Reader screencap is unavailable"))??;
+                        let (captured_generation, capture) =
+                            snapshot.ok_or_else(|| text::tr("Reader screencap is unavailable"))?;
+                        if captured_generation != generation {
+                            return Err(text::tr("Image action cancelled"));
+                        }
+                        let capture = match capture? {
+                            FrozenScreencap::Device(capture) => capture,
+                            FrozenScreencap::Chapter(capture) => {
+                                let rendered = crate::chapter_capture::capture(
+                                    capture.viewport,
+                                    capture.reference,
+                                    &capture.pages,
+                                    capture.background,
+                                    |index| {
+                                        cancel.check().map_err(error)?;
+                                        capture
+                                            .inputs
+                                            .get(&index)
+                                            .ok_or_else(|| {
+                                                text::tr("Chapter image is unavailable")
+                                            })?
+                                            .read(capture.source.as_ref(), &cancel)
+                                    },
+                                )?;
+                                ReaderScreencap {
+                                    width: rendered.width,
+                                    height: rendered.height,
+                                    pixels: rendered.pixels,
+                                }
+                            }
+                        };
                         crate::reader_export::ExportImage::from_rgba_with_preferences(
                             capture.width,
                             capture.height,
@@ -2187,6 +2843,7 @@ pub fn run(services: Services) -> Result<()> {
     crate::appearance::init(&ui)?;
     crate::capture_settings::init(&ui)?;
     crate::image_storage::init(&ui)?;
+    crate::reading_preferences::init(&ui)?;
     let (sender, receiver) = mpsc::channel();
     let artwork = crate::artwork::ArtworkLoader::new(
         services.clone(),
@@ -2244,8 +2901,17 @@ pub fn run(services: Services) -> Result<()> {
     });
     wire!(on_library_sort_changed, |app, ui| app.render(&ui));
     wire!(on_chapter_order_changed, |app, ui, descending| {
-        ui.set_chapters_descending(descending);
-        app.render(&ui);
+        let series = app.view().series.as_ref().map(|series| series.id.clone());
+        if let Some(series) = series {
+            match crate::reading_preferences::save_chapter_order(&ui, &series, descending) {
+                Ok(()) => {
+                    app.render(&ui);
+                }
+                Err(error) => ui.set_status(
+                    format!("{}: {error}", text::tr("Could not save chapter order")).into(),
+                ),
+            }
+        }
     });
     wire!(on_navigate, |app, ui, section| app.navigate(&ui, section));
     wire!(on_return_to_catalogue, |app, ui| app
@@ -2430,31 +3096,11 @@ pub fn run(services: Services) -> Result<()> {
         .position(&ui, offset, width, height));
     wire!(on_page_step, |app, ui, step| app.step_page(&ui, step));
     wire!(on_chapter_step, |app, ui, step| app.step_chapter(&ui, step));
-    wire!(on_mode_changed, |app, ui, index| {
-        {
-            let mut view = app.view();
-            if let Some(reader) = &mut view.reader {
-                reader.mode = reading_mode(index);
-            }
-        }
-        ui.set_reading_mode(index);
-        app.step_page(&ui, 0);
-        let mode = reading_mode(index);
-        let series = app.view().series.as_ref().map(|s| s.id.clone());
-        let _ = app.services.domain.update(|state| {
-            state.preferences.mode = mode;
-            if let Some(library) = state
-                .library
-                .iter_mut()
-                .find(|l| Some(&l.series) == series.as_ref())
-            {
-                let mut preferences = library.preferences.clone().unwrap_or_default();
-                preferences.mode = mode;
-                library.preferences = Some(preferences);
-            }
-            Ok(())
-        });
-    });
+    wire!(on_mode_changed, |app, ui, index| app.choose_reader_mode(
+        &ui,
+        index,
+        reader_modes::save
+    ));
     wire!(on_download_chapter, |app, ui| {
         let chapter = app.view().reader.as_ref().map(|r| r.chapter.clone());
         if let Some(chapter) = chapter {
@@ -2646,9 +3292,8 @@ pub fn run(services: Services) -> Result<()> {
         app.view().category = index.max(0) as usize;
         app.render(&ui);
     });
-    wire!(on_category_assignment_selected, |app, _ui, index| {
-        app.view().category_target = index.max(0) as usize;
-    });
+    wire!(on_entry_action, |app, ui, key, action| app
+        .entry_action(&ui, &key, &action));
     wire!(on_setting_changed, |app, ui, key, value| {
         let package = { app.view().settings_package.clone() };
         if let Some(package) = package {
@@ -2758,6 +3403,389 @@ pub fn run(services: Services) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn tall_reader() -> Reader {
+        Reader {
+            chapter: ChapterId::new(reader_domain::SeriesId::new("fixture", "sharp"), "chapter"),
+            source: None,
+            pages: (0..2)
+                .map(|i| PageInput::Local {
+                    path: PathBuf::new(),
+                    id: format!("page-{i}"),
+                })
+                .collect(),
+            ratios: vec![20000. / 720.; 2],
+            requested: BTreeSet::new(),
+            retained: BTreeSet::new(),
+            desired: BTreeSet::new(),
+            failed: BTreeSet::new(),
+            budget_blocked: BTreeSet::new(),
+            desired_anchor: usize::MAX,
+            decoded_bytes: BTreeMap::new(),
+            decoded_widths: BTreeMap::new(),
+            decoded_windows: BTreeMap::new(),
+            target_width: 1280,
+            viewport_width: 390.,
+            viewport_height: 844.,
+            anchor: ResumeAnchor::new("page-0", 0, 0.).unwrap(),
+            mode: ReadingMode::Webtoon,
+            mode_choice: ModeChoice::Automatic,
+            automatic_mode: ReadingMode::Webtoon,
+            mode_switching: false,
+            completed: false,
+        }
+    }
+    #[test]
+    fn native_width_windows_follow_each_mode_density_and_zoom() {
+        let dimensions = reader_engine::PageDimensions {
+            width: 720,
+            height: 20000,
+        };
+        let mut reader = tall_reader();
+        for mode in [
+            ReadingMode::Webtoon,
+            ReadingMode::LeftToRight,
+            ReadingMode::RightToLeft,
+            ReadingMode::Vertical,
+        ] {
+            reader.mode = mode;
+            for dpr in [1., 1.25, 1.5, 2.75, 3.] {
+                for zoom in [0.75, 1., 1.5, 3.] {
+                    reader.viewport_width = (390_f32 * zoom).min(1100.);
+                    reader.target_width = Reader::decode_width(reader.viewport_width, dpr);
+                    let before = reader.anchor.clone();
+                    let (width, (start, end), budget) =
+                        reader.window_request(0, dimensions).unwrap();
+                    let plan =
+                        reader_engine::plan_display_window(dimensions, width, start, end, budget)
+                            .unwrap();
+                    assert_eq!(plan.width, width.min(720));
+                    if mode == ReadingMode::Webtoon && reader.viewport_width * dpr >= 720. {
+                        assert_eq!(plan.width, 720);
+                    }
+                    if mode != ReadingMode::Webtoon {
+                        assert!(
+                            width
+                                <= Reader::decode_width(
+                                    reader.viewport_height / (20000. / 720.) * dpr,
+                                    1.
+                                )
+                        );
+                    }
+                    assert!(plan.covers(start, end));
+                    assert!(plan.byte_len() <= reader.window_budget());
+                    assert!(
+                        READER_MODEL_BYTES + plan.byte_len() <= 64 * 1024 * 1024,
+                        "replacement headroom must include old+new buffers"
+                    );
+                    assert_eq!(reader.anchor, before);
+                }
+            }
+        }
+        // Unknown source dimensions must not request a whole tall page on the
+        // first load: actual probed ratio determines the visible row span.
+        reader = tall_reader();
+        reader.ratios = vec![1.5; 2];
+        let (width, (start, end), budget) = reader.window_request(0, dimensions).unwrap();
+        assert!(end < 0.1);
+        assert_eq!(width, 1280);
+        assert_eq!(
+            reader_engine::plan_display_window(dimensions, width, start, end, budget)
+                .unwrap()
+                .width,
+            720
+        );
+    }
+    #[test]
+    fn windows_refresh_before_exhaustion_and_partial_pages_cannot_complete() {
+        let dimensions = reader_engine::PageDimensions {
+            width: 720,
+            height: 20000,
+        };
+        let mut reader = tall_reader();
+        let (width, (start, end), budget) = reader.window_request(0, dimensions).unwrap();
+        let first =
+            reader_engine::plan_display_window(dimensions, width, start, end, budget).unwrap();
+        reader.retained.insert(0);
+        reader.decoded_windows.insert(0, first);
+        reader.decoded_bytes.insert(0, first.byte_len());
+        assert!(reader.has_visible_pixels(0));
+        assert!(!reader.needs_window(0));
+        let visible_rows = (end * 20000.).ceil() as u32;
+        reader.anchor = ResumeAnchor::new(
+            "page-0",
+            0,
+            f64::from(first.first_row + first.rows - visible_rows - 256) / 20000.,
+        )
+        .unwrap();
+        assert!(reader.has_visible_pixels(0));
+        assert!(
+            reader.needs_window(0),
+            "request ahead while old pixels still cover viewport"
+        );
+        for offset in [0.8, 0.1, 0.95, 0.0] {
+            reader.anchor = ResumeAnchor::new("page-0", 0, offset).unwrap();
+            let (width, (start, end), budget) = reader.window_request(0, dimensions).unwrap();
+            let next =
+                reader_engine::plan_display_window(dimensions, width, start, end, budget).unwrap();
+            reader.decoded_windows.insert(0, next);
+            reader.decoded_bytes.insert(0, next.byte_len());
+            assert!(reader.has_visible_pixels(0));
+            assert!(!reader.needs_window(0));
+        }
+        reader.retained.insert(1);
+        reader.decoded_windows.insert(1, first);
+        reader.anchor = ResumeAnchor::new("page-1", 1, 0.99).unwrap();
+        assert!(
+            !reader.has_visible_pixels(1),
+            "old top window is not a read bottom window"
+        );
+        let (width, (start, end), budget) = reader.window_request(1, dimensions).unwrap();
+        let bottom =
+            reader_engine::plan_display_window(dimensions, width, start, end, budget).unwrap();
+        reader.decoded_windows.insert(1, bottom);
+        assert!(reader.has_visible_pixels(1));
+        reader.anchor = ResumeAnchor::new("page-0", 0, 0.98).unwrap();
+        assert_eq!(reader.visible_end(), 1);
+        let mut total = 0;
+        for index in 0..2 {
+            let (w, (a, b), budget) = reader.window_request(index, dimensions).unwrap();
+            total += reader_engine::plan_display_window(dimensions, w, a, b, budget)
+                .unwrap()
+                .byte_len();
+        }
+        assert!(
+            total <= READER_MODEL_BYTES,
+            "both visible pages must fit together"
+        );
+    }
+    #[test]
+    fn stale_generation_and_shorter_reader_cannot_plan_old_page() {
+        let mut reader = tall_reader();
+        reader.pages.truncate(1);
+        reader.ratios.truncate(1);
+        let dimensions = reader_engine::PageDimensions {
+            width: 720,
+            height: 20000,
+        };
+        assert!(
+            task_window_request(
+                &reader,
+                2,
+                &ImageTask {
+                    generation: 1,
+                    index: 0
+                },
+                dimensions
+            )
+            .is_err()
+        );
+        assert!(
+            task_window_request(
+                &reader,
+                2,
+                &ImageTask {
+                    generation: 2,
+                    index: 19
+                },
+                dimensions
+            )
+            .is_err()
+        );
+        assert!(
+            task_window_request(
+                &reader,
+                2,
+                &ImageTask {
+                    generation: 2,
+                    index: 0
+                },
+                dimensions
+            )
+            .is_ok()
+        );
+    }
+    #[test]
+    fn moving_windows_reuse_encoded_source_bytes_and_generation_invalidates_cache() {
+        let mut cache = EncodedPages::default();
+        let mut requests = 0;
+        for _ in [0.0, 0.4, 0.8, 0.1, 0.0] {
+            let bytes = cache
+                .read(1, 0, || {
+                    requests += 1;
+                    Ok(vec![7; 1000])
+                })
+                .unwrap();
+            assert_eq!(bytes[0], 7);
+        }
+        assert_eq!(requests, 1, "window movement must not refetch source bytes");
+        cache
+            .read(1, 1, || {
+                requests += 1;
+                Ok(vec![9; 1000])
+            })
+            .unwrap();
+        cache
+            .read(1, 0, || {
+                requests += 1;
+                Ok(vec![7; 1000])
+            })
+            .unwrap();
+        assert_eq!(requests, 2);
+        cache
+            .read(2, 0, || {
+                requests += 1;
+                Ok(vec![8; 1000])
+            })
+            .unwrap();
+        assert_eq!(requests, 3);
+        assert!(cache.bytes <= 32 * 1024 * 1024);
+    }
+    #[test]
+    fn horizontal_tiles_preserve_source_pixels_and_partial_row_coordinates() {
+        let image = image::RgbaImage::from_fn(5000, 8, |x, y| {
+            image::Rgba([(x % 251) as u8, (x / 251) as u8, y as u8, 255])
+        });
+        let tiles = display_window_tiles(image.as_raw(), 5000, 8, 5000, 20000);
+        assert_eq!(tiles.len(), 3);
+        for (index, tile) in tiles.iter().enumerate() {
+            assert!(tile.image.size().width <= 2048 && tile.image.size().height <= 2048);
+            assert_eq!(tile.offset, 0.25);
+            assert_eq!(tile.bottom, 5008. / 20000.);
+            let pixels = tile.image.to_rgba8().unwrap();
+            for y in 0..8 {
+                for x in [0, pixels.width() - 1] {
+                    let pixel = pixels.as_slice()[(y * pixels.width() + x) as usize];
+                    let expected = image.get_pixel(index as u32 * 2048 + x, y);
+                    assert_eq!([pixel.r, pixel.g, pixel.b, pixel.a], expected.0);
+                }
+            }
+        }
+        assert_eq!(tiles[0].left, 0.);
+        assert_eq!(tiles.last().unwrap().right, 1.);
+        for pair in tiles.windows(2) {
+            assert_eq!(pair[0].right, pair[1].left);
+        }
+    }
+
+    #[test]
+    fn entry_category_membership_persists_without_changing_other_sources_or_progress() {
+        const MODE: &str = "READER_ENTRY_MEMBERSHIP_MODE";
+        const DIRECTORY: &str = "READER_ENTRY_MEMBERSHIP_DIRECTORY";
+        if let Ok(mode) = std::env::var(MODE) {
+            let store = reader_domain::DomainStore::open(std::path::Path::new(
+                &std::env::var(DIRECTORY).unwrap(),
+            ))
+            .unwrap();
+            let first = reader_domain::SeriesId::new("source-a", "same");
+            let second = reader_domain::SeriesId::new("source-b", "same");
+            if mode == "write" {
+                store
+                    .update(|state| {
+                        state.categories = vec![
+                            reader_domain::Category {
+                                id: "favorite-id".into(),
+                                name: "Favorites".into(),
+                            },
+                            reader_domain::Category {
+                                id: "other-id".into(),
+                                name: "Other".into(),
+                            },
+                        ];
+                        for id in [&first, &second] {
+                            state.series.push(Series {
+                                id: id.clone(),
+                                title: "Shared title".into(),
+                                description: String::new(),
+                                authors: vec![],
+                                genres: vec![],
+                                cover_url: None,
+                                canonical_url: None,
+                            });
+                            update_entry_membership(state, id, "add")?;
+                        }
+                        state.library[1].categories.insert("other-id".into());
+                        state.library[1].bookmarked = true;
+                        state.library[1].preferences = Some(reader_domain::ReaderPreferences {
+                            gap_pixels: 17,
+                            ..Default::default()
+                        });
+                        state.chapters.push(Chapter {
+                            id: ChapterId::new(first.clone(), "chapter"),
+                            title: "Chapter".into(),
+                            label: "1".into(),
+                            number: Some("1".into()),
+                            volume: None,
+                            source_order: 0,
+                            language: None,
+                            scanlator: None,
+                            uploaded_at: None,
+                        });
+                        state.progress.push(ReadingProgress {
+                            chapter: ChapterId::new(first.clone(), "chapter"),
+                            anchor: ResumeAnchor::new("page", 0, 0.25)?,
+                            mode: ReadingMode::Webtoon,
+                            last_read_at: 7,
+                            completed: true,
+                        });
+                        Ok(())
+                    })
+                    .unwrap();
+                for action in [
+                    "category:favorite-id",
+                    "category:favorite-id",
+                    "remove",
+                    "add",
+                    "category:favorite-id",
+                ] {
+                    store
+                        .update(|state| update_entry_membership(state, &first, action))
+                        .unwrap();
+                }
+                let before = store.snapshot().unwrap();
+                assert!(
+                    store
+                        .update(|state| update_entry_membership(
+                            state,
+                            &first,
+                            "category:missing-id"
+                        ))
+                        .is_err()
+                );
+                assert_eq!(store.snapshot().unwrap(), before);
+            }
+            let snapshot = store.snapshot().unwrap();
+            let first = snapshot
+                .library
+                .iter()
+                .find(|entry| entry.series == first)
+                .unwrap();
+            let second = snapshot
+                .library
+                .iter()
+                .find(|entry| entry.series == second)
+                .unwrap();
+            assert_eq!(first.categories, BTreeSet::from(["favorite-id".into()]));
+            assert_eq!(second.categories, BTreeSet::from(["other-id".into()]));
+            assert!(second.bookmarked);
+            assert_eq!(second.preferences.as_ref().unwrap().gap_pixels, 17);
+            assert_eq!(snapshot.progress.len(), 1);
+            assert!(snapshot.progress[0].completed);
+            assert_eq!(snapshot.progress[0].last_read_at, 7);
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        for mode in ["write", "reload"] {
+            let output=std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact","app::tests::entry_category_membership_persists_without_changing_other_sources_or_progress","--nocapture"])
+                .env(MODE,mode).env(DIRECTORY,directory.path()).output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
 
     #[test]
     fn continue_label_and_action_share_the_actual_resume_target() {
@@ -2834,11 +3862,15 @@ mod tests {
             desired_anchor: usize::MAX,
             decoded_bytes: BTreeMap::new(),
             decoded_widths: BTreeMap::new(),
+            decoded_windows: BTreeMap::new(),
             target_width: 0,
             viewport_width: 500.,
             viewport_height: 500.,
             anchor: ResumeAnchor::new("stable-2", 2, 0.375).unwrap(),
             mode: ReadingMode::Webtoon,
+            mode_choice: ModeChoice::Automatic,
+            automatic_mode: ReadingMode::Webtoon,
+            mode_switching: false,
             completed: false,
         };
         let services = Services::open(&dir.path().join("data")).unwrap();
@@ -2908,7 +3940,7 @@ mod tests {
         assert_eq!(Reader::decode_width(500., 1.), 512);
         assert_eq!(Reader::decode_width(501., 1.), 512);
         assert_eq!(Reader::decode_width(500., 2.), 1024);
-        assert_eq!(Reader::decode_width(1100., 3.), 2048);
+        assert_eq!(Reader::decode_width(1100., 3.), 3328);
 
         // A low-resolution preview must upgrade at the same anchor, in every
         // reading mode, even when the earlier decode completes after reflow.
@@ -2967,16 +3999,58 @@ mod tests {
             assert_eq!(app.view().reader.as_ref().unwrap().anchor, before);
         }
 
+        // A failed durable mode write cannot change either the active reader
+        // or its control. Successful choices stay per-series, never global.
+        let (before_mode, before_choice, before_anchor) = {
+            let view = app.view();
+            let reader = view.reader.as_ref().unwrap();
+            (reader.mode, reader.mode_choice, reader.anchor.clone())
+        };
+        ui.set_reading_mode(mode_index(before_mode));
+        ui.set_reader_mode_choice(2); // the selector optimistically selected RTL
+        app.choose_reader_mode(&ui, 2, |_, _| Err("disk unavailable".into()));
+        assert_eq!(ui.get_reader_mode_choice(), before_choice.selection());
+        assert_eq!(ui.get_reading_mode(), mode_index(before_mode));
+        assert_eq!(app.view().reader.as_ref().unwrap().mode, before_mode);
+        assert_eq!(app.view().reader.as_ref().unwrap().anchor, before_anchor);
+        let global = app.services.domain.snapshot().unwrap().preferences.mode;
+        app.choose_reader_mode(&ui, 2, reader_modes::save);
+        assert_eq!(ui.get_reader_mode_choice(), 2);
+        assert_eq!(
+            app.view().reader.as_ref().unwrap().mode,
+            ReadingMode::RightToLeft
+        );
+        app.reflow(&ui, 500., 500.); // image/layout work cannot restore Automatic
+        assert_eq!(
+            app.view().reader.as_ref().unwrap().mode_choice,
+            ModeChoice::Manual(ReadingMode::RightToLeft)
+        );
+        assert_eq!(app.view().reader.as_ref().unwrap().anchor, before_anchor);
+        app.choose_reader_mode(&ui, 4, reader_modes::save);
+        assert_eq!(
+            app.view().reader.as_ref().unwrap().mode,
+            ReadingMode::Webtoon
+        );
+        assert_eq!(
+            app.services.domain.snapshot().unwrap().preferences.mode,
+            global
+        );
+        assert_eq!(app.view().reader.as_ref().unwrap().anchor, before_anchor);
+
         {
             let mut view = app.view();
             let reader = view.reader.as_mut().unwrap();
-            reader.decoded_bytes = BTreeMap::from([(0, 24 * 1024 * 1024), (1, 32 * 1024 * 1024)]);
-            assert_eq!(reader.retained_bytes_without(0), 32 * 1024 * 1024);
-            // A 32MiB replacement fits exactly; counting its 24MiB preview
-            // as another retained image would incorrectly block the upgrade.
+            reader.decoded_bytes = BTreeMap::from([(0, 12 * 1024 * 1024), (1, 16 * 1024 * 1024)]);
+            assert_eq!(reader.retained_bytes_without(0), 16 * 1024 * 1024);
+            // Two 16MiB visible windows fit the steady model allowance. The
+            // 12MiB old preview can survive until the next frame and still
+            // remains inside the separate replacement headroom.
             assert_eq!(
-                reader.retained_bytes_without(0) + 32 * 1024 * 1024,
-                64 * 1024 * 1024
+                reader.retained_bytes_without(0) + 16 * 1024 * 1024,
+                READER_MODEL_BYTES
+            );
+            assert!(
+                reader.decoded_bytes.values().sum::<usize>() + 16 * 1024 * 1024 <= 64 * 1024 * 1024
             );
         }
 
@@ -3077,6 +4151,33 @@ mod tests {
             local_before
         );
 
+        // Each entry restores its own durable order before publishing chapter
+        // rows, including entries that have never been added to the library.
+        let mut second_chapter = chapter.clone();
+        second_chapter.id.local_id = "second-ordering-chapter".into();
+        second_chapter.title = "Second ordering chapter".into();
+        second_chapter.source_order = 2;
+        app.services
+            .save_details(
+                series.clone(),
+                vec![chapter.clone(), second_chapter.clone()],
+            )
+            .unwrap();
+        crate::reading_preferences::set_chapter_descending(&series.id, false).unwrap();
+        ui.set_detail_series_key("".into());
+        app.view().section = 5;
+        app.render(&ui);
+        assert!(!ui.get_chapters_descending());
+        assert_eq!(ui.get_items().row_data(0).unwrap().title, chapter.title);
+        crate::reading_preferences::set_chapter_descending(&series.id, true).unwrap();
+        ui.set_detail_series_key("".into());
+        app.render(&ui);
+        assert!(ui.get_chapters_descending());
+        assert_eq!(
+            ui.get_items().row_data(0).unwrap().title,
+            second_chapter.title
+        );
+
         // Returning from a result restores its source, search/pagination and
         // catalogue rows instead of routing to the Browse management screen.
         {
@@ -3107,6 +4208,7 @@ mod tests {
                 catalogue: "latest".into(),
                 page: 3,
                 has_more: true,
+                page_error: "Failed saved page".into(),
                 selected: 1,
                 filters_active: true,
             });
@@ -3118,6 +4220,7 @@ mod tests {
         app.return_to_catalogue(&ui);
         assert_eq!(ui.get_section(), 3);
         assert!(ui.get_source_catalog_open());
+        assert_eq!(ui.get_catalogue_page_error(), "Failed saved page");
         assert_eq!(ui.get_source_index(), 1);
         assert_eq!(ui.get_items().row_data(0).unwrap().title, "Saved result");
         let view = app.view();
@@ -3125,6 +4228,40 @@ mod tests {
         assert_eq!(view.page, 3);
         assert!(view.has_more && view.filters_active);
         drop(view);
+        // A failed continuation keeps both the committed page and source-owned
+        // rows; Retry requests page + 1 again. A non-advancing source must also
+        // stop automatic filling instead of repeatedly returning duplicates.
+        let existing = app.view().saved_catalogue.as_ref().unwrap().rows[0].clone();
+        for result in [
+            Err("Page temporarily unavailable".into()),
+            Ok((Vec::new(), true)),
+            Ok((vec![existing.clone()], true)),
+        ] {
+            app.complete_browse(&ui, "fixture.1".into(), 4, true, result);
+            let view = app.view();
+            assert_eq!(view.page, 3);
+            assert_eq!(view.rows.len(), 1);
+            assert!(view.has_more);
+            assert!(!ui.get_catalogue_page_error().is_empty());
+            assert_eq!(view.saved_catalogue.as_ref().unwrap().page, 3);
+            assert!(!view.saved_catalogue.as_ref().unwrap().page_error.is_empty());
+        }
+        let mut new_series = existing.clone();
+        new_series.id.local_id = "next-result".into();
+        app.complete_browse(
+            &ui,
+            "fixture.1".into(),
+            4,
+            true,
+            Ok((vec![existing, new_series], false)),
+        );
+        assert_eq!(app.view().page, 4);
+        assert_eq!(app.view().rows.len(), 2);
+        assert!(!ui.get_has_more());
+        assert!(ui.get_catalogue_page_error().is_empty());
+        let generation = app.generation.load(Ordering::Acquire);
+        app.browse(&ui, "", None, true);
+        assert_eq!(app.generation.load(Ordering::Acquire), generation);
         // Switching to a disabled source still cancels old work and clears
         // result ownership/pagination before the disabled-source early return.
         let old_cancel = app.cancel.lock().unwrap().clone();
@@ -3159,5 +4296,81 @@ mod tests {
         let view = app.view();
         assert_eq!(view.page, 0);
         assert!(!view.has_more);
+        drop(view);
+        app.invalidate();
+        ui.set_busy(false);
+        app.complete_browse(
+            &ui,
+            "fixture.0".into(),
+            1,
+            false,
+            Err("First page failed".into()),
+        );
+        let generation = app.generation.load(Ordering::Acquire);
+        app.browse(&ui, "", None, true);
+        assert!(app.generation.load(Ordering::Acquire) > generation);
+        assert_eq!(app.view().page, 0, "Retry does not precommit page one");
+        assert!(ui.get_catalogue_page_error().is_empty());
+        app.invalidate();
+
+        // Opening an uncached catalogue title publishes its existing metadata
+        // synchronously. Provider completion is deliberately not pumped here:
+        // even a missing/slow source must not delay the detail route or expose
+        // the prior entry's chapter rows and Continue action.
+        let mut uncached = series;
+        uncached.id = reader_domain::SeriesId::new("unavailable", "optimistic-detail");
+        uncached.title = "Immediate catalogue title".into();
+        app.open_series(&ui, uncached.clone());
+        assert_eq!(ui.get_section(), 5);
+        assert_eq!(ui.get_series_title(), uncached.title);
+        assert_eq!(ui.get_detail_origin(), 3);
+        assert_eq!(ui.get_items().row_count(), 0);
+        assert!(ui.get_resume_chapter().is_empty());
+        assert!(ui.get_busy());
+        assert!(ui.get_status().is_empty());
+        app.invalidate();
+    }
+
+    #[test]
+    fn chapter_screencap_geometry_keeps_scroll_pan_and_contain_letterboxing() {
+        let viewport = crate::ReaderCaptureViewport {
+            x: 0.,
+            y: 24.,
+            width: 400.,
+            height: 800.,
+            content_x: -100.,
+            content_y: -500.,
+        };
+        let row = PageRow {
+            ratio: 2.,
+            position: 1.5,
+            ..Default::default()
+        };
+        let webtoon = chapter_capture_rect(&viewport, 600., 0, &row);
+        assert_eq!(
+            (webtoon.x, webtoon.y, webtoon.width, webtoon.height),
+            (-100., 424., 600., 1200.)
+        );
+        for mode in 1..=3 {
+            let contained = chapter_capture_rect(&viewport, 600., mode, &row);
+            assert_eq!(
+                (contained.x, contained.y, contained.width, contained.height),
+                (0., -476., 400., 800.)
+            );
+        }
+        let viewport = crate::ReaderCaptureViewport {
+            content_x: 0.,
+            content_y: 0.,
+            ..viewport
+        };
+        let row = PageRow {
+            ratio: 0.5,
+            ..Default::default()
+        };
+        let contained = chapter_capture_rect(&viewport, 300., 1, &row);
+        assert_eq!(
+            (contained.x, contained.y, contained.width, contained.height),
+            (50., 349., 300., 150.)
+        );
     }
 }

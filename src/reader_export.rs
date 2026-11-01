@@ -21,6 +21,7 @@ impl ExportImage {
                 image::ImageFormat::Png => ("image/png", "png"),
                 image::ImageFormat::Jpeg => ("image/jpeg", "jpg"),
                 image::ImageFormat::WebP => ("image/webp", "webp"),
+                image::ImageFormat::Avif => ("image/avif", "avif"),
                 _ => return Err("Unsupported page image format".into()),
             };
         let stem = std::path::Path::new(name)
@@ -69,16 +70,21 @@ impl ExportImage {
         if expected != pixels.len() as u64 {
             return Err("Screenshot pixels do not match its dimensions".into());
         }
-        let quality = if preferences.format == CaptureFormat::Jpeg {
-            preferences.jpeg_quality
-        } else {
-            preferences.webp_quality
+        let quality = match preferences.format {
+            CaptureFormat::Jpeg => preferences.jpeg_quality,
+            CaptureFormat::Avif => preferences.avif_quality,
+            _ => preferences.webp_quality,
         };
         let bytes = encode_rgba(width, height, pixels, preferences.format, quality)?;
+        if preferences.format == CaptureFormat::Avif {
+            reader_engine::inspect_image(&bytes, reader_engine::DecodeLimits::default())
+                .map_err(|error| format!("AVIF screenshot exceeds decode admission: {error}"))?;
+        }
         let (mime, extension) = match preferences.format {
             CaptureFormat::Png => ("image/png", "png"),
             CaptureFormat::Jpeg => ("image/jpeg", "jpg"),
             CaptureFormat::WebpLossless | CaptureFormat::WebpLossy => ("image/webp", "webp"),
+            CaptureFormat::Avif => ("image/avif", "avif"),
         };
         Ok(Self {
             bytes,
@@ -106,6 +112,7 @@ pub(crate) fn reencode_image(
     let format = match format {
         ImageStorageFormat::Jpeg => CaptureFormat::Jpeg,
         ImageStorageFormat::Webp => CaptureFormat::WebpLossy,
+        ImageStorageFormat::Avif => CaptureFormat::Avif,
     };
     let encoded = encode_rgba(
         image.width(),
@@ -117,6 +124,8 @@ pub(crate) fn reencode_image(
     if encoded.len() > limits.max_encoded_bytes {
         return Err("Compressed image exceeds encoded byte limit".into());
     }
+    reader_engine::inspect_image(&encoded, limits)
+        .map_err(|error| format!("Compressed image exceeds decode admission: {error}"))?;
     Ok(encoded)
 }
 
@@ -155,6 +164,24 @@ fn encode_rgba(
                 .encode_simple(format == CaptureFormat::WebpLossless, f32::from(quality))
                 .map_err(|error| format!("Cannot encode image: {error:?}"))?
                 .to_vec();
+        }
+        CaptureFormat::Avif => {
+            let rgba = pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|pixel| ravif::RGBA8::new(pixel[0], pixel[1], pixel[2], pixel[3]))
+                .collect::<Vec<_>>();
+            bytes = ravif::Encoder::new()
+                .with_bit_depth(ravif::BitDepth::Eight)
+                .with_quality(f32::from(quality))
+                .with_alpha_quality(100.)
+                .with_alpha_color_mode(ravif::AlphaColorMode::UnassociatedDirty)
+                .with_num_threads(Some(1))
+                .with_speed(8)
+                .encode_rgba(ravif::Img::new(&rgba, width as usize, height as usize))
+                .map_err(|error| format!("Cannot encode AVIF image: {error}"))?
+                .avif_file;
         }
     }
     Ok(bytes)
@@ -241,6 +268,7 @@ fn unique_filename(image: &ExportImage, context: &SaveContext) -> Result<String,
         "image/png" => "png",
         "image/jpeg" => "jpg",
         "image/webp" => "webp",
+        "image/avif" => "avif",
         _ => return Err("Unsupported image export format".into()),
     };
     let stem = std::path::Path::new(&image.name)
@@ -632,6 +660,7 @@ mod tests {
             (CaptureFormat::Jpeg, "image/jpeg", "jpg"),
             (CaptureFormat::WebpLossless, "image/webp", "webp"),
             (CaptureFormat::WebpLossy, "image/webp", "webp"),
+            (CaptureFormat::Avif, "image/avif", "avif"),
         ] {
             let preferences = CapturePreferences {
                 format,
@@ -641,13 +670,19 @@ mod tests {
                 ExportImage::from_rgba_with_preferences(64, 64, &pixels, &preferences).unwrap();
             assert_eq!(capture.mime, mime);
             assert!(capture.name.ends_with(extension));
-            let decoded = image::load_from_memory(&capture.bytes).unwrap().to_rgba8();
+            let decoded =
+                reader_engine::decode_image(&capture.bytes, reader_engine::DecodeLimits::default())
+                    .unwrap();
             assert_eq!(decoded.dimensions(), (64, 64));
             if matches!(format, CaptureFormat::Png | CaptureFormat::WebpLossless) {
                 assert_eq!(decoded.as_raw(), &pixels);
             }
         }
-        for format in [CaptureFormat::Jpeg, CaptureFormat::WebpLossy] {
+        for format in [
+            CaptureFormat::Jpeg,
+            CaptureFormat::WebpLossy,
+            CaptureFormat::Avif,
+        ] {
             let encode = |quality| {
                 ExportImage::from_rgba_with_preferences(
                     64,
@@ -657,6 +692,7 @@ mod tests {
                         format,
                         jpeg_quality: quality,
                         webp_quality: quality,
+                        avif_quality: quality,
                         ..CapturePreferences::default()
                     },
                 )
@@ -679,6 +715,7 @@ mod tests {
         for (format, expected) in [
             (ImageStorageFormat::Jpeg, image::ImageFormat::Jpeg),
             (ImageStorageFormat::Webp, image::ImageFormat::WebP),
+            (ImageStorageFormat::Avif, image::ImageFormat::Avif),
         ] {
             let encode = |quality| {
                 reencode_image(
@@ -743,6 +780,62 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("encoded byte limit"));
+    }
+
+    #[test]
+    fn avif_capture_and_storage_roundtrip_rgb_edges_and_alpha() {
+        let mut pixels = Vec::new();
+        for row in 0..16 {
+            for column in 0..16 {
+                pixels.extend_from_slice(match (column < 8, row < 8) {
+                    (true, true) => &[255, 0, 0, 255],
+                    (false, true) => &[0, 255, 0, 128],
+                    (true, false) => &[0, 0, 255, 64],
+                    (false, false) => &[255, 255, 255, 0],
+                });
+            }
+        }
+        let preferences = CapturePreferences {
+            format: CaptureFormat::Avif,
+            avif_quality: 100,
+            ..CapturePreferences::default()
+        };
+        let capture =
+            ExportImage::from_rgba_with_preferences(16, 16, &pixels, &preferences).unwrap();
+        assert_eq!(capture.mime, "image/avif");
+        assert_eq!(capture.name, "screencap.avif");
+        assert_eq!(
+            image::guess_format(&capture.bytes).unwrap(),
+            image::ImageFormat::Avif
+        );
+        let source = ExportImage::from_rgba(16, 16, &pixels).unwrap().bytes;
+        let stored = reencode_image(
+            &source,
+            ImageStorageFormat::Avif,
+            100,
+            reader_engine::DecodeLimits::default(),
+        )
+        .unwrap();
+        for encoded in [&capture.bytes, &stored] {
+            let decoded =
+                reader_engine::decode_image(encoded, reader_engine::DecodeLimits::default())
+                    .unwrap();
+            assert_eq!(decoded.dimensions(), (16, 16));
+            for (actual, expected) in decoded.pixels().zip(pixels.as_chunks::<4>().0) {
+                assert!(actual[3].abs_diff(expected[3]) <= 1);
+                if expected[3] != 0 {
+                    assert!(
+                        actual.0[..3]
+                            .iter()
+                            .zip(&expected[..3])
+                            .all(|(actual, expected)| actual.abs_diff(*expected) <= 12)
+                    );
+                }
+            }
+        }
+        let original = ExportImage::original(stored, "page.png").unwrap();
+        assert_eq!(original.mime, "image/avif");
+        assert_eq!(original.name, "page.avif");
     }
 
     #[test]
@@ -900,21 +993,37 @@ mod tests {
     #[ignore = "requires a running X11 display, for example DISPLAY=:99 under Xvfb"]
     fn image_clipboard_remains_readable_after_delivery_callback() {
         let pixels = [255, 0, 0, 255, 0, 128, 255, 255];
-        let image = ExportImage::from_rgba(2, 1, &pixels).unwrap();
-        let (finished, completion) = std::sync::mpsc::channel();
-        deliver(image, true, move |result| finished.send(result).unwrap());
-        completion
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("clipboard worker must complete")
-            .expect("clipboard image must be accepted");
+        for format in [CaptureFormat::Png, CaptureFormat::Avif] {
+            let image = ExportImage::from_rgba_with_preferences(
+                2,
+                1,
+                &pixels,
+                &CapturePreferences {
+                    format,
+                    avif_quality: 100,
+                    ..CapturePreferences::default()
+                },
+            )
+            .unwrap();
+            let expected =
+                reader_engine::decode_image(&image.bytes, reader_engine::DecodeLimits::default())
+                    .unwrap()
+                    .into_raw();
+            let (finished, completion) = std::sync::mpsc::channel();
+            deliver(image, true, move |result| finished.send(result).unwrap());
+            completion
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("clipboard worker must complete")
+                .expect("clipboard image must be accepted");
 
-        // A separate clipboard client reads after the delivery callback has
-        // returned, exercising the persistent owner and real X11 selection.
-        let mut observer = arboard::Clipboard::new().unwrap();
-        let copied = observer.get_image().unwrap();
-        assert_eq!((copied.width, copied.height), (2, 1));
-        assert_eq!(copied.bytes.as_ref(), pixels);
-        drop(observer);
+            // A separate clipboard client reads after the delivery callback
+            // returned. AVIF passes through Reader's bounded decoder first.
+            let mut observer = arboard::Clipboard::new().unwrap();
+            let copied = observer.get_image().unwrap();
+            assert_eq!((copied.width, copied.height), (2, 1));
+            assert_eq!(copied.bytes.as_ref(), expected);
+            drop(observer);
+        }
         shutdown();
     }
 }

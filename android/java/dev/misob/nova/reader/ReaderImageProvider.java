@@ -24,13 +24,14 @@ public final class ReaderImageProvider extends ContentProvider {
     private static final long LIMIT=32L*1024*1024;
     private static final long RETENTION=24L*60*60*1000;
     private static final int MAX_FILES=8;
-    private static final String NAME="[0-9a-f-]{36}\\.(png|jpg|webp|gif)";
+    private static final String NAME="[0-9a-f-]{36}\\.(png|jpg|webp|gif|avif)";
 
     static String extensionForMime(String mime) throws IOException {
         if ("image/png".equals(mime)) return "png";
         if ("image/jpeg".equals(mime)) return "jpg";
         if ("image/webp".equals(mime)) return "webp";
         if ("image/gif".equals(mime)) return "gif";
+        if ("image/avif".equals(mime)) return "avif";
         throw new IOException("Unsupported clipboard/export image type");
     }
     private static File directory(Context context) throws IOException {
@@ -93,6 +94,7 @@ public final class ReaderImageProvider extends ContentProvider {
             if (name.endsWith(".png")) return "image/png";
             if (name.endsWith(".jpg")) return "image/jpeg";
             if (name.endsWith(".gif")) return "image/gif";
+            if (name.endsWith(".avif")) return "image/avif";
             return "image/webp";
         } catch (FileNotFoundException error) {return null;}
     }

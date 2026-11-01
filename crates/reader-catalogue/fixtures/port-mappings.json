@@ -19,5 +19,54 @@
     "source_id": "993336618407081332",
     "native_addon_id": "manhwa18cc",
     "native_source_id": "manhwa18cc.all"
+  },
+  {
+    "repository": "https://raw.githubusercontent.com/keiyoushi/extensions/repo/index.pb",
+    "package_name": "eu.kanade.tachiyomi.extension.all.mangafire",
+    "source_id": "6084907896154116083",
+    "native_addon_id": "mangafire",
+    "native_source_id": "mangafire.en"
+  },
+  {
+    "repository": "https://raw.githubusercontent.com/keiyoushi/extensions/repo/index.pb",
+    "package_name": "eu.kanade.tachiyomi.extension.all.mangafire",
+    "source_id": "8098539940032331958",
+    "native_addon_id": "mangafire",
+    "native_source_id": "mangafire.es"
+  },
+  {
+    "repository": "https://raw.githubusercontent.com/keiyoushi/extensions/repo/index.pb",
+    "package_name": "eu.kanade.tachiyomi.extension.all.mangafire",
+    "source_id": "3849324770075062403",
+    "native_addon_id": "mangafire",
+    "native_source_id": "mangafire.es-419"
+  },
+  {
+    "repository": "https://raw.githubusercontent.com/keiyoushi/extensions/repo/index.pb",
+    "package_name": "eu.kanade.tachiyomi.extension.all.mangafire",
+    "source_id": "6228021941803932286",
+    "native_addon_id": "mangafire",
+    "native_source_id": "mangafire.fr"
+  },
+  {
+    "repository": "https://raw.githubusercontent.com/keiyoushi/extensions/repo/index.pb",
+    "package_name": "eu.kanade.tachiyomi.extension.all.mangafire",
+    "source_id": "524110931382140732",
+    "native_addon_id": "mangafire",
+    "native_source_id": "mangafire.ja"
+  },
+  {
+    "repository": "https://raw.githubusercontent.com/keiyoushi/extensions/repo/index.pb",
+    "package_name": "eu.kanade.tachiyomi.extension.all.mangafire",
+    "source_id": "758400875161895515",
+    "native_addon_id": "mangafire",
+    "native_source_id": "mangafire.pt"
+  },
+  {
+    "repository": "https://raw.githubusercontent.com/keiyoushi/extensions/repo/index.pb",
+    "package_name": "eu.kanade.tachiyomi.extension.all.mangafire",
+    "source_id": "7842137233968841729",
+    "native_addon_id": "mangafire",
+    "native_source_id": "mangafire.pt-BR"
   }
 ]

@@ -38,6 +38,15 @@ pub enum SourceError {
 }
 
 #[derive(Clone)]
+pub struct SourceAvailability(Arc<std::sync::atomic::AtomicBool>);
+impl SourceAvailability {
+    /// A read-only, memory-only capability. Registry changes revoke old guards.
+    pub fn is_available(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+#[derive(Clone)]
 pub struct Source {
     pub(crate) manifest: Manifest,
     pub(crate) settings: Arc<std::sync::Mutex<Value>>,
@@ -47,6 +56,9 @@ pub struct Source {
     pub(crate) active: Arc<std::sync::atomic::AtomicBool>,
 }
 impl Source {
+    pub fn availability(&self) -> SourceAvailability {
+        SourceAvailability(self.active.clone())
+    }
     pub fn descriptor(&self) -> SourceDescriptor {
         SourceDescriptor::new(
             &self.manifest,

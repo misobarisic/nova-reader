@@ -7,8 +7,10 @@ import { SettingsRow } from "settings-row.slint";
 
 export global CaptureSettings {
     in-out property <int> format-index: 0;
+    in-out property <int> resolution-index: 0;
     in-out property <float> jpeg-quality: 85;
     in-out property <float> webp-quality: 85;
+    in-out property <float> avif-quality: 85;
     in-out property <bool> series-folders: false;
     callback settings-changed(string, int);
 }
@@ -65,15 +67,28 @@ export component CaptureSettingsPage inherits VerticalLayout {
     SettingsCard {
         SettingsRow {
             row-title: @tr("Screenshot format");
-            row-desc: @tr("PNG and lossless WebP preserve every pixel. JPEG and lossy WebP use the quality setting.");
+            row-desc: @tr("PNG and lossless WebP preserve every pixel. JPEG, lossy WebP and AVIF use the quality setting.");
             accessible-label: @tr("Screenshot format");
             ReaderSelect {
                 width: Math.min(252px, Math.max(0px, root.width - 32px));
                 enabled: root.interactive; roomy: true;
                 placeholder-text: @tr("Screenshot format");
-                model: [@tr("PNG (lossless)"), @tr("JPEG"), @tr("WebP (lossless)"), @tr("WebP (lossy)")];
+                model: [@tr("PNG (lossless)"), @tr("JPEG"), @tr("WebP (lossless)"), @tr("WebP (lossy)"), @tr("AVIF")];
                 current-index <=> CaptureSettings.format-index;
                 selected(_) => { CaptureSettings.settings-changed("format", self.current-index); }
+            }
+        }
+        SettingsRow {
+            row-title: @tr("Screenshot resolution");
+            row-desc: @tr("Capture the visible chapter area using device pixels or the chapter's original pixels.");
+            accessible-label: @tr("Screenshot resolution");
+            ReaderSelect {
+                width: Math.min(252px, Math.max(0px, root.width - 32px));
+                enabled: root.interactive;
+                placeholder-text: @tr("Screenshot resolution");
+                model: [@tr("Device resolution"), @tr("Chapter resolution")];
+                current-index <=> CaptureSettings.resolution-index;
+                selected(_) => { CaptureSettings.settings-changed("resolution", self.current-index); }
             }
         }
         SettingsRow {
@@ -109,6 +124,18 @@ export component CaptureSettingsPage inherits VerticalLayout {
                 value <=> CaptureSettings.webp-quality;
                 minimum: 1; maximum: 100; step: 1; suffix: "%";
                 changed(v) => { CaptureSettings.settings-changed("webp_quality", Math.round(v)); }
+            }
+        }
+        if CaptureSettings.format-index == 4: SettingsRow {
+            row-title: @tr("AVIF quality");
+            row-desc: @tr("Higher values retain more detail and create larger files.");
+            accessible-label: @tr("AVIF quality");
+            NumericSetting {
+                width: Math.min(InterfaceStyle.tv ? 320px : 252px, Math.max(0px, root.width - 32px));
+                enabled: root.interactive; name: @tr("AVIF quality");
+                value <=> CaptureSettings.avif-quality;
+                minimum: 1; maximum: 100; step: 1; suffix: "%";
+                changed(v) => { CaptureSettings.settings-changed("avif_quality", Math.round(v)); }
             }
         }
     }

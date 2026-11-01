@@ -79,6 +79,7 @@ fn reader_context_menu_targets_images_and_preserves_reader_gestures() {
                     image: image.clone(),
                     offset: 0.,
                     fraction: 1.,
+                    ..Default::default()
                 }])),
                 ratio: 2.,
                 position: index as f32 * 2.,

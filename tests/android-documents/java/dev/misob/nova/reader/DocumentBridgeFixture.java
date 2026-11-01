@@ -52,6 +52,7 @@ public class DocumentBridgeFixture {
         ((ExecutorService)field.get(null)).submit(() -> {}).get(5,TimeUnit.SECONDS);
     }
     public static String exported() { return new String(ContentResolver.exported.toByteArray(),StandardCharsets.UTF_8); }
+    public static byte[] exportedData() { return ContentResolver.exported.toByteArray(); }
     public static void resetMedia() { ContentResolver.resetMedia(); }
     public static void failMedia(int phase) {
         ContentResolver.failInsert=phase==1;ContentResolver.failOutput=phase==2;
@@ -86,6 +87,20 @@ public class DocumentBridgeFixture {
              FileInputStream input=new FileInputStream(descriptor.getFileDescriptor())) {
             byte[] bytes=new byte[128];int count=input.read(bytes);
             return new String(bytes,0,count,StandardCharsets.UTF_8);
+        }
+    }
+    public static byte[] clipboardData() throws Exception {
+        try (android.os.ParcelFileDescriptor descriptor=ContentResolver.provider.openFile(ClipboardManager.primary.uri,"r");
+             FileInputStream input=new FileInputStream(descriptor.getFileDescriptor());
+             java.io.ByteArrayOutputStream bytes=new java.io.ByteArrayOutputStream()) {
+            byte[] buffer=new byte[4096];int count;
+            while ((count=input.read(buffer))!=-1) bytes.write(buffer,0,count);
+            return bytes.toByteArray();
+        }
+    }
+    public static String clipboardDisplayName() {
+        try (android.database.Cursor cursor=ContentResolver.provider.query(ClipboardManager.primary.uri,null,null,null,null)) {
+            return cursor.moveToFirst()?cursor.getString(0):null;
         }
     }
     public static boolean providerRejectsUnsafePaths() throws Exception {

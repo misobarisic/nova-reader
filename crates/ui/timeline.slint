@@ -125,9 +125,13 @@ export component TimelineList inherits VerticalLayout {
         private property <bool> near-viewport: root.visible
             && self.absolute-position.y + self.height >= root.viewport-top - 2 * (self.row-height + 40px)
             && self.absolute-position.y <= root.viewport-top + root.viewport-height + 2 * (self.row-height + 40px);
+        changed near-viewport => { if self.near-viewport { root.request-artwork(i, i + 1); } }
         height: self.row-height + self.heading-height;
         if slot.near-viewport: Rectangle {
             width: 100%; height: 100%; min-width: 0px;
+            Timer { interval: 1ms; running: true; triggered => {
+                self.stop(); root.request-artwork(i, i + 1);
+            } }
             // Wait for layout before requesting. Repeat while admitted so a
             // busy, bounded artwork queue can retry a previously rejected row.
             Timer {

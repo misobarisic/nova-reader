@@ -36,6 +36,10 @@ The package is `eu.kanade.tachiyomi.extension.all.manhwa18cc`, version
 | ko | `6864643444164576223` | addon `manhwa18cc`, source `manhwa18cc.ko` |
 | all | `993336618407081332` | addon `manhwa18cc`, source `manhwa18cc.all` |
 
+The MangaFire port adds seven exact language mappings and its byte-preserved
+`keiyoushi-mangafire.pb.gz` record. Source IDs, index hash and the native port's
+capabilities and live-test limits are recorded in [MangaFire](mangafire.md).
+
 IDs and upstream version codes are decimal strings at JSON boundaries, including
 negative/extreme signed int64 values. The checked-in mapping requires the exact
 upstream repository, package and source ID. Upstream and native versions are

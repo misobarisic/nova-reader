@@ -14,12 +14,15 @@ bar, shared Nova Kit controls, and More/settings cards. Local imports are under
 styling and transparent bottom bar. **Display** controls poster/list layouts and
 grid columns; **Look and feel** controls animations. **Cache** shows usage and
 clears temporary poster images without deleting downloaded chapters. It also controls
-JPEG/WebP compression of newly cached artwork and new offline downloads;
-existing files stay unchanged. **Screenshots** controls capture format, quality
-and optional series folders.
+JPEG/WebP/AVIF compression of newly cached artwork and new offline downloads;
+existing files stay unchanged. **Screenshots** controls capture format (including
+AVIF), quality, screencap resolution and optional series folders. Screencaps can
+use device pixels or the original chapter image's pixel scale for the visible area.
 These device preferences are saved separately from library backups.
 Browse groups sources by last used, pins and language; Extensions manages installed
 packages. Chapters open with controls hidden; tap or click to show them.
+Automatic reading mode follows [TachiyomiJ2K's genre/source rules](docs/reader-modes.md).
+A manual choice is saved for that series across chapters and restarts.
 Right-click or hold an image to save/copy its original or the visible screencap.
 Chapter artwork fills the hidden status-bar area; showing the OSD restores the
 bar and keeps controls clear of cutouts. Delete remote chapter downloads from
@@ -54,17 +57,30 @@ Browse installs local addon ZIPs and selects source/language variants. A newly
 selected ZIP is explicitly enabled by the application. Permission-expanding
 updates require re-enabling. Source Settings renders declared boolean, text,
 select and secret fields; values are stored per source/profile outside backups. Adult sources are hidden until **Show adult sources**
-is selected. The reference [Manhwa18.cc package](docs/manhwa18.md) is explicitly
-NSFW and exposes English, Korean and all-language variants. Its parser has
+is selected; that choice and each series’ chapter order survive restarts. The
+reference [Manhwa18.cc package](docs/manhwa18.md) is explicitly NSFW and exposes English, Korean and all-language variants. Its parser has
 synthetic fixtures; live website operation has not been verified. Browser
 challenge handoff is not implemented.
 
+The [MangaFire port](docs/mangafire.md) provides seven languages, search/filters,
+chapter and volume listings through a separately installable native addon.
+It is marked as a mixed/adult source and defaults to Safe content.
+
+Library search reveals a live filter. Long-press or right-click a library title,
+or use the detail toolbar menu, for that title’s categories and library actions.
+Details retain their scroll and expanded synopsis on reader return; source
+galleries load further results as you scroll and show Retry after a failed page.
+
+PNG, JPEG, WebP and 8-bit still AVIF images are supported within bounded decode
+limits. Animated, high-bit-depth or transformed AVIF variants are rejected.
+
 The reader loads the full visible page window plus one neighboring page on each
 side, cancels obsolete image requests and waits for Retry after a page failure.
-Retained decoded/display pages have a 64 MiB budget. Admitted tall images are
-width-fitted and split into display textures of at most 2,048 rows, preserving
-logical position independently of texture boundaries. Original decoding remains
-bounded full-image decoding; arbitrary oversized stream decoding is pending.
+Retained display/model pixels use 32 MiB plus 32 MiB replacement headroom. Tall-page output
+uses bounded visible-row windows at reading width, split into textures of at
+most 2,048 × 2,048 pixels; logical position stays independent of those boundaries.
+Original decoding remains bounded full-image decoding and can repeat as the
+window moves; arbitrary oversized stream decoding is pending.
 
 The application uses an independent data directory selected with the operating
 system's application-directory API. Linux defaults to
@@ -103,6 +119,7 @@ cargo test --locked --test mobile_layout
 node examples/addons/neutral-fixture/tests/fixture.test.mjs
 npm ci --ignore-scripts --prefix examples/addons/manhwa18cc/tests
 npm test --prefix examples/addons/manhwa18cc/tests
+node examples/addons/mangafire/tests/parser.test.mjs
 python3 -B -m unittest discover -s .github/scripts -p 'test_package_*.py'
 ```
 

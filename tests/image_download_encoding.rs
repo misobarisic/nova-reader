@@ -149,7 +149,44 @@ fn only_new_download_pages_follow_compression_and_keep_offline_integrity() {
                 .unwrap()
         );
     }
+    preferences.downloads.enabled = true;
+    preferences.downloads.format = ImageStorageFormat::Avif;
+    save_preferences(&preferences);
+    let avif_chapter = chapters
+        .iter()
+        .find(|candidate| candidate.id.local_id.ends_with("wide"))
+        .unwrap();
+    services.download(&avif_chapter.id, &cancel).unwrap();
+    let avif_offline = services.downloads.offline(&avif_chapter.id).unwrap();
+    let avif_bytes = avif_offline
+        .pages
+        .iter()
+        .map(std::fs::read)
+        .collect::<std::io::Result<Vec<_>>>()
+        .unwrap();
+    for bytes in &avif_bytes {
+        assert_eq!(
+            image::guess_format(bytes).unwrap(),
+            image::ImageFormat::Avif
+        );
+        assert_eq!(
+            reader_engine::decode_image(bytes, reader_engine::DecodeLimits::default())
+                .unwrap()
+                .dimensions(),
+            (1800, 600)
+        );
+    }
+    preferences.downloads.enabled = false;
+    save_preferences(&preferences);
     services.sources.remove("neutral-fixture").unwrap();
+    services.download(&avif_chapter.id, &cancel).unwrap();
+    for (path, original) in avif_offline.pages.iter().zip(&avif_bytes) {
+        assert_eq!(
+            &std::fs::read(path).unwrap(),
+            original,
+            "existing AVIF bundles remain unchanged after policy/source removal"
+        );
+    }
     assert_eq!(
         services.downloads.offline(&chapter.id).unwrap().pages.len(),
         encoded.len()

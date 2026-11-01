@@ -755,7 +755,7 @@ fn supported(path: &Path) -> bool {
     path.extension().and_then(|x| x.to_str()).is_some_and(|x| {
         matches!(
             x.to_ascii_lowercase().as_str(),
-            "png" | "jpg" | "jpeg" | "webp"
+            "png" | "jpg" | "jpeg" | "webp" | "avif"
         )
     })
 }
@@ -966,11 +966,25 @@ mod tests {
             .unwrap();
         fs::write(input.path().join("10.png"), two.get_ref()).unwrap();
         fs::write(input.path().join("2.png"), &one).unwrap();
+        let avif = include_bytes!("../../reader-engine/tests/fixtures/tiny.avif");
+        fs::write(input.path().join("11.AVIF"), avif).unwrap();
         let store = DownloadStore::open(directory.path(), 1_000_000).unwrap();
         let chapter = chapter();
         store.import_folder(chapter.clone(), input.path()).unwrap();
         let offline = store.offline(&chapter).unwrap();
         assert_eq!(fs::read(&offline.pages[0]).unwrap(), one);
+        assert_eq!(offline.pages.len(), 3);
+        assert_eq!(fs::read(&offline.pages[2]).unwrap(), avif);
+        let avif_archive = input.path().join("avif.cbz");
+        let mut zip = zip::ZipWriter::new(File::create(&avif_archive).unwrap());
+        zip.start_file("page.avif", SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(avif).unwrap();
+        zip.finish().unwrap();
+        let archived = ChapterId::new(chapter.series.clone(), "avif-archive");
+        store.import_cbz(archived.clone(), avif_archive).unwrap();
+        let imported = store.offline(&archived).unwrap();
+        assert_eq!(fs::read(&imported.pages[0]).unwrap(), avif);
         let archive_path = input.path().join("unsafe.cbz");
         let mut zip = zip::ZipWriter::new(File::create(&archive_path).unwrap());
         zip.start_file("../escape.png", SimpleFileOptions::default())

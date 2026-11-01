@@ -65,7 +65,7 @@ After Android startup, call:
 - `set_reader_immersive(bool)` to synchronize the Android status bar with reader
   controls. It returns JNI/queue errors and does not require a document request.
 - `export_image(staged_path, suggested_name, mime, callback)` to save a PNG,
-  JPEG, WebP or GIF through `ACTION_CREATE_DOCUMENT` with the matching image
+  JPEG, WebP, GIF or AVIF through `ACTION_CREATE_DOCUMENT` with the matching image
   MIME type. The suggested filename is sanitized and receives its extension.
 - `publish_image(staged_path, suggested_name, mime, series_folder, callback)` for
   reader Save actions: API 29+ saves directly to `Pictures/Nova Reader/`, or its
@@ -134,6 +134,10 @@ Clipboard images are copied into a separate private
 `reader-clipboard` cache directory before the main thread publishes `ClipData`.
 The callback reports success only after the clipboard accepts the content URI.
 No file URI or filesystem path is placed on the clipboard.
+AVIF saves and clipboard images keep their original encoded bytes and use
+`image/avif` with an `.avif` filename. The bridge does not transcode for older
+Android versions; a receiving app needs AVIF decoding support to display/paste
+that format. The reader's own codec is independent of Android's image decoder.
 
 `ReaderImageProvider` is a read-only, non-exported provider with
 `grantUriPermissions=true`, so Android grants the receiving clipboard consumer
@@ -195,6 +199,9 @@ Image fixtures verify MIME/filename picker metadata, real export bytes, provider
 stream failures, clipboard bytes after staging deletion/activity destruction and
 provider restart, cache/MIME bounds, read-only traversal rejection, retention,
 cancellation, busy rejection and clipboard failure reporting.
+The shared real AVIF fixture also crosses API 26 SAF and API 35 MediaStore paths
+and the clipboard provider with exact byte comparison, correct MIME/extension,
+and successful reads after staging deletion and provider restart.
 MediaStore fixtures exercise common/per-series paths and filename/MIME metadata
 on API 29 and 35, separate rows for collisions, rollback after
 insert/open/write/close/publication failures and cancellation during copying,

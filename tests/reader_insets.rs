@@ -42,6 +42,7 @@ fn reader_art_reaches_status_area_while_controls_and_normal_pages_respect_insets
             image: slint::Image::from_rgb8(slint::SharedPixelBuffer::new(1, 4)),
             offset: 0.,
             fraction: 1.,
+            ..Default::default()
         }])),
         ..Default::default()
     }])));
@@ -70,6 +71,26 @@ fn reader_art_reaches_status_area_while_controls_and_normal_pages_respect_insets
         insets(&ui, 0., 24., 0., 0.);
         assert_eq!(geometry(&element(&ui, "AppWindow::reader")), viewport);
     }
+    ui.set_scroll_y(-160.);
+    settle();
+    button(&ui, "Page 1 image").invoke_accessible_default_action();
+    settle();
+    let capture = ui.get_reader_capture_viewport();
+    assert_eq!(
+        (capture.x, capture.y, capture.width, capture.height),
+        viewport
+    );
+    assert_eq!(capture.content_y, ui.get_scroll_y());
+    ui.set_scroll_y(-200.);
+    settle();
+    assert_eq!(
+        ui.get_reader_capture_viewport(),
+        capture,
+        "capture framing is frozen before menu opening"
+    );
+    ui.invoke_close_reader_context();
+    ui.set_scroll_y(0.);
+    settle();
     insets(&ui, 32., 24., 12., 18.);
     ui.set_section(0);
     settle();

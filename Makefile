@@ -59,6 +59,7 @@ check-addons:
 	node examples/addons/neutral-fixture/tests/fixture.test.mjs
 	npm ci --ignore-scripts --prefix examples/addons/manhwa18cc/tests
 	npm test --prefix examples/addons/manhwa18cc/tests
+	node examples/addons/mangafire/tests/parser.test.mjs
 
 check-android-java:
 	mkdir -p target/android-java-check
