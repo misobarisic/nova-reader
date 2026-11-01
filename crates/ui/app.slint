@@ -876,17 +876,6 @@ export component AppWindow inherits Window {
                                 }
                                 scrub(value) => { root.reader-seek(value); }
                             }
-                            if root.reader-osd && !root.show-reader-options && ReaderSettings.navigator-modes > 0: Rectangle {
-                                private property <int> nav-bit: root.reading-mode == 0 ? (root.reader-gap > 0 ? 16 : 8) : root.reading-mode == 1 ? 1 : root.reading-mode == 2 ? 2 : 4;
-                                visible: Math.mod(Math.floor(ReaderSettings.navigator-modes / self.nav-bit),2) == 1;
-                                x: ReaderSettings.navigator-left ? 4px : parent.width - self.width - 4px;
-                                y: root.safe-area-insets.top + (parent.height - root.safe-area-insets.top - root.safe-area-insets.bottom - self.height) / 2;
-                                width: 32px; height: max(48px,(parent.height - root.safe-area-insets.top - root.safe-area-insets.bottom - 160px) * ReaderSettings.navigator-height / 100);
-                                border-radius: 12px; background: #00000070;
-                                Rectangle { x: 13px; y: 8px; width: 4px; height: parent.height - 16px; border-radius: 2px; background: Theme.current.control_border; }
-                                Rectangle { x: 11px; y: 8px + (parent.height - 32px) * root.reader-progress; width: 8px; height: 16px; border-radius: 4px; background: Theme.current.accent_soft; }
-                                TouchArea { mouse-cursor: pointer; pointer-event(event) => { if event.kind == PointerEventKind.down && event.button == PointerEventButton.left { root.reader-seek(Math.clamp(self.mouse-y / self.height,0,1)); } } moved => { if self.pressed { root.reader-seek(Math.clamp(self.mouse-y / self.height,0,1)); } } }
-                            }
                             if root.reader-transition-open && root.reading-mode != 0 && ReaderSettings.chapter-transition: Rectangle {
                                 x: (parent.width - self.width) / 2;
                                 y: root.safe-area-insets.top + 68px;

@@ -227,9 +227,9 @@ fn settings_controls_follow_saved_values_after_edit_and_reset() {
             let ui = weak.unwrap();
             let s = ui.global::<ReaderSettings>();
             match key.as_str() {
-                "navigator_modes" => s.set_navigator_modes(value),
-                "navigator_left" => s.set_navigator_left(value != 0),
-                "navigator_height" => s.set_navigator_height(value),
+                "show_page_number" => s.set_show_page_number(value != 0),
+                "custom_brightness" => s.set_custom_brightness(value != 0),
+                "brightness" => s.set_brightness(value),
                 _ => panic!("unexpected setting {key}"),
             }
         }
@@ -237,47 +237,37 @@ fn settings_controls_follow_saved_values_after_edit_and_reset() {
     settle();
     control(&ui, "General", AccessibleRole::Tab).invoke_accessible_default_action();
     settle();
-    for (name, bit) in [
-        ("Left to right", 1),
-        ("Right to left", 2),
-        ("Vertical", 4),
-        ("Webtoon", 8),
-        ("Long strip with gaps", 16),
-    ] {
-        settings.set_navigator_modes(0);
-        settle();
-        let button = control(&ui, name, AccessibleRole::Button);
-        assert_eq!(button.accessible_checked(), Some(false));
-        button.invoke_accessible_default_action();
-        settle();
-        assert_eq!(
-            settings.get_navigator_modes(),
-            bit,
-            "navigator mode must match its renderer bit"
+    for removed in ["Chapter navigator", "Show on the left", "Navigator height"] {
+        assert!(
+            ElementHandle::find_by_accessible_label(&ui, removed)
+                .next()
+                .is_none()
         );
-        assert_eq!(button.accessible_checked(), Some(true));
     }
-    let left = control(&ui, "Show on the left", AccessibleRole::Checkbox);
-    left.mock_single_click(slint::platform::PointerEventButton::Left);
+    let counter = control(&ui, "Page counter", AccessibleRole::Checkbox);
+    counter.mock_single_click(slint::platform::PointerEventButton::Left);
     settle();
-    assert!(settings.get_navigator_left());
-    settings.set_navigator_left(false);
+    assert!(settings.get_show_page_number());
+    settings.set_show_page_number(false);
     settle();
     assert_eq!(
-        left.accessible_checked(),
+        counter.accessible_checked(),
         Some(false),
         "switch follows a reset after pointer editing"
     );
-    let slider = control(&ui, "Navigator height", AccessibleRole::Slider);
-    control(&ui, "Increase Navigator height", AccessibleRole::Button)
-        .invoke_accessible_default_action();
+    control(&ui, "Filters", AccessibleRole::Tab).invoke_accessible_default_action();
     settle();
-    assert_eq!(settings.get_navigator_height(), 66);
-    settings.set_navigator_height(65);
+    control(&ui, "Custom brightness", AccessibleRole::Checkbox).invoke_accessible_default_action();
+    settle();
+    let slider = control(&ui, "Brightness", AccessibleRole::Slider);
+    control(&ui, "Decrease Brightness", AccessibleRole::Button).invoke_accessible_default_action();
+    settle();
+    assert_eq!(settings.get_brightness(), 99);
+    settings.set_brightness(100);
     settle();
     assert_eq!(
         slider.accessible_value().as_deref(),
-        Some("65"),
+        Some("100"),
         "numeric control follows a reset after editing"
     );
 }

@@ -26,9 +26,6 @@ pub(crate) fn apply(ui: &AppWindow, preferences: &Preferences) {
     settings.set_webtoon_double_tap_zoom(preferences.webtoon.double_tap_zoom);
     settings.set_background(preferences.background.into());
     settings.set_show_page_number(preferences.show_page_number);
-    settings.set_navigator_modes(i32::from(preferences.navigator_modes));
-    settings.set_navigator_left(preferences.navigator_left);
-    settings.set_navigator_height(i32::from(preferences.navigator_height));
     settings.set_fullscreen(preferences.fullscreen);
     settings.set_cutout(preferences.cutout);
     settings.set_keep_awake(preferences.keep_awake);

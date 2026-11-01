@@ -92,7 +92,8 @@ pub struct ReaderSettings {
     pub webtoon: LayoutPreferences,
     pub background: Background,
     pub show_page_number: bool,
-    /// Bits: webtoon, LTR, RTL, vertical paging, long strip with gaps.
+    /// Legacy side-navigator values remain readable so removing its UI does not
+    /// reset existing reader preferences. They have no display effect.
     pub navigator_modes: u8,
     pub navigator_left: bool,
     pub navigator_height: u8,
