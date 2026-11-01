@@ -108,3 +108,81 @@ fn disabling_cutout_extension_reserves_each_inset_once() {
     );
     assert_eq!(ui.get_reader_width(), 390.);
 }
+
+#[test]
+fn compact_mode_label_uses_the_effective_mode_and_aligned_action_slots() {
+    use i_slint_backend_testing::AccessibleRole;
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().unwrap();
+    ui.set_section(6);
+    ui.show().unwrap();
+    settle();
+    ui.set_reader_osd(true);
+    settle();
+    for width in [320., 390.] {
+        ui.window().set_size(LogicalSize::new(width, 844.));
+        settle();
+        // Automatic is already resolved by the controller before this label is
+        // published; its effective Webtoon/LTR/RTL label uses the same slot.
+        assert_eq!(
+            ElementHandle::find_by_accessible_label(&ui, "More")
+                .filter(|control| control.accessible_role() == Some(AccessibleRole::Button))
+                .count(),
+            1,
+            "compact controls keep only the bottom More action"
+        );
+        for mode in [
+            "Webtoon",
+            "Left to right",
+            "Right to left",
+            "Long strip with gaps",
+        ] {
+            ui.set_reader_mode_label(mode.into());
+            settle();
+            let mut top: Option<f32> = None;
+            for glyph in ["chapters", "mode", "settings", "more"] {
+                let control = ElementHandle::find_by_element_type_name(&ui, "AddonIconButton")
+                    .find(|control| {
+                        control.accessible_id().as_deref()
+                            == Some(format!("reader-osd-action:{glyph}:labeled").as_str())
+                    })
+                    .expect("labeled reader action");
+                let (x, y, w, h) = bounds(&control);
+                assert!(x >= 0. && x + w <= width && w >= 44. && h >= 44.);
+                if let Some(top) = top {
+                    assert!((y - top).abs() <= 0.5, "mode and sibling icon slots align");
+                } else {
+                    top = Some(y);
+                }
+                if glyph == "mode" {
+                    assert_eq!(control.accessible_label().as_deref(), Some(mode));
+                    assert_eq!(control.accessible_role(), Some(AccessibleRole::Button));
+                    control.invoke_accessible_default_action();
+                    settle();
+                    ElementHandle::find_by_accessible_label(&ui, "Close reader settings")
+                        .next()
+                        .expect("effective mode opens the same picker")
+                        .invoke_accessible_default_action();
+                    settle();
+                }
+            }
+            assert!(
+                ElementHandle::find_by_accessible_label(&ui, "Mode")
+                    .next()
+                    .is_none()
+            );
+        }
+    }
+    ui.window().set_size(LogicalSize::new(1280., 900.));
+    settle();
+    for glyph in ["chapters", "settings", "fullscreen"] {
+        let control = ElementHandle::find_by_element_type_name(&ui, "AddonIconButton")
+            .find(|control| {
+                control.accessible_id().as_deref()
+                    == Some(format!("reader-osd-action:{glyph}:labeled").as_str())
+            })
+            .expect("desktop reader action");
+        let (x, _, w, h) = bounds(&control);
+        assert!(x >= 0. && x + w <= 1280. && w >= 44. && h >= 44.);
+    }
+}

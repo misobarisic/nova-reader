@@ -398,6 +398,13 @@ pub fn init() -> Result<(), String> {
     cache.series.clear();
     Ok(())
 }
+/// Refresh synced global defaults without discarding this process's already
+/// loaded source-local series overrides or changing their inheritance policy.
+pub fn reload_global() -> Result<(), String> {
+    let loaded = read(SETTINGS_KEY, ReaderSettings::validate)?;
+    CACHE.lock().unwrap_or_else(|e| e.into_inner()).global = loaded;
+    Ok(())
+}
 /// An owned snapshot is safe to retain on workers; this never accesses storage.
 pub fn snapshot() -> ReaderSettings {
     CACHE
@@ -438,10 +445,10 @@ pub fn effective(series: &SeriesId) -> ReaderSettings {
 fn commit_global(
     cache: &mut Cache,
     next: ReaderSettings,
-    write: impl FnOnce(&ReaderSettings) -> Result<(), String>,
+    write: impl FnOnce(&ReaderSettings) -> Result<ReaderSettings, String>,
 ) -> Result<ReaderSettings, String> {
     next.validate()?;
-    write(&next)?;
+    let next = write(&next)?;
     cache.global = next.clone();
     Ok(next)
 }
@@ -449,11 +456,17 @@ pub fn update(key: &str, value: i32) -> Result<ReaderSettings, String> {
     let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     let mut next = cache.global.clone();
     next.change(key, value)?;
-    commit_global(&mut cache, next, |value| persist(SETTINGS_KEY, value))
+    let previous = cache.global.clone();
+    commit_global(&mut cache, next, |value| {
+        crate::sync_settings::persist_preferences(SETTINGS_KEY, &previous, value)
+    })
 }
 pub fn save(next: ReaderSettings) -> Result<ReaderSettings, String> {
     let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    commit_global(&mut cache, next, |value| persist(SETTINGS_KEY, value))
+    let previous = cache.global.clone();
+    commit_global(&mut cache, next, |value| {
+        crate::sync_settings::persist_preferences(SETTINGS_KEY, &previous, value)
+    })
 }
 fn commit_series(
     cache: &mut Cache,

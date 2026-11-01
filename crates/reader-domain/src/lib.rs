@@ -6,14 +6,33 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 pub const SCHEMA_VERSION: u32 = 1;
-const STATE_KEY: &str = "reader:state";
+pub const STATE_KEY: &str = "reader:state";
 const MAX_BACKUP_BYTES: usize = 32 * 1024 * 1024;
 static STORE_PATH: OnceLock<PathBuf> = OnceLock::new();
 static SERIAL: Mutex<()> = Mutex::new(());
+
+/// Persistence runs under the domain serial lock. Hooks must not call DomainStore.
+/// The hook commits the validated snapshot and its sync records in one batch.
+pub type PersistenceHook =
+    dyn Fn(&ReaderState, &mut ReaderState, UpdateKind) -> Result<()> + Send + Sync;
+static PERSISTENCE: Mutex<Option<Arc<PersistenceHook>>> = Mutex::new(None);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpdateKind {
+    Local,
+    Checkpoint,
+    ManualProgress,
+    Projection,
+    Seed,
+}
+
+pub fn install_persistence_hook(hook: Arc<PersistenceHook>) {
+    *PERSISTENCE.lock().unwrap_or_else(|e| e.into_inner()) = Some(hook);
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -236,6 +255,15 @@ fn unique<T: Ord>(items: impl Iterator<Item = T>) -> bool {
     items.into_iter().all(|x| seen.insert(x))
 }
 impl ReaderState {
+    /// Validate and enforce the same size bound for local and remote commits.
+    pub fn storage_json(&self) -> Result<String> {
+        self.validate()?;
+        let json = serde_json::to_string(self)?;
+        if json.len() > MAX_BACKUP_BYTES {
+            return Err(Error::Invalid("metadata exceeds limit".into()));
+        }
+        Ok(json)
+    }
     pub fn validate(&self) -> Result<()> {
         let invalid = || Error::Invalid("invalid or duplicate metadata record".into());
         if self.schema_version != SCHEMA_VERSION {
@@ -360,15 +388,39 @@ impl DomainStore {
         Self::read()
     }
     pub fn update(&self, update: impl FnOnce(&mut ReaderState) -> Result<()>) -> Result<()> {
+        self.update_with_kind(UpdateKind::Local, update)
+    }
+    pub fn update_checkpoint(
+        &self,
+        update: impl FnOnce(&mut ReaderState) -> Result<()>,
+    ) -> Result<()> {
+        self.update_with_kind(UpdateKind::Checkpoint, update)
+    }
+    pub fn update_manual_progress(
+        &self,
+        update: impl FnOnce(&mut ReaderState) -> Result<()>,
+    ) -> Result<()> {
+        self.update_with_kind(UpdateKind::ManualProgress, update)
+    }
+    pub fn update_with_kind(
+        &self,
+        kind: UpdateKind,
+        update: impl FnOnce(&mut ReaderState) -> Result<()>,
+    ) -> Result<()> {
         let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-        let mut state = Self::read()?;
+        let before = Self::read()?;
+        let mut state = before.clone();
         update(&mut state)?;
-        state.validate()?;
-        let json = serde_json::to_string(&state)?;
-        if json.len() > MAX_BACKUP_BYTES {
-            return Err(Error::Invalid("metadata exceeds limit".into()));
+        let json = state.storage_json()?;
+        let hook = PERSISTENCE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(hook) = hook {
+            hook(&before, &mut state, kind)?;
+        } else {
+            nova_storage::try_set_str(STATE_KEY, &json)?;
         }
-        nova_storage::try_set_str(STATE_KEY, &json)?;
         Ok(())
     }
     pub fn backup_json(&self) -> Result<Vec<u8>> {
@@ -376,7 +428,9 @@ impl DomainStore {
     }
     pub fn restore_json(&self, bytes: &[u8]) -> Result<()> {
         let state = decode(bytes)?;
-        self.update(|current| {
+        // Restoring completion flags is an explicit user action, rather than a
+        // delayed reading checkpoint that an existing manual register can mask.
+        self.update_with_kind(UpdateKind::ManualProgress, |current| {
             *current = state;
             Ok(())
         })

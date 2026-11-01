@@ -19,7 +19,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `src/reader_controls.rs`, `src/reader_navigation.rs` | Nova-style OSD actions, source-anchored seek/zoom, Mihon tap maps, mode inheritance and Android/desktop preference projection |
 | `src/reader_continuity.rs` | Near-boundary chapter preparation, per-chapter source ownership and canonical progress, stable in-place page growth and bounded three-chapter retention |
 | `src/reader_desktop.rs` | Nova-derived latest-state native keep-awake worker; Linux portal/screensaver, Windows execution state and macOS caffeinate lifetime |
-| `crates/ui/reader-osd.slint`, `crates/ui/reader-settings.slint` | Responsive bottom OSD with fixed 44px chapter buttons and a single expanding bottom progress slider, animated phone-sheet/desktop-panel controls, shared global settings form under More → Settings → Reader |
+| `crates/ui/reader-osd.slint`, `crates/ui/reader-settings.slint` | Responsive bottom OSD with fixed 44px chapter buttons and a single expanding bottom progress slider, aligned compact actions labeled with the effective mode, one More action per layout, animated phone-sheet/desktop-panel controls and shared global settings form under More → Settings → Reader |
 | `src/progress_checkpoint.rs` | One background checkpoint writer, latest offsets coalesced per chapter, failure retry and ordered durable navigation/lifecycle barriers; the 600 ms UI timer only queues progress |
 | `src/reader_export.rs` | Original-image validation, screencap encoding, bounded platform save/clipboard delivery and persistent desktop clipboard ownership; `src/app.rs` captures the clean pre-menu viewport with an 8-million-pixel limit and fetches source page bytes |
 | `src/export_names.rs` | Portable UTF-8 series folders and bounded title/chapter/page/vertical-position filenames, including duplicate numbering |
@@ -35,6 +35,11 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `src/metadata_refresh.rs` | Nova-derived foreground metadata/chapter scheduler, bounded fair batches, persisted per-series deadlines and stale-result admission |
 | `src/about.rs` | Nova’s exact-size catalogue decompression, bounded text chunks and source-row ordering/fallbacks; publishes About models from a worker |
 | `src/browser.rs` | Nova’s desktop browser launching and Reader Android intent adapter for About source links |
+| `src/sync_settings.rs` | Field-level portable settings records, atomic persistence, durable device override baselines, actual Nova scope indicators/modal data and effective reader reapply |
+| `src/sync_ui.rs`, `crates/ui/sync-bridge.slint`, `crates/ui/sync-settings.slint` | Shared Kit Settings → Sync page (section 20), worker-owned startup/shutdown/projection, pairing/invites/QR/peer status and chapter inspector; preserves the UI event-loop boundary |
+| `src/sync_addons.rs` | Per-package desired sync state, hash-verified paired-device addon transfers, nonsecret settings/catalogue switches and permission-confirmation state |
+| `src/android_sync.rs`, `android/java/dev/misob/nova/reader/ReaderSync*.java`, `QrScanActivity.java`, `tools/test-android-sync.py` | Android periodic/headless sync leases, generation-scoped cancellation, network recovery, clipboard and Camera2 invite scanning; Java/JNI regressions |
+| `src/desktop_dialogs.rs` | Nova’s exact titled/filter ZIP addon picker, invoked from Reader’s task worker |
 | `src/appearance.rs` | Device appearance/motion preferences, validated edits, immediate application and KV persistence |
 | `crates/ui/app.slint` | Shared pages/reader models, safe-area layout, platform/width shell selection, detail origin and translated text |
 | `crates/ui/media-models.slint` | Shared series/chapter/timeline/source/extension/filter row models |
@@ -54,8 +59,9 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `assets/fonts` | Nova’s bundled Roboto faces and Apache notices; More/settings artwork comes directly from Kit |
 | `assets/open_source_*.hbs`, `assets/open_source_project_sources.tsv`, `assets/open_source_vendors.txt` | Nova catalogue templates and Reader-specific source/vendor attribution; full local notices are appended by `build.rs` |
 | `assets/icons/navigation` | Embedded SVG navigation and reader controls, independent of system font glyph coverage |
-| `crates/reader-domain` | Source-local identities, schema-1 state, library/categories, publication/reading status in `src/library_status.rs`, progress/history/bookmarks and backup/restore |
-| `crates/reader-sources` | Reader v2 ZIP validation, durable registry, typed profile settings, QuickJS host, HTML/URL capabilities and checked source HTTP |
+| `crates/reader-domain` | Source-local identities, schema-1 state, library/categories, publication/reading status in `src/library_status.rs`, progress/history/bookmarks, backup/restore and serialized atomic persistence hook |
+| `src/sync.rs` | Reader per-identity adapter on Kit `nova-sync`: default `reader` namespace, metadata, library, category memberships, resume, manual reading actions, history and bookmarks; atomic `reader:state`/record/baseline persistence and remote echo guard |
+| `crates/reader-sources` | Reader v2 ZIP validation, durable registry, typed profile settings, QuickJS host, HTML/URL capabilities and checked source HTTP; verified archive export and parse-only inspection for peer package transfer |
 | `crates/reader-engine` | Dimension probing, bounded PNG/JPEG/WebP decode and shared Kit AVIF delegation, display geometry, resume anchors and decoded cache utility |
 | `crates/reader-engine/src/jxl.rs`, `crates/reader-engine/tests/jpeg_xl.rs` | Thin adapter to Kit JPEG XL probing/decoding; Reader retains synthetic RGB/alpha integration fixtures while Kit owns metadata admission, auxiliary-box skipping, tracked grid budget and native row conversion |
 | `crates/reader-engine/src/display.rs`, `crates/reader-engine/src/avif.rs` | Width-preserving visible-row display admission/resampling and one-original worker reuse; thin boundary to Kit `nova-image` AVIF/JPEG XL with independent Reader fixture/display/admission regressions |
@@ -288,7 +294,6 @@ Source examples are intended for independent future publication in nova-addons.
 - Appearance controls, palette and device persistence: `crates/ui/theme-settings.slint`, `crates/ui/src/appearance.rs`, `src/appearance.rs`.
 - Android picker context, callbacks and host JVM regression: [Android documents](android-documents.md).
 - Android/desktop shells and touch layout checks: `crates/ui/navigation.slint`, `crates/ui/app.slint`, `tests/mobile_layout.rs`.
-- Static review scope and outcome: [review record](../REVIEW.md).
 - Build-time license catalogue and source inventory: `build.rs`, `about.toml`, `assets/open_source_*`, `tests/license_catalog_build.rs`.
 - About license/source viewer: `src/about.rs`, `crates/ui/about.slint`, `tests/about.rs`.
 - Run/build/install and CLI: [README](../README.md), [packaging](packaging.md).
@@ -388,3 +393,49 @@ Per-page chapter/source ownership keeps caches, export filenames and progress
 canonical; old segments are pruned in place to retain previous/current/next,
 with a fresh generation rejecting old indexed tasks. A small boundary row names
 both chapters in Webtoon; paged crossings show a brief caption with both names. Completion is tracked per chapter and split spreads complete only after their second half. Periodic checkpoint storage remains off the UI thread.
+
+Reader sync stores one record per source-scoped identity under
+`profile_domain("reader", "reader_<kind>")`, never a replicated whole-state
+snapshot. Category IDs survive renames. Existing bookmark identities migrate
+without changing backup schema: their immutable chapter/page/offset tuple is the
+record key, so note edits retain identity and removal retains a tombstone.
+`DomainStore::update_checkpoint` distinguishes delayed resume saves from
+`update_manual_progress`; read/unread actions have their own register. The
+persistence hook commits state, records and materialized baselines through one
+Kit storage transaction even when networking is disabled. Remote projection
+uses `UpdateKind::Projection` to avoid publishing received changes as local
+edits. Drain `ProgressWriter` before projection or exchange.
+
+Sync uses Kit’s generic engine with video features disabled. `NR1` invite tickets
+and the `nova-reader/*` protocol namespace cannot pair with Nova’s `NV1`/`nova/*`.
+`Services::open` serializes process initialization and retains one registry for
+foreground and headless consumers of the same application directory. Sync is
+opt-in; durable local changes are recorded without binding a network endpoint.
+
+`reader:sync-settings-baseline` stores shared field baselines and
+`reader:sync-settings-overrides` stores device-local override membership. The
+shared scope badge/modal compares local and shared values; releasing an override
+follows the current shared record immediately. Paths, credentials, cache quotas
+and device display/power policy stay local. Effective settings reload preserves
+per-series caches and reapplies the active reader’s layout/platform preferences.
+Addon source permissions remain device-local; received executable packages pass
+Reader validation and wait for local approval when new permissions are needed.
+
+Reader settings scrollers use Nova’s raw Flickable guards against
+`SliderGesture.active` and `SliderGesture.hovered`, releasing on pointer
+cancellation, panel close and settings navigation.
+`tests/settings_slider_gestures.rs` covers actual horizontal touch/mouse drags,
+outside release/cancellation and resumed vertical scrolling;
+`tests/reader_layout_preferences.rs` checks mode/icon alignment and compact More.
+Local preference saves diff the editor’s previous/next values against current
+durable data, so an edit cannot republish unrelated stale fields after a remote
+projection. Addon mutation/publication uses one reconciliation gate, keeps
+permission denials local and preserves disjoint field edits.
+
+The native, storage-free addon validator is
+`crates/reader-sources/examples/validate-package.rs`; the shared addon release
+repository uses it alongside Nova’s provider validator to enforce each app’s
+contract. Canonical distribution sources and tag packaging live in
+[`nova-addons`](https://github.com/misobarisic/nova-addons), with `reader-addons/`
+separate from the existing video `addons/` paths. Local example fixtures and old
+ZIP URLs remain for regression coverage and existing catalogue links.

@@ -127,7 +127,7 @@ impl Default for CapturePreferences {
 }
 
 impl CapturePreferences {
-    fn valid(&self) -> bool {
+    pub(crate) fn valid(&self) -> bool {
         (1..=100).contains(&self.jpeg_quality)
             && (1..=100).contains(&self.webp_quality)
             && (1..=100).contains(&self.avif_quality)
@@ -194,19 +194,21 @@ pub fn preferences(ui: &AppWindow) -> CapturePreferences {
     }
 }
 
-fn persist(preferences: &CapturePreferences) -> Result<(), String> {
-    let json = serde_json::to_string(preferences).map_err(|error| error.to_string())?;
-    nova_storage::try_set_str(KEY, &json).map_err(|error| error.to_string())
+fn persist(
+    previous: &CapturePreferences,
+    preferences: &CapturePreferences,
+) -> Result<CapturePreferences, String> {
+    crate::sync_settings::persist_preferences(KEY, previous, preferences)
 }
 
 fn save(
     ui: &AppWindow,
     state: &RefCell<CapturePreferences>,
     next: CapturePreferences,
-    write: impl FnOnce(&CapturePreferences) -> Result<(), String>,
+    write: impl FnOnce(&CapturePreferences) -> Result<CapturePreferences, String>,
 ) {
     match write(&next) {
-        Ok(()) => {
+        Ok(next) => {
             next.apply(ui);
             *state.borrow_mut() = next;
             ui.set_status("".into());
@@ -249,7 +251,8 @@ pub fn init(ui: &AppWindow) -> Result<(), String> {
             if let Some(ui) = weak.upgrade() {
                 let mut next = *state.borrow();
                 if next.change(&key, value) {
-                    save(&ui, &state, next, persist);
+                    let previous = *state.borrow();
+                    save(&ui, &state, next, |next| persist(&previous, next));
                 } else {
                     state.borrow().apply(&ui);
                 }

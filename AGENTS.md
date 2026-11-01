@@ -77,8 +77,10 @@ cargo test --workspace --locked
   `dev.misob.nova.reader`, native library `nova_reader`, and
   `NOVA_READER_DATA_DIR`. The database may retain the internal filename
   `nova.redb` within Reader's separate directory.
-- Reader has no Nova sync wire protocol, media relay or video-library dependency.
-  Do not carry those identities or packaging assumptions into Reader.
+- Reader uses Kit's generic `nova-sync` without video features. Its `NR1`
+  invites and `nova-reader/*` protocols remain isolated from Nova's `NV1` and
+  `nova/*` protocols. Configure Reader's protocol and record policy before loading
+  sync storage or starting an endpoint; never copy Nova video identities into it.
 - Reader format-2 JavaScript packages use `nova-reader1`. Keiyoushi APK/JAR
   catalogue entries are discovery metadata and cannot execute here. Generic
   extraction to kit must retain Nova's separate v1 compatibility gate.

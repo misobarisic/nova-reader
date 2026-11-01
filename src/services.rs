@@ -60,42 +60,56 @@ pub struct Services {
 }
 impl Services {
     pub fn open(path: &Path) -> Result<Self> {
-        Ok(Self {
-            domain: DomainStore::open(path).map_err(error)?,
+        // Foreground activities and headless jobs share one registry lock.
+        static OPEN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        static CURRENT: std::sync::OnceLock<Services> = std::sync::OnceLock::new();
+        let _open = OPEN.lock().unwrap_or_else(|e| e.into_inner());
+        let domain = DomainStore::open(path).map_err(error)?;
+        if let Some(current) = CURRENT.get() {
+            return Ok(current.clone());
+        }
+        let services = Self {
+            domain,
             downloads: DownloadStore::open(path.join("chapters"), 8 * 1024 * 1024 * 1024)
                 .map_err(error)?,
             sources: SourceRegistry::open(path.join("addons")).map_err(error)?,
-        })
+        };
+        crate::sync::initialize(&services.domain).map_err(error)?;
+        crate::sync_addons::initialize(&services)?;
+        let _ = CURRENT.set(services.clone());
+        Ok(services)
     }
     pub fn install(&self, bytes: &[u8]) -> Result<String> {
-        let source = self.sources.install_zip(bytes).map_err(error)?;
-        // Selecting a ZIP is an explicit installation. Permission-expanding
-        // updates stay disabled until the user enables them in Browse.
-        if !source.enabled
-            && !self
-                .domain
-                .snapshot()
-                .map_err(error)?
-                .sources
-                .iter()
-                .any(|s| s.addon_id == source.id)
-        {
-            self.sources.set_enabled(&source.id, true).map_err(error)?;
-        }
-        self.domain
-            .update(|state| {
-                state.sources.retain(|s| s.addon_id != source.id);
-                state.sources.push(reader_domain::SourceDescriptor {
-                    id: source.id.clone(),
-                    addon_id: source.id.clone(),
-                    name: source.name,
-                    language: source.language,
-                    version: source.version,
-                });
-                Ok(())
-            })
-            .map_err(error)?;
-        Ok(source.id)
+        crate::sync_addons::local_change(self, || {
+            let source = self.sources.install_zip(bytes).map_err(error)?;
+            // Selecting a ZIP is an explicit installation. Permission-expanding
+            // updates stay disabled until the user enables them in Browse.
+            if !source.enabled
+                && !self
+                    .domain
+                    .snapshot()
+                    .map_err(error)?
+                    .sources
+                    .iter()
+                    .any(|s| s.addon_id == source.id)
+            {
+                self.sources.set_enabled(&source.id, true).map_err(error)?;
+            }
+            self.domain
+                .update(|state| {
+                    state.sources.retain(|s| s.addon_id != source.id);
+                    state.sources.push(reader_domain::SourceDescriptor {
+                        id: source.id.clone(),
+                        addon_id: source.id.clone(),
+                        name: source.name,
+                        language: source.language,
+                        version: source.version,
+                    });
+                    Ok(())
+                })
+                .map_err(error)?;
+            Ok(source.id)
+        })
     }
     pub fn source(&self, source_id: &str) -> Result<Source> {
         if let Ok(source) = self.sources.source(source_id) {

@@ -34,6 +34,7 @@ export component ThemeSettings inherits VerticalLayout {
     in property <bool> interactive;
     spacing: 16px; alignment: start;
     SettingsCard { SettingsRow {
+        setting-key: "reader:appearance/accent_color";
         row-title: @tr("Accent color"); row-desc: @tr("Choose the highlight color used throughout the app.");
         if !root.narrow: VerticalLayout {
             spacing: 8px;
@@ -48,7 +49,7 @@ export component ThemeSettings inherits VerticalLayout {
             AccentChoices { interactive: root.interactive; first-index: 6; labels: [@tr("Amber"), @tr("Lime")]; }
         }
     } }
-    SettingsCard { SettingsRow {
+    SettingsCard { SettingsRow { setting-key: "reader:appearance/background_style";
         row-title: @tr("Background style"); row-desc: @tr("Use the default palette, a subtle accent tint, or pure black backgrounds.");
         private property <int> selected: Appearance.background-style == 0 ? 0 : Appearance.background-style == 1 ? 1 : 2;
         if !root.narrow: Segmented { enabled: root.interactive;
@@ -70,7 +71,7 @@ export component ThemeSettings inherits VerticalLayout {
             }
         }
     } }
-    SettingsCard { SettingsRow {
+    SettingsCard { SettingsRow { setting-key: "reader:appearance/card_radius";
         row-title: @tr("Card corner radius"); row-desc: @tr("Choose how rounded cards look. Soft is the default.");
         private property <int> selected: Appearance.card-radius == 0 ? 0 : Appearance.card-radius == 4 ? 1 : Appearance.card-radius == 10 ? 2 : Appearance.card-radius == 16 ? 3 : 4;
         if !root.narrow: Segmented { enabled: root.interactive;
@@ -92,7 +93,7 @@ export component ThemeSettings inherits VerticalLayout {
             }
         }
     } }
-    SettingsCard { SettingsRow {
+    SettingsCard { SettingsRow { setting-key: "reader:appearance/button_radius";
         row-title: @tr("Button corner radius"); row-desc: @tr("Choose how rounded buttons and controls look.");
         private property <int> selected: Appearance.button-radius == 0 ? 0 : Appearance.button-radius == 4 ? 1 : Appearance.button-radius == 8 ? 2 : Appearance.button-radius == 12 ? 3 : 4;
         if !root.narrow: Segmented { enabled: root.interactive;
@@ -114,7 +115,7 @@ export component ThemeSettings inherits VerticalLayout {
             }
         }
     } }
-    SettingsCard { SettingsRow {
+    SettingsCard { SettingsRow { setting-key: "reader:appearance/card_spacing";
         row-title: @tr("Card spacing"); row-desc: @tr("Choose the gap between list cards.");
         private property <int> selected: Appearance.card-spacing == 0 ? 0 : Appearance.card-spacing == 4 ? 1 : Appearance.card-spacing == 8 ? 2 : Appearance.card-spacing == 12 ? 3 : 4;
         if !root.narrow: Segmented { enabled: root.interactive;
@@ -136,7 +137,7 @@ export component ThemeSettings inherits VerticalLayout {
             }
         }
     } }
-    SettingsCard { SettingsRow {
+    SettingsCard { SettingsRow { setting-key: "reader:appearance/transparent_navbar";
         row-title: @tr("Transparent bottom navigation bar");
         row-desc: root.phone-layout ? @tr("Show content behind the bottom bar with a dark gradient.") : @tr("Available when using bottom navigation.");
         ToggleSwitch {
@@ -159,7 +160,7 @@ export component MotionSettings inherits VerticalLayout {
     in property <bool> interactive;
     spacing: 16px; alignment: start;
     SectionHeader { label: @tr("Animations"); }
-    SettingsCard { SettingsRow {
+    SettingsCard { SettingsRow { setting-key: "reader:appearance/animations";
         row-title: @tr("Enable animations"); row-desc: @tr("Master switch. Turn off to make every transition and hover effect instant.");
         ToggleSwitch {
             name: @tr("Enable animations"); checked <=> Appearance.animations; enabled: root.interactive;
@@ -167,7 +168,7 @@ export component MotionSettings inherits VerticalLayout {
             accessible-action-default => { if self.enabled { Appearance.setting-changed("animations", Appearance.animations ? 0 : 1); } }
         }
     } }
-    SettingsCard { SettingsRow {
+    SettingsCard { SettingsRow { setting-key: "reader:appearance/transitions";
         row-title: @tr("Page transitions"); row-desc: @tr("Slide and fade between pages.");
         ToggleSwitch {
             name: @tr("Page transitions"); checked <=> Appearance.transitions; enabled: root.interactive && Appearance.animations;
@@ -175,7 +176,7 @@ export component MotionSettings inherits VerticalLayout {
             accessible-action-default => { if self.enabled { Appearance.setting-changed("transitions", Appearance.transitions ? 0 : 1); } }
         }
     } }
-    SettingsCard { SettingsRow {
+    SettingsCard { SettingsRow { setting-key: "reader:appearance/hover";
         row-title: @tr("Hover effects"); row-desc: @tr("Highlight fades on buttons, toggles, rows and filter pills.");
         ToggleSwitch {
             name: @tr("Hover effects"); checked <=> Appearance.hover; enabled: root.interactive && Appearance.animations;
@@ -183,7 +184,7 @@ export component MotionSettings inherits VerticalLayout {
             accessible-action-default => { if self.enabled { Appearance.setting-changed("hover", Appearance.hover ? 0 : 1); } }
         }
     } }
-    SettingsCard { SettingsRow {
+    SettingsCard { SettingsRow { setting-key: "reader:appearance/navigation_feedback";
         row-title: @tr("Navigation feedback"); row-desc: @tr("Gently pop the selected navigation icon when switching pages.");
         ToggleSwitch {
             name: @tr("Navigation feedback"); checked <=> Appearance.navigation-feedback; enabled: root.interactive && Appearance.animations;

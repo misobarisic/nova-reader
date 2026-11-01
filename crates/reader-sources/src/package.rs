@@ -449,6 +449,18 @@ impl SourceRegistry {
             .map(|id| self.source_unchecked(id).map(|s| s.descriptor()))
             .collect()
     }
+    /// Validate an archive without installing or granting its permissions.
+    pub fn inspect_archive(bytes: &[u8]) -> Result<(SourceDescriptor, String)> {
+        let (manifest, script) = validate(bytes)?;
+        crate::runtime::validate_script(&script)?;
+        Ok((SourceDescriptor::new(&manifest, false), digest(bytes)))
+    }
+    /// Only currently installed, verified archives can be served to paired peers.
+    pub fn archive(&self, id: &str) -> Result<(String, Vec<u8>)> {
+        let source = self.source_unchecked(id)?;
+        let bytes = source.archive.as_ref().clone();
+        Ok((digest(&bytes), bytes))
+    }
     /// Read verified package decoration even for disabled addons. No script or
     /// network runs, and package updates/removal cannot supply stale bytes.
     pub fn icon(&self, id: &str) -> Result<Option<Vec<u8>>> {

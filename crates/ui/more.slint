@@ -1,6 +1,6 @@
 // Reader destinations hosted in Nova's retained More landing/push-page pattern.
 // Layout, SettingsCard/SettingsLink rows and transitions follow Nova b69a1e5.
-import { Theme, Anim, SettingsStyle } from "@NovaUiShared";
+import { Theme, Anim, SettingsStyle, SliderGesture } from "@NovaUiShared";
 import { SettingsCard } from "@NovaUiBase/settings-controls.slint";
 import { ScrollView } from "@NovaUiBase/scrollview.slint";
 import { DisplaySettings } from "display-settings.slint";
@@ -9,6 +9,7 @@ import { CaptureSettingsPage } from "capture-settings.slint";
 import { ImageStorageSettingsPage } from "image-storage-settings.slint";
 import { ThemeSettings, MotionSettings } from "theme-settings.slint";
 import { PageHeader } from "page-header.slint";
+import { ReaderSyncSettingsPage } from "sync-settings.slint";
 import { AboutPage } from "about.slint";
 import { LicenseSource } from "about-models.slint";
 import { MenuLink, ActionButton, ReaderField } from "controls.slint";
@@ -49,7 +50,7 @@ export component MorePage inherits Rectangle {
     }
     changed narrow => { root.choice = max(root.narrow ? 1 : 2, root.choice); }
     private property <bool> local-open: root.section >= 9;
-    private property <bool> detail-open: root.section == 11 || root.section == 12 || root.section == 14 || root.section == 15 || root.section == 16 || root.section == 17 || root.section == 18 || root.section == 19;
+    private property <bool> detail-open: root.section == 11 || root.section == 12 || root.section == 14 || root.section == 15 || root.section == 16 || root.section == 17 || root.section == 18 || root.section == 19 || root.section == 20;
     private property <int> child-section: 9;
     private property <int> detail-section: 11;
     private property <bool> entered: false;
@@ -97,6 +98,7 @@ export component MorePage inherits Rectangle {
     private property <bool> child-active: root.local-open && !root.detail-open && root.sub-slide <= 0 && root.sub-alpha <= 0;
     private property <bool> detail-active: root.local-open && root.detail-open;
     changed section => {
+        SliderGesture.active = false; SliderGesture.hovered = false;
         if root.section == 9 || root.section == 10 || root.section == 13 {
             if root.child-section != root.section { child-scroll.content-y = 0px; root.child-scroll-y = 0px; }
             root.child-section = root.section;
@@ -157,8 +159,8 @@ export component MorePage inherits Rectangle {
     function reveal_detail() {
         let top = SettingsStyle.focus-y - detail-scroll.absolute-position.y;
         if top < 0px { detail-scroll.content-y -= top; }
-        else if top + SettingsStyle.focus-height > detail-scroll.visible-height {
-            detail-scroll.content-y -= top + SettingsStyle.focus-height - detail-scroll.visible-height;
+        else if top + SettingsStyle.focus-height > detail-scroll.height {
+            detail-scroll.content-y -= top + SettingsStyle.focus-height - detail-scroll.height;
         }
     }
     // This scroller remains mounted while its children own input. Returning
@@ -251,6 +253,10 @@ export component MorePage inherits Rectangle {
                     if root.child-section == 10: VerticalLayout {
                         spacing: 12px;
                         SettingsCard { MenuLink {
+                            interactive: root.child-active; title: @tr("Sync"); subtitle: @tr("Paired devices, reading progress and shared settings"); icon-kind: 7;
+                            destination-id: "settings:sync"; picked => { root.navigate(20); }
+                        } }
+                        SettingsCard { MenuLink {
                             interactive: root.child-active; title: @tr("Reader"); subtitle: @tr("Reading defaults, navigation and image adjustments"); icon-kind: 4;
                             picked => { root.navigate(19); }
                         } }
@@ -325,17 +331,24 @@ export component MorePage inherits Rectangle {
                 if root.status != "": Text { text: root.status; color: Theme.current.text_settings; wrap: word-wrap; }
                 reader-defaults := ReaderSettingsForm { global-settings: true; interactive: root.detail-active; min-height: 0px; vertical-stretch: 1; }
             }
-            detail-scroll := ScrollView {
+            detail-scroll := Flickable {
                 visible: root.detail-section != 19;
                 width: parent.width; height: parent.height;
-                mouse-drag-pan-enabled: true; content-width: self.visible-width;
-                VerticalLayout {
+                // Same guard as Nova Settings: a slider owns diagonal motion
+                // until release, while ordinary settings swipes still scroll.
+                interactive: root.detail-active && !SliderGesture.active;
+                mouse-drag-pan-enabled: !SliderGesture.hovered;
+                content-width: self.width;
+                content-height: max(self.height, detail-content.preferred-height);
+                detail-content := VerticalLayout {
+                    width: detail-scroll.width; height: self.preferred-height; min-width: 0px;
                     padding: 18px; spacing: 16px; alignment: start;
                     PageHeader {
-                        title: root.detail-section == 11 ? @tr("Categories") : root.detail-section == 12 ? @tr("Data") : root.detail-section == 14 ? @tr("Theme") : root.detail-section == 16 ? @tr("Display") : root.detail-section == 17 ? @tr("Cache") : root.detail-section == 18 ? @tr("Screenshots") : @tr("Look and feel");
+                        title: root.detail-section == 20 ? @tr("Sync") : root.detail-section == 11 ? @tr("Categories") : root.detail-section == 12 ? @tr("Data") : root.detail-section == 14 ? @tr("Theme") : root.detail-section == 16 ? @tr("Display") : root.detail-section == 17 ? @tr("Cache") : root.detail-section == 18 ? @tr("Screenshots") : @tr("Look and feel");
                         narrow: root.narrow; show-back: true; back => { if root.detail-active { root.navigate(10); } }
                     }
                     if root.status != "": Text { min-width: 0px; text: root.status; color: Theme.current.text_settings; wrap: word-wrap; }
+                    if root.detail-section == 20: ReaderSyncSettingsPage {}
                     if root.detail-section == 11: SettingsCard {
                         VerticalLayout {
                             padding: 16px; spacing: 12px;

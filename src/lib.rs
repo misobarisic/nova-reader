@@ -4,6 +4,8 @@ mod about;
 mod addon_icons;
 #[cfg(target_os = "android")]
 pub mod android_documents;
+#[cfg(target_os = "android")]
+pub mod android_sync;
 mod app;
 pub mod appearance;
 mod artwork;
@@ -12,6 +14,8 @@ pub mod capture_settings;
 pub mod chapter_cache;
 mod chapter_capture;
 mod cli;
+#[cfg(not(target_os = "android"))]
+mod desktop_dialogs;
 pub mod export_names;
 pub mod image_storage;
 mod metadata_refresh;
@@ -29,6 +33,10 @@ pub mod services;
 mod source_browser;
 mod source_catalogs;
 mod source_filters;
+pub mod sync;
+pub mod sync_addons;
+pub mod sync_settings;
+mod sync_ui;
 mod timeline;
 mod updates;
 
@@ -46,12 +54,18 @@ fn android_main(app: slint::android::AndroidApp) {
     if let Some(path) = app.internal_data_path() {
         let _ = paths::ANDROID_DATA.set(path.join("nova-reader"));
     }
+    crate::android_sync::initialize_foreground_context(app.vm_as_ptr(), app.activity_as_ptr());
     slint::android::init_with_event_listener(app, |event| {
         use slint::android::android_activity::{MainEvent, PollEvent};
         match event {
-            PollEvent::Main(MainEvent::Resume { .. }) => metadata_refresh::set_foreground(true),
+            PollEvent::Main(MainEvent::Resume { .. }) => {
+                metadata_refresh::set_foreground(true);
+                nova_sync::set_foreground(true);
+                nova_sync::notify_network_change();
+            }
             PollEvent::Main(MainEvent::Pause | MainEvent::Destroy) => {
                 metadata_refresh::set_foreground(false);
+                nova_sync::set_foreground(false);
                 app::flush_lifecycle();
             }
             _ => {}

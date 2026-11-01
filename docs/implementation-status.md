@@ -13,7 +13,7 @@ the presence of a test or workflow does not establish that it passed on a device
 | 3 — Reference reading flow | YiiMadara/Manhwa18 parser and explicit language/NSFW capabilities; neutral install/browse/details/chapters/pages; library reveal search, optimistic details with retained synopsis/scroll, automatic source paging with explicit failure Retry, reading modes and persisted logical resume | Live source availability; device interaction/resume checks; independently published native source package in nova-addons |
 | 4 — Usable alpha | Per-entry categories/bookmarks, durable adult visibility and per-series chapter ordering, dated History/Updates, compact chapter actions, source pins/last-used grouping, Sources/Extensions management, source filters and cover cache; manual updates; ordered checksummed bundles; remote chapter download deletion; queue pause/resume/cancel/retry, recovery and queued-job startup resume; local folder/CBZ/ZIP imports; validated metadata backup/restore | Target-platform process-kill/offline/restore acceptance, Android SAF device validation, selectable durable external download destination, configurable quota/retention and source concurrency policies |
 | 5 — Discovery/distribution | Bounded gzip/protobuf catalogue adapter, live-derived exact upstream IDs, native port mapping, Ed25519 verification/trust API and sequence floors, discovery states | Published signed catalogue/ZIPs; trust/key-management UI and durable policy; automated download/hash-check/review/activation lifecycle and permission-change UX |
-| 6 — Beta/v1 | Platform CI/release scaffolding and focused regression tests | Scheduled Android updates/download policy, background/reboot behavior, sync, external tracking, migration UX, device performance budgets, accessibility and full release rehearsal |
+| 6 — Beta/v1 | Platform CI/release scaffolding, shared Kit record sync, pairing/peer UI, field-level settings overrides, source package transfer, Android sync jobs and focused regression tests | Scheduled Android updates/download policy, background/reboot device validation, external tracking, migration UX, device performance budgets, accessibility and full release rehearsal |
 
 ## Reading and offline behavior
 
@@ -145,14 +145,6 @@ updates. Keiyoushi APK/JAR catalogue entries are discovery records, not executab
 Nova sources.
 
 ## Verification entry points
-
-The user-requested `gpt-6-astra` review at medium reasoning found no residual
-demonstrated P1/P2 issue after fixes; see [review record](../REVIEW.md). Static
-review is recorded separately from execution. Local workspace checks, Clippy,
-tests (including geometry/tiles and the process-boundary journey), addon/parser
-and packaging regressions passed. A Linux desktop Xvfb smoke also covered
-browse, details, library add, tall rendering and scroll persistence. See the
-[verification record](../REVIEW.md) for scope and remaining platform checks.
 
 Run focused checks before broad workspace checks:
 

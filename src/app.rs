@@ -625,6 +625,32 @@ struct Controller {
     metadata_refresh: Arc<crate::metadata_refresh::Scheduler>,
 }
 impl Controller {
+    fn refresh_synced(self: &Arc<Self>, ui: &AppWindow) {
+        self.render(ui);
+        self.refresh_download_states(ui);
+        if self.view().section != 3 || ui.get_source_catalog_open() {
+            return;
+        }
+        let generation = self.generation.load(Ordering::Acquire);
+        let adult = ui.get_show_adult();
+        let app = self.clone();
+        let weak = ui.as_weak();
+        std::thread::spawn(move || {
+            let sources = app.browse_sources(adult);
+            let _ = weak.upgrade_in_event_loop(move |ui| {
+                if app.generation.load(Ordering::Acquire) == generation
+                    && app.view().section == 3
+                    && !ui.get_source_catalog_open()
+                    && ui.get_show_adult() == adult
+                {
+                    match sources {
+                        Ok(sources) => app.publish_sources(&ui, sources),
+                        Err(error) => ui.set_status(error.into()),
+                    }
+                }
+            });
+        });
+    }
     fn metadata_refresh_allowed(&self, ui: &AppWindow) -> bool {
         crate::metadata_refresh::foreground()
             && crate::metadata_refresh::surface_allowed(self.view().section)
@@ -1393,11 +1419,14 @@ impl Controller {
             ui.set_status(text::tr("Source unavailable").into());
             return;
         };
-        let result = match action {
-            "remove" => self.services.sources.remove(package),
-            "toggle" => self.services.sources.set_enabled(package, !current.enabled),
-            _ => return,
-        };
+        let result = crate::sync_addons::local_change(&self.services, || {
+            match action {
+                "remove" => self.services.sources.remove(package),
+                "toggle" => self.services.sources.set_enabled(package, !current.enabled),
+                _ => return Err(text::tr("Unknown source action")),
+            }
+            .map_err(error)
+        });
         if let Err(e) = result {
             ui.set_status(error(e).into());
         } else {
@@ -3032,7 +3061,7 @@ impl Controller {
             "read" => self
                 .services
                 .domain
-                .update(|state| {
+                .update_manual_progress(|state| {
                     let completed = !state
                         .progress
                         .iter()
@@ -3973,6 +4002,28 @@ pub fn run(services: Services) -> Result<()> {
         metadata_refresh: Arc::default(),
     });
     let _ = LIFECYCLE.set(Arc::downgrade(&app));
+    let barrier = Arc::downgrade(&app);
+    nova_sync::set_persistence_barrier(Arc::new(move || {
+        if let Some(app) = barrier.upgrade() {
+            app.checkpoint_progress();
+            app.progress_checkpoint
+                .flush(None)
+                .map_err(anyhow::Error::msg)?;
+        }
+        Ok(())
+    }));
+    let remote = Arc::downgrade(&app);
+    let reapply = Arc::downgrade(&app);
+    crate::sync_settings::install_reapply(move |ui| {
+        if let Some(app) = reapply.upgrade() {
+            app.apply_reader_preferences(ui);
+        }
+    });
+    let sync = crate::sync_ui::SyncController::initialize(app.services.clone(), &ui, move |ui| {
+        if let Some(app) = remote.upgrade() {
+            app.refresh_synced(ui);
+        }
+    })?;
     let weak = ui.as_weak();
     app.chapter_cache.on_gc(Arc::new(move || {
         let _ = weak.upgrade_in_event_loop(|ui| {
@@ -4249,11 +4300,21 @@ pub fn run(services: Services) -> Result<()> {
         .install(&ui, PathBuf::from(path.as_str())));
     wire!(on_install_addon, |app, ui| {
         #[cfg(not(target_os = "android"))]
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter("Reader addon", &["zip"])
-            .pick_file()
         {
-            app.install(&ui, path);
+            if ui.get_busy() {
+                return;
+            }
+            // Match Nova's addon picker: keep native selection on a worker so
+            // the desktop event loop can display and service the dialog.
+            app.task(
+                &ui,
+                |_, _| Ok(crate::desktop_dialogs::choose_addon()),
+                |app, ui, path| match path {
+                    Some(path) => app.install(ui, path),
+                    None => ui.set_status("".into()),
+                },
+            );
+            ui.set_status(text::tr("Choose an addon ZIP file…").into());
         }
         #[cfg(target_os = "android")]
         {
@@ -4435,7 +4496,9 @@ pub fn run(services: Services) -> Result<()> {
     wire!(on_catalog_enabled_changed, |app, ui, id, enabled| {
         let package = { app.view().settings_package.clone() };
         if let Some(package) = package {
-            let result = crate::source_catalogs::set_enabled(&package, &id, enabled);
+            let result = crate::sync_addons::local_change(&app.services, || {
+                crate::source_catalogs::set_enabled(&package, &id, enabled)
+            });
             let saved = result.is_ok();
             match result {
                 Ok(()) => {
@@ -4478,12 +4541,15 @@ pub fn run(services: Services) -> Result<()> {
             } else {
                 serde_json::Value::String(value.to_string())
             };
-            match app
-                .services
-                .sources
-                .set_settings(&package, json!({key.as_str():value}))
-            {
-                Ok(()) => ui.set_status(text::tr("Source settings saved.").into()),
+            match crate::sync_addons::local_change(&app.services, || {
+                app.services
+                    .sources
+                    .set_settings(&package, json!({key.as_str():value}))
+                    .map_err(error)
+            }) {
+                Ok(()) => {
+                    ui.set_status(text::tr("Source settings saved.").into());
+                }
                 Err(e) => ui.set_status(error(e).into()),
             }
         }
@@ -4492,7 +4558,13 @@ pub fn run(services: Services) -> Result<()> {
         if !name.trim().is_empty() {
             if let Err(e) = app.services.domain.update(|state| {
                 state.categories.push(reader_domain::Category {
-                    id: format!("category-{}", now()),
+                    id: format!(
+                        "category-{:016x}-{}",
+                        nova_sync::local_device()
+                            .map_err(|e| reader_domain::Error::Invalid(e.to_string()))?,
+                        nova_storage::try_allocate_local_sequence("reader:category", 0)
+                            .map_err(reader_domain::Error::from)?
+                    ),
                     name: name.trim().into(),
                 });
                 Ok(())
@@ -4528,11 +4600,15 @@ pub fn run(services: Services) -> Result<()> {
     let checkpoint = app.clone();
     let refresh_ui = ui.as_weak();
     let mut inventory_check = std::time::Instant::now();
+    let sync_timer = sync.clone();
     timer.start(
         slint::TimerMode::Repeated,
         std::time::Duration::from_millis(600),
         move || {
             checkpoint.checkpoint_progress();
+            if let Some(ui) = refresh_ui.upgrade() {
+                sync_timer.tick(&ui);
+            }
             if let Some(ui) = refresh_ui.upgrade()
                 && !checkpoint.metadata_refresh_allowed(&ui)
             {
@@ -4587,6 +4663,8 @@ pub fn run(services: Services) -> Result<()> {
     app.invalidate();
     crate::reader_export::shutdown();
     app.flush();
+    sync.shutdown();
+    nova_sync::set_persistence_barrier(Arc::new(|| Ok(())));
     app.invalidate();
     result
 }

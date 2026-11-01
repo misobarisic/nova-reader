@@ -26,7 +26,7 @@ impl ProgressWriter {
     pub(crate) fn new(domain: DomainStore) -> std::io::Result<Self> {
         Self::spawn(move |batch| {
             domain
-                .update(|state| {
+                .update_checkpoint(|state| {
                     for progress in batch {
                         state.set_progress(progress.clone());
                     }

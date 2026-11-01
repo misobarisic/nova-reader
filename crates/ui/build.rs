@@ -13,7 +13,14 @@ fn main() {
                 ("ReaderDropdown".into(), dropdown),
                 ("ReaderSegmented".into(), segmented),
                 ("ReaderMenuSheet".into(), menu_sheet),
-                ("NovaUiShared".into(), shared.join("host-globals.slint")),
+                (
+                    "NovaUiShared".into(),
+                    std::path::PathBuf::from("host-globals.slint"),
+                ),
+                (
+                    "NovaSyncHost".into(),
+                    std::path::PathBuf::from("sync-host.slint"),
+                ),
             ]))
             // Layout regressions inspect element bounds in development builds.
             .with_debug_info(std::env::var("PROFILE").as_deref() == Ok("debug"))

@@ -95,7 +95,7 @@ impl Default for CachePolicyPreferences {
     }
 }
 impl CachePolicyPreferences {
-    fn valid(&self) -> bool {
+    pub(crate) fn valid(&self) -> bool {
         DISK_CACHE_LIMITS.contains(&self.chapter_disk_limit_mb)
             && DISK_CACHE_LIMITS.contains(&self.artwork_disk_limit_mb)
             && (32..=512).contains(&self.decoded_memory_mb)
@@ -162,7 +162,18 @@ impl Default for ImageStoragePreferences {
 }
 
 impl ImageStoragePreferences {
-    fn valid(&self) -> bool {
+    /// Canonical interpretation of the retained legacy JXL enum value. Keep
+    /// this pure so durable field-intent merges use the same model as readers.
+    pub(crate) fn normalized(mut self) -> Self {
+        for compression in [&mut self.cache, &mut self.downloads] {
+            if compression.format == ImageStorageFormat::JxlLossless {
+                compression.format = ImageStorageFormat::JxlLossy;
+                compression.lossless_inputs = true;
+            }
+        }
+        self
+    }
+    pub(crate) fn valid(&self) -> bool {
         (1..=100).contains(&self.cache.quality)
             && (1..=100).contains(&self.downloads.quality)
             && self.policy.valid()
@@ -300,16 +311,9 @@ fn read() -> Result<ImageStoragePreferences, String> {
     let Some(json) = nova_storage::try_get_str(KEY).map_err(|error| error.to_string())? else {
         return Ok(ImageStoragePreferences::default());
     };
-    let mut preferences: ImageStoragePreferences =
+    let preferences: ImageStoragePreferences =
         serde_json::from_str(&json).map_err(|error| error.to_string())?;
-    // Retain stored enum indices while migrating both old lossless JXL choices
-    // to the unified codec and input-aware lossless policy.
-    for compression in [&mut preferences.cache, &mut preferences.downloads] {
-        if compression.format == ImageStorageFormat::JxlLossless {
-            compression.format = ImageStorageFormat::JxlLossy;
-            compression.lossless_inputs = true;
-        }
-    }
+    let preferences = preferences.normalized();
     if preferences.valid() {
         Ok(preferences)
     } else {
@@ -323,19 +327,21 @@ pub fn load() -> ImageStoragePreferences {
     read().unwrap_or_default()
 }
 
-fn persist(preferences: &ImageStoragePreferences) -> Result<(), String> {
-    let json = serde_json::to_string(preferences).map_err(|error| error.to_string())?;
-    nova_storage::try_set_str(KEY, &json).map_err(|error| error.to_string())
+fn persist(
+    previous: &ImageStoragePreferences,
+    preferences: &ImageStoragePreferences,
+) -> Result<ImageStoragePreferences, String> {
+    crate::sync_settings::persist_preferences(KEY, previous, preferences)
 }
 
 fn save(
     ui: &AppWindow,
     state: &RefCell<ImageStoragePreferences>,
     next: ImageStoragePreferences,
-    write: impl FnOnce(&ImageStoragePreferences) -> Result<(), String>,
+    write: impl FnOnce(&ImageStoragePreferences) -> Result<ImageStoragePreferences, String>,
 ) {
     match write(&next) {
-        Ok(()) => {
+        Ok(next) => {
             let changed = next != *state.borrow();
             publish(next);
             next.apply(ui);
@@ -378,7 +384,8 @@ pub fn init(ui: &AppWindow) -> Result<(), String> {
             if let Some(ui) = weak.upgrade() {
                 let mut next = *state.borrow();
                 if next.change(&key, value) {
-                    save(&ui, &state, next, persist);
+                    let previous = *state.borrow();
+                    save(&ui, &state, next, |next| persist(&previous, next));
                 } else {
                     state.borrow().apply(&ui);
                 }

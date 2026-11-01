@@ -1,0 +1,15 @@
+import { SettingsStyle } from "@NovaUiShared";
+export { ReaderSyncSettings as SyncBridge } from "sync-bridge.slint";
+export { SettingsRow } from "settings-row.slint";
+export { SettingSyncBadge } from "settings-sync.slint";
+export global SyncContent {
+    in-out property <bool> advanced_visible: true;
+    in-out property <bool> input_focused: false;
+    in-out property <length> content_min_height;
+    in-out property <length> content_preferred_height;
+    in-out property <bool> sync_remove_prompt_visible: false;
+    in-out property <string> sync_remove_prompt_id;
+    in-out property <string> sync_remove_prompt_name;
+    callback schedule_setting(string);
+    public function reveal_detail_control(y: length, height: length) { SettingsStyle.reveal_control(y, height, false); }
+}

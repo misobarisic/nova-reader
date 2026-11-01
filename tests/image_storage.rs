@@ -289,6 +289,20 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
                     Some(raw)
                 );
                 settings.invoke_settings_changed("cache_quality".into(), 63);
+                // A same-value edit still persists the canonical migration;
+                // the returned merged snapshot must keep both lossless flags.
+                assert!(settings.get_cache_lossless_inputs());
+                assert!(settings.get_downloads_lossless_inputs());
+                let saved: serde_json::Value = serde_json::from_str(
+                    &nova_storage::try_get_str("reader:image-storage")
+                        .unwrap()
+                        .unwrap(),
+                )
+                .unwrap();
+                for kind in ["cache", "downloads"] {
+                    assert_eq!(saved[kind]["format"], 4);
+                    assert_eq!(saved[kind]["lossless_inputs"], true);
+                }
             }
             "legacy-reload" => {
                 assert_eq!(

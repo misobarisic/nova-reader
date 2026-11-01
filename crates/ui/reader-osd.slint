@@ -26,21 +26,20 @@ component ReaderGlyph inherits Path {
 component OsdAction inherits Rectangle {
     in property <string> label;
     in property <string> glyph;
-    in property <string> subtitle;
     in property <bool> enabled: true;
     in property <bool> active: false;
     in property <bool> show-label: true;
     in property <bool> surface: false;
     callback clicked;
     min-width: 44px; preferred-width: root.show-label ? 76px : 44px;
-    height: root.show-label ? (root.subtitle == "" ? 66px : 80px) : 44px;
+    height: root.show-label ? 66px : 44px;
     button := AddonIconButton {
-        x: (parent.width - self.width) / 2;
+        x: (parent.width - self.width) / 2; y: 0px;
         name: root.label; enabled: root.enabled;
         background: root.active ? Theme.current.selection_fill : root.surface ? Theme.current.player_control : transparent;
         border-radius: 10px;
         accessible-checkable: root.active; accessible-checked: root.active;
-        accessible-description: root.subtitle;
+        accessible-id: "reader-osd-action:" + root.glyph + (root.show-label ? ":labeled" : ":icon");
         accessible-action-default => { if root.enabled { root.clicked(); } }
         clicked => { root.clicked(); }
         ReaderGlyph {
@@ -53,11 +52,6 @@ component OsdAction inherits Rectangle {
         text: root.label; color: root.active ? Theme.current.accent_soft : Theme.current.text_player_caption;
         horizontal-alignment: center; vertical-alignment: center; font-size: 12px;
         overflow: elide;
-    }
-    if root.show-label && root.subtitle != "": Text {
-        x: 0px; y: 64px; width: 100%; height: 16px;
-        text: root.subtitle; color: Theme.current.text_player_caption;
-        horizontal-alignment: center; font-size: 11px; overflow: elide;
     }
     forward-focus: button;
 }
@@ -103,10 +97,11 @@ export component ReaderOsd inherits Rectangle {
         clicked => { root.action("back"); }
     }
     HorizontalLayout {
-        x: max(root.safe-left + 64px, root.width - root.safe-right - root.gutter - 96px);
-        y: root.safe-top + 12px; width: 96px; height: 44px; spacing: 8px;
+        x: max(root.safe-left + 64px, root.width - root.safe-right - root.gutter - self.width);
+        y: root.safe-top + 12px; width: root.compact ? 44px : 96px; height: 44px; spacing: 8px;
         OsdAction { label: @tr("Bookmark chapter"); glyph: "bookmark"; show-label: false; surface: true; active: root.bookmarked; clicked => { root.action("bookmark"); } }
-        OsdAction { label: @tr("More"); glyph: "more"; show-label: false; surface: true; clicked => { root.action("more"); } }
+        // Wide controls have no bottom More action; the compact rail does.
+        if !root.compact: OsdAction { label: @tr("More"); glyph: "more"; show-label: false; surface: true; clicked => { root.action("more"); } }
     }
     rail := Rectangle {
         x: root.safe-left + root.gutter;
@@ -140,9 +135,9 @@ export component ReaderOsd inherits Rectangle {
             changed(v) => { root.scrub(v); }
         }
         if root.compact: HorizontalLayout {
-            x: 0px; y: 100px; width: 100%; height: 80px; spacing: 0px;
+            x: 0px; y: 100px; width: 100%; height: 66px; spacing: 0px;
             OsdAction { label: @tr("Chapters"); glyph: "chapters"; clicked => { root.action("chapters"); } }
-            OsdAction { label: @tr("Mode"); glyph: "mode"; subtitle: root.mode-label; clicked => { root.action("mode"); } }
+            OsdAction { label: root.mode-label; glyph: "mode"; clicked => { root.action("mode"); } }
             OsdAction { label: @tr("Settings"); glyph: "settings"; clicked => { root.action("settings"); } }
             OsdAction { label: @tr("More"); glyph: "more"; clicked => { root.action("more"); } }
         }

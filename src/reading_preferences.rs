@@ -17,8 +17,7 @@ fn read_bool(key: &str, default: bool) -> Result<bool, String> {
 }
 
 fn write_bool(key: &str, value: bool) -> Result<(), String> {
-    let raw = serde_json::to_string(&value).map_err(|error| error.to_string())?;
-    nova_storage::try_set_str(key, &raw).map_err(|error| error.to_string())
+    crate::sync_settings::persist_preferences(key, &!value, &value).map(|_| ())
 }
 
 fn order_key(series: &SeriesId) -> String {

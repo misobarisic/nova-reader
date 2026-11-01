@@ -8,7 +8,7 @@ const KEY: &str = "reader:appearance";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-struct Preferences {
+pub(crate) struct Preferences {
     accent_color: i32,
     background_style: i32,
     card_radius: i32,
@@ -47,6 +47,22 @@ impl Default for Preferences {
 }
 
 impl Preferences {
+    pub(crate) fn valid(&self) -> bool {
+        let mut trial = self.clone();
+        serde_json::to_value(self)
+            .ok()
+            .and_then(|v| v.as_object().cloned())
+            .is_some_and(|fields| {
+                fields.into_iter().all(|(key, value)| {
+                    let value = value
+                        .as_bool()
+                        .map(i32::from)
+                        .or_else(|| value.as_i64().and_then(|v| i32::try_from(v).ok()));
+                    value.is_some_and(|value| trial.change(&key, value))
+                })
+            })
+    }
+
     fn apply(&self, ui: &AppWindow) {
         let appearance = ui.global::<Appearance>();
         appearance.set_accent_color(self.accent_color.clamp(0, 7));
@@ -98,11 +114,9 @@ impl Preferences {
 }
 
 fn save(ui: &AppWindow, state: &RefCell<Preferences>, next: Preferences) {
-    let result = serde_json::to_string(&next)
-        .map_err(|e| e.to_string())
-        .and_then(|json| nova_storage::try_set_str(KEY, &json).map_err(|e| e.to_string()));
+    let result = crate::sync_settings::persist_preferences(KEY, &*state.borrow(), &next);
     match result {
-        Ok(()) => {
+        Ok(next) => {
             next.apply(ui);
             *state.borrow_mut() = next;
             ui.set_status("".into());

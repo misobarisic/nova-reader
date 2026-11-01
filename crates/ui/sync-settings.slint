@@ -1,0 +1,9 @@
+import { ReaderSyncSettings } from "sync-bridge.slint";
+import { SyncSettingsPage } from "@NovaUiBase/sync-settings.slint";
+export component ReaderSyncSettingsPage inherits SyncSettingsPage {
+    reading-terminology: true;
+    remote-control-available: false;
+    // The host enables these only after its platform adapters are available.
+    background-sync-available: ReaderSyncSettings.sync_background_available;
+    invite-qr-available: ReaderSyncSettings.invite_qr_available;
+}

@@ -6,16 +6,17 @@ resolver = "3"
 license = "GPL-3.0-or-later"
 
 [workspace.dependencies]
-nova-storage = { git = "https://github.com/misobarisic/nova-kit", rev = "689f86852aaaf5b13f1f51178672ac5de6745795" }
-nova-ui-base = { git = "https://github.com/misobarisic/nova-kit", rev = "689f86852aaaf5b13f1f51178672ac5de6745795" }
-nova-cache = { git = "https://github.com/misobarisic/nova-kit", rev = "689f86852aaaf5b13f1f51178672ac5de6745795" }
-nova-image = { git = "https://github.com/misobarisic/nova-kit", rev = "689f86852aaaf5b13f1f51178672ac5de6745795" }
+nova-storage = { git = "https://github.com/misobarisic/nova-kit", rev = "01cd5ab098d836faf5138d91e538946439c656f2" }
+nova-ui-base = { git = "https://github.com/misobarisic/nova-kit", rev = "01cd5ab098d836faf5138d91e538946439c656f2" }
+nova-cache = { git = "https://github.com/misobarisic/nova-kit", rev = "01cd5ab098d836faf5138d91e538946439c656f2" }
+nova-image = { git = "https://github.com/misobarisic/nova-kit", rev = "01cd5ab098d836faf5138d91e538946439c656f2" }
+nova-sync = { git = "https://github.com/misobarisic/nova-kit", rev = "01cd5ab098d836faf5138d91e538946439c656f2", default-features = false }
 slint = { version = "=1.18.0", default-features = false, features = ["std", "compat-1-2", "accessibility"] }
 slint-build = "=1.18.0"
 
 [package]
 name = "nova-reader"
-version = "0.1.23"
+version = "0.1.24"
 edition = "2024"
 license.workspace = true
 description = "A source-based manga and webtoon reader for desktop and Android"
@@ -34,6 +35,9 @@ update-check = ["dep:reqwest", "dep:semver"]
 [dependencies]
 nova-cache = { workspace = true }
 nova-image = { workspace = true }
+nova-sync = { workspace = true }
+anyhow = "1"
+qrcode = { version = "0.14", default-features = false }
 # Nova's embedded license catalog uses the same zstd implementation as storage.
 zstd = { version = "0.13", default-features = false }
 sha2 = "0.10"
@@ -61,6 +65,7 @@ rfd = { version = "0.17", default-features = false, features = ["xdg-portal", "w
 arboard = { version = "3.7", default-features = false, features = ["image-data", "wayland-data-control"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
+rqrr = { version = "0.11", default-features = false }
 jni = "0.21"
 ndk-context = "0.1"
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "aws-lc-rs"] }
@@ -135,6 +140,33 @@ target_sdk_version = 35
 
 [[package.metadata.android.uses_permission]]
 name = "android.permission.INTERNET"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.ACCESS_NETWORK_STATE"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.RECEIVE_BOOT_COMPLETED"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.CAMERA"
+
+# Invite scanning is optional; Reader also supports camera-less devices.
+[[package.metadata.android.uses_feature]]
+name = "android.hardware.camera"
+required = false
+
+[[package.metadata.android.uses_feature]]
+name = "android.hardware.camera.autofocus"
+required = false
+
+[[package.metadata.android.application.service]]
+name = "dev.misob.nova.reader.ReaderSyncJobService"
+exported = false
+permission = "android.permission.BIND_JOB_SERVICE"
+
+[[package.metadata.android.application.activity]]
+name = "dev.misob.nova.reader.QrScanActivity"
+exported = false
 
 [package.metadata.android.signing.dev]
 path = "android/keystore/debug.keystore"

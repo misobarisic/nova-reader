@@ -81,7 +81,10 @@ def main():
                         '-cp', str(android_jar), '-d', str(production_classes),
                         *map(str, production_sources)], check=True)
         sources = sorted((ROOT / 'tests/android-documents/java').rglob('*.java'))
-        sources.extend(production_sources)
+        # The runtime fixtures model the document bridge, not Camera2/jobs.
+        # All Java still compiles against the real SDK above.
+        sources.extend(source for source in production_sources
+                       if source.name in {'ReaderActivity.java', 'ReaderImageProvider.java'})
         subprocess.run([*compiler, '-source', '8', '-target', '8', '-Xlint:-options',
                         '-cp', str(android_jar), '-d', str(classes), *map(str, sources)], check=True)
         (work / 'src').mkdir()

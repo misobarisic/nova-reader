@@ -33,3 +33,9 @@ d649274c7c2891df86eb6fc9abc28eb9ac285740f53dd82ada5a48f2853a62fb  mangafire-1.0.
 The older [MangaFire 1.0.0](mangafire-1.0.0.zip) remains available for older Reader
 versions without addon icons (SHA-256
 `db2bebbcc3363ac2e7b521e53f8524f4aaaf0b277044b84bd459774838999797`).
+
+The shared [Nova addons repository](https://github.com/misobarisic/nova-addons)
+also publishes these packages from `reader-addons/` as `nova-reader-…zip` release
+assets. Their manifest contract remains `nova-reader1`; the video addons in that
+repository target Nova. These existing downloads remain available for installed
+catalogue links.

@@ -152,8 +152,7 @@ configuration targets Android ARM64/ARMv7/x86_64/universal APKs, Linux Debian an
 AppImage, and a Windows x86_64 ZIP; installation and device acceptance remain
 separate from compile/archive checks.
 
-The [static review record](REVIEW.md) distinguishes review findings from build
-and target-device verification. See [project structure](docs/project-structure.md), [source API and limits](docs/source-api.md),
+See [project structure](docs/project-structure.md), [source API and limits](docs/source-api.md),
 [catalogue trust/discovery](docs/catalogues.md) and [remaining gates](docs/implementation-status.md).
 
 ## Attribution and licensing
@@ -167,3 +166,23 @@ Slint carries its own license alternatives; dependency license texts are
 generated for the actual build target/features and embedded into About using
 Nova’s copied build-time catalogue. The Manhwa18/YiiMadara port retains its
 upstream Apache-2.0 license and provenance. Neutral fixture material is CC0-1.0.
+
+## Cross-device sync
+
+More → Settings → Sync offers device pairing with expiring invitation codes/QR,
+confirmation prompts, peer management, Sync now, automatic exchange, local network
+discovery and a read-only chapter/state inspector. Android also offers best-effort
+background sync. Reader devices pair with other Reader devices; Nova’s video
+library uses a separate protocol and identity.
+
+Library entries, categories, chapter progress/read actions, history, bookmarks,
+portable settings and source packages synchronize as individual records. Settings
+show Nova’s scope indicators and a shared/local comparison; device overrides keep
+a chosen value local until released. Chapter files, paths and credentials remain
+on their device. Received addons require local permission approval when needed.
+
+Production addon sources and tag-built downloads for both apps are maintained in
+[`misobarisic/nova-addons`](https://github.com/misobarisic/nova-addons): existing
+`addons/` targets Nova and `reader-addons/` targets Nova Reader. Reader downloads
+use the `nova-reader-` filename prefix and the `nova-reader1` manifest contract.
+Runtime fixtures and existing download URLs remain available in this repository.

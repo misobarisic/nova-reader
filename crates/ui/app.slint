@@ -1,3 +1,5 @@
+export { ReaderSettingsSync, SettingSyncInfo } from "settings-sync.slint";
+import { SettingSyncBadge } from "settings-sync.slint";
 import { ControlTouchArea } from "@NovaUiBase/control-input.slint";
 import { Spinner } from "std-widgets.slint";
 import { Theme, SettingsStyle, ControlInput } from "@NovaUiShared";
@@ -27,6 +29,12 @@ import { LibraryFilterChip } from "@NovaUiBase/filter-chip.slint";
 import { LibrarySearchReveal } from "library-search.slint";
 import { EntryMenu, EntryCategoryRow } from "entry-menu.slint";
 export { EntryCategoryRow } from "entry-menu.slint";
+export { ReaderSyncSettings, SyncPeer, SyncInvite, SyncInspectorRow } from "sync-bridge.slint";
+import { ReaderSettingsSync } from "sync-scope.slint";
+import { ReaderSyncSettings } from "sync-bridge.slint";
+import { SyncContent } from "sync-host.slint";
+import { SettingSyncModal } from "settings-sync.slint";
+import { SyncPeerRemovalModal } from "@NovaUiBase/sync-peer-removal.slint";
 import { MorePage } from "more.slint";
 import { LicenseSource } from "about-models.slint";
 export { LicenseSource } from "about-models.slint";
@@ -363,6 +371,16 @@ export component AppWindow inherits Window {
     callback flush-progress;
 
     public function go-back() {
+        if ReaderSettingsSync.open { ReaderSettingsSync.open = false; return; }
+        if SyncContent.sync_remove_prompt_visible {
+            SyncContent.sync_remove_prompt_visible = false;
+            SyncContent.sync_remove_prompt_id = "";
+            SyncContent.sync_remove_prompt_name = "";
+            return;
+        }
+        if root.section == 20 && ReaderSyncSettings.sync_pair_prompt_visible {
+            ReaderSyncSettings.sync_respond_pair(ReaderSyncSettings.sync_pair_prompt_id, false); return;
+        }
         if root.section == 6 && root.show-reader-options { root.show-reader-options = false; return; }
         if root.section == 6 && root.reader-osd { root.reader-osd = false; return; }
         if root.export-conflict-open { root.resolve-export-conflict(2); return; }
@@ -372,10 +390,15 @@ export component AppWindow inherits Window {
         if root.section == 0 && root.library-search-open { root.close-library-search(); return; }
         if ((root.section == 5 && root.detail-origin == 3) || root.section == 8) && root.source-catalog-open { root.return-to-catalogue(); return; }
         if root.section == 3 && root.source-catalog-open { root.source-catalog-open = false; root.navigate(3); return; }
-        root.navigate(root.section == 6 ? 5 : root.section == 8 ? 3 : root.section == 11 || root.section == 12 || root.section == 14 || root.section == 15 || root.section == 16 || root.section == 17 || root.section == 18 || root.section == 19 ? 10 : root.section >= 9 || root.section == 7 ? 4 : root.section == 5 ? root.detail-origin : 0);
+        root.navigate(root.section == 6 ? 5 : root.section == 8 ? 3 : root.section == 11 || root.section == 12 || root.section == 14 || root.section == 15 || root.section == 16 || root.section == 17 || root.section == 18 || root.section == 19 || root.section == 20 ? 10 : root.section >= 9 || root.section == 7 ? 4 : root.section == 5 ? root.detail-origin : 0);
     }
 
     changed section => {
+        if root.section != 20 {
+            ReaderSyncSettings.sync_inspector_active = false;
+            SyncContent.sync_remove_prompt_visible = false;
+        }
+        ReaderSettingsSync.open = false;
         if root.export-conflict-open { root.resolve-export-conflict(2); }
         if root.entry-menu-visible { root.close-entry-menu(); }
         root.detail-restore-pending = root.section == 5;
@@ -491,7 +514,11 @@ export component AppWindow inherits Window {
                                     Segmented { labels: [@tr("Sources"),@tr("Extensions ({})",root.extensions.length)]; current-index: root.browse-tab; picked(i) => { root.browse-tab = i; } }
                                     if root.browse-tab == 0: VerticalLayout {
                                         spacing: 12px;
-                                        CheckBox { text: @tr("Show adult sources"); checked <=> root.show-adult; toggled => { root.adult-visibility-changed(self.checked); } }
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            CheckBox { horizontal-stretch: 1; min-width: 0px; text: @tr("Show adult sources"); checked <=> root.show-adult; toggled => { root.adult-visibility-changed(self.checked); } }
+                                            if ReaderSettingsSync.enabled: SettingSyncBadge { setting_key: "reader:show-adult"; setting_title: @tr("Show adult sources"); }
+                                        }
                                         SourceList {
                                             items: root.source-rows;
                                             picked(i) => { root.source-index = i; root.source-catalog-open = true; root.source-catalogue-kind = "popular"; root.source-selected(i); }
@@ -1029,6 +1056,17 @@ export component AppWindow inherits Window {
         picked(action) => { root.entry-menu-picked(action); }
         category-toggled(id) => { root.entry-action(root.entry-menu-key,"category:" + id); }
         dismissed => { root.close-entry-menu(); }
+    }
+    SettingSyncModal {
+        width: root.width; height: root.height; narrow: root.mobile-ui;
+        safe-top: root.safe-area-insets.top; safe-bottom: root.safe-area-insets.bottom;
+        safe-left: root.safe-area-insets.left; safe-right: root.safe-area-insets.right;
+    }
+    SyncPeerRemovalModal {
+        width: root.width; height: root.height; active: root.section == 20;
+        safe-top: root.safe-area-insets.top; safe-bottom: root.safe-area-insets.bottom;
+        safe-left: root.safe-area-insets.left; safe-right: root.safe-area-insets.right;
+        closed => { more-page.focus_shell(); }
     }
     SaveConflictSheet {
         width: root.width; height: root.height;

@@ -67,7 +67,7 @@ export component CaptureSettingsPage inherits VerticalLayout {
     spacing: 16px; alignment: start;
     SectionHeader { label: @tr("Screenshots"); }
     SettingsCard {
-        SettingsRow {
+        SettingsRow { setting-key: "reader:captures/format";
             row-title: @tr("Screenshot format");
             row-desc: @tr("Lossless formats preserve every pixel. Lossy formats use the quality setting below.");
             accessible-label: @tr("Screenshot format");
@@ -80,7 +80,7 @@ export component CaptureSettingsPage inherits VerticalLayout {
                 selected(_) => { CaptureSettings.settings-changed("format", self.current-index); }
             }
         }
-        if CaptureSettings.format-index == 1: SettingsRow {
+        if CaptureSettings.format-index == 1: SettingsRow { setting-key: "reader:captures/jpeg_quality";
             row-title: @tr("JPEG quality");
             row-desc: @tr("Higher values retain more detail and create larger files.");
             accessible-label: @tr("JPEG quality");
@@ -92,7 +92,7 @@ export component CaptureSettingsPage inherits VerticalLayout {
                 changed(v) => { CaptureSettings.settings-changed("jpeg_quality", Math.round(v)); }
             }
         }
-        if CaptureSettings.format-index == 3: SettingsRow {
+        if CaptureSettings.format-index == 3: SettingsRow { setting-key: "reader:captures/webp_quality";
             row-title: @tr("WebP quality");
             row-desc: @tr("Higher values retain more detail and create larger files.");
             accessible-label: @tr("WebP quality");
@@ -104,7 +104,7 @@ export component CaptureSettingsPage inherits VerticalLayout {
                 changed(v) => { CaptureSettings.settings-changed("webp_quality", Math.round(v)); }
             }
         }
-        if CaptureSettings.format-index == 4: SettingsRow {
+        if CaptureSettings.format-index == 4: SettingsRow { setting-key: "reader:captures/avif_quality";
             row-title: @tr("AVIF quality");
             row-desc: @tr("Higher values retain more detail and create larger files.");
             accessible-label: @tr("AVIF quality");
@@ -116,7 +116,7 @@ export component CaptureSettingsPage inherits VerticalLayout {
                 changed(v) => { CaptureSettings.settings-changed("avif_quality", Math.round(v)); }
             }
         }
-        if CaptureSettings.format-index == 6: SettingsRow {
+        if CaptureSettings.format-index == 6: SettingsRow { setting-key: "reader:captures/jxl_quality";
             row-title: @tr("JPEG XL quality");
             row-desc: @tr("Higher values retain more detail and create larger files.");
             accessible-label: @tr("JPEG XL quality");
@@ -128,7 +128,7 @@ export component CaptureSettingsPage inherits VerticalLayout {
                 changed(v) => { CaptureSettings.settings-changed("jxl_quality", Math.round(v)); }
             }
         }
-        SettingsRow {
+        SettingsRow { setting-key: "reader:captures/resolution";
             row-title: @tr("Screencap resolution");
             row-desc: @tr("Capture the visible chapter area using device pixels or the chapter's original pixels.");
             accessible-label: @tr("Screencap resolution");
@@ -141,7 +141,7 @@ export component CaptureSettingsPage inherits VerticalLayout {
                 selected(_) => { CaptureSettings.settings-changed("resolution", self.current-index); }
             }
         }
-        SettingsRow {
+        SettingsRow { setting-key: "reader:captures/series_folders";
             row-title: @tr("Screenshot folder");
             row-desc: @tr("Save in Pictures/Nova Reader or group captures by series.");
             accessible-label: @tr("Screenshot folder");
@@ -152,7 +152,7 @@ export component CaptureSettingsPage inherits VerticalLayout {
                 picked(i) => { CaptureSettings.settings-changed("series_folders", i); }
             }
         }
-        SettingsRow {
+        SettingsRow { setting-key: "reader:captures/conflict";
             row-title: @tr("File conflicts");
             row-desc: @tr("Choose what happens when a capture file already exists.");
             accessible-label: @tr("File conflicts");

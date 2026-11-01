@@ -45,7 +45,7 @@ export component ImageStorageSettingsPage inherits VerticalLayout {
     changed interactive => { if root.interactive { ImageStorageSettings.chapter-cache-refresh(); } }
     SectionHeader { label: @tr("Chapter cache"); }
     SettingsCard {
-        SettingsRow {
+        SettingsRow { setting-key: "reader:image-storage/policy/disk_enabled";
             row-title: @tr("Disk caching");
             row-desc: @tr("Keep viewed chapter pages and artwork on this device to reduce network use. Offline downloads stay independent.");
             CacheDiskToggle {
@@ -54,7 +54,7 @@ export component ImageStorageSettingsPage inherits VerticalLayout {
                 toggled => { ImageStorageSettings.settings-changed("disk_enabled", self.checked ? 1 : 0); }
             }
         }
-        SettingsRow {
+        SettingsRow { setting-key: "reader:image-storage/policy/chapter_disk_limit_mb";
             row-title: @tr("Chapter disk-cache limit");
             row-desc: @tr("Remove older viewed chapters when this limit is exceeded. Downloaded chapters and local imports are preserved.");
             CacheDiskLimit {
@@ -82,7 +82,7 @@ export component ImageStorageSettingsPage inherits VerticalLayout {
     }
     SectionHeader { label: @tr("Cache compression"); }
     SettingsCard {
-        SettingsRow {
+        SettingsRow { setting-key: "reader:image-storage/cache/enabled";
             row-title: @tr("Compress new cached images");
             row-desc: @tr("Compress new temporary chapter pages and artwork. Existing files stay unchanged; unsupported images keep their original encoding.");
             CacheCompressionToggle {
@@ -92,7 +92,7 @@ export component ImageStorageSettingsPage inherits VerticalLayout {
                 toggled => { ImageStorageSettings.settings-changed("cache_enabled", self.checked ? 1 : 0); }
             }
         }
-        cache_format_row := SettingsRow {
+        cache_format_row := SettingsRow { setting-key: "reader:image-storage/cache/format";
             row-title: @tr("Cache format"); row-desc: @tr("JPEG, WebP, AVIF or JPEG XL for newly cached images.");
             cache_format := Dropdown {
                 width: Math.min(252px, Math.max(0px, root.width - 32px)); roomy: true;
@@ -102,7 +102,7 @@ export component ImageStorageSettingsPage inherits VerticalLayout {
                 selected(i) => { ImageStorageSettings.settings-changed("cache_format", self.current-index); }
             }
         }
-        cache_quality_row := SettingsRow {
+        cache_quality_row := SettingsRow { setting-key: "reader:image-storage/cache/quality";
             row-title: @tr("Cache quality"); row-desc: @tr("Higher values retain more detail and use more disk space.");
             CacheQualityControl {
                 width: Math.min(InterfaceStyle.tv ? 320px : 252px, Math.max(0px, root.width - 32px));
@@ -113,7 +113,7 @@ export component ImageStorageSettingsPage inherits VerticalLayout {
                 changed(v) => { ImageStorageSettings.settings-changed("cache_quality", Math.round(v)); }
             }
         }
-        if ImageStorageSettings.cache-format == 1 || ImageStorageSettings.cache-format == 3: cache_lossless_row := SettingsRow {
+        if ImageStorageSettings.cache-format == 1 || ImageStorageSettings.cache-format == 3: cache_lossless_row := SettingsRow { setting-key: "reader:image-storage/cache/lossless_inputs";
             row-title: @tr("Lossless encoding for lossless inputs");
             row-desc: @tr("Preserve pixels from lossless PNG and WebP inputs. Lossy and unrecognized inputs use the selected quality. Unresized high-depth PNGs keep their original encoding.");
             CacheCompressionToggle {
@@ -123,7 +123,7 @@ export component ImageStorageSettingsPage inherits VerticalLayout {
                 toggled => { ImageStorageSettings.settings-changed("cache_lossless_inputs", self.checked ? 1 : 0); }
             }
         }
-        if ImageStorageSettings.cache-format == 3: cache_transcode_row := SettingsRow {
+        if ImageStorageSettings.cache-format == 3: cache_transcode_row := SettingsRow { setting-key: "reader:image-storage/cache/jxl_lossless_jpeg";
             row-title: @tr("Losslessly transcode JPEG");
             row-desc: @tr("Preserve original JPEG data when no resize is needed. Other images follow the cache compression settings.");
             CacheCompressionToggle {
@@ -136,7 +136,7 @@ export component ImageStorageSettingsPage inherits VerticalLayout {
     }
     SectionHeader { label: @tr("Artwork and memory"); }
     SettingsCard {
-        SettingsRow {
+        SettingsRow { setting-key: "reader:image-storage/policy/artwork_disk_limit_mb";
             row-title: @tr("Artwork disk-cache limit");
             row-desc: @tr("Artwork has its own budget, so viewed chapter pages cannot evict library covers.");
             CacheDiskLimit {
@@ -148,7 +148,7 @@ export component ImageStorageSettingsPage inherits VerticalLayout {
                 selected(_) => { ImageStorageSettings.settings-changed("artwork_disk_limit_index", self.current-index); }
             }
         }
-        SettingsRow {
+        SettingsRow { setting-key: "reader:image-storage/policy/poster_max_side";
             row-title: @tr("Poster resolution");
             row-desc: @tr("Limit the longest side of newly processed artwork. Original keeps source dimensions. Chapter pages always keep their original dimensions.");
             CacheResolutionControl {
@@ -159,7 +159,7 @@ export component ImageStorageSettingsPage inherits VerticalLayout {
                 selected(_) => { ImageStorageSettings.settings-changed("poster_resolution_index", self.current-index); }
             }
         }
-        SettingsRow {
+        SettingsRow { setting-key: "reader:image-storage/policy/decoded_memory_mb";
             row-title: @tr("Decoded-image budget");
             row-desc: @tr("Memory available for decoded artwork, independent of disk caching.");
             CacheMemoryControl {
@@ -188,7 +188,7 @@ export component ImageStorageSettingsPage inherits VerticalLayout {
     }
     SectionHeader { label: @tr("Download compression"); }
     SettingsCard {
-        SettingsRow {
+        SettingsRow { setting-key: "reader:image-storage/downloads/enabled";
             row-title: @tr("Compress new chapter downloads");
             row-desc: @tr("Re-encode new chapter pages at their original dimensions before saving. Existing downloads stay unchanged; unsupported images keep their original encoding.");
             CacheCompressionToggle {
@@ -197,7 +197,7 @@ export component ImageStorageSettingsPage inherits VerticalLayout {
                 toggled => { ImageStorageSettings.settings-changed("downloads_enabled", self.checked ? 1 : 0); }
             }
         }
-        downloads_format_row := SettingsRow {
+        downloads_format_row := SettingsRow { setting-key: "reader:image-storage/downloads/format";
             row-title: @tr("Download format"); row-desc: @tr("JPEG, WebP, AVIF or JPEG XL for new offline chapter pages.");
             downloads_format := Dropdown {
                 width: Math.min(252px, Math.max(0px, root.width - 32px)); roomy: true;
@@ -207,7 +207,7 @@ export component ImageStorageSettingsPage inherits VerticalLayout {
                 selected(i) => { ImageStorageSettings.settings-changed("downloads_format", self.current-index); }
             }
         }
-        downloads_quality_row := SettingsRow {
+        downloads_quality_row := SettingsRow { setting-key: "reader:image-storage/downloads/quality";
             row-title: @tr("Download quality"); row-desc: @tr("Higher values retain more detail and use more disk space.");
             CacheQualityControl {
                 width: Math.min(InterfaceStyle.tv ? 320px : 252px, Math.max(0px, root.width - 32px));
@@ -217,7 +217,7 @@ export component ImageStorageSettingsPage inherits VerticalLayout {
                 changed(v) => { ImageStorageSettings.settings-changed("downloads_quality", Math.round(v)); }
             }
         }
-        if ImageStorageSettings.downloads-format == 1 || ImageStorageSettings.downloads-format == 3: downloads_lossless_row := SettingsRow {
+        if ImageStorageSettings.downloads-format == 1 || ImageStorageSettings.downloads-format == 3: downloads_lossless_row := SettingsRow { setting-key: "reader:image-storage/downloads/lossless_inputs";
             row-title: @tr("Lossless encoding for lossless inputs");
             row-desc: @tr("Preserve pixels from lossless PNG and WebP inputs. Lossy and unrecognized inputs use the selected quality. High-depth PNGs keep their original encoding.");
             CacheCompressionToggle {
@@ -227,7 +227,7 @@ export component ImageStorageSettingsPage inherits VerticalLayout {
                 toggled => { ImageStorageSettings.settings-changed("downloads_lossless_inputs", self.checked ? 1 : 0); }
             }
         }
-        if ImageStorageSettings.downloads-format == 3: downloads_transcode_row := SettingsRow {
+        if ImageStorageSettings.downloads-format == 3: downloads_transcode_row := SettingsRow { setting-key: "reader:image-storage/downloads/jxl_lossless_jpeg";
             row-title: @tr("Losslessly transcode JPEG");
             row-desc: @tr("Preserve original JPEG data when no resize is needed. Other images and resized JPEGs use the selected quality.");
             CacheCompressionToggle {
