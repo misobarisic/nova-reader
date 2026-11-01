@@ -26,7 +26,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `crates/ui/save-conflict-sheet.slint` | Retained modal Overwrite/Add number/Cancel sheet; `app.slint` owns name/open/choice properties and callbacks |
 | `src/chapter_capture.rs` | Bounded source-resolution compositor for visible chapter areas; captures original pixels rather than enlarging a device snapshot |
 | `src/capture_settings.rs`, `crates/ui/capture-settings.slint` | Validated device capture preferences and retained More → Settings → Screenshots controls for format (including JPEG XL lossless/lossy), adjacent quality, Device/Chapter screencap resolution, per-series folders and duplicate policy |
-| `src/image_storage.rs`, `crates/ui/image-storage-settings.slint` | Durable cache policy, input-aware lossless WebP/JXL caching and independent download compression; shared Kit cache controls with chapter-first maintenance and separate artwork settings |
+| `src/image_storage.rs`, `crates/ui/image-storage-settings.slint` | Durable cache policy, unified codecs and independent input-aware lossless WebP/JXL cache/download compression; shared Kit cache controls with chapter-first maintenance and separate artwork settings |
 | `src/source_catalogs.rs` | Host-owned per-addon catalogue switches under `reader:disabled-catalogs:<JSON package ID>`; filters Browse while preserving direct/history/offline access |
 | `src/reading_preferences.rs` | Fallible Nova KV persistence for adult-source visibility and chapter order keyed by full source-local series identity |
 | `src/reader_modes.rs`, `docs/reader-modes.md` | Pinned TachiyomiJ2K classification, Default/global inheritance, explicit Automatic/manual/gapped selection, and durable per-series mode overrides |
@@ -90,6 +90,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `.github/scripts/test_package_nova_parity.py` | Immutable Nova-source parity for all three packaging scripts, masking only documented metadata/license adaptations and exact AppImage tool pins |
 | `.github/scripts/test_package_linux.py`, Kit `crates/image/tests/avif_portability.rs` | Dated AppImage tool/checksum regressions and portable decoder feature-gating/runtime-dispatch regression |
 | `android` | Android resources, platform document bridge and intentionally public local debug signing key |
+| `flake.nix`, `Makefile` | Pinned desktop/Android/Windows Cargo environments with cargo-sweep; Node/npm in the default shell support addon fixtures in `make check`, while runtime addons use QuickJS |
 
 ## State and work boundaries
 
@@ -131,7 +132,7 @@ and source inputs before opening the menu, then composites visible source pixels
 on a worker. The clicked page defines the native pixel scale. Both resolution
 modes keep the eight-million-pixel export limit and apply to save and clipboard.
 `reader:image-storage` stores independent cache/download compression switches,
-formats and quality for new writes, the cache `lossless_inputs` policy, plus backward-compatible cache budgets:
+formats, quality and separate `lossless_inputs` policies for new writes, plus backward-compatible cache budgets:
 disk caching, separate chapter/artwork limits, decoded artwork memory and future
 poster resolution. Preference changes do not rewrite existing cache files or
 downloaded chapter bundles. Successful writes publish a thread-safe policy
@@ -283,7 +284,7 @@ Source examples are intended for independent future publication in nova-addons.
 - Left-anchored library reading progress: `crates/ui/library-cards.slint`, `tests/library_progress.rs`.
 - Image filenames and duplicate handling: `src/export_names.rs`, `src/reader_export.rs`, `src/android_documents.rs`, `crates/ui/save-conflict-sheet.slint`.
 - Reader image/screencap actions and export settings: `crates/ui/reader-context-menu.slint`, `src/reader_export.rs`, `src/chapter_capture.rs`, `src/capture_settings.rs`, More → Settings → Screenshots.
-- New cache/download image compression and input-aware lossless cache policy: `src/image_storage.rs`, `crates/ui/image-storage-settings.slint`, More → Settings → Cache.
+- New cache/download image compression and independent input-aware lossless policies: `src/image_storage.rs`, `crates/ui/image-storage-settings.slint`, More → Settings → Cache.
 - Appearance controls, palette and device persistence: `crates/ui/theme-settings.slint`, `crates/ui/src/appearance.rs`, `src/appearance.rs`.
 - Android picker context, callbacks and host JVM regression: [Android documents](android-documents.md).
 - Android/desktop shells and touch layout checks: `crates/ui/navigation.slint`, `crates/ui/app.slint`, `tests/mobile_layout.rs`.
@@ -297,15 +298,15 @@ Source examples are intended for independent future publication in nova-addons.
 - Discovery, actual upstream IDs and signing trust API: [catalogues](catalogues.md).
 - Implemented behavior versus outstanding plan gates: [implementation status](implementation-status.md).
 
-Reader cache offers one choice per codec (JPEG, WebP, AVIF, JPEG XL); cache
-UI index 3 maps to stored lossy JXL index 4. Downloads retain explicit JPEG XL
-lossless/lossy indices 3/4. The persisted cache `lossless_inputs` flag defaults
-false, with a WebP/JXL-only switch directly after quality. Known lossless PNG
+Reader cache and chapter downloads offer one choice per codec (JPEG, WebP, AVIF,
+JPEG XL); UI index 3 maps to stored lossy JXL index 4 in both groups. Each
+persisted `lossless_inputs` flag defaults false, with a WebP/JXL-only switch
+directly after quality. Known lossless PNG
 and WebP inputs bypass quality when enabled; JPEG and unrecognized inputs keep
 using quality. High-depth PNG originals are retained to avoid RGBA8 downcasting.
 AVIF remains lossy: the shared ravif/rav1e encoder does not implement lossless
 AV1, including at quality 100 (Kit verifies decoded pixels).
-Legacy cache JXL lossless migrates on load to JXL plus this flag; the next
+Legacy cache/download JXL lossless migrates on load to JXL plus this flag; the next
 settings save persists it. Both groups retain separate `jxl_lossless_jpeg` flags
 for reversible JPEG coefficient transcoding. Artwork classifies original bytes
 before resizing to PNG. Source-scoped disk keys remain stable, so changing any

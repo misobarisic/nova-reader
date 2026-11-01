@@ -16,7 +16,9 @@ grid columns; **Look and feel** controls animations. **Cache** controls separate
 chapter-page and artwork caches, disk limits, decoded artwork memory and poster
 resolution. Clearing either cache preserves explicit downloads and library data.
 It also controls JPEG/WebP/AVIF/JPEG XL compression of newly cached images and new offline downloads;
-existing files stay unchanged. **Screenshots** controls capture format (including
+both use one choice per format, quality, and a separate option to preserve lossless
+PNG/WebP inputs when encoding to WebP or JPEG XL. AVIF encoding remains lossy.
+Existing files stay unchanged. **Screenshots** controls capture format (including
 AVIF and JPEG XL lossless/lossy), quality, screencap resolution, optional series folders and duplicate handling. Screencaps can
 use device pixels or the original chapter image's pixel scale for the visible area.
 These device preferences are saved separately from library backups.
@@ -58,6 +60,11 @@ python3 tools/package-addon.py examples/addons/neutral-fixture /tmp/neutral-fixt
 cargo run --locked -- install-addon /tmp/neutral-fixture.zip
 cargo run --locked
 ```
+
+The default shell includes Node.js/npm for addon parser fixtures in `make check`.
+The app runs addons through embedded QuickJS and needs no Node.js at runtime.
+The default, Android and Windows shells include `cargo-sweep` for cleaning unused
+Cargo build artifacts.
 
 In Browse, select **Neutral reader fixtures**, open the series, add it to the
 library, and choose a chapter. Fixtures include portrait, wide, tall, mixed and

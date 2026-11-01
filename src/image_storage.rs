@@ -179,7 +179,11 @@ impl ImageStoragePreferences {
         settings.set_cache_quality(f32::from(self.cache.quality));
         settings.set_cache_jxl_lossless_jpeg(self.cache.jxl_lossless_jpeg);
         settings.set_downloads_enabled(self.downloads.enabled);
-        settings.set_downloads_format(self.downloads.format.into());
+        settings.set_downloads_format(match self.downloads.format {
+            ImageStorageFormat::JxlLossless | ImageStorageFormat::JxlLossy => 3,
+            format => format.into(),
+        });
+        settings.set_downloads_lossless_inputs(self.downloads.lossless_inputs);
         settings.set_downloads_quality(f32::from(self.downloads.quality));
         settings.set_downloads_jxl_lossless_jpeg(self.downloads.jxl_lossless_jpeg);
         settings.set_disk_enabled(self.policy.disk_enabled);
@@ -266,7 +270,6 @@ impl ImageStoragePreferences {
             }
             _ => {}
         }
-        let is_cache = key.starts_with("cache_");
         let (compression, field) = if let Some(field) = key.strip_prefix("cache_") {
             (&mut self.cache, field)
         } else if let Some(field) = key.strip_prefix("downloads_") {
@@ -276,16 +279,12 @@ impl ImageStoragePreferences {
         };
         match field {
             "enabled" if value == 0 || value == 1 => compression.enabled = value == 1,
-            "format" => {
-                match ImageStorageFormat::try_from(if is_cache && value == 3 { 4 } else { value }) {
-                    Ok(format) if !is_cache || (0..=3).contains(&value) => {
-                        compression.format = format
-                    }
-                    _ => return false,
-                }
-            }
+            "format" => match ImageStorageFormat::try_from(if value == 3 { 4 } else { value }) {
+                Ok(format) if (0..=3).contains(&value) => compression.format = format,
+                _ => return false,
+            },
             "quality" if (1..=100).contains(&value) => compression.quality = value as u8,
-            "lossless_inputs" if is_cache && (value == 0 || value == 1) => {
+            "lossless_inputs" if value == 0 || value == 1 => {
                 compression.lossless_inputs = value == 1
             }
             "jxl_lossless_jpeg" if value == 0 || value == 1 => {
@@ -303,11 +302,13 @@ fn read() -> Result<ImageStoragePreferences, String> {
     };
     let mut preferences: ImageStoragePreferences =
         serde_json::from_str(&json).map_err(|error| error.to_string())?;
-    // The old cache-only lossless JXL choice becomes the input-aware policy.
-    // Download formats keep their existing explicit encoding modes.
-    if preferences.cache.format == ImageStorageFormat::JxlLossless {
-        preferences.cache.format = ImageStorageFormat::JxlLossy;
-        preferences.cache.lossless_inputs = true;
+    // Retain stored enum indices while migrating both old lossless JXL choices
+    // to the unified codec and input-aware lossless policy.
+    for compression in [&mut preferences.cache, &mut preferences.downloads] {
+        if compression.format == ImageStorageFormat::JxlLossless {
+            compression.format = ImageStorageFormat::JxlLossy;
+            compression.lossless_inputs = true;
+        }
     }
     if preferences.valid() {
         Ok(preferences)

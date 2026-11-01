@@ -16,6 +16,7 @@ export global ImageStorageSettings {
     in-out property <int> downloads-format: 1;
     in-out property <float> downloads-quality: 85;
     in-out property <bool> downloads-jxl-lossless-jpeg: false;
+    in-out property <bool> downloads-lossless-inputs: false;
     in-out property <bool> disk-enabled: true;
     in-out property <[string]> disk-limit-names;
     in-out property <int> chapter-disk-limit-index: 3;
@@ -200,13 +201,13 @@ export component ImageStorageSettingsPage inherits VerticalLayout {
             row-title: @tr("Download format"); row-desc: @tr("JPEG, WebP, AVIF or JPEG XL for new offline chapter pages.");
             downloads_format := Dropdown {
                 width: Math.min(252px, Math.max(0px, root.width - 32px)); roomy: true;
-                model: [@tr("JPEG"), @tr("WebP"), @tr("AVIF"), @tr("JPEG XL (lossless)"), @tr("JPEG XL (lossy)")];
+                model: [@tr("JPEG"), @tr("WebP"), @tr("AVIF"), @tr("JPEG XL")];
                 enabled: !(!root.interactive) && ImageStorageSettings.downloads-enabled;
                 current-index <=> ImageStorageSettings.downloads-format;
                 selected(i) => { ImageStorageSettings.settings-changed("downloads_format", self.current-index); }
             }
         }
-        if ImageStorageSettings.downloads-format != 3: downloads_quality_row := SettingsRow {
+        downloads_quality_row := SettingsRow {
             row-title: @tr("Download quality"); row-desc: @tr("Higher values retain more detail and use more disk space.");
             CacheQualityControl {
                 width: Math.min(InterfaceStyle.tv ? 320px : 252px, Math.max(0px, root.width - 32px));
@@ -216,7 +217,17 @@ export component ImageStorageSettingsPage inherits VerticalLayout {
                 changed(v) => { ImageStorageSettings.settings-changed("downloads_quality", Math.round(v)); }
             }
         }
-        if ImageStorageSettings.downloads-format == 3 || ImageStorageSettings.downloads-format == 4: downloads_transcode_row := SettingsRow {
+        if ImageStorageSettings.downloads-format == 1 || ImageStorageSettings.downloads-format == 3: downloads_lossless_row := SettingsRow {
+            row-title: @tr("Lossless encoding for lossless inputs");
+            row-desc: @tr("Preserve pixels from lossless PNG and WebP inputs. Lossy and unrecognized inputs use the selected quality. High-depth PNGs keep their original encoding.");
+            CacheCompressionToggle {
+                name: @tr("Lossless encoding for lossless download inputs");
+                busy: !root.interactive || !ImageStorageSettings.downloads-enabled;
+                checked <=> ImageStorageSettings.downloads-lossless-inputs;
+                toggled => { ImageStorageSettings.settings-changed("downloads_lossless_inputs", self.checked ? 1 : 0); }
+            }
+        }
+        if ImageStorageSettings.downloads-format == 3: downloads_transcode_row := SettingsRow {
             row-title: @tr("Losslessly transcode JPEG");
             row-desc: @tr("Preserve original JPEG data when no resize is needed. Other images and resized JPEGs use the selected quality.");
             CacheCompressionToggle {

@@ -35,7 +35,9 @@
       };
     in {
       default = pkgs.mkShell {
-        nativeBuildInputs = [ (toolchain []) pkgs.pkg-config pkgs.cargo-about pkgs.python3 pkgs.nodejs ];
+        # Node/npm run addon parser fixtures in `make check`; addons themselves
+        # execute in Reader's embedded QuickJS runtime.
+        nativeBuildInputs = [ (toolchain []) pkgs.pkg-config pkgs.cargo-about pkgs.cargo-sweep pkgs.python3 pkgs.nodejs ];
         buildInputs = with pkgs; [ fontconfig freetype libxkbcommon libGL libx11 libxcursor libxi libxrandr vulkan-loader ] ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ wayland ];
         LD_LIBRARY_PATH = lib.makeLibraryPath (with pkgs; [ fontconfig libxkbcommon libGL libx11 libxcursor libxi libxrandr vulkan-loader ] ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ wayland ]);
       };
@@ -48,7 +50,7 @@
           includeNDK = true; ndkVersions = [ "26.1.10909125" ];
         }).androidsdk;
       in androidPkgs.mkShell {
-        nativeBuildInputs = [ sdk androidPkgs.jdk17 cargo-apk2 pkgs.python3 pkgs.android-tools pkgs.cargo-about pkgs.llvmPackages.libclang pkgs.gn pkgs.ninja pkgs.git pkgs.curl (toolchain [ "aarch64-linux-android" "armv7-linux-androideabi" "x86_64-linux-android" ]) ];
+        nativeBuildInputs = [ sdk androidPkgs.jdk17 cargo-apk2 pkgs.python3 pkgs.android-tools pkgs.cargo-about pkgs.cargo-sweep pkgs.llvmPackages.libclang pkgs.gn pkgs.ninja pkgs.git pkgs.curl (toolchain [ "aarch64-linux-android" "armv7-linux-androideabi" "x86_64-linux-android" ]) ];
         shellHook = ''
           export ANDROID_HOME="${sdk}/libexec/android-sdk"
           export ANDROID_NDK_ROOT="$ANDROID_HOME/ndk/26.1.10909125"
@@ -80,7 +82,7 @@
         '';
       };
       windows = let cc = pkgs.pkgsCross.mingwW64.stdenv.cc; in pkgs.mkShell {
-        nativeBuildInputs = [ (toolchain [ "x86_64-pc-windows-gnu" ]) cc pkgs.pkg-config pkgs.python3 pkgs.cargo-about ];
+        nativeBuildInputs = [ (toolchain [ "x86_64-pc-windows-gnu" ]) cc pkgs.pkg-config pkgs.python3 pkgs.cargo-about pkgs.cargo-sweep ];
         buildInputs = [ pkgs.pkgsCross.mingwW64.windows.pthreads ];
         # aws-lc's supplemental entropy source includes sched.h, absent in MinGW.
         AWS_LC_SYS_NO_JITTER_ENTROPY = "1";

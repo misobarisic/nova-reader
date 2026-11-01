@@ -52,6 +52,7 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
                     ("cache_jxl_lossless_jpeg", 1),
                     ("cache_lossless_inputs", 1),
                     ("downloads_jxl_lossless_jpeg", 1),
+                    ("downloads_lossless_inputs", 1),
                 ] {
                     settings.invoke_settings_changed(key.into(), value);
                 }
@@ -61,7 +62,8 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
                     ("cache_quality", 0),
                     ("downloads_quality", 101),
                     ("downloads_enabled", 2),
-                    ("downloads_lossless_inputs", 1),
+                    ("downloads_format", 4),
+                    ("downloads_lossless_inputs", 2),
                     ("unknown", 1),
                 ] {
                     settings.invoke_settings_changed(key.into(), value);
@@ -85,7 +87,7 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
                         format: ImageStorageFormat::Avif,
                         quality: 73,
                         jxl_lossless_jpeg: true,
-                        lossless_inputs: false,
+                        lossless_inputs: true,
                     },
                     policy: CachePolicyPreferences::default(),
                 }
@@ -96,7 +98,7 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
                     ("cache_format", 3),
                     ("cache_quality", 85),
                     ("downloads_enabled", 1),
-                    ("downloads_format", 4),
+                    ("downloads_format", 3),
                     ("downloads_quality", 85),
                     ("cache_jxl_lossless_jpeg", 0),
                     ("downloads_jxl_lossless_jpeg", 0),
@@ -115,6 +117,11 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
                 assert!(!image_storage::load().cache.lossless_inputs);
                 toggle(&ui, "Lossless encoding for lossless inputs");
                 assert!(image_storage::load().cache.lossless_inputs);
+                toggle(&ui, "Lossless encoding for lossless download inputs");
+                assert!(!image_storage::load().downloads.lossless_inputs);
+                assert!(image_storage::load().cache.lossless_inputs);
+                toggle(&ui, "Lossless encoding for lossless download inputs");
+                assert!(image_storage::load().downloads.lossless_inputs);
                 quality(&ui, "Cache quality").invoke_accessible_increment_action();
                 quality(&ui, "Download quality").invoke_accessible_increment_action();
                 assert_eq!(image_storage::load().cache.quality, 86);
@@ -136,13 +143,12 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
                         let format = row("format");
                         let quality = row("quality");
                         let transcode = row("transcode");
-                        let lossless = if prefix == "cache" {
-                            Some(row("lossless"))
-                        } else {
-                            None
-                        };
-                        let next = lossless.as_ref().unwrap_or(&transcode);
-                        for (before, after) in [(&format, &quality), (&quality, next)] {
+                        let lossless = row("lossless");
+                        for (before, after) in [
+                            (&format, &quality),
+                            (&quality, &lossless),
+                            (&lossless, &transcode),
+                        ] {
                             assert!(
                                 (after.absolute_position().y
                                     - before.absolute_position().y
@@ -158,7 +164,7 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
                 settle();
                 for (id, index, label) in [
                     ("cache_format", 3, "JPEG XL"),
-                    ("downloads_format", 3, "JPEG XL (lossless)"),
+                    ("downloads_format", 3, "JPEG XL"),
                 ] {
                     let dropdown = ElementHandle::find_by_element_id(
                         &ui,
@@ -168,16 +174,13 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
                     .unwrap();
                     dropdown.invoke_accessible_default_action();
                     settle();
-                    if id == "cache_format" {
-                        for old_label in ["JPEG XL (lossless)", "JPEG XL (lossy)"] {
-                            assert!(
-                                !ElementHandle::find_by_accessible_label(&ui, old_label).any(
-                                    |element| element.accessible_role()
-                                        == Some(AccessibleRole::Button)
-                                        && element.type_name().as_deref() != Some("Dropdown")
-                                )
-                            );
-                        }
+                    for old_label in ["JPEG XL (lossless)", "JPEG XL (lossy)"] {
+                        assert!(
+                            !ElementHandle::find_by_accessible_label(&ui, old_label)
+                                .any(|element| element.accessible_role()
+                                    == Some(AccessibleRole::Button)
+                                    && element.type_name().as_deref() != Some("Dropdown"))
+                        );
                     }
                     ElementHandle::find_by_accessible_label(&ui, label)
                         .filter(|element| {
@@ -205,10 +208,14 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
                 assert!(
                     ElementHandle::find_by_accessible_label(&ui, "Download quality")
                         .find(|element| element.accessible_role() == Some(AccessibleRole::Slider))
-                        .is_none()
+                        .is_some()
                 );
                 assert_eq!(
                     image_storage::load().cache.format,
+                    ImageStorageFormat::JxlLossy
+                );
+                assert_eq!(
+                    image_storage::load().downloads.format,
                     ImageStorageFormat::JxlLossy
                 );
                 for (index, visible) in [(0, false), (1, true), (2, false), (3, true)] {
@@ -223,6 +230,21 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
                         visible
                     );
                     assert!(quality(&ui, "Cache quality").accessible_enabled().unwrap());
+                    settings.invoke_settings_changed("downloads_format".into(), index);
+                    settle();
+                    assert_eq!(
+                        ElementHandle::find_by_accessible_label(
+                            &ui,
+                            "Lossless encoding for lossless download inputs"
+                        )
+                        .any(|element| element.accessible_checkable() == Some(true)),
+                        visible
+                    );
+                    assert!(
+                        quality(&ui, "Download quality")
+                            .accessible_enabled()
+                            .unwrap()
+                    );
                 }
                 toggle(&ui, "Compress new cached images");
                 assert!(!image_storage::load().cache.enabled);
@@ -255,10 +277,11 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
                 assert!(image_storage::load().cache.lossless_inputs);
                 assert_eq!(
                     image_storage::load().downloads.format,
-                    ImageStorageFormat::JxlLossless
+                    ImageStorageFormat::JxlLossy
                 );
-                assert!(!image_storage::load().downloads.lossless_inputs);
+                assert!(image_storage::load().downloads.lossless_inputs);
                 assert_eq!(settings.get_cache_format(), 3);
+                assert_eq!(settings.get_downloads_format(), 3);
                 assert_eq!(
                     nova_storage::try_get_str("reader:image-storage")
                         .unwrap()
@@ -274,6 +297,9 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
                 );
                 assert!(settings.get_cache_lossless_inputs());
                 assert_eq!(settings.get_cache_quality(), 63.);
+                assert_eq!(settings.get_downloads_format(), 3);
+                assert!(settings.get_downloads_lossless_inputs());
+                assert_eq!(settings.get_downloads_quality(), 72.);
                 let raw = nova_storage::try_get_str("reader:image-storage")
                     .unwrap()
                     .unwrap();
@@ -281,6 +307,9 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
                     serde_json::from_str::<serde_json::Value>(&raw).unwrap()["cache"]["format"],
                     4
                 );
+                let saved: serde_json::Value = serde_json::from_str(&raw).unwrap();
+                assert_eq!(saved["downloads"]["format"], 4);
+                assert_eq!(saved["downloads"]["lossless_inputs"], true);
             }
             "corrupt" => {
                 for raw in [

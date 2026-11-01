@@ -158,6 +158,50 @@ fn only_new_download_pages_follow_compression_and_keep_offline_integrity() {
         .iter()
         .find(|candidate| candidate.id.local_id.ends_with("wide"))
         .unwrap();
+    // Follow the production download path, including hashing/offline validation:
+    // low quality must not damage recognized lossless input pixels in either codec.
+    let (_, lossless_resources) = services.pages(&avif_chapter.id, &cancel).unwrap();
+    let limits = reader_engine::DecodeLimits::default();
+    let source_pixels = lossless_resources
+        .iter()
+        .map(|page| {
+            let bytes = source
+                .fetch_page(&page.url, &page.headers, &cancel)
+                .unwrap();
+            reader_engine::decode_image(&bytes, limits)
+                .unwrap()
+                .into_raw()
+        })
+        .collect::<Vec<_>>();
+    for format in [ImageStorageFormat::Webp, ImageStorageFormat::JxlLossy] {
+        preferences.downloads.format = format;
+        preferences.downloads.quality = 10;
+        preferences.downloads.lossless_inputs = true;
+        save_preferences(&preferences);
+        services.download(&avif_chapter.id, &cancel).unwrap();
+        let saved = services.downloads.offline(&avif_chapter.id).unwrap();
+        for (path, original) in saved.pages.iter().zip(&source_pixels) {
+            let bytes = std::fs::read(path).unwrap();
+            if format == ImageStorageFormat::Webp {
+                assert_eq!(
+                    image::guess_format(&bytes).unwrap(),
+                    image::ImageFormat::WebP
+                );
+            } else {
+                assert!(nova_image::is_jpeg_xl(&bytes));
+            }
+            assert_eq!(
+                reader_engine::decode_image(&bytes, limits)
+                    .unwrap()
+                    .as_raw(),
+                original
+            );
+        }
+        services.downloads.remove(&avif_chapter.id).unwrap();
+    }
+    preferences.downloads.format = ImageStorageFormat::Avif;
+    preferences.downloads.quality = 35;
+    save_preferences(&preferences);
     services.download(&avif_chapter.id, &cancel).unwrap();
     let avif_offline = services.downloads.offline(&avif_chapter.id).unwrap();
     let avif_bytes = avif_offline
