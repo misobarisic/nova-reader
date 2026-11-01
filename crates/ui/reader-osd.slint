@@ -126,12 +126,13 @@ export component ReaderOsd inherits Rectangle {
         }
         if root.compact: HorizontalLayout {
             x: 0px; y: 52px; width: 100%; height: 44px; spacing: 8px;
-            OsdAction { label: @tr("Previous chapter"); glyph: "previous-chapter"; show-label: false; enabled: root.previous-chapter-enabled; clicked => { root.action("previous-chapter"); } }
+            OsdAction { width: 44px; horizontal-stretch: 0; label: @tr("Previous chapter"); glyph: "previous-chapter"; show-label: false; enabled: root.previous-chapter-enabled; clicked => { root.action("previous-chapter"); } }
             MiniSlider {
+                min-width: 0px; horizontal-stretch: 1;
                 name: @tr("Chapter progress"); value: root.progress; minimum: 0; maximum: 1; step: 0.001;
                 changed(v) => { root.scrub(v); }
             }
-            OsdAction { label: @tr("Next chapter"); glyph: "next-chapter"; show-label: false; enabled: root.next-chapter-enabled; clicked => { root.action("next-chapter"); } }
+            OsdAction { width: 44px; horizontal-stretch: 0; label: @tr("Next chapter"); glyph: "next-chapter"; show-label: false; enabled: root.next-chapter-enabled; clicked => { root.action("next-chapter"); } }
         }
         if !root.compact: MiniSlider {
             x: 8px; y: 48px; width: max(0px, parent.width - 16px);

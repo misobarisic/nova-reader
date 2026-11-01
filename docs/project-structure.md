@@ -19,7 +19,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `src/reader_controls.rs`, `src/reader_navigation.rs` | Nova-style OSD actions, source-anchored seek/zoom, Mihon tap maps, mode inheritance and Android/desktop preference projection |
 | `src/reader_continuity.rs` | Near-boundary chapter preparation, per-chapter source ownership and canonical progress, stable in-place page growth and bounded three-chapter retention |
 | `src/reader_desktop.rs` | Nova-derived latest-state native keep-awake worker; Linux portal/screensaver, Windows execution state and macOS caffeinate lifetime |
-| `crates/ui/reader-osd.slint`, `crates/ui/reader-settings.slint` | Responsive bottom OSD and animated phone-sheet/desktop-panel controls, shared global settings form under More → Settings → Reader |
+| `crates/ui/reader-osd.slint`, `crates/ui/reader-settings.slint` | Responsive bottom OSD with fixed 44px chapter buttons and an expanding phone progress slider, multi-select chapter navigator buttons, animated phone-sheet/desktop-panel controls, shared global settings form under More → Settings → Reader |
 | `src/progress_checkpoint.rs` | One background checkpoint writer, latest offsets coalesced per chapter, failure retry and ordered durable navigation/lifecycle barriers; the 600 ms UI timer only queues progress |
 | `src/reader_export.rs` | Original-image validation, screencap encoding, bounded platform save/clipboard delivery and persistent desktop clipboard ownership; `src/app.rs` captures the clean pre-menu viewport with an 8-million-pixel limit and fetches source page bytes |
 | `src/export_names.rs` | Portable UTF-8 series folders and bounded title/chapter/page/vertical-position filenames, including duplicate numbering |

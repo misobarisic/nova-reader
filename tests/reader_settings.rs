@@ -246,16 +246,16 @@ fn settings_controls_follow_saved_values_after_edit_and_reset() {
     ] {
         settings.set_navigator_modes(0);
         settle();
-        let checkbox = control(&ui, name, AccessibleRole::Checkbox);
-        assert_eq!(checkbox.accessible_checked(), Some(false));
-        checkbox.invoke_accessible_default_action();
+        let button = control(&ui, name, AccessibleRole::Button);
+        assert_eq!(button.accessible_checked(), Some(false));
+        button.invoke_accessible_default_action();
         settle();
         assert_eq!(
             settings.get_navigator_modes(),
             bit,
             "navigator mode must match its renderer bit"
         );
-        assert_eq!(checkbox.accessible_checked(), Some(true));
+        assert_eq!(button.accessible_checked(), Some(true));
     }
     let left = control(&ui, "Show on the left", AccessibleRole::Checkbox);
     left.mock_single_click(slint::platform::PointerEventButton::Left);

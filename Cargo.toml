@@ -15,7 +15,7 @@ slint-build = "=1.18.0"
 
 [package]
 name = "nova-reader"
-version = "0.1.22"
+version = "0.1.23"
 edition = "2024"
 license.workspace = true
 description = "A source-based manga and webtoon reader for desktop and Android"

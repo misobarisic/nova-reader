@@ -92,6 +92,24 @@ component PreferenceNumber inherits SettingsRow {
     }
 }
 
+component NavigatorModeButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> enabled: true;
+    in property <int> mode-bit: 1;
+    private property <bool> selected: Math.mod(Math.floor(ReaderSettings.navigator-modes / root.mode-bit), 2) == 1;
+    min-width: 0px; preferred-width: 152px;
+    height: button.height;
+    button := PillButton {
+        width: 100%; label: root.label; enabled: root.enabled;
+        compact: true; wrap-label: true; primary: root.selected;
+        accessible-checkable: true; accessible-checked: root.selected;
+        accessible-action-default => { if root.enabled { self.clicked(); } }
+        clicked => {
+            ReaderSettings.settings-changed("navigator_modes", ReaderSettings.navigator-modes + (root.selected ? -root.mode-bit : root.mode-bit));
+        }
+    }
+}
+
 // The same form is embedded in More → Settings and in the chapter overlay.
 export component ReaderSettingsForm inherits Rectangle {
     in property <bool> global-settings: false;
@@ -232,16 +250,24 @@ export component ReaderSettingsForm inherits Rectangle {
                     }
                     SectionHeader { label: @tr("Chapter navigator"); }
                     SettingsCard {
-                        PreferenceToggle { row-title: @tr("Left to right"); checked: Math.mod(Math.floor(ReaderSettings.navigator-modes / 1), 2) == 1; enabled: root.interactive;
-                            changed(v) => { ReaderSettings.settings-changed("navigator_modes", ReaderSettings.navigator-modes + (v ? 1 : -1)); } }
-                        PreferenceToggle { row-title: @tr("Right to left"); checked: Math.mod(Math.floor(ReaderSettings.navigator-modes / 2), 2) == 1; enabled: root.interactive;
-                            changed(v) => { ReaderSettings.settings-changed("navigator_modes", ReaderSettings.navigator-modes + (v ? 2 : -2)); } }
-                        PreferenceToggle { row-title: @tr("Vertical"); checked: Math.mod(Math.floor(ReaderSettings.navigator-modes / 4), 2) == 1; enabled: root.interactive;
-                            changed(v) => { ReaderSettings.settings-changed("navigator_modes", ReaderSettings.navigator-modes + (v ? 4 : -4)); } }
-                        PreferenceToggle { row-title: @tr("Webtoon"); checked: Math.mod(Math.floor(ReaderSettings.navigator-modes / 8), 2) == 1; enabled: root.interactive;
-                            changed(v) => { ReaderSettings.settings-changed("navigator_modes", ReaderSettings.navigator-modes + (v ? 8 : -8)); } }
-                        PreferenceToggle { row-title: @tr("Long strip with gaps"); checked: Math.mod(Math.floor(ReaderSettings.navigator-modes / 16), 2) == 1; enabled: root.interactive;
-                            changed(v) => { ReaderSettings.settings-changed("navigator_modes", ReaderSettings.navigator-modes + (v ? 16 : -16)); } }
+                        SettingsRow {
+                            row-title: @tr("Show in");
+                            GridLayout {
+                                min-width: 0px; spacing: 8px;
+                                Row {
+                                    NavigatorModeButton { label: @tr("Left to right"); mode-bit: 1; enabled: root.interactive; }
+                                    NavigatorModeButton { label: @tr("Right to left"); mode-bit: 2; enabled: root.interactive; }
+                                }
+                                Row {
+                                    NavigatorModeButton { label: @tr("Vertical"); mode-bit: 4; enabled: root.interactive; }
+                                    NavigatorModeButton { label: @tr("Webtoon"); mode-bit: 8; enabled: root.interactive; }
+                                }
+                                Row {
+                                    NavigatorModeButton { label: @tr("Long strip with gaps"); mode-bit: 16; enabled: root.interactive; }
+                                    Rectangle { min-width: 0px; }
+                                }
+                            }
+                        }
                         PreferenceToggle { row-title: @tr("Show on the left"); checked: ReaderSettings.navigator-left; enabled: root.interactive; changed(v) => { ReaderSettings.settings-changed("navigator_left", v ? 1 : 0); } }
                         PreferenceNumber { row-title: @tr("Navigator height"); value: ReaderSettings.navigator-height; minimum: 20; maximum: 100; enabled: root.interactive; changed(v) => { ReaderSettings.settings-changed("navigator_height", v); } }
                     }
