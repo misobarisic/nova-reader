@@ -40,8 +40,7 @@ suffixes mfcdn.nl and mfcdn1.xyz. A new CDN suffix needs a permission-reviewed
 package update; it is not automatically trusted from API output.
 
 Synthetic fixtures contain newly authored neutral metadata and placeholder image
-URLs only. No scraped chapter/image bytes, upstream icon or solver asset is
-included. Safe live metadata probes on 2026-11-01 validated API signing, listing,
+URLs only. No scraped chapter/image bytes or solver asset is included. Safe live metadata probes on 2026-11-01 validated API signing, listing,
 details, chapter-list and page-descriptor endpoints. These probes fetched no
 image bytes and do not establish image decoding, downloading or device reading.
 The production Reader-host live smoke was attempted separately and failed before
@@ -49,3 +48,7 @@ listing with Network("DNS deadline"); successful proxy HTTP probes are not claim
 as a successful native Reader live session.
 Independent publication belongs in nova-addons/addons/mangafire when requested;
 this package is carried as a reference in the reader repository.
+
+Version 1.0.1 bundles the upstream `res/mipmap-xxxhdpi/ic_launcher.png` icon
+from Keiyoushi revision `1dfd0bcf25b48cb5bd42d9191918a29072c67a61`, unchanged,
+under the repository Apache-2.0 license. Parser behavior is unchanged.

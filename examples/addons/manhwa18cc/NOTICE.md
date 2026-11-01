@@ -18,10 +18,14 @@ source-local path identities; language variants selected by sourceId; ISO date
 strings; page request Referer/Origin descriptors. Related-series and legacy
 Madara chapter-memo migration are not implemented. The unchanged route, ordering,
 raw-language policy, text-search apostrophe normalization and filter precedence
-are retained. No upstream icons, adult images or scraped site HTML are included.
+are retained. No adult images or scraped site HTML are included.
 Fixtures and neutral images are newly authored synthetic material.
 
 No live-site availability, challenge bypass or session transfer is implied.
 Native addon version 1.0.0 is independent of upstream extension versionCode 65.
 The intended independently published home is nova-addons/addons/manhwa18cc;
 this reader repository carries the reviewable reference package and fixtures.
+
+Version 1.0.1 bundles the upstream `res/mipmap-xxxhdpi/ic_launcher.png` icon
+from Keiyoushi revision `1dfd0bcf25b48cb5bd42d9191918a29072c67a61`, unchanged,
+under the repository Apache-2.0 license. Parser behavior is unchanged.

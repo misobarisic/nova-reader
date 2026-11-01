@@ -1,0 +1,17 @@
+import { Theme } from "@NovaUiShared";
+import { IcExtension } from "@NovaUiBase/icons.slint";
+
+// Nova addon decoration: preserve each source's colors with a Kit fallback.
+export component AddonIcon inherits Rectangle {
+    in property <image> icon;
+    in property <bool> enabled: true;
+    width: 40px; height: 40px;
+    opacity: root.enabled ? 1 : 0.55;
+    if root.icon.width > 0 && root.icon.height > 0: Image {
+        source: root.icon; image-fit: contain;
+    }
+    if root.icon.width == 0 || root.icon.height == 0: IcExtension {
+        x: 4px; y: 4px; width: 32px; height: 32px;
+        fill: root.enabled ? Theme.current.accent_soft : Theme.current.text_muted;
+    }
+}

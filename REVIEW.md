@@ -531,3 +531,59 @@ serial software-OpenGL screenshot, headless settings and persistence/sync checks
 passed before its shared-cache/AVIF commit was pushed.
 The desktop distribution feature set (`--no-default-features --features desktop`)
 also passed its locked check and target-specific license generation.
+
+
+## Addon icons and Kagane (0.1.17)
+
+Codex reviewed this change directly. Optional manifest icons are local declared
+PNG assets, constrained to 256 KiB and 512×512 before installation. Workers
+fully decode and prepare 64px thumbnails; only the UI thread creates Slint image
+handles. Matching digests reuse handles across Browse visits, language variants
+share package icons, and refreshes discard removed/replaced decoration. A 512-icon
+cap bounds retained pixels to 8 MiB. Disabled packages require no script/network
+execution to display their icons. Kit supplies the iconless/invalid-pixel fallback.
+
+Manhwa18cc and MangaFire 1.0.1 include unchanged upstream icons and notices.
+Kagane 1.0.0 follows Keiyoushi v37 at immutable revision
+1dfd0bcf25b48cb5bd42d9191918a29072c67a61. Native QuickJS fixtures exercise all
+capability variants, Safe search defaults, posted filters, compact column-order
+chapter mapping, fractional identities, chronological metadata, page ordering,
+public integrity tokens, cancellation, rejected cache hosts and incomplete
+chapter indices. Rejected image access refreshes once through declared
+resolvePage; the refreshed request is checked again and cannot recurse forever.
+The narrow integrity header is treated as sensitive for redirects.
+
+Reader now supports the JPEG XL page format observed in Kagane manifests using
+jxl-oxide 0.12.6 with Rayon disabled. Dimension/encoded/page budgets and the
+codec's grid allocation tracker bound admitted still pages. The adapter reserves
+RGBA/row output before rendering, streams rows directly, skips unrelated
+compressed container metadata and rejects custom ICC, previews, animation, CMYK
+and extra channels. This is decoding, not JPEG XL encoding. Original page save,
+clipboard, offline bundles and local import retain their original bytes; normal
+new-write cache/download compression can transcode supported JXL input. Neutral
+lossless RGB/alpha fixtures validate exact pixels, truncation and low budgets;
+a boxed fixture verifies auxiliary Brotli metadata is never inflated.
+
+Multiple and tristate source filters now render through existing Nova setting
+controls, preserving provider values separately from labels. Options use internal
+keys that cannot collide with provider IDs. Bounds remain explicit, including
+512 choices per multiple group and 1024 rendered options total. This also makes
+MangaFire's existing genre/content/type filters usable in Reader.
+
+Independent live HTTP probes verified Safe Kagane search/details/chapter index
+and original/datasaver manifests on 2026-11-01. Both used JXL on kstatic.to. These
+probes fetched no chapter image bytes. Physical Android and live image decoding
+remain unverified; host/compile tests do not establish those acceptance gates.
+
+The actual Reader-transport live metadata smoke was attempted separately and
+failed at its first search with `Network("DNS deadline")` in this workspace.
+Successful independent HTTP probes are not reported as a native live session.
+
+Final validation passed formatting, all-target workspace Clippy with warnings
+denied, locked workspace check, all workspace tests/doc tests and 33 packaging
+regressions without skips. The actual Android Java/JNI save/clipboard/import
+harness and Clippy passed, including original JXL bytes on API 26/35. The exact
+production JXL adapter compiled for ARMv7 in an isolated pure-codec harness.
+The full local ARMv7 engine check was blocked by the missing Android NDK C linker
+in the existing storage dependency; APK/whole-app validation remains in release
+CI. Reference addon parsers and deterministic package/source-byte checks passed.

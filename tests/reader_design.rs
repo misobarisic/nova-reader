@@ -571,6 +571,7 @@ fn poster_layout_timelines_chapters_and_reader_controls() {
         version: "1.0.0".into(),
         language: "en".into(),
         enabled: true,
+        ..Default::default()
     }])));
     let pinned = Rc::new(RefCell::new(String::new()));
     ui.on_source_pin_picked({

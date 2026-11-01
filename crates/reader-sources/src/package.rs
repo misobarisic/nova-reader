@@ -30,6 +30,9 @@ pub struct Manifest {
     pub scripts: Vec<String>,
     #[serde(default)]
     pub assets: Vec<String>,
+    /// Optional PNG path declared in assets; never a remote URL.
+    #[serde(default)]
+    pub icon: Option<String>,
     pub permissions: Permissions,
     #[serde(default)]
     pub capabilities: Vec<String>,
@@ -181,6 +184,11 @@ fn validate_manifest(m: &Manifest) -> Result<BTreeSet<String>> {
             return Err(invalid("scripts must be JavaScript"));
         }
     }
+    if let Some(icon) = &m.icon
+        && (!m.assets.contains(icon) || !icon.ends_with(".png"))
+    {
+        return Err(invalid("icon must be a declared PNG asset"));
+    }
     Ok(paths)
 }
 pub(crate) fn validate(bytes: &[u8]) -> Result<(Manifest, String)> {
@@ -252,6 +260,20 @@ pub(crate) fn validate(bytes: &[u8]) -> Result<(Manifest, String)> {
     let expected = validate_manifest(&m)?;
     if expected != files.keys().cloned().collect() {
         return Err(invalid("missing or unlisted file"));
+    }
+    if let Some(icon) = &m.icon {
+        let data = &files[icon];
+        if data.len() > 256 * 1024
+            || data.len() < 24
+            || &data[..8] != b"\x89PNG\r\n\x1a\n"
+            || &data[12..16] != b"IHDR"
+            || [16, 20].iter().any(|&start| {
+                let side = u32::from_be_bytes(data[start..start + 4].try_into().unwrap());
+                side == 0 || side > 512
+            })
+        {
+            return Err(invalid("icon exceeds PNG size/dimension limits"));
+        }
     }
     let mut script = String::new();
     for path in m.scripts.iter().chain(std::iter::once(&m.entry)) {
@@ -426,6 +448,17 @@ impl SourceRegistry {
         ids.iter()
             .map(|id| self.source_unchecked(id).map(|s| s.descriptor()))
             .collect()
+    }
+    /// Read verified package decoration even for disabled addons. No script or
+    /// network runs, and package updates/removal cannot supply stale bytes.
+    pub fn icon(&self, id: &str) -> Result<Option<Vec<u8>>> {
+        let source = self.source_unchecked(id)?;
+        source
+            .manifest
+            .icon
+            .as_deref()
+            .map(|path| asset(&source.archive, &source.manifest, path))
+            .transpose()
     }
     fn source_unchecked(&self, id: &str) -> Result<Source> {
         let mut inner = self.inner.lock().unwrap();

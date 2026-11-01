@@ -15,7 +15,7 @@ def files_for(root):
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("formatVersion") != 2 or manifest.get("contract") != "nova-reader1":
         raise ValueError("expected format 2 nova-reader1 package")
-    allowed = {"formatVersion", "contract", "api", "id", "name", "version", "language", "nsfw", "entry", "scripts", "assets", "permissions", "capabilities", "configuration"}
+    allowed = {"formatVersion", "contract", "api", "id", "name", "version", "language", "nsfw", "entry", "scripts", "assets", "icon", "permissions", "capabilities", "configuration"}
     if set(manifest) - allowed:
         raise ValueError("unknown manifest fields")
     if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", manifest["id"]):
@@ -62,6 +62,13 @@ def files_for(root):
         raise ValueError("script byte limit")
     if sum((root / p).stat().st_size for p in names) > LIMIT:
         raise ValueError("expanded archive byte limit")
+    icon = manifest.get("icon")
+    if icon is not None:
+        if icon not in manifest.get("assets", []) or not icon.endswith(".png"):
+            raise ValueError("icon must be a declared PNG asset")
+        data = (root / icon).read_bytes()
+        if len(data) > 256 * 1024 or len(data) < 24 or data[:8] != b"\x89PNG\r\n\x1a\n" or data[12:16] != b"IHDR" or any(not 0 < int.from_bytes(data[i:i+4], "big") <= 512 for i in (16, 20)):
+            raise ValueError("icon exceeds PNG size/dimension limits")
     return sorted(names)
 
 

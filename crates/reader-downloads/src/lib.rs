@@ -755,7 +755,7 @@ fn supported(path: &Path) -> bool {
     path.extension().and_then(|x| x.to_str()).is_some_and(|x| {
         matches!(
             x.to_ascii_lowercase().as_str(),
-            "png" | "jpg" | "jpeg" | "webp" | "avif"
+            "png" | "jpg" | "jpeg" | "webp" | "avif" | "jxl"
         )
     })
 }
@@ -968,23 +968,30 @@ mod tests {
         fs::write(input.path().join("2.png"), &one).unwrap();
         let avif = include_bytes!("../../reader-engine/tests/fixtures/tiny.avif");
         fs::write(input.path().join("11.AVIF"), avif).unwrap();
+        let jxl = include_bytes!("../../reader-engine/tests/fixtures/jxl/rgb.jxl");
+        fs::write(input.path().join("12.JXL"), jxl).unwrap();
         let store = DownloadStore::open(directory.path(), 1_000_000).unwrap();
         let chapter = chapter();
         store.import_folder(chapter.clone(), input.path()).unwrap();
         let offline = store.offline(&chapter).unwrap();
         assert_eq!(fs::read(&offline.pages[0]).unwrap(), one);
-        assert_eq!(offline.pages.len(), 3);
+        assert_eq!(offline.pages.len(), 4);
         assert_eq!(fs::read(&offline.pages[2]).unwrap(), avif);
+        assert_eq!(fs::read(&offline.pages[3]).unwrap(), jxl);
         let avif_archive = input.path().join("avif.cbz");
         let mut zip = zip::ZipWriter::new(File::create(&avif_archive).unwrap());
         zip.start_file("page.avif", SimpleFileOptions::default())
             .unwrap();
         zip.write_all(avif).unwrap();
+        zip.start_file("page2.jxl", SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(jxl).unwrap();
         zip.finish().unwrap();
         let archived = ChapterId::new(chapter.series.clone(), "avif-archive");
         store.import_cbz(archived.clone(), avif_archive).unwrap();
         let imported = store.offline(&archived).unwrap();
         assert_eq!(fs::read(&imported.pages[0]).unwrap(), avif);
+        assert_eq!(fs::read(&imported.pages[1]).unwrap(), jxl);
         let archive_path = input.path().join("unsafe.cbz");
         let mut zip = zip::ZipWriter::new(File::create(&archive_path).unwrap());
         zip.start_file("../escape.png", SimpleFileOptions::default())

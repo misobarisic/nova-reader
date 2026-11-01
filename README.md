@@ -21,7 +21,10 @@ AVIF), quality, screencap resolution, optional series folders and duplicate hand
 use device pixels or the original chapter image's pixel scale for the visible area.
 These device preferences are saved separately from library backups.
 Browse groups sources by last used, pins and language; Extensions manages installed
-packages. Chapters open with controls hidden; tap or click to show them.
+packages. Sources and Extensions show bundled addon icons, with a fallback for
+older packages. [Installable addons](addons/README.md) include Manhwa18cc,
+MangaFire and Kagane. Kagane supports its 18 upstream language variants and
+JPEG XL chapter pages. Chapters open with controls hidden; tap or click to show them.
 Automatic reading mode follows [TachiyomiJ2K's genre/source rules](docs/reader-modes.md).
 A manual choice is saved for that series across chapters and restarts.
 Right-click or hold an image to save/copy its original or the visible screencap.

@@ -27,6 +27,11 @@ enum Kind {
         options: Vec<OptionValue>,
         selected: usize,
     },
+    Multiple {
+        options: Vec<OptionValue>,
+        states: Vec<usize>,
+        tristate: bool,
+    },
     Text(String),
     Bool(bool),
 }
@@ -83,12 +88,21 @@ impl FilterSet {
                 return Err("Duplicate source filter name".into());
             }
             let default = definition.get("default");
-            let kind = match definition.get("type").and_then(Value::as_str) {
-                Some("select") => {
+            let filter_type = definition.get("type").and_then(Value::as_str);
+            let kind = match filter_type {
+                Some("select" | "multiselect" | "tristate") => {
                     let values = definition
                         .get("options")
                         .and_then(Value::as_array)
-                        .filter(|values| !values.is_empty() && values.len() <= MAX_OPTIONS)
+                        .filter(|values| {
+                            !values.is_empty()
+                                && values.len()
+                                    <= if filter_type == Some("select") {
+                                        MAX_OPTIONS
+                                    } else {
+                                        512
+                                    }
+                        })
                         .ok_or("Invalid source filter options")?;
                     let mut options = Vec::with_capacity(values.len());
                     let mut unique_values = BTreeSet::new();
@@ -112,7 +126,39 @@ impl FilterSet {
                         .and_then(Value::as_str)
                         .and_then(|value| options.iter().position(|option| option.value == value))
                         .unwrap_or(0);
-                    Kind::Select { options, selected }
+                    if filter_type == Some("select") {
+                        Kind::Select { options, selected }
+                    } else {
+                        let tristate = filter_type == Some("tristate");
+                        let mut states = vec![0; options.len()];
+                        for (index, option) in options.iter().enumerate() {
+                            let includes = if tristate {
+                                default.and_then(|d| d.get("include"))
+                            } else {
+                                default
+                            };
+                            if includes.and_then(Value::as_array).is_some_and(|a| {
+                                a.iter().any(|v| v.as_str() == Some(&option.value))
+                            }) {
+                                states[index] = 1;
+                            }
+                            if tristate
+                                && default
+                                    .and_then(|d| d.get("exclude"))
+                                    .and_then(Value::as_array)
+                                    .is_some_and(|a| {
+                                        a.iter().any(|v| v.as_str() == Some(&option.value))
+                                    })
+                            {
+                                states[index] = 2;
+                            }
+                        }
+                        Kind::Multiple {
+                            options,
+                            states,
+                            tristate,
+                        }
+                    }
                 }
                 Some("text") => Kind::Text(
                     default
@@ -125,6 +171,16 @@ impl FilterSet {
             };
             filters.push(Filter { id, name, kind });
         }
+        let rows: usize = filters
+            .iter()
+            .map(|filter| match &filter.kind {
+                Kind::Multiple { options, .. } => options.len(),
+                _ => 1,
+            })
+            .sum();
+        if rows > 1024 {
+            return Err("Source has too many filter options".into());
+        }
         Ok(Self { notice, filters })
     }
 
@@ -135,13 +191,42 @@ impl FilterSet {
     pub fn rows(&self) -> Vec<crate::SettingRow> {
         self.filters
             .iter()
-            .map(|filter| {
+            .flat_map(|filter| {
+                if let Kind::Multiple {
+                    options,
+                    states,
+                    tristate,
+                } = &filter.kind
+                {
+                    return options
+                        .iter()
+                        .enumerate()
+                        .map(|(index, option)| crate::SettingRow {
+                            key: format!(
+                                " {}",
+                                serde_json::to_string(&(filter.id.as_str(), index)).unwrap()
+                            )
+                            .into(),
+                            name: format!("{} · {}", filter.name, option.label).into(),
+                            kind: if *tristate { "select" } else { "bool" }.into(),
+                            selected: states[index] as i32,
+                            checked: states[index] == 1,
+                            options: ModelRc::new(VecModel::from(
+                                ["Any", "Include", "Exclude"]
+                                    .map(|s| nova_reader_ui::backend_text::tr(s).into())
+                                    .to_vec(),
+                            )),
+                            ..Default::default()
+                        })
+                        .collect::<Vec<_>>();
+                }
                 let mut row = crate::SettingRow {
                     key: filter.id.as_str().into(),
                     name: filter.name.as_str().into(),
                     ..Default::default()
                 };
                 match &filter.kind {
+                    Kind::Multiple { .. } => unreachable!(),
                     Kind::Select { options, selected } => {
                         row.kind = "select".into();
                         row.value = options[*selected].value.as_str().into();
@@ -163,12 +248,41 @@ impl FilterSet {
                         row.value = if *checked { "true" } else { "false" }.into();
                     }
                 }
-                row
+                vec![row]
             })
             .collect()
     }
 
+    fn multiple_edit(&mut self, key: &str, state: usize) -> Option<bool> {
+        // JSON tuple keys cannot collide with ordinary provider IDs. Prefer an
+        // exact ID before decoding synthetic option rows.
+        if self.filters.iter().any(|filter| filter.id == key) {
+            return None;
+        }
+        let (id, index): (String, usize) = serde_json::from_str(key).ok()?;
+        let Kind::Multiple {
+            states, tristate, ..
+        } = &mut self.filters.iter_mut().find(|f| f.id == id)?.kind
+        else {
+            return None;
+        };
+        if state > if *tristate { 2 } else { 1 } {
+            return Some(false);
+        }
+        Some(
+            states
+                .get_mut(index)
+                .is_some_and(|current| replace_if_changed(current, state)),
+        )
+    }
     pub fn change(&mut self, key: &str, value: &str) -> bool {
+        if let Some(changed) = match value {
+            "true" => self.multiple_edit(key, 1),
+            "false" => self.multiple_edit(key, 0),
+            _ => None,
+        } {
+            return changed;
+        }
         let Some(filter) = self.filters.iter_mut().find(|filter| filter.id == key) else {
             return false;
         };
@@ -192,6 +306,11 @@ impl FilterSet {
     }
 
     pub fn select(&mut self, key: &str, index: i32) -> bool {
+        if index >= 0
+            && let Some(changed) = self.multiple_edit(key, index as usize)
+        {
+            return changed;
+        }
         let Some(Filter {
             kind: Kind::Select { options, selected },
             ..
@@ -211,6 +330,25 @@ impl FilterSet {
                 .iter()
                 .map(|filter| {
                     let value = match &filter.kind {
+                        Kind::Multiple {
+                            options,
+                            states,
+                            tristate,
+                        } => {
+                            let selected = |state| {
+                                options
+                                    .iter()
+                                    .zip(states)
+                                    .filter(|(_, s)| **s == state)
+                                    .map(|(o, _)| Value::String(o.value.clone()))
+                                    .collect::<Vec<_>>()
+                            };
+                            if *tristate {
+                                serde_json::json!({"include":selected(1),"exclude":selected(2)})
+                            } else {
+                                Value::Array(selected(1))
+                            }
+                        }
                         Kind::Select { options, selected } => {
                             Value::String(options[*selected].value.clone())
                         }
@@ -262,6 +400,32 @@ mod tests {
     use super::*;
     use serde_json::json;
     use slint::Model;
+
+    #[test]
+    fn multiple_and_tristate_rows_preserve_provider_values_and_separate_selection() {
+        let mut filters = FilterSet::parse(json!({"filters":[
+            {"id":"sources","type":"multiselect","options":[{"label":"Source A","value":"source-a"},{"label":"Source B","value":"source-b"}]},
+            {"id":"genres","type":"tristate","options":[{"label":"Adventure","value":"genre-a"},{"label":"Drama","value":"genre-b"}]}
+        ]})).unwrap();
+        let rows = filters.rows();
+        assert_eq!(rows.len(), 4);
+        assert!(filters.change(rows[0].key.as_str(), "true"));
+        assert!(filters.change(rows[1].key.as_str(), "true"));
+        assert!(filters.select(rows[2].key.as_str(), 1));
+        assert!(filters.select(rows[3].key.as_str(), 2));
+        assert_eq!(
+            filters.values(),
+            json!({"sources":["source-a","source-b"],"genres":{"include":["genre-a"],"exclude":["genre-b"]}})
+        );
+        assert!(filters.select(rows[3].key.as_str(), 1));
+        assert!(!filters.select(rows[3].key.as_str(), 3));
+        assert!(!filters.select(rows[2].key.as_str(), -1));
+        assert!(filters.change(rows[0].key.as_str(), "false"));
+        assert_eq!(
+            filters.values()["genres"],
+            json!({"include":["genre-a","genre-b"],"exclude":[]})
+        );
+    }
 
     #[test]
     fn selection_sends_provider_values_and_preserves_empty_all_option() {

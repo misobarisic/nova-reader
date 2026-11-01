@@ -2,6 +2,7 @@ import { Theme } from "@NovaUiShared";
 import { SettingsCard } from "@NovaUiBase/settings-controls.slint";
 import { ExtensionRow } from "media-models.slint";
 import { ActionButton } from "controls.slint";
+import { AddonIcon } from "addon-icon.slint";
 export component ExtensionList inherits VerticalLayout {
     in property <[ExtensionRow]> items;
     callback action(string,string);
@@ -9,8 +10,15 @@ export component ExtensionList inherits VerticalLayout {
     for addon in root.items: SettingsCard {
         VerticalLayout {
             padding: 16px; spacing: 12px;
-            Text { text: addon.name; color: Theme.current.text_bright; font-size: 16px; font-weight: 600; wrap: word-wrap; min-width: 0px; }
-            Text { text: addon.version + " · " + addon.language; color: Theme.current.text_secondary; font-size: 13px; wrap: word-wrap; min-width: 0px; }
+            HorizontalLayout {
+                spacing: 12px;
+                AddonIcon { icon: addon.icon; enabled: addon.enabled; }
+                VerticalLayout {
+                    alignment: center; spacing: 5px;
+                    Text { text: addon.name; color: Theme.current.text_bright; font-size: 16px; font-weight: 600; wrap: word-wrap; min-width: 0px; }
+                    Text { text: addon.version + " · " + addon.language; color: Theme.current.text_secondary; font-size: 13px; wrap: word-wrap; min-width: 0px; }
+                }
+            }
             HorizontalLayout {
                 spacing: 8px;
                 ActionButton { text: addon.enabled ? @tr("Disable") : @tr("Enable"); clicked => { root.action(addon.id,"toggle"); } }

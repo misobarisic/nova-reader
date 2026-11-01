@@ -177,3 +177,18 @@ automated service journey, not a device touch/keyboard or rendering benchmark.
 CI also defines Windows GNU and Android ARM64 compile checks. A configured check
 is not evidence of a successful run; release installation, execution and signing
 acceptance remain separate gates. See [packaging](packaging.md).
+
+
+## Addon icons and Kagane (0.1.17)
+
+Native packages may declare a bounded bundled PNG icon; Sources and Extensions
+share retained thumbnails across language variants and use Kit fallback icons.
+Manhwa18cc and MangaFire 1.0.1 carry unchanged upstream icons. Kagane 1.0.0 ports
+Keiyoushi v37 metadata/search/filters, compact chapter indices and page-token
+manifests. One refresh retries expired image access. Reader adds JPEG XL still
+pages via jxl-oxide (pure Rust, no native codec dependency), preserving original
+save/download bytes and allowing normal new-write cache compression.
+Animation, custom ICC, previews, CMYK and extra JPEG XL channels are rejected;
+auxiliary container metadata is skipped. This does not add JPEG XL encoding.
+Live probes cover Safe metadata/manifests only; physical Android acceptance and
+live chapter-image decoding remain unverified.

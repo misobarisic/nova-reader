@@ -1,6 +1,6 @@
 // Mihon's source hierarchy with Nova's Kit controls, palette and focus rules.
 import { Theme, SettingsStyle } from "@NovaUiShared";
-import { IcExtension } from "@NovaUiBase/icons.slint";
+import { AddonIcon } from "addon-icon.slint";
 import { SourceRow } from "media-models.slint";
 import { ActionButton, IconAction } from "controls.slint";
 
@@ -35,9 +35,9 @@ component SourceListRow inherits Rectangle {
         accessible-label: root.item.name + ", " + root.item.language;
         accessible-enabled: root.item.enabled;
         accessible-action-default => { if root.item.enabled { root.picked(); } }
-        IcExtension {
-            x: 8px; y: 24px; width: 32px; height: 32px;
-            fill: root.item.enabled ? Theme.current.accent_soft : Theme.current.text_muted;
+        AddonIcon {
+            x: 4px; y: 20px;
+            icon: root.item.icon; enabled: root.item.enabled;
         }
         VerticalLayout {
             x: 56px; y: 17px;

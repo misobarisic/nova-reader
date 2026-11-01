@@ -103,6 +103,7 @@ fn extension(value: &str) -> &'static str {
         "jpeg" => "jpeg",
         "webp" => "webp",
         "avif" => "avif",
+        "jxl" => "jxl",
         _ => "png",
     }
 }

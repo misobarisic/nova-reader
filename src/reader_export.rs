@@ -17,14 +17,17 @@ impl ExportImage {
     pub fn original(bytes: Vec<u8>, name: &str) -> Result<Self, String> {
         reader_engine::inspect_image(&bytes, reader_engine::DecodeLimits::default())
             .map_err(|error| format!("Cannot export page image: {error}"))?;
-        let (mime, extension) =
+        let (mime, extension) = if reader_engine::is_jpeg_xl(&bytes) {
+            ("image/jxl", "jxl")
+        } else {
             match image::guess_format(&bytes).map_err(|error| error.to_string())? {
                 image::ImageFormat::Png => ("image/png", "png"),
                 image::ImageFormat::Jpeg => ("image/jpeg", "jpg"),
                 image::ImageFormat::WebP => ("image/webp", "webp"),
                 image::ImageFormat::Avif => ("image/avif", "avif"),
                 _ => return Err("Unsupported page image format".into()),
-            };
+            }
+        };
         let stem = std::path::Path::new(name)
             .file_stem()
             .and_then(|name| name.to_str())
@@ -225,7 +228,7 @@ pub fn deliver_with_context(
 ) {
     if !matches!(
         image.mime.as_str(),
-        "image/png" | "image/jpeg" | "image/webp" | "image/avif"
+        "image/png" | "image/jpeg" | "image/webp" | "image/avif" | "image/jxl"
     ) {
         callback(Err("Unsupported image export format".into()));
         return;
@@ -907,6 +910,16 @@ mod tests {
         let original = ExportImage::original(stored, "page.png").unwrap();
         assert_eq!(original.mime, "image/avif");
         assert_eq!(original.name, "page.avif");
+    }
+
+    #[test]
+    fn jpeg_xl_original_export_preserves_codec_and_bytes() {
+        let bytes = include_bytes!("../crates/reader-engine/tests/fixtures/jxl/rgba.jxl");
+        let image =
+            ExportImage::original(bytes.to_vec(), "Story - Ch. 0001 - P. 0001.jpg").unwrap();
+        assert_eq!(image.mime, "image/jxl");
+        assert!(image.name.ends_with(".jxl"));
+        assert_eq!(image.bytes, bytes);
     }
 
     #[test]

@@ -165,6 +165,7 @@ impl SourceBrowser {
                 enabled: choice.enabled,
                 latest: choice.latest,
                 index: choice.index,
+                icon: Default::default(),
             })
             .collect()
     }

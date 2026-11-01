@@ -215,3 +215,12 @@ safe toolbar spacing and safe hero/chapter-list gutters.
 Remote chapter rows offer Delete download from their trailing action and menu;
 Downloads exposes the same operation. Local imports retain their sole copy.
 Removal targets the chapter bundle, keeping series metadata and reading history.
+
+
+Sources and Extensions use `addon-icon.slint`: a 40px source-colored image with
+Nova Kit's extension icon as fallback and the existing disabled opacity. Labels,
+focus, pin/latest hit targets and extension action cards retain their current
+Nova typography/spacing. Icons are bundled package assets, fully decoded on a
+worker and retained on the UI thread; language variants share the same image.
+Multiple source filters reuse Nova setting switches and Any/Include/Exclude
+dropdowns. No new palette or platform navigation is introduced.

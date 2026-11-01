@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 class AddonPackagingTests(unittest.TestCase):
     def test_reference_packages_are_reproducible(self):
-        for addon in ("neutral-fixture", "manhwa18cc", "mangafire"):
+        for addon in ("neutral-fixture", "manhwa18cc", "mangafire", "kagane"):
             with self.subTest(addon=addon), tempfile.TemporaryDirectory() as temporary:
                 outputs = [Path(temporary) / name for name in ("one.zip", "two.zip")]
                 for output in outputs:

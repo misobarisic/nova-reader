@@ -127,6 +127,15 @@ impl Source {
         headers: &BTreeMap<String, String>,
         cancel: &CancelToken,
     ) -> Result<Vec<u8>> {
+        self.fetch_page_attempt(url, headers, cancel, true)
+    }
+    fn fetch_page_attempt(
+        &self,
+        url: &str,
+        headers: &BTreeMap<String, String>,
+        cancel: &CancelToken,
+        refresh: bool,
+    ) -> Result<Vec<u8>> {
         self.validate_page_request(url, headers)?;
         if let Some(path) = url.strip_prefix(&format!("addon://{}/", self.manifest.id)) {
             cancel.check()?;
@@ -147,6 +156,26 @@ impl Source {
         }
         if response.body.len() > 32 * 1024 * 1024 {
             return Err(SourceError::Network("image byte limit".into()));
+        }
+        if refresh
+            && matches!(response.status, 401 | 403 | 507)
+            && self
+                .manifest
+                .capabilities
+                .iter()
+                .any(|op| op == "resolvePage")
+        {
+            let result =
+                self.call_cancelled("resolvePage", &serde_json::json!({"url":url}), cancel)?;
+            let pages: PageList = serde_json::from_value(result)
+                .map_err(|_| SourceError::ParseChanged("invalid refreshed page".into()))?;
+            if pages.pages.len() != 1 {
+                return Err(SourceError::ParseChanged(
+                    "refresh must return exactly one page".into(),
+                ));
+            }
+            let page = &pages.pages[0];
+            return self.fetch_page_attempt(&page.url, &page.headers, cancel, false);
         }
         network::check_status(response.status)?;
         Ok(response.body)

@@ -1052,9 +1052,13 @@ impl Controller {
                 index: i as i32,
             })
             .collect::<Vec<_>>();
-        ui.set_source_rows(ModelRc::new(VecModel::from(
-            view.source_browser.rows(&source_choices),
-        )));
+        let mut source_rows = view.source_browser.rows(&source_choices);
+        for row in &mut source_rows {
+            if let Some(choice) = view.choices.get(row.index.max(0) as usize) {
+                row.icon = crate::addon_icons::image(&choice.package);
+            }
+        }
+        ui.set_source_rows(ModelRc::new(VecModel::from(source_rows)));
         ui.set_source_index(if view.choices.is_empty() {
             -1
         } else {
@@ -1274,16 +1278,17 @@ impl Controller {
             self.task(
                 ui,
                 move |app, _| {
-                    Ok((
-                        app.sources(adult)?,
-                        app.services.sources.list().map_err(error)?,
-                    ))
+                    let extensions = app.services.sources.list().map_err(error)?;
+                    let icons = crate::addon_icons::prepare(&app.services.sources, &extensions);
+                    Ok((app.sources(adult)?, extensions, icons))
                 },
-                |app, ui, (choices, extensions)| {
+                |app, ui, (choices, extensions, icons)| {
+                    crate::addon_icons::publish(icons);
                     ui.set_extensions(ModelRc::new(VecModel::from(
                         extensions
                             .into_iter()
                             .map(|e| ExtensionRow {
+                                icon: crate::addon_icons::image(&e.id),
                                 id: e.id.into(),
                                 name: e.name.into(),
                                 version: e.version.into(),

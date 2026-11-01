@@ -4,7 +4,7 @@
   "api": "^1.0",
   "id": "mangafire",
   "name": "MangaFire",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "language": "all",
   "nsfw": true,
   "entry": "main.js",
@@ -14,7 +14,8 @@
   ],
   "assets": [
     "NOTICE.md",
-    "LICENSE"
+    "LICENSE",
+    "icon.png"
   ],
   "permissions": {
     "domains": [
@@ -65,5 +66,6 @@
       "kind": "bool",
       "default": true
     }
-  ]
+  ],
+  "icon": "icon.png"
 }

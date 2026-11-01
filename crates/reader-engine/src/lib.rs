@@ -2,10 +2,12 @@
 use image::ImageDecoder;
 mod avif;
 mod display;
+mod jxl;
 pub use display::{
     DISPLAY_WINDOW_BYTES, DisplayDecoder, DisplayWindow, DisplayWindowPlan, decode_display_image,
     decode_display_window, plan_display_window,
 };
+pub use jxl::matches as is_jpeg_xl;
 pub use nova_image::{DecodeLimits, PageDimensions};
 use reader_domain::{ReadingMode, ResumeAnchor};
 use std::{
@@ -24,6 +26,8 @@ pub enum Error {
     Image(#[from] image::ImageError),
     #[error("AVIF: {0}")]
     Avif(String),
+    #[error("JPEG XL: {0}")]
+    Jxl(String),
 }
 pub type Result<T> = std::result::Result<T, Error>;
 fn reader(bytes: &[u8], limits: DecodeLimits) -> Result<image::ImageReader<Cursor<&[u8]>>> {
@@ -46,6 +50,9 @@ fn reader(bytes: &[u8], limits: DecodeLimits) -> Result<image::ImageReader<Curso
     Ok(reader)
 }
 pub fn inspect_image(bytes: &[u8], limits: DecodeLimits) -> Result<PageDimensions> {
+    if is_jpeg_xl(bytes) {
+        return jxl::inspect(bytes, limits);
+    }
     if image::guess_format(bytes).is_ok_and(|format| format == image::ImageFormat::Avif) {
         return avif::inspect(bytes, limits);
     }
@@ -68,6 +75,9 @@ pub fn inspect_image(bytes: &[u8], limits: DecodeLimits) -> Result<PageDimension
 /// supported budget fail explicitly; post-decode tiling is never used to claim
 /// a reduction in peak allocation.
 pub fn decode_image(bytes: &[u8], limits: DecodeLimits) -> Result<image::RgbaImage> {
+    if is_jpeg_xl(bytes) {
+        return jxl::decode(bytes, limits);
+    }
     if image::guess_format(bytes).is_ok_and(|format| format == image::ImageFormat::Avif) {
         return avif::decode(bytes, limits);
     }

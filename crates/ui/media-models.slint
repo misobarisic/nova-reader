@@ -6,5 +6,5 @@ export struct ItemRow {
 }
 
 export struct SettingRow { key: string, name: string, kind: string, value: string, checked: bool, options: [string], selected: int }
-export struct SourceRow { id:string, name:string, language:string, group:string, pinned:bool, enabled:bool, latest:bool, index:int }
-export struct ExtensionRow { id:string, name:string, version:string, language:string, enabled:bool }
+export struct SourceRow { id:string, name:string, language:string, group:string, pinned:bool, enabled:bool, latest:bool, index:int, icon:image }
+export struct ExtensionRow { id:string, name:string, version:string, language:string, enabled:bool, icon:image }

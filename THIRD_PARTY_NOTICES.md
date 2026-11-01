@@ -29,6 +29,17 @@ Apache-2.0. Its JSON API adapter and VRF request signer, modifications, scoped
 CDN permissions and verification limits are recorded in
 `examples/addons/mangafire/NOTICE.md`; the full license ships inside its addon ZIP.
 
+Kagane and the bundled Kagane/Manhwa18cc/MangaFire icons derive from Keiyoushi
+extensions-source revision `1dfd0bcf25b48cb5bd42d9191918a29072c67a61` under
+Apache-2.0. Exact paths, modifications and verification limits are recorded in
+`examples/addons/kagane/NOTICE.md` and each addon's own notice/license files.
+
+JPEG XL still-page decoding uses jxl-oxide 0.12.6 (MIT OR Apache-2.0), with Rayon
+and native CMS dependencies disabled. Its associated pure Rust crates and full
+license texts are included in the generated dependency catalogue. Reader's
+bounded page adapter and newly authored geometric fixtures are GPL-3.0-or-later.
+No libjxl binary is linked into the application.
+
 Slint 1.18 is separately licensed. Its published alternatives include GPL-3.0-only,
 Slint Royalty-free License 2.0 and Slint Software License 3.0. The application's
 GPL declaration does not replace Slint's terms or other dependencies' licenses.

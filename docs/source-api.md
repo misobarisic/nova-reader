@@ -20,6 +20,15 @@ UTF-8 JavaScript to 2 MiB. The deterministic builder is
 `python3 tools/package-addon.py examples/addons/neutral-fixture output.zip`.
 Native installation is the authoritative compatibility validator.
 
+Reader 0.1.17 adds optional `"icon":"icon.png"`. It must name an entry in
+`assets`, use PNG, fit 256 KiB and declare nonzero dimensions at most 512×512.
+The UI fully decodes with bounded allocation on a worker and retains a 64px
+thumbnail shared across language variants. Disabled addons may still display
+bundled decoration without running scripts or fetching the network. Invalid
+pixel streams use the Kit extension fallback; invalid declarations fail install.
+Omitting `icon` preserves the fallback and compatibility with older packages.
+Packages using the new manifest field require Reader 0.1.17 or newer.
+
 `SourceRegistry::open(directory)` validates durable packages and digests.
 `install_zip(bytes)` fully validates before publishing registry state atomically.
 New installs start disabled; `set_enabled(id, true)` explicitly activates them.
@@ -45,7 +54,10 @@ page, query, filters, seriesId, chapterId, id and url are passed through. Operat
 
 Series: `id,title,url,coverUrl?,description?,authors[],genres[],status?`.
 Chapter: `id,seriesId,title,number?:string,sourceOrder,url,language?,scanlator?,uploadedAt?`.
-Page: `id,url,headers:{},width?,height?`. Chapter numbers are decimal strings and
+Page: `id,url,headers:{},width?,height?`. If `resolvePage` is declared, a rejected
+image request (401/403/507) calls it once with `{url}` and retries its single
+returned Page under the same permission, header and cancellation checks. This
+supports short-lived image tokens; a second rejection is returned normally. Chapter numbers are decimal strings and
 must never define identity. Page IDs remain stable when signed URLs expire.
 Sources may implement multiple language variants using the request sourceId.
 Capabilities/filters use generic JSON; typed Rust convenience methods are provided
@@ -78,7 +90,9 @@ assets can be read using `addon://<source-id>/<asset-path>` (neutral fixtures).
 
 Metadata and images use the same explicit domain allowlist, HTTPS-only/default-port
 policy, safe header whitelist, manual redirect checks and source/profile cookie jar.
-Cookie/Host/hop-by-hop headers are host-owned. Allowed Referer and Origin must also
+Cookie/Host/hop-by-hop headers are host-owned. The narrow `x-integrity-token`
+header supports Kagane's public integrity endpoint; like Authorization and POST,
+it forbids cross-origin redirects. Allowed Referer and Origin must also
 match source domain permissions. Cookie-authenticated, explicitly authenticated and POST cross-origin redirects are
 rejected. Each network hop resolves all addresses, rejects private/reserved IPs,
 and pins the validated DNS snapshot for direct connections. Inherited HTTP proxy
@@ -137,3 +151,11 @@ on their next invocation; running operations retain their original snapshot.
 Configured secret values are redacted from script/source error text and never
 appear in descriptors. As executable addons can read their own settings, only
 install trusted sources. Callers still cancel work when switching profiles.
+
+
+Source filters support select, text, bool, multiselect and tristate. Multiple
+choices produce arrays of provider values; tristate produces
+`{include:[...],exclude:[...]}`. Existing Nova switches/dropdowns render option
+rows, preserving independent include/exclude selection. Limits are 32 filter
+groups, 200 choices per single-select, 512 per multiple group and 1024 rendered
+controls total. Oversized definitions fail explicitly rather than truncating.

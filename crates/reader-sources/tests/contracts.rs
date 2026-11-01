@@ -647,3 +647,39 @@ fn settings_schema_rejects_invalid_defaults_and_secrets_are_redacted_in_errors()
         "public-default"
     );
 }
+
+#[test]
+fn addon_icons_are_optional_verified_bounded_and_available_while_disabled() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = SourceRegistry::open(dir.path()).unwrap();
+    let mut m = manifest();
+    m["assets"] = json!(["icon.png"]);
+    m["icon"] = json!("icon.png");
+    let icon = include_bytes!("../../../examples/addons/mangafire/icon.png");
+    let bundle = |m: &Value, icon: &[u8]| {
+        archive(vec![
+            ("manifest.json".into(), serde_json::to_vec(m).unwrap()),
+            (
+                "main.js".into(),
+                b"globalThis.novaProvider={handle:()=>({})};".to_vec(),
+            ),
+            ("icon.png".into(), icon.to_vec()),
+        ])
+    };
+    registry.install_zip(&bundle(&m, icon)).unwrap();
+    assert!(!registry.list().unwrap()[0].enabled);
+    assert_eq!(registry.icon("fixture").unwrap().unwrap(), icon);
+    drop(registry);
+    let registry = SourceRegistry::open(dir.path()).unwrap();
+    assert_eq!(registry.icon("fixture").unwrap().unwrap(), icon);
+    for invalid in [vec![0; 24], vec![0; 256 * 1024 + 1]] {
+        assert!(registry.install_zip(&bundle(&m, &invalid)).is_err());
+    }
+    let mut enormous = icon.to_vec();
+    enormous[16..20].copy_from_slice(&513u32.to_be_bytes());
+    assert!(registry.install_zip(&bundle(&m, &enormous)).is_err());
+    m["icon"] = json!("../icon.png");
+    assert!(registry.install_zip(&bundle(&m, icon)).is_err());
+    registry.remove("fixture").unwrap();
+    assert!(registry.icon("fixture").is_err());
+}

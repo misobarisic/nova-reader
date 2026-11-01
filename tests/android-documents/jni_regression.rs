@@ -667,8 +667,11 @@ fn image_export_and_clipboard_have_real_readable_bytes(env: &mut JNIEnv<'_>) {
 }
 
 fn avif_save_and_clipboard_preserve_encoded_bytes(env: &mut JNIEnv<'_>) {
-    let encoded = include_bytes!("../../crates/reader-engine/tests/fixtures/tiny.avif");
-    let staged = cache_dir().unwrap().join("avif-transfer.avif");
+    for (encoded, mime, ext) in [
+        (include_bytes!("../../crates/reader-engine/tests/fixtures/tiny.avif").as_slice(), "image/avif", "avif"),
+        (include_bytes!("../../crates/reader-engine/tests/fixtures/jxl/rgba.jxl").as_slice(), "image/jxl", "jxl"),
+    ] {
+    let staged = cache_dir().unwrap().join(format!("codec-transfer.{ext}"));
     for api in [26, 35] {
         env.call_static_method(FIXTURE, "setApi", "(I)V", &[JValue::Int(api)])
             .unwrap();
@@ -681,7 +684,7 @@ fn avif_save_and_clipboard_preserve_encoded_bytes(env: &mut JNIEnv<'_>) {
         publish_image(
             staged.clone(),
             "capture",
-            "image/avif",
+            mime,
             Some("Series"),
             move |result| {
                 let _ = send.send(result);
@@ -702,8 +705,8 @@ fn avif_save_and_clipboard_preserve_encoded_bytes(env: &mut JNIEnv<'_>) {
             .unwrap();
         assert_eq!(fixture_data(env, "exportedData"), encoded);
         if api >= 29 {
-            assert_eq!(fixture_text(env, "mediaMime"), "image/avif");
-            assert_eq!(fixture_text(env, "mediaName"), "capture.avif");
+            assert_eq!(fixture_text(env, "mediaMime"), mime);
+            assert_eq!(fixture_text(env, "mediaName"), format!("capture.{ext}"));
             assert_eq!(
                 fixture_text(env, "mediaPath"),
                 "Pictures/Nova Reader/Series/"
@@ -711,10 +714,10 @@ fn avif_save_and_clipboard_preserve_encoded_bytes(env: &mut JNIEnv<'_>) {
             assert!(fixture_bool(env, "mediaAllVisible"));
         }
 
-        // Clipboard consumers receive the actual encoded AVIF, including on an
+        // Clipboard consumers receive the actual encoded image, including on an
         // older OS whose image decoder may not support it. No silent transcoding.
         let (send, receive) = std::sync::mpsc::channel();
-        copy_image(staged.clone(), "image/avif", move |result| {
+        copy_image(staged.clone(), mime, move |result| {
             let _ = send.send(result);
         });
         fixture_run(env, "drain");
@@ -724,15 +727,16 @@ fn avif_save_and_clipboard_preserve_encoded_bytes(env: &mut JNIEnv<'_>) {
             .recv_timeout(std::time::Duration::from_secs(2))
             .unwrap()
             .unwrap();
-        assert_eq!(fixture_text(env, "clipboardMime"), "image/avif");
+        assert_eq!(fixture_text(env, "clipboardMime"), mime);
         assert_eq!(
             fixture_text(env, "clipboardDisplayName"),
-            "Reader image.avif"
+            format!("Reader image.{ext}")
         );
-        assert!(fixture_text(env, "clipboardUri").ends_with(".avif"));
+        assert!(fixture_text(env, "clipboardUri").ends_with(&format!(".{ext}")));
         std::fs::remove_file(&staged).unwrap();
         fixture_run(env, "restartProvider");
         assert_eq!(fixture_data(env, "clipboardData"), encoded);
+    }
     }
 }
 

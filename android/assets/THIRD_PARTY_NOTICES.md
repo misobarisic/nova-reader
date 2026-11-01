@@ -1,24 +1,67 @@
-Nova Reader derives its build and platform infrastructure and icons from Nova,
-Copyright Nova contributors, licensed under GPL-3.0 (see LICENSE).
-Source: https://github.com/misobarisic/nova/tree/b69a1e5765ecc65ac3b00acdfe2f16e2f46a5dda
+# Third-party notices and provenance
 
-Shared storage and UI components: nova-kit contributors, GPL-3.0.
-https://github.com/misobarisic/nova-kit/tree/138f29e33d4f7d8ae9204b6bd6118eb458740f70
+Nova Reader is derived from [Nova](https://github.com/misobarisic/nova), revision
+`b69a1e5765ecc65ac3b00acdfe2f16e2f46a5dda`, by Nova's contributors. Adapted
+material includes project/build/release structure, platform conventions,
+application artwork, navigation/PageHeader/More presentation patterns, and reader source runtime/HTTP foundations. Reader changes
+remove video-specific responsibilities and establish a separate application.
+Nova and this project's code are GPL-3.0-or-later; the full GPL text is in LICENSE.
 
-The complete Reader source and Cargo.lock identify all Rust dependencies:
-https://github.com/misobarisic/nova-reader
-The root build script copies Nova's actual current-target cargo-about license
-and source-catalogue generation, using the locked dependency graph and active
-features and failing on unresolved entries. Full dependency texts and links,
-Reader's complete root third-party notices, local AVIF vendor COPYING and the
-Roboto license are compressed with Nova's zstd recipe and compiled into
-More → About. There is no separate all-platform inventory generation step.
+Shared storage, caching, codecs and UI utilities are consumed from
+[nova-kit](https://github.com/misobarisic/nova-kit), pinned in Cargo.toml/Cargo.lock
+to `138f29e33d4f7d8ae9204b6bd6118eb458740f70`, the shared cache and codec revision.
+Kit retains its own GPL-3.0-or-later notices.
+Generic addon extraction and the Nova compatibility gate remain pending.
+
+The Manhwa18.cc/YiiMadara JavaScript port derives from Keiyoushi
+extensions-source revision `0d83f6be79e12b0a8b6c6f20a500c0e9456c222a` under
+Apache-2.0. Exact source paths, modifications and omissions are recorded in
+`examples/addons/manhwa18cc/NOTICE.md`; its full applicable license is retained
+alongside it. Keiyoushi catalogue schema/data provenance and live-index extraction
+are recorded in `docs/catalogues.md` and `crates/reader-catalogue/fixtures`.
+Those upstream IDs/version numbers do not imply executable APK/JAR compatibility.
+The newly authored neutral source and generated geometric PNGs are CC0-1.0;
+see `examples/addons/neutral-fixture/NOTICE.md`.
 
 The MangaFire reference JavaScript port derives from the same Keiyoushi
 extensions-source revision `0d83f6be79e12b0a8b6c6f20a500c0e9456c222a` under
 Apache-2.0. Its JSON API adapter and VRF request signer, modifications, scoped
 CDN permissions and verification limits are recorded in
 `examples/addons/mangafire/NOTICE.md`; the full license ships inside its addon ZIP.
+
+Kagane and the bundled Kagane/Manhwa18cc/MangaFire icons derive from Keiyoushi
+extensions-source revision `1dfd0bcf25b48cb5bd42d9191918a29072c67a61` under
+Apache-2.0. Exact paths, modifications and verification limits are recorded in
+`examples/addons/kagane/NOTICE.md` and each addon's own notice/license files.
+
+JPEG XL still-page decoding uses jxl-oxide 0.12.6 (MIT OR Apache-2.0), with Rayon
+and native CMS dependencies disabled. Its associated pure Rust crates and full
+license texts are included in the generated dependency catalogue. Reader's
+bounded page adapter and newly authored geometric fixtures are GPL-3.0-or-later.
+No libjxl binary is linked into the application.
+
+Slint 1.18 is separately licensed. Its published alternatives include GPL-3.0-only,
+Slint Royalty-free License 2.0 and Slint Software License 3.0. The application's
+GPL declaration does not replace Slint's terms or other dependencies' licenses.
+This open-source build uses the applicable GPL option. Review upstream terms
+before distributing under another licensing arrangement.
+
+The root build script copies Nova's actual current-target cargo-about license
+and source-catalogue generation, using the locked dependency graph and active
+features and failing on unresolved entries. Full dependency license texts and
+upstream links, these complete notices, local AVIF vendor COPYING and the Roboto
+license are compressed with Nova's zstd recipe and compiled into Settings →
+About. There is no separate all-platform inventory generation step. This notice
+is attribution, not a substitute for the embedded dependency catalogue.
+The inherited launcher art is not newly commissioned Reader branding.
+
+The UI uses the same Roboto Regular and Bold faces as Nova, derived from
+[googlefonts/roboto-2](https://github.com/googlefonts/roboto-2) revision
+`38062f4b4a0be4346d07a928408da21602545e9e` under Apache-2.0. Nova's prepared
+faces are retained unchanged; see `assets/fonts/README.md` and the full license
+in `assets/fonts/LICENSE.txt`. That license is included in the embedded
+current-target catalogue. Navigation and menu artwork is reused from Nova
+under the project's existing license and attribution.
 
 The AVIF decoder uses the complete published ferri-pdf-rav1d 1.1.2 source
 in Nova Kit at `vendor/ferri-pdf-rav1d`, with only ARM/RISC-V nightly-feature predicates

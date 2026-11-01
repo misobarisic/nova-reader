@@ -639,7 +639,7 @@ public final class ReaderActivity extends NativeActivity {
     }
     private static String displayName(String name) {return name==null?"Document":name.substring(0,Math.min(128,name.length())).replaceAll("[\\p{Cntrl}/\\\\]","_");}
     private static String extension(String name) {int dot=name.lastIndexOf('.');return dot<0?"":name.substring(dot+1).toLowerCase(Locale.ROOT);}
-    private static boolean supported(String name) {String ext=extension(name);return "png".equals(ext)||"jpg".equals(ext)||"jpeg".equals(ext)||"webp".equals(ext);}
+    private static boolean supported(String name) {String ext=extension(name);return "png".equals(ext)||"jpg".equals(ext)||"jpeg".equals(ext)||"webp".equals(ext)||"avif".equals(ext)||"jxl".equals(ext);}
     private static int naturalCompare(String left,String right) {
         int a=0,b=0;
         while(a<left.length() && b<right.length()) {

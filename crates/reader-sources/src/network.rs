@@ -135,6 +135,7 @@ pub(crate) fn validate_headers(
             "origin",
             "authorization",
             "x-requested-with",
+            "x-integrity-token",
         ]
         .contains(&name.as_str())
             || reqwest::header::HeaderName::from_bytes(k.as_bytes()).is_err()
@@ -201,10 +202,10 @@ impl SourceTransport for NetworkTransport {
         }
         let mut url = checked_url(&input.url, &self.permissions)?;
         let sensitive = method == "POST"
-            || input
-                .headers
-                .keys()
-                .any(|s| s.eq_ignore_ascii_case("authorization"));
+            || input.headers.keys().any(|s| {
+                s.eq_ignore_ascii_case("authorization")
+                    || s.eq_ignore_ascii_case("x-integrity-token")
+            });
         let started = Instant::now();
         let deadline = Duration::from_secs(15);
         for hop in 0..=5 {

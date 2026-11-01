@@ -12,6 +12,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `src/services.rs` | Shared UI/test services: install, validated source/date conversion, library, downloads and local import |
 | `src/cli.rs`, `src/paths.rs` | Commands, bounded file input, independent data and platform cache directories |
 | `src/android_documents.rs`, `android/java/dev/misob/nova/reader/ReaderActivity.java` | Application-context JNI, current-activity SAF and reader status-bar visibility/lifecycle on Java main |
+| `src/addon_icons.rs`, `crates/ui/addon-icon.slint` | Verified bundled addon PNGs decoded on workers, retained UI-thread image handles shared by language variants, Sources/Extensions decoration and Kit fallback |
 | `src/artwork.rs` | Kit decoded-poster LRU and encoded variants, synchronous cross-page hits, source permits, UI handles, bounded worker and legacy artwork migration |
 | `src/chapter_cache.rs` | Kit-backed disposable viewed pages, authorization scopes, chapter-group eviction/active leases and bounded background encoding |
 | `src/reader_export.rs` | Original-image validation, screencap encoding, bounded platform save/clipboard delivery and persistent desktop clipboard ownership; `src/app.rs` captures the clean pre-menu viewport with an 8-million-pixel limit and fetches source page bytes |
@@ -34,7 +35,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `crates/ui/library-search.slint` | Retained Nova search reveal, deferred focus, live filtering and viewport-aware field exposure |
 | `crates/ui/entry-menu.slint` | Per-title Kit action sheet/anchored desktop menu, stable-identity category editing and library/refresh actions |
 | `crates/ui/detail-hero.slint`, `crates/ui/title-artwork.slint`, `crates/ui/chapter-row.slint` | Nova detail artwork/title/metadata/actions, retained synopsis state, chapter-ready Continue gating, compact chapter rows and accessible action popup |
-| `crates/ui/timeline.slint`, `crates/ui/source-list.slint`, `crates/ui/extensions.slint`, `crates/ui/source-filters.slint` | Dated History/Updates, grouped sources, extension management and actual source-defined browse filters |
+| `crates/ui/timeline.slint`, `crates/ui/source-list.slint`, `crates/ui/extensions.slint`, `crates/ui/source-filters.slint` | Dated History/Updates, grouped sources with bundled icons, extension management and actual source-defined browse filters |
 | `crates/ui/reader-context-menu.slint` | Custom four-action image/screencap menu, stationary-hold/right-click handling, viewport clamping and keyboard navigation; `app.slint` owns capture/action/close callbacks and reader export feedback |
 | `crates/ui/navigation.slint` | Nova’s 64px icon rail, flat five-tab bottom bar, icon feedback and keyboard navigation |
 | `crates/ui/controls.slint`, `crates/ui/page-header.slint` | Thin Nova Kit control adapters and Nova’s PageHeader; shared palette, typography and accessibility |
@@ -48,11 +49,13 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `crates/reader-domain` | Source-local identities, schema-1 state, library/categories, progress/history/bookmarks, backup/restore |
 | `crates/reader-sources` | Reader v2 ZIP validation, durable registry, typed profile settings, QuickJS host, HTML/URL capabilities and checked source HTTP |
 | `crates/reader-engine` | Dimension probing, bounded PNG/JPEG/WebP decode and shared Kit AVIF delegation, display geometry, resume anchors and decoded cache utility |
+| `crates/reader-engine/src/jxl.rs`, `crates/reader-engine/tests/jpeg_xl.rs` | Pure Rust single-threaded JPEG XL still-page probing/decoding with metadata admission, skipped auxiliary boxes, tracked grid budget and native row conversion; synthetic RGB/alpha fixtures |
 | `crates/reader-engine/src/display.rs`, `crates/reader-engine/src/avif.rs` | Width-preserving visible-row display admission/resampling and one-original worker reuse; thin boundary to Kit `nova-image` AVIF with independent Reader fixture/display/admission regressions |
 | `crates/reader-engine/examples/tall_scroll.rs`, `docs/tall-scroll-performance.md` | Deterministic 720×25,000 CPU scroll profile and actual Mihon stable/main rendering comparison |
 | Kit `crates/image`, `vendor/ferri-pdf-rav1d` | Shared bounded AVIF codec and published 1.1.2 portable decoder; Reader retains only thin adapters, fixture attribution and distribution licenses |
 | `crates/reader-downloads` | Durable queue, checksummed page bundles, recovery, quota, source-free offline lookup, local folder/CBZ import, bundle removal and manifest-only status hints |
 | `crates/reader-catalogue` | Bounded Keiyoushi protobuf discovery, exact port mappings, signed native catalogue verification and availability states |
+| `examples/addons/kagane`, `crates/reader-sources/tests/kagane.rs` | Keiyoushi Kagane v37 native port, 18 languages, compact chapter index, typed filters/settings, public token/one-retry flow, bundled icon and synthetic QuickJS host regressions |
 | `examples/addons/manhwa18cc` | Thin Manhwa18 configuration, reusable YiiMadara helper, Apache license/provenance and synthetic parser fixtures |
 | `examples/addons/mangafire`, `crates/reader-sources/tests/mangafire.rs` | MangaFire JSON/VRF port, seven languages and typed filters/settings, deterministic parser and actual QuickJS host fixtures; scoped CDN permissions and Apache provenance |
 | `addons/` | Versioned, installable native addon ZIP downloads with source links and checksums |
@@ -243,6 +246,8 @@ Source examples are intended for independent future publication in nova-addons.
 - Cache quotas, disk master switch and worker snapshots: `src/image_storage.rs`, `crates/ui/image-storage-settings.slint`, `tests/image_storage.rs`.
 - Shared Nova settings controls: Kit `slint/cache-settings-controls.slint`; Nova keeps SettingsRow/search/sync/keyboard wrappers.
 - Cover cache placement, immediate reuse and source revocation: `src/paths.rs`, `src/artwork.rs`, More → Settings → Cache.
+- Addon icons and source filters: `src/addon_icons.rs`, `crates/ui/addon-icon.slint`, `src/source_filters.rs`, `crates/reader-sources/src/package.rs`; optional `manifest.icon` must name a declared PNG asset. Multiple/include/exclude groups use existing Nova setting rows with typed JSON output.
+- Kagane port and JPEG XL pages: `examples/addons/kagane`, `crates/reader-sources/tests/kagane.rs`, `crates/reader-engine/src/jxl.rs`.
 - Shared cache implementation/settings: Kit `crates/cache` and `crates/ui-base/slint/cache-settings-controls.slint`; Reader `src/chapter_cache.rs`, `src/image_storage.rs` and `tests/image_storage.rs`.
 - Library search, retained details and per-title actions: `crates/ui/library-search.slint`, `crates/ui/entry-menu.slint`, `src/app.rs`, `tests/library_navigation.rs`, `tests/entry_menu.rs`.
 - Automatic source paging and Retry: `src/app.rs` (`browse`/`complete_browse`), `crates/ui/app.slint`, `tests/source_paging.rs`.
