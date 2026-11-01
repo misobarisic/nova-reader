@@ -62,7 +62,7 @@ export component LibraryCard inherits Rectangle {
             }
             if !root.list-view: Rectangle { y: parent.height - 70px; height: 70px; width: 100%; background: @linear-gradient(180deg, transparent, Theme.current.card); }
         }
-        if root.card.total > 0 && !root.overlay-caption: HorizontalLayout {
+        if root.card.completed > 0 && root.card.total > 0 && !root.overlay-caption: HorizontalLayout {
             x: root.list-view ? 104px : 9px;
             y: root.list-view ? parent.height - 26px : root.poster-height - 25px;
             width: max(1px, parent.width - self.x - 9px); height: 18px; spacing: root.width > 100px ? 8px : 4px;

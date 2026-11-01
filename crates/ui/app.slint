@@ -19,6 +19,9 @@ import { SettingsCard } from "@NovaUiBase/settings-controls.slint";
 import { SourceFilterPanel } from "source-filters.slint";
 import { TimelineList } from "timeline.slint";
 import { ReaderContextMenu, ReaderImageInteraction } from "reader-context-menu.slint";
+import { ReaderOsd } from "reader-osd.slint";
+import { ReaderSettings, ReaderSettingsPanel } from "reader-settings.slint";
+export { ReaderSettings } from "reader-settings.slint";
 import { SaveConflictSheet } from "save-conflict-sheet.slint";
 import { LibraryFilterChip } from "@NovaUiBase/filter-chip.slint";
 import { LibrarySearchReveal } from "library-search.slint";
@@ -37,6 +40,7 @@ import { ActionButton, IconAction, BackButton, MenuLink } from "controls.slint";
 import { DesktopSidebar, MobileNavigation } from "navigation.slint";
 
 export struct TileRow { image: image, offset: float, fraction: float, left: float, right: float, bottom: float }
+export struct ReaderBoundaryRow { position: float, previous: string, next: string }
 export struct PageRow { tiles:[TileRow], page-id: string, image: image, ratio: float, position: float, loaded: bool, error: string }
 export struct ReaderCaptureViewport { x: float, y: float, width: float, height: float, content-x: float, content-y: float }
 export { SettingRow } from "media-models.slint";
@@ -135,7 +139,56 @@ export component AppWindow inherits Window {
     in-out property <int> current-page: 0;
     in-out property <int> reading-mode: 0;
     // Actual renderer modes stay 0–3; index 4 is a persisted Automatic choice.
-    in-out property <int> reader-mode-choice: 4;
+    in-out property <int> reader-mode-choice: 6;
+    in-out property <int> reader-rotation-choice: -1;
+    in-out property <string> reader-mode-label: @tr("Webtoon");
+    in-out property <string> reader-chapter-title;
+    in-out property <bool> reader-bookmarked: false;
+    in-out property <float> reader-progress: 0;
+    in-out property <int> reader-local-page: 1;
+    in-out property <int> reader-page-count: 0;
+    in-out property <[ReaderBoundaryRow]> reader-boundaries;
+    private property <bool> reader-transition-open: false;
+    private property <string> reader-transition-from;
+    private property <string> reader-transition-to;
+    public function show-reader-transition(previous: string, next: string) {
+        if root.reading-mode != 0 && ReaderSettings.chapter-transition {
+            root.reader-transition-from = previous;
+            root.reader-transition-to = next;
+            root.reader-transition-open = true;
+            reader-transition-timer.restart();
+        }
+    }
+    reader-transition-timer := Timer { interval: 2400ms; running: false; triggered => { root.reader-transition-open = false; self.stop(); } }
+    in-out property <string> reader-continuation-error;
+    callback retry-continuation;
+    in-out property <color> reader-background: #000000;
+    in-out property <bool> reader-window-fullscreen: false;
+    in-out property <int> reader-side-padding: 0;
+    in-out property <float> reader-gap: 0;
+    in-out property <bool> reader-double-tap-enabled: true;
+    in-out property <length> scroll-x: 0px;
+    in-out property <int> reader-orientation: 0;
+    in-out property <bool> reader-platform-android: false;
+    in-out property <bool> reader-split-page: false;
+    in-out property <int> reader-split-half: 0;
+    out property <length> reader-canvas-width: !root.reader-platform-android && (root.reader-orientation == 2 || root.reader-orientation == 4 || root.reader-orientation == 6) ? min(root.width,root.height * 0.72) : root.width;
+    out property <length> reader-canvas-height: !root.reader-platform-android && (root.reader-orientation == 3 || root.reader-orientation == 5) ? min(root.height,root.width * 0.625) : root.height;
+    callback reader-action(string);
+    callback reader-seek(float);
+    callback reader-tap(float,float);
+    callback reader-double-tap(float,float);
+    callback reader-rotation-changed(int);
+    private property <int> reader-settings-tab: 0;
+    private property <bool> reader-flash-active: false;
+    private property <bool> reader-page-entered: true;
+    private property <bool> reader-page-motion: false;
+    private property <float> reader-page-opacity: root.reader-page-entered ? 1 : 0;
+    animate reader-page-opacity { duration: root.reader-page-motion && ReaderSettings.page-animations ? 150ms : 0ms; easing: ease-out; }
+    public function animate-reader-page() { if root.reading-mode != 0 && ReaderSettings.page-animations { root.reader-page-motion = false; root.reader-page-entered = false; reader-page-animation-timer.start(); } }
+    reader-page-animation-timer := Timer { interval: 16ms; triggered => { root.reader-page-motion = true; root.reader-page-entered = true; } }
+    public function flash-reader-page() { if ReaderSettings.page-flash { root.reader-flash-active = true; reader-flash-timer.restart(); } }
+    reader-flash-timer := Timer { interval: 100ms; triggered => { root.reader-flash-active = false; } }
     in-out property <float> zoom: 1;
     in property <string> position-label;
     in property <bool> can-previous;
@@ -190,7 +243,7 @@ export component AppWindow inherits Window {
     private property <bool> reader-context-toast-open;
     callback reader-context-opening(int);
     in-out property <ReaderCaptureViewport> reader-capture-viewport;
-    out property <color> reader-capture-background: Theme.current.artwork_canvas;
+    out property <color> reader-capture-background: root.reader-background;
     callback reader-context-action(int, string);
     callback reader-context-closed;
     public function open-reader-context(page: int, x: length, y: length) {
@@ -199,6 +252,7 @@ export component AppWindow inherits Window {
         root.reader-osd = false;
         root.show-reader-options = false;
         root.reader-context-toast-open = false;
+        root.reader-transition-open = false;
         root.reader-context-page = page;
         root.reader-context-page-id = root.pages[page].page-id;
         root.reader-context-x = x; root.reader-context-y = y;
@@ -253,9 +307,9 @@ export component AppWindow inherits Window {
     changed reader-osd => {
         if root.reader-context-visible && root.reader-osd { root.reader-osd = false; }
         if !root.reader-osd { root.show-reader-options = false; }
-        root.immersive-changed(root.section == 6 && !root.reader-osd);
+        root.immersive-changed(root.section == 6 && ReaderSettings.fullscreen && !root.reader-osd);
     }
-    out property <length> reader-width: min(1100px, max(100px, (root.width - (root.section == 6 ? 0px : root.safe-area-insets.left + root.safe-area-insets.right)) * root.zoom));
+    out property <length> reader-width: min(1100px, max(100px, (root.reader-canvas-width - (root.section == 6 && ReaderSettings.cutout ? 0px : root.safe-area-insets.left + root.safe-area-insets.right)) * (1 - root.reader-side-padding / 50.0) * root.zoom));
     private property <length> reader-height: root.total-ratio * root.reader-width;
 
     callback request-artwork(int,int);
@@ -309,6 +363,8 @@ export component AppWindow inherits Window {
     callback flush-progress;
 
     public function go-back() {
+        if root.section == 6 && root.show-reader-options { root.show-reader-options = false; return; }
+        if root.section == 6 && root.reader-osd { root.reader-osd = false; return; }
         if root.export-conflict-open { root.resolve-export-conflict(2); return; }
         if root.section == 13 { root.about-back-request += 1; return; }
         if root.entry-menu-visible { root.close-entry-menu(); return; }
@@ -316,7 +372,7 @@ export component AppWindow inherits Window {
         if root.section == 0 && root.library-search-open { root.close-library-search(); return; }
         if ((root.section == 5 && root.detail-origin == 3) || root.section == 8) && root.source-catalog-open { root.return-to-catalogue(); return; }
         if root.section == 3 && root.source-catalog-open { root.source-catalog-open = false; root.navigate(3); return; }
-        root.navigate(root.section == 6 ? 5 : root.section == 8 ? 3 : root.section == 11 || root.section == 12 || root.section == 14 || root.section == 15 || root.section == 16 || root.section == 17 || root.section == 18 ? 10 : root.section >= 9 || root.section == 7 ? 4 : root.section == 5 ? root.detail-origin : 0);
+        root.navigate(root.section == 6 ? 5 : root.section == 8 ? 3 : root.section == 11 || root.section == 12 || root.section == 14 || root.section == 15 || root.section == 16 || root.section == 17 || root.section == 18 || root.section == 19 ? 10 : root.section >= 9 || root.section == 7 ? 4 : root.section == 5 ? root.detail-origin : 0);
     }
 
     changed section => {
@@ -326,7 +382,7 @@ export component AppWindow inherits Window {
         if root.reader-context-visible { root.close-reader-context(); }
         root.reader-context-toast-open = false;
         if root.section == 6 { root.reader-osd = false; root.show-reader-options = false; }
-        root.immersive-changed(root.section == 6 && !root.reader-osd);
+        root.immersive-changed(root.section == 6 && ReaderSettings.fullscreen && !root.reader-osd);
         keyboard.focus();
         if root.section == 4 || root.section >= 9 { more-page.focus_shell(); }
     }
@@ -353,7 +409,7 @@ export component AppWindow inherits Window {
             x: root.edge-to-edge-artwork ? 0px : root.safe-area-insets.left;
             y: root.edge-to-edge-artwork ? 0px : root.safe-area-insets.top;
             width: max(0px, root.width - (root.edge-to-edge-artwork ? 0px : root.safe-area-insets.left + root.safe-area-insets.right));
-            height: max(0px, root.height - (root.edge-to-edge-artwork ? 0px : root.safe-area-insets.top) - root.safe-area-insets.bottom);
+            height: max(0px, root.height - (root.edge-to-edge-artwork ? 0px : root.safe-area-insets.top) - (root.section == 6 ? 0px : root.safe-area-insets.bottom));
             VerticalLayout {
                 spacing: 0px;
                 HorizontalLayout {
@@ -683,11 +739,16 @@ export component AppWindow inherits Window {
                             }
                         }
                         if root.section == 6: Rectangle {
+                            background: root.reader-background;
                             reader := Flickable {
                                 private property <length> physical-pixel: 1phx;
                                 changed physical-pixel => {root.reader-reflow(root.reader-width / 1px,self.height / 1px);}
-                                width: parent.width; height: parent.height;
+                                x: (parent.width - root.reader-canvas-width) / 2 + (ReaderSettings.cutout ? 0px : root.safe-area-insets.left);
+                                y: (parent.height - root.reader-canvas-height) / 2 + (ReaderSettings.cutout ? 0px : root.safe-area-insets.top);
+                                width: max(1px,root.reader-canvas-width - (ReaderSettings.cutout ? 0px : root.safe-area-insets.left + root.safe-area-insets.right));
+                                height: max(1px,root.reader-canvas-height - (ReaderSettings.cutout ? 0px : root.safe-area-insets.top + root.safe-area-insets.bottom));
                                 content-y <=> root.scroll-y;
+                                content-x <=> root.scroll-x;
                                 changed content-y => {if root.reading-mode==0{root.reader-position(-self.content-y / 1px,root.reader-width / 1px,self.height / 1px);}}
                                 changed height => {root.reader-viewport-height=self.height;root.reader-reflow(root.reader-width / 1px,self.height / 1px);}
                                 interactive: root.reading-mode == 0 || root.zoom > 1;
@@ -698,26 +759,44 @@ export component AppWindow inherits Window {
                                     context-enabled: false;
                                     accessible-role: button; accessible-label: @tr("Toggle reader controls");
                                     accessible-action-default => { root.toggle-reader-osd(); }
-                                    tapped => { root.toggle-reader-osd(); }
+                                    double-tap-enabled: root.reader-double-tap-enabled;
+                                    long-press-enabled: ReaderSettings.long-press-actions;
+                                    positioned-tap(x,y) => { root.reader-tap((x - reader.absolute-position.x) / max(1px,reader.width),(y - reader.absolute-position.y) / max(1px,reader.height)); }
+                                    double-tapped(x,y) => { root.reader-double-tap((x - reader.absolute-position.x) / max(1px,reader.width),(y - reader.absolute-position.y) / max(1px,reader.height)); }
+                                }
+                                for boundary in root.reader-boundaries: Rectangle {
+                                    visible: root.reading-mode == 0 && ReaderSettings.chapter-transition && !root.reader-context-capturing;
+                                    x: (max(reader.width,root.reader-width) - root.reader-width) / 2;
+                                    y: boundary.position * root.reader-width;
+                                    width: root.reader-width; height: 48px;
+                                    HorizontalLayout {
+                                        padding-left: 12px; padding-right: 12px; spacing: 12px;
+                                        Text { min-width: 0px; text: boundary.previous; color: Theme.current.text_muted; font-size: 12px; overflow: elide; vertical-alignment: center; horizontal-alignment: right; }
+                                        Path { width: 20px; height: 20px; viewbox-width: 24; viewbox-height: 24; commands: "M4 12h16M14 6l6 6-6 6"; stroke: Theme.current.accent_soft; stroke-width: 1.5px; fill: transparent; }
+                                        Text { min-width: 0px; text: boundary.next; color: Theme.current.text_secondary; font-size: 12px; overflow: elide; vertical-alignment: center; }
+                                    }
                                 }
                                 for page[index] in root.pages: page-frame := Rectangle {
                                     visible: root.reading-mode == 0 || index == root.current-page;
+                                    opacity: root.reading-mode == 0 ? 1 : root.reader-page-opacity;
                                     x: (max(reader.width, root.reader-width) - self.width) / 2;
                                     y: root.reading-mode == 0 ? page.position * root.reader-width : 0px;
                                     width: root.reader-width;
                                     height: root.reading-mode == 0 ? root.reader-width * page.ratio : reader.height;
+                                    clip: root.reading-mode != 0;
                                     // Loaded page frames stay transparent: a logical,
                                     // unsnapped background could paint over its neighbour's
                                     // snapped image edge while the chapter is scrolling.
                                     if page.loaded: image-frame := Rectangle {
-                                        width: root.reading-mode==0 ? parent.width : min(parent.width,parent.height/page.ratio);
-                                        height: root.reading-mode==0 ? parent.height : min(parent.height,parent.width*page.ratio);
-                                        x:(parent.width - self.width)/2; y:(parent.height - self.height)/2;
+                                        width: root.reading-mode == 0 ? parent.width : min(parent.width,parent.height / (page.ratio / (root.reader-split-page ? 2 : 1)));
+                                        height: root.reading-mode == 0 ? parent.height : self.width * page.ratio;
+                                        x: (parent.width - self.width) / 2;
+                                        y: root.reading-mode != 0 && root.reader-split-page ? -root.reader-split-half * self.height / 2 : (parent.height - self.height) / 2;
                                         // Keep layout/resume coordinates continuous. Only
                                         // raster edges use physical pixels, including the
                                         // fractional viewport scroll and window origin.
                                         private property <length> raster-origin-y: root.reading-mode == 0 ? reader.absolute-position.y + reader.content-y + page.position * root.reader-width : self.absolute-position.y;
-                                        private property <length> raster-bottom-y: root.reading-mode == 0 ? reader.absolute-position.y + reader.content-y + (index + 1 < root.pages.length ? root.pages[index + 1].position : root.total-ratio) * root.reader-width : self.absolute-position.y + self.height;
+                                        private property <length> raster-bottom-y: root.reading-mode == 0 ? image-frame.raster-origin-y + page.ratio * root.reader-width : self.absolute-position.y + self.height;
                                         for tile[tile-index] in page.tiles: reader-tile := Image {
                                             source: tile.image;
                                             private property <length> logical-top: image-frame.raster-origin-y + tile.offset * image-frame.height;
@@ -743,70 +822,96 @@ export component AppWindow inherits Window {
                                                 root.reader-capture-viewport = { x: reader.absolute-position.x / 1px, y: reader.absolute-position.y / 1px, width: reader.width / 1px, height: reader.height / 1px, content-x: reader.content-x / 1px, content-y: reader.content-y / 1px };
                                                 root.open-reader-context(index, self.absolute-position.x + self.width / 2, reader.absolute-position.y + reader.height / 2);
                                             }
-                                            tapped => { root.toggle-reader-osd(); }
+                                            double-tap-enabled: root.reader-double-tap-enabled;
+                                    long-press-enabled: ReaderSettings.long-press-actions;
+                                    positioned-tap(x,y) => { root.reader-tap((x - reader.absolute-position.x) / max(1px,reader.width),(y - reader.absolute-position.y) / max(1px,reader.height)); }
+                                    double-tapped(x,y) => { root.reader-double-tap((x - reader.absolute-position.x) / max(1px,reader.width),(y - reader.absolute-position.y) / max(1px,reader.height)); }
                                             context-requested(x,y) => {
                                                 root.reader-capture-viewport = { x: reader.absolute-position.x / 1px, y: reader.absolute-position.y / 1px, width: reader.width / 1px, height: reader.height / 1px, content-x: reader.content-x / 1px, content-y: reader.content-y / 1px };
                                                 root.open-reader-context(index,x,y);
                                             }
                                         }
                                     }
-                                    if !page.loaded: Text { text: page.error == "" ? @tr("Loading page {}", index + 1) : page.error; color: Theme.current.text_secondary; wrap: word-wrap; horizontal-alignment: center; vertical-alignment: center; }
+                                    if !page.loaded: Text { text: page.error == "" ? @tr("Loading page…") : page.error; color: Theme.current.text_secondary; wrap: word-wrap; horizontal-alignment: center; vertical-alignment: center; }
                                 }
                             }
-                            if root.reader-osd: Rectangle {
-                                x: 0px; y: 0px; width: parent.width; height: parent.height;
-                            Rectangle {
-                                y: 0px; width: parent.width; height: root.safe-area-insets.top + 64px; background: Theme.current.nav_rail;
-                                HorizontalLayout {
-                                    x: root.safe-area-insets.left; y: root.safe-area-insets.top;
-                                    width: max(0px, parent.width - root.safe-area-insets.left - root.safe-area-insets.right); height: 64px;
-                                    padding: 8px; spacing: 8px;
-                                    IconAction { text: @tr("Back to chapters"); icon: @image-url("../../assets/icons/navigation/back.svg"); clicked => { root.navigate(5); } }
-                                    VerticalLayout {
-                                        spacing: 2px;
-                                        Text { min-width: 0px; text: root.series-title; color: Theme.current.text_bright; overflow: elide; }
-                                        Text { min-width: 0px; text: root.position-label; color: Theme.current.text_secondary; font-size: 12px; overflow: elide; }
+                            if ReaderSettings.custom-brightness && ReaderSettings.brightness < 100: Rectangle {
+                                width: 100%; height: 100%; background: #000000;
+                                opacity: 1 - ReaderSettings.brightness / 100;
+                            }
+                            if root.reader-continuation-error != "": Rectangle {
+                                x: 12px; y: parent.height - root.safe-area-insets.bottom - self.height - (root.reader-osd ? 190px : 16px);
+                                width: max(1px,parent.width - 24px); height: 72px; border-radius: 12px; background: Theme.current.player_menu;
+                                HorizontalLayout { padding: 12px; spacing: 12px;
+                                    Text { min-width: 0px; text: @tr("Could not preload the next chapter"); color: Theme.current.text_bright; wrap: word-wrap; vertical-alignment: center; }
+                                    ActionButton { text: @tr("Retry"); clicked => { root.retry-continuation(); } }
+                                }
+                            }
+                            if root.reader-flash-active: Rectangle { width: 100%; height: 100%; background: #ffffff; }
+                            if ReaderSettings.show-page-number && !root.reader-osd && !root.reader-context-capturing: Rectangle {
+                                x: parent.width - self.width - 12px; y: parent.height - root.safe-area-insets.bottom - 40px;
+                                width: 76px; height: 28px; border-radius: 10px; background: #000000a0;
+                                Text { width: 100%; height: 100%; text: root.reader-local-page + " / " + root.reader-page-count; color: #ffffff; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
+                            }
+                            if root.reader-osd: ReaderOsd {
+                                width: 100%; height: 100%; compact: root.mobile-ui;
+                                title: root.series-title; chapter-title: root.reader-chapter-title;
+                                page: root.reader-local-page; page-count: root.reader-page-count;
+                                progress: root.reader-progress; mode-label: root.reader-mode-label;
+                                zoom-percent: round(root.zoom * 100); fit-width: root.zoom == 1;
+                                fullscreen: root.reader-window-fullscreen; bookmarked: root.reader-bookmarked;
+                                previous-chapter-enabled: root.can-previous; next-chapter-enabled: root.can-next;
+                                previous-page-enabled: root.current-page > 0 || root.scroll-y < 0px;
+                                next-page-enabled: root.current-page + 1 < root.pages.length || root.reading-mode == 0 || (root.reader-split-page && root.reader-split-half == 0);
+                                safe-top: root.safe-area-insets.top; safe-bottom: root.safe-area-insets.bottom;
+                                safe-left: root.safe-area-insets.left; safe-right: root.safe-area-insets.right;
+                                action(action) => {
+                                    if action == "settings" || action == "mode" { root.reader-settings-tab = 0; root.show-reader-options = !root.show-reader-options; }
+                                    else if action == "more" || action == "screencap" {
+                                        root.reader-capture-viewport = { x: reader.absolute-position.x / 1px, y: reader.absolute-position.y / 1px, width: reader.width / 1px, height: reader.height / 1px, content-x: reader.content-x / 1px, content-y: reader.content-y / 1px };
+                                        root.open-reader-context(root.current-page,root.width - 24px,root.height - 180px);
+                                        if action == "screencap" { root.reader-context-picked("save-screencap"); }
                                     }
-                                    ActionButton { width: 76px; text: @tr("Options"); clicked => { root.show-reader-options = !root.show-reader-options; } }
-                                    IconAction { text: @tr("Download chapter"); icon: @image-url("../../assets/icons/navigation/downloads.svg"); clicked => { root.download-chapter(); } }
+                                    else { root.reader-action(action); }
+                                }
+                                scrub(value) => { root.reader-seek(value); }
+                            }
+                            if root.reader-osd && !root.show-reader-options && ReaderSettings.navigator-modes > 0: Rectangle {
+                                private property <int> nav-bit: root.reading-mode == 0 ? (root.reader-gap > 0 ? 16 : 8) : root.reading-mode == 1 ? 1 : root.reading-mode == 2 ? 2 : 4;
+                                visible: Math.mod(Math.floor(ReaderSettings.navigator-modes / self.nav-bit),2) == 1;
+                                x: ReaderSettings.navigator-left ? 4px : parent.width - self.width - 4px;
+                                y: root.safe-area-insets.top + (parent.height - root.safe-area-insets.top - root.safe-area-insets.bottom - self.height) / 2;
+                                width: 32px; height: max(48px,(parent.height - root.safe-area-insets.top - root.safe-area-insets.bottom - 160px) * ReaderSettings.navigator-height / 100);
+                                border-radius: 12px; background: #00000070;
+                                Rectangle { x: 13px; y: 8px; width: 4px; height: parent.height - 16px; border-radius: 2px; background: Theme.current.control_border; }
+                                Rectangle { x: 11px; y: 8px + (parent.height - 32px) * root.reader-progress; width: 8px; height: 16px; border-radius: 4px; background: Theme.current.accent_soft; }
+                                TouchArea { mouse-cursor: pointer; pointer-event(event) => { if event.kind == PointerEventKind.down && event.button == PointerEventButton.left { root.reader-seek(Math.clamp(self.mouse-y / self.height,0,1)); } } moved => { if self.pressed { root.reader-seek(Math.clamp(self.mouse-y / self.height,0,1)); } } }
+                            }
+                            if root.reader-transition-open && root.reading-mode != 0 && ReaderSettings.chapter-transition: Rectangle {
+                                x: (parent.width - self.width) / 2;
+                                y: root.safe-area-insets.top + 68px;
+                                width: min(480px, max(1px, parent.width - 32px)); height: 48px;
+                                border-radius: 12px; background: Theme.current.player_menu;
+                                Text {
+                                    x: 12px; width: parent.width - 24px; height: 100%;
+                                    text: root.reader-transition-from + " → " + root.reader-transition-to;
+                                    color: Theme.current.text_secondary; font-size: 12px;
+                                    horizontal-alignment: center; vertical-alignment: center; overflow: elide;
                                 }
                             }
-                            if root.show-reader-options: Rectangle {
-                                y: root.safe-area-insets.top + 64px; width: parent.width; height: min(120px, max(48px, root.height - root.safe-area-insets.top - root.safe-area-insets.bottom - 176px));
-                                background: Theme.current.nav_rail;
-                                ScrollView {
-                                    x: root.safe-area-insets.left;
-                                    width: max(0px, parent.width - root.safe-area-insets.left - root.safe-area-insets.right); height: parent.height;
-                                    VerticalLayout {
-                                        padding: 8px; spacing: 8px;
-                                        ComboBox { min-width: 0px; placeholder-text: @tr("Reading mode"); model: [@tr("Webtoon"), @tr("Left to right"), @tr("Right to left"), @tr("Vertical paging"), @tr("Automatic")]; current-index <=> root.reader-mode-choice; selected(value) => { root.mode-changed(self.current-index); } }
-                                        Text {
-                                            text: root.reader-mode-choice == 4 ? @tr("Automatic · {}", root.reading-mode == 0 ? @tr("Webtoon") : root.reading-mode == 1 ? @tr("Left to right") : root.reading-mode == 2 ? @tr("Right to left") : @tr("Vertical paging")) : @tr("Manual · saved for this series");
-                                            color: Theme.current.text_secondary; font-size: 12px; wrap: word-wrap;
-                                        }
-                                        HorizontalLayout {
-                                            spacing: 8px;
-                                            IconAction { text: @tr("Zoom out"); icon: @image-url("../../assets/icons/navigation/minus.svg"); clicked => { root.zoom = max(0.5, root.zoom - 0.25); } }
-                                            Text { min-width: 0px; text: @tr("Zoom {}%", round(root.zoom * 100)); color: Theme.current.text_secondary; horizontal-alignment: center; vertical-alignment: center; }
-                                            IconAction { text: @tr("Zoom in"); icon: @image-url("../../assets/icons/navigation/plus.svg"); clicked => { root.zoom = min(3, root.zoom + 0.25); } }
-                                        }
-                                    }
-                                }
+                            reader-preferences := ReaderSettingsPanel {
+                                open: root.show-reader-options;
+                                width: 100%; height: 100%; compact: root.mobile-ui;
+                                safe-top: root.safe-area-insets.top; safe-bottom: root.safe-area-insets.bottom;
+                                safe-left: root.safe-area-insets.left; safe-right: root.safe-area-insets.right;
+                                mode: root.reader-mode-choice; rotation: root.reader-rotation-choice;
+                                rotation-label: @tr("Orientation"); resolved-mode: root.reader-mode-label;
+                                current-tab <=> root.reader-settings-tab;
+                                mode-selected(value) => { root.mode-changed(value); }
+                                rotation-selected(value) => { root.reader-rotation-changed(value); }
+                                dismissed => { root.show-reader-options = false; keyboard.focus(); }
                             }
-                            Rectangle {
-                                y: parent.height - 64px; width: parent.width; height: 64px; background: Theme.current.nav_rail;
-                                HorizontalLayout {
-                                    x: root.safe-area-insets.left;
-                                    width: max(0px, parent.width - root.safe-area-insets.left - root.safe-area-insets.right); height: 64px;
-                                    padding: 8px; spacing: 6px;
-                                    IconAction { text: @tr("Previous chapter"); icon: @image-url("../../assets/icons/navigation/chapter-previous.svg"); enabled: root.can-previous; clicked => { root.chapter-step(-1); } }
-                                    IconAction { text: @tr("Previous page"); icon: @image-url("../../assets/icons/navigation/previous.svg"); clicked => { root.page-step(-1); } }
-                                    ActionButton { text: @tr("Retry"); clicked => { root.page-step(0); } }
-                                    IconAction { text: @tr("Next page"); icon: @image-url("../../assets/icons/navigation/next.svg"); clicked => { root.page-step(1); } }
-                                    IconAction { text: @tr("Next chapter"); icon: @image-url("../../assets/icons/navigation/chapter-next.svg"); enabled: root.can-next; clicked => { root.chapter-step(1); } }
-                                }
-                            }
-                            }
+
                         }
                         if root.section == 5: Rectangle {
                             x: 0px; y: 0px; width: parent.width; height: root.safe-area-insets.top + (root.mobile-ui ? 64px : 76px);
@@ -883,9 +988,15 @@ export component AppWindow inherits Window {
                 root.go-back();
                 return accept;
             }
+            if root.section == 6 && root.show-reader-options { return reject; }
+            if root.section == 6 && (event.text == "f" || event.text == "F") { root.reader-action("fullscreen"); return accept; }
+            if root.section == 6 && (event.text == "+" || event.text == "=") { root.reader-action("zoom-in"); return accept; }
+            if root.section == 6 && event.text == "-" { root.reader-action("zoom-out"); return accept; }
+            if root.section == 6 && (event.text == "s" || event.text == "S") { root.reader-osd = true; root.show-reader-options = true; return accept; }
             if root.section == 6 && event.text == Key.RightArrow { root.page-step(root.reading-mode == 2 ? -1 : 1); return accept; }
             if root.section == 6 && event.text == Key.LeftArrow { root.page-step(root.reading-mode == 2 ? 1 : -1); return accept; }
-            if root.section == 6 && (event.text == " " || event.text == Key.DownArrow) { root.page-step(1); return accept; }
+            if root.section == 6 && (event.text == " " || event.text == Key.DownArrow || event.text == Key.PageDown) { root.reader-action("forward"); return accept; }
+            if root.section == 6 && (event.text == Key.UpArrow || event.text == Key.PageUp) { root.reader-action("backward"); return accept; }
             return reject;
         }
     }

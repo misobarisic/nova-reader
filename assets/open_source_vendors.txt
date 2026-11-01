@@ -37,3 +37,13 @@ provenance. Executable addon packages are independent installs; their own
 NOTICES/LICENSE files travel inside their ZIPs. The included neutral geometric
 fixture material is CC0-1.0. Upstream APK/JAR metadata does not grant Reader
 runtime compatibility or native package trust.
+
+MIHON TAP NAVIGATION
+Tap region data and direction semantics port Mihon v0.21.3 revision
+feadad5e1e2bf638be6e2ca317d11657b09d4596, copyright Tachiyomi/Mihon
+contributors, under Apache-2.0. Attribution and the full applicable Apache
+license accompany THIRD_PARTY_NOTICES.md.
+
+NOVA READER CONTROLS AND IDLE WORKER
+Reader OSD layout and desktop idle-worker mailbox adapt Nova revision
+ac1c981955b812e4766202646aa45bb61321aaf4 under GPL-3.0-or-later.

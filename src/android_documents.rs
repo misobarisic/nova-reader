@@ -449,6 +449,33 @@ pub fn set_reader_immersive(immersive: bool) -> Result<(), String> {
         Ok(())
     })
 }
+/// Apply reader-only Android orientation, wake and cutout preferences on the
+/// Java main thread. Rotation: 0 system, 1 free, 2 sensor portrait, 3 sensor
+/// landscape, 4 locked portrait, 5 locked landscape, 6 reverse portrait.
+/// Leaving the reader restores the Activity's prior orientation/window state.
+pub fn set_reader_presentation(
+    reading: bool,
+    immersive: bool,
+    rotation: i32,
+    keep_awake: bool,
+    cutout: bool,
+) -> Result<(), String> {
+    with_context(|env, _, class| {
+        env.call_static_method(
+            class,
+            "setReaderPresentation",
+            "(ZZIZZ)V",
+            &[
+                JValue::Bool(reading.into()),
+                JValue::Bool(immersive.into()),
+                JValue::Int(rotation),
+                JValue::Bool(keep_awake.into()),
+                JValue::Bool(cutout.into()),
+            ],
+        )?;
+        Ok(())
+    })
+}
 /// Android's application cache root. Document staging is removed after use;
 /// disposable artwork uses its own `posters` subdirectory under this root.
 pub fn cache_dir() -> Result<PathBuf, String> {

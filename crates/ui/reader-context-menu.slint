@@ -6,14 +6,44 @@ import { Spinner } from "std-widgets.slint";
 // grab, while only a stationary press can become an image context request.
 export component ReaderImageInteraction inherits ControlTouchArea {
     in property <bool> context-enabled: true;
+    in property <bool> long-press-enabled: true;
+    in property <bool> double-tap-enabled: false;
     callback tapped;
+    callback positioned-tap(length, length);
+    callback double-tapped(length, length);
     callback context-requested(length, length);
     private property <bool> suppress-tap;
     private property <bool> dragged;
+    private property <bool> pending-tap;
+    private property <length> pending-window-x;
+    private property <length> pending-window-y;
     private property <length> press-window-x;
     private property <length> press-window-y;
     mouse-cursor: pointer;
-    clicked => { if !root.suppress-tap { root.tapped(); } }
+    function cancel-pending() { single-tap.stop(); root.pending-tap = false; }
+    function emit-single(x: length, y: length) {
+        root.tapped();
+        root.positioned-tap(x, y);
+    }
+    clicked => {
+        if root.suppress-tap || root.dragged { return; }
+        let x = root.absolute-position.x + root.mouse-x;
+        let y = root.absolute-position.y + root.mouse-y;
+        if !root.double-tap-enabled {
+            root.emit-single(x, y);
+        } else if root.pending-tap && Math.max(Math.abs(x - root.pending-window-x), Math.abs(y - root.pending-window-y)) <= 24px {
+            root.cancel-pending();
+            root.double-tapped(x, y);
+        } else {
+            // Distant clicks remain two independent taps. Wait until release
+            // before publishing either, so a second gesture can still pan.
+            if root.pending-tap { root.emit-single(root.pending-window-x, root.pending-window-y); }
+            root.pending-tap = true;
+            root.pending-window-x = x;
+            root.pending-window-y = y;
+            single-tap.start();
+        }
+    }
     pointer-event(event) => {
         if event.kind == PointerEventKind.down {
             root.dragged = false;
@@ -21,29 +51,57 @@ export component ReaderImageInteraction inherits ControlTouchArea {
             root.press-window-x = root.absolute-position.x + root.mouse-x;
             root.press-window-y = root.absolute-position.y + root.mouse-y;
             hold.stop();
-            if event.button == PointerEventButton.left && root.context-enabled { hold.start(); }
+            // Pause the first tap while the second press establishes whether
+            // it is a double tap, a hold, or a scroll gesture.
+            single-tap.stop();
+            if event.button != PointerEventButton.left { root.cancel-pending(); }
+            if event.button == PointerEventButton.left && root.context-enabled && root.long-press-enabled { hold.start(); }
         } else if event.kind == PointerEventKind.up {
             hold.stop();
             if event.button == PointerEventButton.right && !root.dragged && root.context-enabled {
+                root.cancel-pending();
                 root.suppress-tap = true;
                 SettingsStyle.keyboard-mode = false;
                 root.context-requested(root.absolute-position.x + root.mouse-x, root.absolute-position.y + root.mouse-y);
             }
+        } else if event.kind == PointerEventKind.move && event.touch-finger-id != 0 && root.pending-tap {
+            // Flickable can observe a touch move before it delivers its delayed
+            // second press. Discard the old tap as soon as that touch pans.
+            if Math.max(Math.abs(root.absolute-position.x + root.mouse-x - root.pending-window-x), Math.abs(root.absolute-position.y + root.mouse-y - root.pending-window-y)) > 12px {
+                root.cancel-pending();
+            }
         } else if event.kind == PointerEventKind.cancel {
-            hold.stop(); root.dragged = true; root.suppress-tap = true;
+            hold.stop(); root.cancel-pending();
+            root.dragged = true; root.suppress-tap = true;
         }
     }
     moved => {
-        if Math.abs(root.absolute-position.x + root.mouse-x - root.press-window-x)
+        if root.pressed && Math.abs(root.absolute-position.x + root.mouse-x - root.press-window-x)
             + Math.abs(root.absolute-position.y + root.mouse-y - root.press-window-y) > 12px {
-            hold.stop(); root.dragged = true; root.suppress-tap = true;
+            hold.stop(); root.cancel-pending();
+            root.dragged = true; root.suppress-tap = true;
+        }
+    }
+    changed enabled => { if !root.enabled { hold.stop(); root.cancel-pending(); } }
+    changed double-tap-enabled => { root.cancel-pending(); }
+    changed long-press-enabled => { if !root.long-press-enabled { hold.stop(); } }
+    changed context-enabled => { if !root.context-enabled { hold.stop(); } }
+    single-tap := Timer {
+        interval: 250ms; running: false;
+        triggered => {
+            self.stop();
+            if root.pending-tap {
+                root.pending-tap = false;
+                root.emit-single(root.pending-window-x, root.pending-window-y);
+            }
         }
     }
     hold := Timer {
         interval: 600ms; running: false;
         triggered => {
             self.stop();
-            if root.pressed && !root.dragged && root.context-enabled {
+            if root.pressed && !root.dragged && root.context-enabled && root.long-press-enabled {
+                root.cancel-pending();
                 root.suppress-tap = true;
                 SettingsStyle.keyboard-mode = false;
                 root.context-requested(root.absolute-position.x + root.mouse-x, root.absolute-position.y + root.mouse-y);

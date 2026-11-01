@@ -80,6 +80,50 @@ pub(crate) fn capture(
     reference_index: usize,
     pages: &[PageRect],
     background: [u8; 4],
+    fetch: impl FnMut(usize) -> Result<Vec<u8>, String>,
+) -> Result<Capture, String> {
+    capture_with_budget(
+        viewport,
+        reference_index,
+        pages,
+        background,
+        reader_engine::DisplayOptions::default(),
+        MEMORY_LIMIT,
+        fetch,
+    )
+}
+
+/// Render the visible virtual page geometry from one original at a time.
+/// Options must be the immutable snapshot used to lay out `pages`.
+pub(crate) fn capture_with_options(
+    viewport: Rect,
+    reference_index: usize,
+    pages: &[PageRect],
+    background: [u8; 4],
+    options: reader_engine::DisplayOptions,
+    fetch: impl FnMut(usize) -> Result<Vec<u8>, String>,
+) -> Result<Capture, String> {
+    if options == reader_engine::DisplayOptions::default() {
+        return capture(viewport, reference_index, pages, background, fetch);
+    }
+    capture_with_budget(
+        viewport,
+        reference_index,
+        pages,
+        background,
+        options,
+        MEMORY_LIMIT,
+        fetch,
+    )
+}
+
+fn capture_with_budget(
+    viewport: Rect,
+    reference_index: usize,
+    pages: &[PageRect],
+    background: [u8; 4],
+    options: reader_engine::DisplayOptions,
+    memory_limit: u64,
     mut fetch: impl FnMut(usize) -> Result<Vec<u8>, String>,
 ) -> Result<Capture, String> {
     if !viewport.valid() || pages.len() > 10_000 {
@@ -104,9 +148,34 @@ pub(crate) fn capture(
         .find(|page| page.index == reference_index)
         .ok_or_else(geometry_error)?;
     let reference_bytes = fetch(reference_index)?;
-    let limits = reader_engine::DecodeLimits::default();
-    let dimensions = reader_engine::inspect_image(&reference_bytes, limits)
-        .map_err(|error| format!("Cannot inspect original chapter image: {error}"))?;
+    let limits = reader_engine::DecodeLimits {
+        max_decoded_bytes: memory_limit,
+        ..Default::default()
+    };
+    // Crop geometry depends on pixels. Admit this decode before output exists;
+    // later, admit its retained original plus output as a separate phase.
+    // Default keeps the legacy probe-first/reduced-decode admission unchanged.
+    let early_reference = if options.crop_borders || options.split_wide || options.rotate_wide {
+        let image = reader_engine::decode_image(&reference_bytes, limits).map_err(|error| {
+            format!(
+                "Original chapter image exceeds capture admission: {error}. Use Device resolution."
+            )
+        })?;
+        let presentation = reader_engine::page_presentation(&image, options)
+            .map_err(|error| format!("Cannot present original chapter image: {error}"))?;
+        Some((image, presentation))
+    } else {
+        None
+    };
+    let reference_presentation = early_reference
+        .as_ref()
+        .map(|(_, presentation)| *presentation);
+    let dimensions = if let Some(presentation) = reference_presentation {
+        presentation.effective
+    } else {
+        reader_engine::inspect_image(&reference_bytes, limits)
+            .map_err(|error| format!("Cannot inspect original chapter image: {error}"))?
+    };
     let scale = f64::from(dimensions.width) / reference.rect.width;
     let left = ((viewport.x - reference.rect.x) * scale).floor();
     let top = ((viewport.y - reference.rect.y) * scale).floor();
@@ -150,7 +219,7 @@ pub(crate) fn capture(
         .filter(|pixels| *pixels <= PIXEL_LIMIT)
         .ok_or_else(budget_error)?;
     let output_bytes = pixels.checked_mul(4).ok_or_else(budget_error)?;
-    let remaining = MEMORY_LIMIT
+    let remaining = memory_limit
         .checked_sub(output_bytes)
         .ok_or_else(budget_error)?;
     let limits = reader_engine::DecodeLimits {
@@ -160,12 +229,18 @@ pub(crate) fn capture(
     // Admit and decode the reference before allocating the output. If it is
     // first in paint order, retain that decode; otherwise drop it before any
     // other page is decoded and reuse its fetched bytes when its turn arrives.
-    let reference_image =
+    let reference_image = if let Some((image, _)) = early_reference {
+        if image.as_raw().len() as u64 > remaining {
+            return Err(budget_error());
+        }
+        image
+    } else {
         reader_engine::decode_image(&reference_bytes, limits).map_err(|error| {
             format!(
                 "Original chapter image exceeds capture admission: {error}. Use Device resolution."
             )
-        })?;
+        })?
+    };
     let mut reference_image = if visible
         .first()
         .is_some_and(|page| page.index == reference_index)
@@ -200,7 +275,15 @@ pub(crate) fn capture(
                 format!("Cannot decode original chapter image: {error}. Use Device resolution.")
             })?
         };
-        paint(&mut output, &raster, page, &image)?;
+        let presentation = if page.index == reference_index {
+            reference_presentation
+                .map(Ok)
+                .unwrap_or_else(|| reader_engine::page_presentation(&image, options))
+        } else {
+            reader_engine::page_presentation(&image, options)
+        }
+        .map_err(|error| format!("Cannot present original chapter image: {error}"))?;
+        paint(&mut output, &raster, page, &image, presentation, options)?;
         // No decoded page survives into the next iteration.
     }
     Ok(Capture {
@@ -215,6 +298,8 @@ fn paint(
     raster: &Raster,
     page: &PageRect,
     image: &image::RgbaImage,
+    presentation: reader_engine::PagePresentation,
+    options: reader_engine::DisplayOptions,
 ) -> Result<(), String> {
     let Raster {
         width,
@@ -237,8 +322,8 @@ fn paint(
     let end_y = ((clip.bottom() - viewport.y) * scale - 0.5)
         .ceil()
         .clamp(0., f64::from(height)) as u32;
-    let mut step_x = f64::from(image.width()) / (rect.width * scale);
-    let mut step_y = f64::from(image.height()) / (rect.height * scale);
+    let mut step_x = f64::from(presentation.effective.width) / (rect.width * scale);
+    let mut step_y = f64::from(presentation.effective.height) / (rect.height * scale);
     let (offset_x, offset_y) = if page.index == raster.reference_index {
         // Ignore only layout float rounding at a true native 1:1 ratio.
         step_x = 1.;
@@ -251,8 +336,8 @@ fn paint(
         )
     } else {
         (
-            (viewport.x - rect.x) / rect.width * f64::from(image.width()) - 0.5,
-            (viewport.y - rect.y) / rect.height * f64::from(image.height()) - 0.5,
+            (viewport.x - rect.x) / rect.width * f64::from(presentation.effective.width) - 0.5,
+            (viewport.y - rect.y) / rect.height * f64::from(presentation.effective.height) - 0.5,
         )
     };
     if [step_x, step_y, offset_x, offset_y]
@@ -261,14 +346,28 @@ fn paint(
     {
         return Err(geometry_error());
     }
+    let identity = presentation.crop_x == 0
+        && presentation.crop_y == 0
+        && presentation.source == presentation.effective
+        && !presentation.split
+        && presentation.rotation == reader_engine::PageRotation::None
+        && !presentation.reverse_page;
     for y in start_y..end_y {
-        let source_y =
-            ((f64::from(y) + 0.5) * step_y + offset_y).clamp(0., f64::from(image.height() - 1));
+        let source_y = ((f64::from(y) + 0.5) * step_y + offset_y)
+            .clamp(0., f64::from(presentation.effective.height - 1));
         for x in start_x..end_x {
-            let source_x =
-                ((f64::from(x) + 0.5) * step_x + offset_x).clamp(0., f64::from(image.width() - 1));
+            let source_x = ((f64::from(x) + 0.5) * step_x + offset_x)
+                .clamp(0., f64::from(presentation.effective.width - 1));
             let target = ((u64::from(y) * u64::from(width) + u64::from(x)) * 4) as usize;
-            blend(&mut output[target..target + 4], image, source_x, source_y);
+            blend(
+                &mut output[target..target + 4],
+                image,
+                presentation,
+                source_x,
+                source_y,
+                options,
+                identity,
+            );
         }
     }
     Ok(())
@@ -276,30 +375,69 @@ fn paint(
 
 /// Bilinear filtering uses premultiplied colors to avoid dark fringes around
 /// transparent source pixels. Integer source coordinates remain exact.
-fn blend(target: &mut [u8], image: &image::RgbaImage, x: f64, y: f64) {
+fn blend(
+    target: &mut [u8],
+    image: &image::RgbaImage,
+    presentation: reader_engine::PagePresentation,
+    x: f64,
+    y: f64,
+    options: reader_engine::DisplayOptions,
+    identity: bool,
+) {
     let x0 = x.floor() as u32;
     let y0 = y.floor() as u32;
     let fx = x - f64::from(x0);
     let fy = y - f64::from(y0);
-    let first = image.get_pixel(x0, y0).0;
+    let sample = |x, y| {
+        if identity {
+            return image.get_pixel(x, y).0;
+        }
+        let (x, y) = presentation.source_coordinate(f64::from(x), f64::from(y));
+        image.get_pixel(x as u32, y as u32).0
+    };
+    let mut first = sample(x0, y0);
     if fx == 0. && fy == 0. && first[3] == 255 {
+        if options.color_filter || options.grayscale || options.invert_colors {
+            reader_engine::filter_pixel(&mut first, options);
+        }
         target.copy_from_slice(&first);
         return;
     }
-    let x1 = (x0 + 1).min(image.width() - 1);
-    let y1 = (y0 + 1).min(image.height() - 1);
+    let x1 = (x0 + 1).min(presentation.effective.width - 1);
+    // Interpolation must stay on one paper half, including when reversed.
+    let section_end = if presentation.split && y0 < presentation.half_height {
+        presentation.half_height - 1
+    } else {
+        presentation.effective.height - 1
+    };
+    let y1 = (y0 + 1).min(section_end);
     let mut color = [0.; 3];
     let mut alpha = 0.;
     for (pixel, weight) in [
         (first, (1. - fx) * (1. - fy)),
-        (image.get_pixel(x1, y0).0, fx * (1. - fy)),
-        (image.get_pixel(x0, y1).0, (1. - fx) * fy),
-        (image.get_pixel(x1, y1).0, fx * fy),
+        (sample(x1, y0), fx * (1. - fy)),
+        (sample(x0, y1), (1. - fx) * fy),
+        (sample(x1, y1), fx * fy),
     ] {
         let coverage = f64::from(pixel[3]) / 255. * weight;
         alpha += coverage;
         for channel in 0..3 {
             color[channel] += f64::from(pixel[channel]) * coverage;
+        }
+    }
+    if alpha > 0.
+        && ((options.color_filter && options.filter_intensity > 0)
+            || options.grayscale
+            || options.invert_colors)
+    {
+        let mut foreground = [0; 4];
+        for channel in 0..3 {
+            foreground[channel] = (color[channel] / alpha).round().clamp(0., 255.) as u8;
+        }
+        foreground[3] = (alpha * 255.).round().clamp(0., 255.) as u8;
+        reader_engine::filter_pixel(&mut foreground, options);
+        for channel in 0..3 {
+            color[channel] = f64::from(foreground[channel]) * alpha;
         }
     }
     let background_alpha = f64::from(target[3]) / 255.;
@@ -603,5 +741,286 @@ mod tests {
             );
             assert_eq!(calls, 0);
         }
+    }
+    fn bordered_pixel(x: u32, y: u32) -> [u8; 4] {
+        if (2..10).contains(&x) && (2..6).contains(&y) {
+            [(x * 20) as u8, (y * 20) as u8, 40, 255]
+        } else {
+            [255; 4]
+        }
+    }
+
+    #[test]
+    fn chapter_options_crop_and_rtl_split_use_effective_native_width_and_filtered_pixels() {
+        let original = png(12, 8, bordered_pixel);
+        let cropped = capture_with_options(
+            rect(0., 0., 4., 2.),
+            0,
+            &[PageRect {
+                index: 0,
+                rect: rect(0., 0., 4., 2.),
+            }],
+            [0, 0, 0, 255],
+            reader_engine::DisplayOptions {
+                crop_borders: true,
+                ..Default::default()
+            },
+            |_| Ok(original.clone()),
+        )
+        .unwrap();
+        assert_eq!((cropped.width, cropped.height), (8, 4));
+        assert_eq!(at(&cropped, 0, 0), bordered_pixel(2, 2));
+        assert_eq!(at(&cropped, 7, 3), bordered_pixel(9, 5));
+
+        let split = capture_with_options(
+            rect(0., 0., 4., 8.),
+            0,
+            &[PageRect {
+                index: 0,
+                rect: rect(0., 0., 4., 8.),
+            }],
+            [0, 0, 0, 255],
+            reader_engine::DisplayOptions {
+                crop_borders: true,
+                split_wide: true,
+                rtl: true,
+                grayscale: true,
+                invert_colors: true,
+                ..Default::default()
+            },
+            |_| Ok(original.clone()),
+        )
+        .unwrap();
+        assert_eq!((split.width, split.height), (4, 8));
+        // Right paper half first, then left; grayscale precedes inversion.
+        assert_eq!(at(&split, 0, 0), [191, 191, 191, 255]);
+        assert_eq!(at(&split, 3, 3), [138, 138, 138, 255]);
+        assert_eq!(at(&split, 0, 4), [215, 215, 215, 255]);
+        assert_eq!(at(&split, 3, 7), [162, 162, 162, 255]);
+    }
+
+    #[test]
+    fn chapter_options_rotate_in_both_directions_and_reverse_without_intermediate_images() {
+        let original = png(12, 8, bordered_pixel);
+        for (flip, reverse, top_left, bottom_right) in [
+            (false, false, (2, 5), (9, 2)),
+            (true, false, (9, 2), (2, 5)),
+            (false, true, (9, 2), (2, 5)),
+        ] {
+            let image = capture_with_options(
+                rect(0., 0., 4., 8.),
+                0,
+                &[PageRect {
+                    index: 0,
+                    rect: rect(0., 0., 4., 8.),
+                }],
+                [0, 0, 0, 255],
+                reader_engine::DisplayOptions {
+                    crop_borders: true,
+                    rotate_wide: true,
+                    flip_wide: flip,
+                    reverse_page: reverse,
+                    ..Default::default()
+                },
+                |_| Ok(original.clone()),
+            )
+            .unwrap();
+            assert_eq!((image.width, image.height), (4, 8));
+            assert_eq!(at(&image, 0, 0), bordered_pixel(top_left.0, top_left.1));
+            assert_eq!(
+                at(&image, 3, 7),
+                bordered_pixel(bottom_right.0, bottom_right.1)
+            );
+        }
+    }
+
+    #[test]
+    fn chapter_options_filter_the_foreground_before_alpha_compositing() {
+        let original = png(2, 2, |_, _| [100, 50, 0, 128]);
+        let image = capture_with_options(
+            rect(0., 0., 2., 2.),
+            0,
+            &[PageRect {
+                index: 0,
+                rect: rect(0., 0., 2., 2.),
+            }],
+            [0; 4],
+            reader_engine::DisplayOptions {
+                color_filter: true,
+                filter_color: 0xc86464,
+                filter_intensity: 50,
+                ..Default::default()
+            },
+            |_| Ok(original.clone()),
+        )
+        .unwrap();
+        assert_eq!(at(&image, 0, 0), [150, 75, 50, 128]);
+    }
+
+    #[test]
+    fn cropped_multi_page_capture_clips_and_preserves_paint_order_fetching_reference_once() {
+        let originals = [0u8, 100].map(|red| {
+            png(12, 8, |x, y| {
+                if (2..10).contains(&x) && (2..6).contains(&y) {
+                    [red + x as u8, y as u8, 0, 255]
+                } else {
+                    [255; 4]
+                }
+            })
+        });
+        let mut fetched = Vec::new();
+        let image = capture_with_options(
+            rect(2., 0., 4., 4.),
+            1,
+            &[
+                PageRect {
+                    index: 0,
+                    rect: rect(0., -2., 8., 4.),
+                },
+                PageRect {
+                    index: 1,
+                    rect: rect(0., 2., 8., 4.),
+                },
+            ],
+            [0, 0, 0, 255],
+            reader_engine::DisplayOptions {
+                crop_borders: true,
+                ..Default::default()
+            },
+            |index| {
+                fetched.push(index);
+                Ok(originals[index].clone())
+            },
+        )
+        .unwrap();
+        assert_eq!(fetched, [1, 0]);
+        assert_eq!((image.width, image.height), (4, 4));
+        assert_eq!(at(&image, 0, 0), [4, 4, 0, 255]);
+        assert_eq!(at(&image, 3, 1), [7, 5, 0, 255]);
+        assert_eq!(at(&image, 0, 2), [104, 2, 0, 255]);
+        assert_eq!(at(&image, 3, 3), [107, 3, 0, 255]);
+    }
+
+    #[test]
+    fn split_sampling_clamps_at_paper_seams_while_resampling_other_pages() {
+        let originals = [
+            png(2, 8, |_, _| [0; 4]),
+            png(4, 2, |x, y| {
+                [
+                    if x < 2 {
+                        10 + 10 * y as u8
+                    } else {
+                        200 + 10 * y as u8
+                    },
+                    0,
+                    0,
+                    255,
+                ]
+            }),
+        ];
+        let image = capture_with_options(
+            rect(0., 0., 2., 8.),
+            0,
+            &[
+                PageRect {
+                    index: 0,
+                    rect: rect(0., 0., 2., 8.),
+                },
+                PageRect {
+                    index: 1,
+                    rect: rect(0., 0., 2., 8.),
+                },
+            ],
+            [0, 0, 0, 255],
+            reader_engine::DisplayOptions {
+                split_wide: true,
+                ..Default::default()
+            },
+            |index| Ok(originals[index].clone()),
+        )
+        .unwrap();
+        assert_eq!(
+            (0..8).map(|y| at(&image, 0, y)[0]).collect::<Vec<_>>(),
+            [10, 13, 18, 20, 20, 203, 208, 210]
+        );
+    }
+
+    #[test]
+    fn options_preserve_separate_decode_and_retained_output_memory_admission() {
+        let options = reader_engine::DisplayOptions {
+            crop_borders: true,
+            ..Default::default()
+        };
+        let page = PageRect {
+            index: 0,
+            rect: rect(0., 0., 4., 4.),
+        };
+        // Native decoder output and RGBA conversion must both fit before output.
+        let original = png(4, 3, |_, _| [10, 20, 30, 255]);
+        assert!(
+            capture_with_budget(
+                rect(0., 0., 4., 4.),
+                0,
+                &[page],
+                [0; 4],
+                options,
+                64,
+                |_| Ok(original.clone())
+            )
+            .is_err()
+        );
+        // Initial decode fits 128 bytes exactly; retained original + output do not.
+        let original = png(4, 4, |_, _| [10, 20, 30, 255]);
+        assert!(
+            capture_with_budget(
+                rect(0., 0., 4., 5.),
+                0,
+                &[page],
+                [0; 4],
+                options,
+                128,
+                |_| Ok(original.clone())
+            )
+            .is_err()
+        );
+        // A later original fits the full budget, but its decode must leave room
+        // for the already allocated output. No reference decode overlaps it.
+        let originals = [original, png(7, 4, |_, _| [30, 40, 50, 255])];
+        let mut fetched = Vec::new();
+        let error = capture_with_budget(
+            rect(0., 0., 4., 4.),
+            0,
+            &[
+                page,
+                PageRect {
+                    index: 1,
+                    rect: page.rect,
+                },
+            ],
+            [0; 4],
+            options,
+            256,
+            |index| {
+                fetched.push(index);
+                Ok(originals[index].clone())
+            },
+        )
+        .err()
+        .unwrap();
+        assert_eq!(fetched, [0, 1]);
+        assert!(error.contains("limits"));
+        // The unchanged Default path retains its previous reduced decode budget.
+        assert!(
+            capture_with_budget(
+                rect(0., 0., 4., 4.),
+                0,
+                &[page],
+                [0; 4],
+                reader_engine::DisplayOptions::default(),
+                128,
+                |_| Ok(originals[0].clone())
+            )
+            .is_err()
+        );
     }
 }

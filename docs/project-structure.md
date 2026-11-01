@@ -15,6 +15,11 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `src/addon_icons.rs`, `crates/ui/addon-icon.slint` | Verified bundled addon PNGs decoded on workers, retained UI-thread image handles shared by language variants, Sources/Extensions decoration and Kit fallback |
 | `src/artwork.rs` | Kit decoded-poster LRU and encoded variants, synchronous cross-page hits, source permits, UI handles, bounded worker and legacy artwork migration |
 | `src/chapter_cache.rs` | Kit-backed disposable viewed pages, authorization scopes, chapter-group eviction/active leases and bounded background encoding |
+| `src/reader_settings.rs`, `src/reader_settings_ui.rs` | Durable global reader defaults, source-local series layout/orientation overrides, cached effective snapshots and fallible UI rollback |
+| `src/reader_controls.rs`, `src/reader_navigation.rs` | Nova-style OSD actions, source-anchored seek/zoom, Mihon tap maps, mode inheritance and Android/desktop preference projection |
+| `src/reader_continuity.rs` | Near-boundary chapter preparation, per-chapter source ownership and canonical progress, stable in-place page growth and bounded three-chapter retention |
+| `src/reader_desktop.rs` | Nova-derived latest-state native keep-awake worker; Linux portal/screensaver, Windows execution state and macOS caffeinate lifetime |
+| `crates/ui/reader-osd.slint`, `crates/ui/reader-settings.slint` | Responsive bottom OSD and animated phone-sheet/desktop-panel controls, shared global settings form under More → Settings → Reader |
 | `src/progress_checkpoint.rs` | One background checkpoint writer, latest offsets coalesced per chapter, failure retry and ordered durable navigation/lifecycle barriers; the 600 ms UI timer only queues progress |
 | `src/reader_export.rs` | Original-image validation, screencap encoding, bounded platform save/clipboard delivery and persistent desktop clipboard ownership; `src/app.rs` captures the clean pre-menu viewport with an 8-million-pixel limit and fetches source page bytes |
 | `src/export_names.rs` | Portable UTF-8 series folders and bounded title/chapter/page/vertical-position filenames, including duplicate numbering |
@@ -24,7 +29,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `src/image_storage.rs`, `crates/ui/image-storage-settings.slint` | Durable cache policy, input-aware lossless WebP/JXL caching and independent download compression; shared Kit cache controls with chapter-first maintenance and separate artwork settings |
 | `src/source_catalogs.rs` | Host-owned per-addon catalogue switches under `reader:disabled-catalogs:<JSON package ID>`; filters Browse while preserving direct/history/offline access |
 | `src/reading_preferences.rs` | Fallible Nova KV persistence for adult-source visibility and chapter order keyed by full source-local series identity |
-| `src/reader_modes.rs`, `docs/reader-modes.md` | Pinned TachiyomiJ2K genre/source classification, Automatic/manual selection, and per-series persisted mode overrides |
+| `src/reader_modes.rs`, `docs/reader-modes.md` | Pinned TachiyomiJ2K classification, Default/global inheritance, explicit Automatic/manual/gapped selection, and durable per-series mode overrides |
 | `src/timeline.rs`, `src/source_filters.rs`, `src/source_browser.rs` | Local date groups/provider date parsing, bounded typed filter values and persistent source pins/last-used grouping |
 | `src/updates.rs` | Optional reader application release discovery |
 | `src/metadata_refresh.rs` | Nova-derived foreground metadata/chapter scheduler, bounded fair batches, persisted per-series deadlines and stale-result admission |
@@ -33,7 +38,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `src/appearance.rs` | Device appearance/motion preferences, validated edits, immediate application and KV persistence |
 | `crates/ui/app.slint` | Shared pages/reader models, safe-area layout, platform/width shell selection, detail origin and translated text |
 | `crates/ui/media-models.slint` | Shared series/chapter/timeline/source/extension/filter row models |
-| `crates/ui/library-cards.slint`, `crates/ui/display-settings.slint` | Nova poster/list painting and left-anchored progress fill, per-entry context gestures, viewport admission, grid/list switch and persisted display choices |
+| `crates/ui/library-cards.slint`, `crates/ui/display-settings.slint` | Nova poster/list painting and left-anchored progress fill shown after a chapter is read, per-entry context gestures, viewport admission, grid/list switch and persisted display choices |
 | `../nova-kit/crates/cache`, `../nova-kit/crates/ui-base/slint/cache-settings-controls.slint` | Actual Nova cache/settings implementations and NumericSetting/cache controls shared by Nova and Reader; app persistence/search/sync adapters remain local |
 | `crates/ui/library-search.slint` | Retained Nova search reveal, deferred focus, live filtering and viewport-aware field exposure |
 | `crates/ui/entry-menu.slint`, `crates/ui/status-menu.slint` | Per-title Kit action sheet/anchored desktop menu, copied Nova Change status picker, stable-identity category editing and library/refresh actions |
@@ -69,6 +74,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `tests/reader_insets.rs` | Real Window safe-area injection verifies edge-to-edge chapter/detail artwork, safe controls/chapter rows, normal-page restoration and stable OSD geometry; uses the already pinned Slint core as a dev dependency |
 | `tests/reader_design.rs` | Responsive poster/list/timeline/chapter layouts, source/pin/extension actions, retained catalogue scroll, download-delete actions, tap-versus-pan reader OSD and image-menu targeting, hold cancellation, clamping, keyboard/busy/lifecycle behavior |
 | `tests/capture_settings.rs`, `tests/image_storage.rs` | Process-boundary capture/compression persistence, corruption recovery, independent policies and accessible settings controls |
+| `tests/reader_settings.rs`, `tests/reader_gestures.rs`, `src/reader_preview.rs` | Process-restart defaults/overrides and validation, actual touch gesture cancellation, and optional production phone/desktop raster previews |
 | `tests/reader_modes.rs` | Per-series mode restart persistence, explicit Automatic/legacy migration, source identity isolation and accessible short-viewport mode options |
 | `tests/library_navigation.rs`, `tests/source_paging.rs` | Search reveal/focus and retained detail context; automatic viewport paging, short-page fill, Retry and saved catalogue scroll |
 | `tests/library_progress.rs` | Phone/desktop grid/list progress geometry from unread through complete, including small left-anchored fills |
@@ -365,3 +371,17 @@ its existing artwork usage/status/busy properties and clear callback into that
 page; chapter maintenance retains its independent callback and busy state.
 `tests/capture_settings.rs::render_capture_and_cache_settings_previews` is an
 opt-in software-rendered phone/desktop capture helper for reviewing these pages.
+
+Reader device defaults use `reader:reader-settings`; series layout/orientation
+overrides use `reader:reader-settings-series:<JSON SeriesId>`. Modes retain the
+existing `reader:mode-choice:` namespace, with new Default inheritance and a
+gapped long-strip choice. The native image worker freezes `DisplayOptions` for
+every task and rejects results for an old recipe. Engine presentation maps crop,
+RTL spread splitting, rotation/reverse and color filtering without modifying
+source/cache bytes or expanding the existing output/decode memory limits.
+
+Continuous reading attaches prepared chapters to the same page model in Webtoon and paged modes.
+Per-page chapter/source ownership keeps caches, export filenames and progress
+canonical; old segments are pruned in place to retain previous/current/next,
+with a fresh generation rejecting old indexed tasks. A small boundary row names
+both chapters in Webtoon; paged crossings show a brief caption with both names. Completion is tracked per chapter and split spreads complete only after their second half. Periodic checkpoint storage remains off the UI thread.

@@ -23,8 +23,8 @@ public class Window {
     public void clearFlags(int flags) { attributes.flags&=~flags; }
     public int flags() { return attributes.flags; }
     public WindowManager.LayoutParams getAttributes() {
-        if (android.os.Build.VERSION.SDK_INT<28) throw new AssertionError("Cutout attributes require API 28");
-        cutoutAccesses++;return attributes;
+        if (android.os.Build.VERSION.SDK_INT>=28) cutoutAccesses++;
+        return attributes;
     }
     public void setAttributes(WindowManager.LayoutParams attributes) { this.attributes=attributes; }
 }

@@ -1,0 +1,167 @@
+// Caption, progress rail and controls adapt Nova's PlayerOverlay geometry.
+import { Theme } from "@NovaUiShared";
+import { AddonIconButton, MiniSlider } from "@NovaUiBase/settings-controls.slint";
+
+component ReaderGlyph inherits Path {
+    in property <string> name;
+    viewbox-width: 24; viewbox-height: 24;
+    stroke: Theme.current.text_bright; stroke-width: 1.7px; fill: transparent;
+    commands: root.name == "back" ? "M15 18l-6-6 6-6"
+        : root.name == "previous-page" ? "M15 18l-6-6 6-6"
+        : root.name == "next-page" ? "M9 6l6 6-6 6"
+        : root.name == "previous-chapter" ? "M5 5v14M19 5l-10 7 10 7z"
+        : root.name == "next-chapter" ? "M19 5v14M5 5l10 7-10 7z"
+        : root.name == "chapters" ? "M8 6h13M8 12h13M8 18h13M3 6h1M3 12h1M3 18h1"
+        : root.name == "mode" ? "M12 6c-3-2-7-2-10-1v15c4-1 7-1 10 1 3-2 6-2 10-1V5c-3-1-7-1-10 1zM12 6v15"
+        : root.name == "settings" ? "M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM10 2h4l1 3 3 1 3-1 2 4-2 2v3l2 2-2 4-3-1-3 1-1 3h-4l-1-3-3-1-3 1-2-4 2-2v-3L1 9l2-4 3 1 3-1z"
+        : root.name == "screencap" ? "M3 6h4l2-3h6l2 3h4v15H3zM12 9a4 4 0 1 0 0 8 4 4 0 0 0 0-8z"
+        : root.name == "fit-width" ? "M3 3h18v18H3zM5 12h14M8 9l-3 3 3 3M16 9l3 3-3 3"
+        : root.name == "zoom" ? "M10 3a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM15 15l6 6M10 7v6M7 10h6"
+        : root.name == "fullscreen" ? "M3 9V3h6M15 3h6v6M21 15v6h-6M9 21H3v-6"
+        : root.name == "fullscreen-exit" ? "M9 3v6H3M21 9h-6V3M15 21v-6h6M3 15h6v6"
+        : root.name == "bookmark" ? "M6 3h12v19l-6-4-6 4z"
+        : "M3 12h2M11 12h2M19 12h2";
+}
+
+component OsdAction inherits Rectangle {
+    in property <string> label;
+    in property <string> glyph;
+    in property <string> subtitle;
+    in property <bool> enabled: true;
+    in property <bool> active: false;
+    in property <bool> show-label: true;
+    in property <bool> surface: false;
+    callback clicked;
+    min-width: 44px; preferred-width: root.show-label ? 76px : 44px;
+    height: root.show-label ? (root.subtitle == "" ? 66px : 80px) : 44px;
+    button := AddonIconButton {
+        x: (parent.width - self.width) / 2;
+        name: root.label; enabled: root.enabled;
+        background: root.active ? Theme.current.selection_fill : root.surface ? Theme.current.player_control : transparent;
+        border-radius: 10px;
+        accessible-checkable: root.active; accessible-checked: root.active;
+        accessible-description: root.subtitle;
+        accessible-action-default => { if root.enabled { root.clicked(); } }
+        clicked => { root.clicked(); }
+        ReaderGlyph {
+            x: 11px; y: 11px; width: 22px; height: 22px;
+            name: root.glyph; stroke: root.active ? Theme.current.accent_soft : Theme.current.text_bright;
+        }
+    }
+    if root.show-label: Text {
+        x: 0px; y: 44px; width: 100%; height: 20px;
+        text: root.label; color: root.active ? Theme.current.accent_soft : Theme.current.text_player_caption;
+        horizontal-alignment: center; vertical-alignment: center; font-size: 12px;
+        overflow: elide;
+    }
+    if root.show-label && root.subtitle != "": Text {
+        x: 0px; y: 64px; width: 100%; height: 16px;
+        text: root.subtitle; color: Theme.current.text_player_caption;
+        horizontal-alignment: center; font-size: 11px; overflow: elide;
+    }
+    forward-focus: button;
+}
+
+export component ReaderOsd inherits Rectangle {
+    in property <bool> compact: root.width < 700px;
+    in property <string> title;
+    in property <string> chapter-title;
+    in property <int> page: 1;
+    in property <int> page-count: 0;
+    in property <float> progress: 0;
+    in property <string> mode-label;
+    in property <int> zoom-percent: 100;
+    in property <bool> fit-width: true;
+    in property <bool> fullscreen: false;
+    in property <bool> bookmarked: false;
+    in property <bool> previous-chapter-enabled: true;
+    in property <bool> next-chapter-enabled: true;
+    in property <bool> previous-page-enabled: true;
+    in property <bool> next-page-enabled: true;
+    in property <length> safe-top: 0px;
+    in property <length> safe-bottom: 0px;
+    in property <length> safe-left: 0px;
+    in property <length> safe-right: 0px;
+    callback action(string);
+    callback scrub(float);
+    private property <length> gutter: root.compact ? 12px : 18px;
+    private property <length> rail-height: root.compact ? 190px : 170px;
+    Rectangle {
+        x: 0px; y: 0px;
+        width: 100%; height: min(parent.height, root.safe-top + 96px);
+        background: @linear-gradient(0deg, transparent 0%, #00000088 100%);
+    }
+    Rectangle {
+        y: max(0px, root.height - self.height); width: 100%;
+        height: min(root.height, root.rail-height + root.safe-bottom + 64px);
+        background: @linear-gradient(180deg, transparent 0%, #00000088 32%, #000000df 100%);
+    }
+    OsdAction {
+        x: root.safe-left + root.gutter; y: root.safe-top + 12px;
+        width: 44px;
+        label: @tr("Back"); glyph: "back"; show-label: false; surface: true;
+        clicked => { root.action("back"); }
+    }
+    HorizontalLayout {
+        x: max(root.safe-left + 64px, root.width - root.safe-right - root.gutter - 96px);
+        y: root.safe-top + 12px; width: 96px; height: 44px; spacing: 8px;
+        OsdAction { label: @tr("Bookmark chapter"); glyph: "bookmark"; show-label: false; surface: true; active: root.bookmarked; clicked => { root.action("bookmark"); } }
+        OsdAction { label: @tr("More"); glyph: "more"; show-label: false; surface: true; clicked => { root.action("more"); } }
+    }
+    rail := Rectangle {
+        x: root.safe-left + root.gutter;
+        y: max(root.safe-top + 68px, root.height - root.safe-bottom - root.rail-height);
+        width: max(0px, root.width - root.safe-left - root.safe-right - 2 * root.gutter);
+        height: root.rail-height;
+        // Consume gaps in the overlay's control lane without covering the page.
+        TouchArea { }
+        Text {
+            x: root.compact ? 4px : 8px; y: 0px; width: max(0px, parent.width - 16px); height: 26px;
+            text: root.title; color: Theme.current.text_bright; font-size: 20px; font-weight: 600; overflow: elide;
+        }
+        Text {
+            x: root.compact ? 4px : 8px; y: 28px; width: max(0px, parent.width - 16px); height: 22px;
+            text: @tr("{0} · Page {1} of {2}", root.chapter-title, root.page, root.page-count);
+            color: Theme.current.text_player_caption; font-size: 14px; overflow: elide;
+        }
+        if root.compact: HorizontalLayout {
+            x: 0px; y: 52px; width: 100%; height: 44px; spacing: 8px;
+            OsdAction { label: @tr("Previous chapter"); glyph: "previous-chapter"; show-label: false; enabled: root.previous-chapter-enabled; clicked => { root.action("previous-chapter"); } }
+            MiniSlider {
+                name: @tr("Chapter progress"); value: root.progress; minimum: 0; maximum: 1; step: 0.001;
+                changed(v) => { root.scrub(v); }
+            }
+            OsdAction { label: @tr("Next chapter"); glyph: "next-chapter"; show-label: false; enabled: root.next-chapter-enabled; clicked => { root.action("next-chapter"); } }
+        }
+        if !root.compact: MiniSlider {
+            x: 8px; y: 48px; width: max(0px, parent.width - 16px);
+            name: @tr("Chapter progress"); value: root.progress; minimum: 0; maximum: 1; step: 0.001;
+            changed(v) => { root.scrub(v); }
+        }
+        if root.compact: HorizontalLayout {
+            x: 0px; y: 100px; width: 100%; height: 80px; spacing: 0px;
+            OsdAction { label: @tr("Chapters"); glyph: "chapters"; clicked => { root.action("chapters"); } }
+            OsdAction { label: @tr("Mode"); glyph: "mode"; subtitle: root.mode-label; clicked => { root.action("mode"); } }
+            OsdAction { label: @tr("Settings"); glyph: "settings"; clicked => { root.action("settings"); } }
+            OsdAction { label: @tr("More"); glyph: "more"; clicked => { root.action("more"); } }
+        }
+        if !root.compact: HorizontalLayout {
+            x: 0px; y: 92px; width: 100%; height: 66px; spacing: 0px;
+            HorizontalLayout {
+                alignment: start; spacing: 0px; vertical-stretch: 0;
+                OsdAction { label: @tr("Previous chapter"); glyph: "previous-chapter"; show-label: false; enabled: root.previous-chapter-enabled; clicked => { root.action("previous-chapter"); } }
+                OsdAction { label: @tr("Previous page"); glyph: "previous-page"; show-label: false; enabled: root.previous-page-enabled; clicked => { root.action("previous-page"); } }
+                Text { min-width: 56px; preferred-width: 70px; height: 44px; text: root.page + " / " + root.page-count; horizontal-alignment: center; vertical-alignment: center; color: Theme.current.text_player_caption; font-size: 14px; }
+                OsdAction { label: @tr("Next page"); glyph: "next-page"; show-label: false; enabled: root.next-page-enabled; clicked => { root.action("next-page"); } }
+                OsdAction { label: @tr("Next chapter"); glyph: "next-chapter"; show-label: false; enabled: root.next-chapter-enabled; clicked => { root.action("next-chapter"); } }
+            }
+            Rectangle { min-width: 0px; horizontal-stretch: 1; }
+            OsdAction { label: @tr("Fit width"); glyph: "fit-width"; active: root.fit-width; clicked => { root.action("fit-width"); } }
+            OsdAction { label: root.zoom-percent + "%"; glyph: "zoom"; clicked => { root.action("zoom"); } }
+            OsdAction { label: @tr("Screencap"); glyph: "screencap"; clicked => { root.action("screencap"); } }
+            OsdAction { label: @tr("Chapters"); glyph: "chapters"; clicked => { root.action("chapters"); } }
+            OsdAction { label: @tr("Settings"); glyph: "settings"; clicked => { root.action("settings"); } }
+            OsdAction { label: @tr("Fullscreen"); glyph: root.fullscreen ? "fullscreen-exit" : "fullscreen"; clicked => { root.action("fullscreen"); } }
+        }
+    }
+}

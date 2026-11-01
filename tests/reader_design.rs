@@ -634,6 +634,11 @@ fn poster_layout_timelines_chapters_and_reader_controls() {
         "Back restores the source catalogue viewport"
     );
     // A chapter starts immersive, and controls overlay rather than resize it.
+    // Input routing lives in Controller; this layout fixture uses tap-to-toggle.
+    ui.on_reader_tap({
+        let weak = ui.as_weak();
+        move |_, _| weak.unwrap().invoke_toggle_reader_osd()
+    });
     let immersive = Rc::new(Cell::new(false));
     ui.on_immersive_changed({
         let immersive = immersive.clone();
@@ -651,7 +656,7 @@ fn poster_layout_timelines_chapters_and_reader_controls() {
     assert!(!ui.get_reader_osd());
     assert!(immersive.get());
     assert!(
-        ElementHandle::find_by_accessible_label(&ui, "Options")
+        ElementHandle::find_by_accessible_label(&ui, "Settings")
             .next()
             .is_none()
     );
@@ -665,7 +670,7 @@ fn poster_layout_timelines_chapters_and_reader_controls() {
     assert!(ui.get_reader_osd());
     assert!(!immersive.get());
     assert_eq!(reader.size().height, initial_height);
-    button(&ui, "Options").invoke_accessible_default_action();
+    button(&ui, "Settings").invoke_accessible_default_action();
     settle();
     assert_eq!(reader.size().height, initial_height);
     ui.invoke_toggle_reader_osd();

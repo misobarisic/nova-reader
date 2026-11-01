@@ -22,7 +22,7 @@ fn per_series_manual_modes_migrate_and_survive_restart_without_progress_override
         nova_storage::init_at(std::path::Path::new(&std::env::var(DIRECTORY).unwrap()));
         match phase.as_str() {
             "write" => {
-                assert_eq!(reader_modes::load(&a, None).unwrap(), ModeChoice::Automatic);
+                assert_eq!(reader_modes::load(&a, None).unwrap(), ModeChoice::Default);
                 reader_modes::save(&a, ModeChoice::Manual(ReadingMode::RightToLeft)).unwrap();
                 reader_modes::save(&b, ModeChoice::Manual(ReadingMode::Webtoon)).unwrap();
                 assert_eq!(
@@ -44,11 +44,11 @@ fn per_series_manual_modes_migrate_and_survive_restart_without_progress_override
                     ModeChoice::Manual(ReadingMode::Vertical)
                 );
                 // A completed async chapter-open must reread, not use this old
-                // Automatic snapshot after a newer manual choice was saved.
+                // Default snapshot after a newer manual choice was saved.
                 let stale = reader_modes::load(&SeriesId::new("late", "same-local"), None).unwrap();
                 let late = SeriesId::new("late", "same-local");
                 reader_modes::save(&late, ModeChoice::Manual(ReadingMode::LeftToRight)).unwrap();
-                assert_eq!(stale, ModeChoice::Automatic);
+                assert_eq!(stale, ModeChoice::Default);
                 assert_eq!(
                     reader_modes::load(&late, None)
                         .unwrap()
@@ -82,7 +82,7 @@ fn per_series_manual_modes_migrate_and_survive_restart_without_progress_override
                     nova_storage::try_set_str(&key, raw).unwrap();
                     assert_eq!(
                         reader_modes::load(&invalid, Some(ReadingMode::Vertical)).unwrap(),
-                        ModeChoice::Automatic
+                        ModeChoice::Default
                     );
                     assert_eq!(
                         nova_storage::try_get_str(&key).unwrap().as_deref(),
@@ -143,7 +143,7 @@ fn automatic_option_and_manual_indicator_remain_reachable_on_small_viewports() {
         settle();
         ui.set_reader_osd(true);
         settle();
-        button(&ui, "Options").invoke_accessible_default_action();
+        button(&ui, "Settings").invoke_accessible_default_action();
         settle();
         let picker = ElementHandle::find_by_accessible_label(&ui, "Reading mode")
             .find(|e| e.accessible_role() == Some(AccessibleRole::Combobox))
@@ -163,12 +163,21 @@ fn automatic_option_and_manual_indicator_remain_reachable_on_small_viewports() {
         ui.set_reader_mode_choice(2);
         ui.set_reading_mode(2);
         settle();
-        // The manual indicator is content in a scrollable Options panel;
-        // it must exist independently of chapter progress or image loading.
-        let captions =
-            ElementHandle::find_by_accessible_label(&ui, "Manual · saved for this series").count();
-        assert!(captions > 0);
-        button(&ui, "Options").invoke_accessible_default_action();
+        // The picker reflects the saved series choice independently of page
+        // progress, and keeps inheritance separate from explicit Automatic.
+        let picker = ElementHandle::find_by_accessible_label(&ui, "Reading mode")
+            .find(|e| e.accessible_role() == Some(AccessibleRole::Combobox))
+            .unwrap();
+        assert_eq!(picker.accessible_value().as_deref(), Some("Right to left"));
+        picker.invoke_accessible_default_action();
+        settle();
+        assert!(
+            ElementHandle::find_by_accessible_label(&ui, "Default (Automatic)")
+                .next()
+                .is_some()
+        );
+        button(&ui, "Automatic").invoke_accessible_default_action();
+        button(&ui, "Close reader settings").invoke_accessible_default_action();
         settle();
     }
 }

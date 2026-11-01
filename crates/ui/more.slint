@@ -4,6 +4,7 @@ import { Theme, Anim, SettingsStyle } from "@NovaUiShared";
 import { SettingsCard } from "@NovaUiBase/settings-controls.slint";
 import { ScrollView } from "@NovaUiBase/scrollview.slint";
 import { DisplaySettings } from "display-settings.slint";
+import { ReaderSettingsForm } from "reader-settings.slint";
 import { CaptureSettingsPage } from "capture-settings.slint";
 import { ImageStorageSettingsPage } from "image-storage-settings.slint";
 import { ThemeSettings, MotionSettings } from "theme-settings.slint";
@@ -48,7 +49,7 @@ export component MorePage inherits Rectangle {
     }
     changed narrow => { root.choice = max(root.narrow ? 1 : 2, root.choice); }
     private property <bool> local-open: root.section >= 9;
-    private property <bool> detail-open: root.section == 11 || root.section == 12 || root.section == 14 || root.section == 15 || root.section == 16 || root.section == 17 || root.section == 18;
+    private property <bool> detail-open: root.section == 11 || root.section == 12 || root.section == 14 || root.section == 15 || root.section == 16 || root.section == 17 || root.section == 18 || root.section == 19;
     private property <int> child-section: 9;
     private property <int> detail-section: 11;
     private property <bool> entered: false;
@@ -250,6 +251,10 @@ export component MorePage inherits Rectangle {
                     if root.child-section == 10: VerticalLayout {
                         spacing: 12px;
                         SettingsCard { MenuLink {
+                            interactive: root.child-active; title: @tr("Reader"); subtitle: @tr("Reading defaults, navigation and image adjustments"); icon-kind: 4;
+                            picked => { root.navigate(19); }
+                        } }
+                        SettingsCard { MenuLink {
                             interactive: root.child-active; title: @tr("Theme"); subtitle: @tr("Accent color, backgrounds and card styling"); icon-kind: 3;
                             picked => { root.navigate(14); }
                         } }
@@ -314,7 +319,14 @@ export component MorePage inherits Rectangle {
         opacity: root.alpha * root.sub-alpha;
         detail-scope := FocusScope {
             width: parent.width; height: parent.height; enabled: root.detail-active;
+            if root.detail-section == 19: VerticalLayout {
+                padding: 18px; spacing: 12px;
+                PageHeader { title: @tr("Reader"); narrow: root.narrow; show-back: true; back => { if root.detail-active { root.navigate(10); } } }
+                if root.status != "": Text { text: root.status; color: Theme.current.text_settings; wrap: word-wrap; }
+                reader-defaults := ReaderSettingsForm { global-settings: true; interactive: root.detail-active; min-height: 0px; vertical-stretch: 1; }
+            }
             detail-scroll := ScrollView {
+                visible: root.detail-section != 19;
                 width: parent.width; height: parent.height;
                 mouse-drag-pan-enabled: true; content-width: self.visible-width;
                 VerticalLayout {

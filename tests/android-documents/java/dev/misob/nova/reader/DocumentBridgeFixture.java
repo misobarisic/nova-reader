@@ -173,6 +173,17 @@ public class DocumentBridgeFixture {
         catch (java.io.IOException expected) { }
         source.delete();return directory.listFiles().length<=8;
     }
+    public static void resume() { current.onResume(); }
+    public static void pause() { current.onPause(); }
+    public static void seedKeepAwake() { current.getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON); }
+    public static void seedReaderBaseline() {
+        current.setRequestedOrientation(8);
+        current.getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+    }
+    public static int orientation() { return current.getRequestedOrientation(); }
+    public static boolean keepAwake() { return (current.getWindow().flags()&WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)!=0; }
+    public static boolean previousKeepAwake() { return (previous.getWindow().flags()&WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)!=0; }
+    public static int cutoutMode() { return current.getWindow().getAttributes().layoutInDisplayCutoutMode; }
     public static void setApi(int api) { Build.VERSION.SDK_INT=api; }
     private static boolean statusHidden(ReaderActivity activity) {
         Window window=activity.getWindow();

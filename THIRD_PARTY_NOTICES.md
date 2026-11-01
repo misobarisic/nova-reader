@@ -309,3 +309,11 @@ The full applicable license follows.
    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
    See the License for the specific language governing permissions and
    limitations under the License.
+
+## Mihon tap navigation
+
+Tap regions and viewer direction semantics in `src/reader_navigation.rs` adapt
+Mihon v0.21.3, commit `feadad5e1e2bf638be6e2ca317d11657b09d4596`,
+Copyright Tachiyomi and Mihon contributors, under Apache-2.0. Source paths and
+Nova adaptations are retained in the module header. The Apache-2.0 license
+reproduced above also applies to this material. No upstream Kotlin executes.

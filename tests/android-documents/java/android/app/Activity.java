@@ -9,7 +9,12 @@ public class Activity extends android.content.Context {
     public static int launchedRequest;
     public boolean changing;
     private boolean destroyed;
+    private int requestedOrientation=-1;
     private final Window window=new Window();
+    public int getRequestedOrientation() { return requestedOrientation; }
+    public void setRequestedOrientation(int orientation) { requestedOrientation=orientation; }
+    protected void onPause() { }
+    protected void onResume() { }
     public Window getWindow() { return window; }
     public void onWindowFocusChanged(boolean hasFocus) { }
     public boolean isFinishing() { return false; }

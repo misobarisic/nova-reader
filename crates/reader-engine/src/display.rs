@@ -36,6 +36,288 @@ pub struct DisplayWindow {
     pub plan: DisplayWindowPlan,
 }
 
+/// Immutable settings for a display request. They never change encoded bytes,
+/// downloaded originals, or the decoder's cached source pixels. Callers must
+/// include this snapshot in their window/tile identity.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DisplayOptions {
+    pub crop_borders: bool,
+    pub split_wide: bool,
+    pub rotate_wide: bool,
+    pub flip_wide: bool,
+    pub rtl: bool,
+    /// Rotate the composed virtual page 180 degrees (desktop reverse portrait).
+    pub reverse_page: bool,
+    pub color_filter: bool,
+    pub filter_color: u32,
+    pub filter_intensity: u8,
+    pub grayscale: bool,
+    pub invert_colors: bool,
+}
+impl DisplayOptions {
+    fn has_filters(self) -> bool {
+        (self.color_filter && self.filter_intensity > 0) || self.grayscale || self.invert_colors
+    }
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PageRotation {
+    #[default]
+    None,
+    Clockwise,
+    CounterClockwise,
+}
+/// Geometry of the virtual display image, before output-width resampling.
+/// Split spreads are stacked in reading order; each half occupies half_height
+/// rows. Coordinates below are pixel centers, from zero through dimension-1.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PagePresentation {
+    pub source: PageDimensions,
+    pub cropped: PageDimensions,
+    pub effective: PageDimensions,
+    pub crop_x: u32,
+    pub crop_y: u32,
+    pub split: bool,
+    pub half_height: u32,
+    pub rotation: PageRotation,
+    pub rtl: bool,
+    pub reverse_page: bool,
+    /// Original top-left pixel after filters, stable across viewport windows.
+    pub background_color: [u8; 4],
+}
+impl PagePresentation {
+    fn new(source: PageDimensions, crop: CropRect, options: DisplayOptions) -> Result<Self> {
+        let cropped = PageDimensions {
+            width: crop.width,
+            height: crop.height,
+        };
+        let split = options.split_wide && cropped.width > cropped.height;
+        let rotation = if !split && options.rotate_wide && cropped.width > cropped.height {
+            if options.flip_wide {
+                PageRotation::CounterClockwise
+            } else {
+                PageRotation::Clockwise
+            }
+        } else {
+            PageRotation::None
+        };
+        let effective = if split {
+            PageDimensions {
+                width: cropped.width.div_ceil(2),
+                height: cropped.height.checked_mul(2).ok_or(Error::Limit)?,
+            }
+        } else if rotation != PageRotation::None {
+            PageDimensions {
+                width: cropped.height,
+                height: cropped.width,
+            }
+        } else {
+            cropped
+        };
+        Ok(Self {
+            source,
+            cropped,
+            effective,
+            crop_x: crop.x,
+            crop_y: crop.y,
+            split,
+            half_height: if split { cropped.height } else { 0 },
+            rotation,
+            rtl: options.rtl,
+            reverse_page: options.reverse_page,
+            background_color: [255; 4],
+        })
+    }
+    fn is_identity(self) -> bool {
+        self.crop_x == 0
+            && self.crop_y == 0
+            && self.source == self.cropped
+            && !self.split
+            && self.rotation == PageRotation::None
+            && !self.reverse_page
+    }
+    fn source_pixel(self, x: u32, y: u32) -> (u32, u32) {
+        let (x, y) = if self.reverse_page {
+            (self.effective.width - 1 - x, self.effective.height - 1 - y)
+        } else {
+            (x, y)
+        };
+        let (x, y) = if self.split {
+            let right = (y >= self.half_height) != self.rtl;
+            let left_width = self.cropped.width.div_ceil(2);
+            let offset = if right { left_width } else { 0 };
+            let width = if right {
+                self.cropped.width - left_width
+            } else {
+                left_width
+            };
+            (x.min(width - 1) + offset, y % self.half_height)
+        } else {
+            match self.rotation {
+                PageRotation::None => (x, y),
+                PageRotation::Clockwise => (y, self.cropped.height - 1 - x),
+                PageRotation::CounterClockwise => (self.cropped.width - 1 - y, x),
+            }
+        };
+        (x + self.crop_x, y + self.crop_y)
+    }
+    /// Map display pixel centers to the original image (also useful for capture
+    /// and source-coordinate anchors). The shorter odd-width half pads its last
+    /// column, so that single padded column has no unique inverse.
+    pub fn source_coordinate(self, x: f64, y: f64) -> (f64, f64) {
+        let x = x.clamp(0., f64::from(self.effective.width - 1));
+        let y = y.clamp(0., f64::from(self.effective.height - 1));
+        let (x, y) = if self.reverse_page {
+            (
+                f64::from(self.effective.width - 1) - x,
+                f64::from(self.effective.height - 1) - y,
+            )
+        } else {
+            (x, y)
+        };
+        let (x, y) = if self.split {
+            let second = y >= f64::from(self.half_height);
+            let right = second != self.rtl;
+            let left_width = self.cropped.width.div_ceil(2);
+            let offset = if right { left_width } else { 0 };
+            let width = if right {
+                self.cropped.width - left_width
+            } else {
+                left_width
+            };
+            (
+                x.min(f64::from(width - 1)) + f64::from(offset),
+                y % f64::from(self.half_height),
+            )
+        } else {
+            match self.rotation {
+                PageRotation::None => (x, y),
+                PageRotation::Clockwise => (y, f64::from(self.cropped.height - 1) - x),
+                PageRotation::CounterClockwise => (f64::from(self.cropped.width - 1) - y, x),
+            }
+        };
+        (x + f64::from(self.crop_x), y + f64::from(self.crop_y))
+    }
+    /// Inverse source-to-display mapping for source-coordinate anchors.
+    pub fn display_coordinate(self, x: f64, y: f64) -> (f64, f64) {
+        let x = (x - f64::from(self.crop_x)).clamp(0., f64::from(self.cropped.width - 1));
+        let y = (y - f64::from(self.crop_y)).clamp(0., f64::from(self.cropped.height - 1));
+        let (x, y) = if self.split {
+            let left_width = self.cropped.width.div_ceil(2);
+            let right = x >= f64::from(left_width);
+            let second = right != self.rtl;
+            (
+                x - if right { f64::from(left_width) } else { 0. },
+                y + if second {
+                    f64::from(self.half_height)
+                } else {
+                    0.
+                },
+            )
+        } else {
+            match self.rotation {
+                PageRotation::None => (x, y),
+                PageRotation::Clockwise => (f64::from(self.cropped.height - 1) - y, x),
+                PageRotation::CounterClockwise => (y, f64::from(self.cropped.width - 1) - x),
+            }
+        };
+        if self.reverse_page {
+            (
+                f64::from(self.effective.width - 1) - x,
+                f64::from(self.effective.height - 1) - y,
+            )
+        } else {
+            (x, y)
+        }
+    }
+}
+#[derive(Clone, Copy)]
+struct CropRect {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+impl CropRect {
+    fn full(dimensions: PageDimensions) -> Self {
+        Self {
+            x: 0,
+            y: 0,
+            width: dimensions.width,
+            height: dimensions.height,
+        }
+    }
+}
+/// Remove only confidently empty outer bands. An all-blank or sparsely marked
+/// page and tiny gutters keep their original framing. Nonwhite edge details,
+/// including low-alpha ink, stop the scan; transparent RGB values are ignored.
+fn detect_crop(original: &image::RgbaImage) -> CropRect {
+    let full = CropRect::full(PageDimensions {
+        width: original.width(),
+        height: original.height(),
+    });
+    let (mut left, mut top, mut right, mut bottom) = (full.width, full.height, 0, 0);
+    for (x, y, pixel) in original.enumerate_pixels() {
+        if pixel[3] != 0 && pixel.0[..3].iter().any(|channel| *channel < 248) {
+            left = left.min(x);
+            top = top.min(y);
+            right = right.max(x + 1);
+            bottom = bottom.max(y + 1);
+        }
+    }
+    if right <= left
+        || bottom <= top
+        || (right - left) < full.width.div_ceil(2)
+        || (bottom - top) < full.height.div_ceil(2)
+    {
+        return full;
+    }
+    let min_x = (full.width / 100).max(2);
+    let min_y = (full.height / 100).max(2);
+    let x = if left >= min_x { left } else { 0 };
+    let y = if top >= min_y { top } else { 0 };
+    let right = if full.width - right >= min_x {
+        right
+    } else {
+        full.width
+    };
+    let bottom = if full.height - bottom >= min_y {
+        bottom
+    } else {
+        full.height
+    };
+    CropRect {
+        x,
+        y,
+        width: right - x,
+        height: bottom - y,
+    }
+}
+
+/// Describe an already admitted original without allocating a transformed copy.
+/// Capture uses the same crop/rotation/split geometry as the display worker.
+pub fn page_presentation(
+    original: &image::RgbaImage,
+    options: DisplayOptions,
+) -> Result<PagePresentation> {
+    let dimensions = PageDimensions {
+        width: original.width(),
+        height: original.height(),
+    };
+    if dimensions.width == 0 || dimensions.height == 0 {
+        return Err(Error::Layout);
+    }
+    let crop = if options.crop_borders {
+        detect_crop(original)
+    } else {
+        CropRect::full(dimensions)
+    };
+    let mut presentation = PagePresentation::new(dimensions, crop, options)?;
+    let mut background = original.get_pixel(0, 0).0;
+    filter_pixel(&mut background, options);
+    presentation.background_color = background;
+    Ok(presentation)
+}
+
 /// One image worker's most recent windowed original, separate from display
 /// buffers. Moving a viewport must not decompress the same long page again.
 ///
@@ -50,12 +332,64 @@ struct DecodedOriginal {
     bytes: Arc<Vec<u8>>,
     limits: DecodeLimits,
     image: image::RgbaImage,
+    crop: Option<CropRect>,
 }
 impl DisplayDecoder {
     /// Release pixels and their response on reader close, generation changes,
     /// or source revocation, including while the worker has no queued images.
     pub fn clear(&mut self) {
         self.cached = None;
+    }
+
+    fn ensure_original(&mut self, bytes: &Arc<Vec<u8>>, limits: DecodeLimits) -> Result<()> {
+        if !self
+            .cached
+            .as_ref()
+            .is_some_and(|cached| Arc::ptr_eq(&cached.bytes, bytes) && cached.limits == limits)
+        {
+            self.cached = None;
+            self.cached = Some(DecodedOriginal {
+                bytes: bytes.clone(),
+                limits,
+                image: decode_image(bytes, limits)?,
+                crop: None,
+            });
+        }
+        Ok(())
+    }
+
+    /// Obtain virtual geometry before constructing the viewport/window request.
+    /// Cropping scans the admitted original once; filter-only changes reuse it.
+    pub fn presentation(
+        &mut self,
+        bytes: &Arc<Vec<u8>>,
+        limits: DecodeLimits,
+        options: DisplayOptions,
+    ) -> Result<PagePresentation> {
+        let dimensions = inspect_image(bytes, limits)?;
+        self.ensure_original(bytes, limits)?;
+        let crop = if options.crop_borders {
+            let cached = self.cached.as_mut().unwrap();
+            *cached
+                .crop
+                .get_or_insert_with(|| detect_crop(&cached.image))
+        } else {
+            CropRect::full(dimensions)
+        };
+        let mut presentation = PagePresentation::new(dimensions, crop, options)?;
+        let mut background = *self.cached.as_ref().unwrap().image.get_pixel(0, 0);
+        filter_pixel(&mut background.0, options);
+        presentation.background_color = background.0;
+        Ok(presentation)
+    }
+
+    pub fn display_dimensions(
+        &mut self,
+        bytes: &Arc<Vec<u8>>,
+        limits: DecodeLimits,
+        options: DisplayOptions,
+    ) -> Result<PageDimensions> {
+        Ok(self.presentation(bytes, limits, options)?.effective)
     }
 
     pub fn decode_window(
@@ -67,27 +401,52 @@ impl DisplayDecoder {
         end: f64,
         max_bytes: usize,
     ) -> Result<DisplayWindow> {
-        let dimensions = inspect_image(bytes, limits)?;
-        let plan = plan_display_window(dimensions, target_width, start, end, max_bytes)?;
-        if !self
-            .cached
-            .as_ref()
-            .is_some_and(|cached| Arc::ptr_eq(&cached.bytes, bytes) && cached.limits == limits)
-        {
-            self.cached = None;
-            self.cached = Some(DecodedOriginal {
-                bytes: bytes.clone(),
-                limits,
-                image: decode_image(bytes, limits)?,
-            });
-        }
+        self.decode_window_with_options(
+            bytes,
+            limits,
+            target_width,
+            start,
+            end,
+            max_bytes,
+            DisplayOptions::default(),
+        )
+    }
+
+    /// Render only the admitted virtual row window. No transformed full-frame
+    /// copy or float plane is allocated, and the cached original stays exact.
+    #[allow(clippy::too_many_arguments)]
+    pub fn decode_window_with_options(
+        &mut self,
+        bytes: &Arc<Vec<u8>>,
+        limits: DecodeLimits,
+        target_width: u32,
+        start: f64,
+        end: f64,
+        max_bytes: usize,
+        options: DisplayOptions,
+    ) -> Result<DisplayWindow> {
+        let presentation = self.presentation(bytes, limits, options)?;
+        let plan =
+            plan_display_window(presentation.effective, target_width, start, end, max_bytes)?;
+        self.ensure_original(bytes, limits)?;
         let original = &self.cached.as_ref().unwrap().image;
-        // Whole-page display already retains the pixels: transfer ownership
-        // instead of keeping a second copy just for a cache hit.
-        let image = if is_original(plan, original) {
+        // Keep the original for changing filters, but preserve the native
+        // identity transfer fast path used by ordinary full-page display.
+        let image = if presentation.is_identity()
+            && !options.has_filters()
+            && is_original(plan, original)
+        {
             self.cached.take().unwrap().image
         } else {
-            render_window(original, plan, limits)?
+            let mut image = if presentation.is_identity() {
+                render_window(original, plan, limits)?
+            } else {
+                render_presentation(original, presentation, plan, limits)?
+            };
+            if options.has_filters() {
+                apply_filters(&mut image, options);
+            }
+            image
         };
         Ok(DisplayWindow { image, plan })
     }
@@ -273,9 +632,517 @@ fn render_window(
     }
     Ok(image)
 }
+fn render_presentation(
+    original: &image::RgbaImage,
+    presentation: PagePresentation,
+    plan: DisplayWindowPlan,
+    limits: DecodeLimits,
+) -> Result<image::RgbaImage> {
+    if (original.as_raw().len() as u64)
+        .checked_add(plan.byte_len() as u64)
+        .is_none_or(|n| n > limits.max_decoded_bytes)
+    {
+        return Err(Error::Limit);
+    }
+    let mut output = image::RgbaImage::new(plan.width, plan.rows);
+    // Native cropped rows remain contiguous. Copy directly rather than paying
+    // per-pixel transform/sampling cost on a long cropped page.
+    if !presentation.split
+        && !presentation.reverse_page
+        && presentation.rotation == PageRotation::None
+        && plan.width == presentation.effective.width
+        && plan.full_height == presentation.effective.height
+    {
+        let stride = original.width() as usize * 4;
+        let width_bytes = plan.width as usize * 4;
+        for (y, row) in output.as_mut().chunks_exact_mut(width_bytes).enumerate() {
+            let start = (presentation.crop_y as usize + plan.first_row as usize + y) * stride
+                + presentation.crop_x as usize * 4;
+            row.copy_from_slice(&original.as_raw()[start..start + width_bytes]);
+        }
+        return Ok(output);
+    }
+    let width = presentation.effective.width;
+    let height = presentation.effective.height;
+    for (y, row) in output
+        .as_mut()
+        .chunks_exact_mut(plan.width as usize * 4)
+        .enumerate()
+    {
+        let sy = ((f64::from(plan.first_row + y as u32) + 0.5) * f64::from(height)
+            / f64::from(plan.full_height)
+            - 0.5)
+            .clamp(0., f64::from(height - 1));
+        let y0 = sy.floor() as u32;
+        // Clamp interpolation at the split seam: separate paper halves must
+        // never mix the bottom of one page with the top of its neighbour.
+        let section_end = if presentation.split && y0 < presentation.half_height {
+            presentation.half_height - 1
+        } else {
+            height - 1
+        };
+        let y1 = (y0 + 1).min(section_end);
+        let fy = sy - f64::from(y0);
+        for (x, pixel) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            let sx = ((x as f64 + 0.5) * f64::from(width) / f64::from(plan.width) - 0.5)
+                .clamp(0., f64::from(width - 1));
+            let x0 = sx.floor() as u32;
+            let x1 = (x0 + 1).min(width - 1);
+            let fx = sx - f64::from(x0);
+            let sample = |x, y| {
+                let (sx, sy) = presentation.source_pixel(x, y);
+                original.get_pixel(sx, sy)
+            };
+            let (a, b, c, d) = (
+                sample(x0, y0),
+                sample(x1, y0),
+                sample(x0, y1),
+                sample(x1, y1),
+            );
+            for i in 0..4 {
+                pixel[i] = ((f64::from(a[i]) * (1. - fx) + f64::from(b[i]) * fx) * (1. - fy)
+                    + (f64::from(c[i]) * (1. - fx) + f64::from(d[i]) * fx) * fy)
+                    .round()
+                    .clamp(0., 255.) as u8;
+            }
+        }
+    }
+    Ok(output)
+}
+fn apply_filters(image: &mut image::RgbaImage, options: DisplayOptions) {
+    for pixel in image.pixels_mut() {
+        filter_pixel(&mut pixel.0, options);
+    }
+}
+/// Apply the display color chain to one RGBA sample, preserving alpha.
+pub fn filter_pixel(pixel: &mut [u8; 4], options: DisplayOptions) {
+    let intensity = u32::from(options.filter_intensity.min(100));
+    let tint = [
+        (options.filter_color >> 16) & 255,
+        (options.filter_color >> 8) & 255,
+        options.filter_color & 255,
+    ];
+    if options.color_filter && intensity > 0 {
+        for (channel, tint) in pixel[..3].iter_mut().zip(tint) {
+            *channel =
+                ((u32::from(*channel) * (100 - intensity) + tint * intensity + 50) / 100) as u8;
+        }
+    }
+    if options.grayscale {
+        let gray = ((u32::from(pixel[0]) * 299
+            + u32::from(pixel[1]) * 587
+            + u32::from(pixel[2]) * 114
+            + 500)
+            / 1000) as u8;
+        pixel[..3].fill(gray);
+    }
+    if options.invert_colors {
+        for channel in &mut pixel[..3] {
+            *channel = 255 - *channel;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn admitted_original_presentation_matches_worker_and_rejects_empty_images() {
+        assert!(
+            page_presentation(&image::RgbaImage::new(0, 0), DisplayOptions::default()).is_err()
+        );
+        let original = image::RgbaImage::from_fn(20, 16, |x, y| {
+            image::Rgba(if (3..17).contains(&x) && (2..14).contains(&y) {
+                [20, 40, 80, 255]
+            } else {
+                [255; 4]
+            })
+        });
+        let options = DisplayOptions {
+            crop_borders: true,
+            split_wide: true,
+            rtl: true,
+            color_filter: true,
+            filter_color: 0x123456,
+            filter_intensity: 25,
+            grayscale: true,
+            invert_colors: true,
+            ..Default::default()
+        };
+        let presentation = page_presentation(&original, options).unwrap();
+        let mut worker = DisplayDecoder::default();
+        assert_eq!(
+            presentation,
+            worker
+                .presentation(&encoded(&original), DecodeLimits::default(), options)
+                .unwrap()
+        );
+        assert_eq!(
+            presentation.effective,
+            PageDimensions {
+                width: 7,
+                height: 24
+            }
+        );
+    }
+
+    fn encoded(image: &image::RgbaImage) -> Arc<Vec<u8>> {
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        Arc::new(bytes.into_inner())
+    }
+    #[test]
+    fn conservative_crop_retains_details_tiny_gutters_and_blank_framing() {
+        let image = image::RgbaImage::from_fn(20, 16, |x, y| {
+            if (3..17).contains(&x) && (2..14).contains(&y) {
+                image::Rgba([20, 30, 40, 255])
+            } else {
+                image::Rgba([255, 255, 255, 255])
+            }
+        });
+        let bytes = encoded(&image);
+        let options = DisplayOptions {
+            crop_borders: true,
+            ..DisplayOptions::default()
+        };
+        let mut decoder = DisplayDecoder::default();
+        let p = decoder
+            .presentation(&bytes, DecodeLimits::default(), options)
+            .unwrap();
+        assert_eq!(
+            (p.crop_x, p.crop_y, p.cropped.width, p.cropped.height),
+            (3, 2, 14, 12)
+        );
+        let original = decoder.cached.as_ref().unwrap().image.as_ptr();
+        let window = decoder
+            .decode_window_with_options(&bytes, DecodeLimits::default(), 14, 0., 1., 10000, options)
+            .unwrap();
+        assert_eq!(
+            window.image,
+            image::imageops::crop_imm(&image, 3, 2, 14, 12).to_image()
+        );
+        assert_eq!(decoder.cached.as_ref().unwrap().image.as_ptr(), original);
+        assert_eq!(decoder.cached.as_ref().unwrap().image, image);
+        assert_eq!(p.source_coordinate(0., 0.), (3., 2.));
+        assert_eq!(p.display_coordinate(3., 2.), (0., 0.));
+        for mut blank in [
+            image::RgbaImage::from_pixel(20, 16, image::Rgba([255; 4])),
+            image::RgbaImage::from_pixel(20, 16, image::Rgba([17, 19, 29, 0])),
+        ] {
+            let c = detect_crop(&blank);
+            assert_eq!((c.x, c.y, c.width, c.height), (0, 0, 20, 16));
+            blank.put_pixel(10, 8, image::Rgba([0, 0, 0, 255]));
+            let c = detect_crop(&blank);
+            assert_eq!((c.x, c.y, c.width, c.height), (0, 0, 20, 16));
+        }
+        let tiny = image::RgbaImage::from_fn(20, 16, |x, y| {
+            if x == 0 || x == 19 || y == 0 || y == 15 {
+                image::Rgba([255; 4])
+            } else {
+                image::Rgba([0, 0, 0, 255])
+            }
+        });
+        let c = detect_crop(&tiny);
+        assert_eq!((c.x, c.y, c.width, c.height), (0, 0, 20, 16));
+        let mut edge = image;
+        edge.put_pixel(0, 8, image::Rgba([0, 0, 0, 1]));
+        assert_eq!(detect_crop(&edge).x, 0, "low-alpha edge ink must survive");
+    }
+    #[test]
+    fn split_and_rotations_map_exact_pixels_and_inverse_coordinates() {
+        let source =
+            image::RgbaImage::from_fn(5, 2, |x, y| image::Rgba([(x + y * 5) as u8, 0, 0, 255]));
+        let dimensions = PageDimensions {
+            width: 5,
+            height: 2,
+        };
+        for rtl in [false, true] {
+            let options = DisplayOptions {
+                split_wide: true,
+                rotate_wide: true,
+                rtl,
+                ..DisplayOptions::default()
+            };
+            let p = PagePresentation::new(dimensions, CropRect::full(dimensions), options).unwrap();
+            assert_eq!(p.rotation, PageRotation::None);
+            assert_eq!(
+                p.effective,
+                PageDimensions {
+                    width: 3,
+                    height: 4
+                }
+            );
+            let result = render_presentation(
+                &source,
+                p,
+                DisplayWindowPlan {
+                    width: 3,
+                    full_height: 4,
+                    first_row: 0,
+                    rows: 4,
+                },
+                DecodeLimits::default(),
+            )
+            .unwrap();
+            let expected = if rtl {
+                [3, 4, 4, 8, 9, 9, 0, 1, 2, 5, 6, 7]
+            } else {
+                [0, 1, 2, 5, 6, 7, 3, 4, 4, 8, 9, 9]
+            };
+            assert_eq!(result.pixels().map(|p| p[0]).collect::<Vec<_>>(), expected);
+            for y in 0..2 {
+                for x in 0..5 {
+                    let (dx, dy) = p.display_coordinate(f64::from(x), f64::from(y));
+                    assert_eq!(p.source_coordinate(dx, dy), (f64::from(x), f64::from(y)));
+                }
+            }
+        }
+        for flip in [false, true] {
+            let options = DisplayOptions {
+                rotate_wide: true,
+                flip_wide: flip,
+                ..DisplayOptions::default()
+            };
+            let p = PagePresentation::new(dimensions, CropRect::full(dimensions), options).unwrap();
+            let result = render_presentation(
+                &source,
+                p,
+                DisplayWindowPlan {
+                    width: 2,
+                    full_height: 5,
+                    first_row: 0,
+                    rows: 5,
+                },
+                DecodeLimits::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                result,
+                if flip {
+                    image::imageops::rotate270(&source)
+                } else {
+                    image::imageops::rotate90(&source)
+                }
+            );
+            for y in 0..2 {
+                for x in 0..5 {
+                    let (dx, dy) = p.display_coordinate(f64::from(x), f64::from(y));
+                    assert_eq!(p.source_coordinate(dx, dy), (f64::from(x), f64::from(y)));
+                }
+            }
+        }
+    }
+    #[test]
+    fn reverse_composes_crop_split_rotation_filters_and_inverse_coordinates() {
+        let original = image::RgbaImage::from_fn(12, 8, |x, y| {
+            if (2..10).contains(&x) && (2..6).contains(&y) {
+                image::Rgba([(x + y * 12) as u8, 40, 100, 127])
+            } else {
+                image::Rgba([255; 4])
+            }
+        });
+        let bytes = encoded(&original);
+        let mut decoder = DisplayDecoder::default();
+        for (split, rotate, rtl) in [
+            (false, false, false),
+            (true, false, false),
+            (true, true, true),
+            (false, true, false),
+            (false, true, true),
+        ] {
+            let base = DisplayOptions {
+                crop_borders: true,
+                split_wide: split,
+                rotate_wide: rotate,
+                rtl,
+                color_filter: true,
+                filter_color: 0x122fbc,
+                filter_intensity: 25,
+                invert_colors: true,
+                ..DisplayOptions::default()
+            };
+            let normal = decoder
+                .decode_window_with_options(
+                    &bytes,
+                    DecodeLimits::default(),
+                    20,
+                    0.,
+                    1.,
+                    10000,
+                    base,
+                )
+                .unwrap();
+            let options = DisplayOptions {
+                reverse_page: true,
+                ..base
+            };
+            let reversed = decoder
+                .decode_window_with_options(
+                    &bytes,
+                    DecodeLimits::default(),
+                    20,
+                    0.,
+                    1.,
+                    10000,
+                    options,
+                )
+                .unwrap();
+            assert_eq!(reversed.image, image::imageops::rotate180(&normal.image));
+            let presentation = decoder
+                .presentation(&bytes, DecodeLimits::default(), options)
+                .unwrap();
+            assert!(!presentation.is_identity());
+            for y in 2..6 {
+                for x in 2..10 {
+                    let (dx, dy) = presentation.display_coordinate(f64::from(x), f64::from(y));
+                    assert_eq!(
+                        presentation.source_coordinate(dx, dy),
+                        (f64::from(x), f64::from(y))
+                    );
+                }
+            }
+            let plan = DisplayWindowPlan {
+                width: 3,
+                full_height: presentation.effective.height * 3 / presentation.effective.width,
+                first_row: 0,
+                rows: presentation.effective.height * 3 / presentation.effective.width,
+            };
+            let full = render_presentation(&original, presentation, plan, DecodeLimits::default())
+                .unwrap();
+            if plan.rows > 1 {
+                let partial = DisplayWindowPlan {
+                    first_row: 1,
+                    rows: plan.rows - 1,
+                    ..plan
+                };
+                assert_eq!(
+                    render_presentation(&original, presentation, partial, DecodeLimits::default())
+                        .unwrap(),
+                    image::imageops::crop_imm(&full, 0, 1, 3, partial.rows).to_image()
+                );
+            }
+        }
+    }
+    #[test]
+    fn filters_preserve_alpha_and_cached_original_across_settings_changes() {
+        let original = image::RgbaImage::from_fn(4, 8, |x, y| {
+            image::Rgba([20 + x as u8, 80, 160, y as u8 * 30])
+        });
+        let bytes = encoded(&original);
+        let mut decoder = DisplayDecoder::default();
+        let options = DisplayOptions {
+            color_filter: true,
+            filter_color: 0xff0000,
+            filter_intensity: 50,
+            ..DisplayOptions::default()
+        };
+        let tinted = decoder
+            .decode_window_with_options(&bytes, DecodeLimits::default(), 4, 0., 1., 1000, options)
+            .unwrap();
+        assert_eq!(tinted.image.get_pixel(0, 1).0, [138, 40, 80, 30]);
+        assert_eq!(
+            decoder
+                .presentation(&bytes, DecodeLimits::default(), options)
+                .unwrap()
+                .background_color,
+            [138, 40, 80, 0]
+        );
+        let ptr = decoder.cached.as_ref().unwrap().image.as_ptr();
+        let next = DisplayOptions {
+            grayscale: true,
+            invert_colors: true,
+            ..DisplayOptions::default()
+        };
+        let filtered = decoder
+            .decode_window_with_options(&bytes, DecodeLimits::default(), 4, 0., 1., 1000, next)
+            .unwrap();
+        assert_eq!(filtered.image.get_pixel(0, 1).0, [184, 184, 184, 30]);
+        assert_eq!(decoder.cached.as_ref().unwrap().image.as_ptr(), ptr);
+        assert_eq!(decoder.cached.as_ref().unwrap().image, original);
+        let mut transparent = image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 0]));
+        apply_filters(
+            &mut transparent,
+            DisplayOptions {
+                color_filter: true,
+                filter_intensity: 255,
+                filter_color: 0x123456,
+                ..DisplayOptions::default()
+            },
+        );
+        assert_eq!(transparent.get_pixel(0, 0).0, [0x12, 0x34, 0x56, 0]);
+    }
+    #[test]
+    fn transformed_resampling_is_bit_exact_on_overlapping_windows_and_phase_bounded() {
+        let original = image::RgbaImage::from_fn(43, 121, |x, y| {
+            if !(3..40).contains(&x) || !(4..117).contains(&y) {
+                image::Rgba([255; 4])
+            } else {
+                image::Rgba([
+                    (x * 17 + y * 3) as u8,
+                    (x + y * 13) as u8,
+                    (x * 7 + y * 11) as u8,
+                    (x * 5 + y) as u8,
+                ])
+            }
+        });
+        let dimensions = PageDimensions {
+            width: 43,
+            height: 121,
+        };
+        let p = PagePresentation::new(
+            dimensions,
+            detect_crop(&original),
+            DisplayOptions {
+                crop_borders: true,
+                ..DisplayOptions::default()
+            },
+        )
+        .unwrap();
+        let full = DisplayWindowPlan {
+            width: 19,
+            full_height: p.effective.height * 19 / p.effective.width,
+            first_row: 0,
+            rows: p.effective.height * 19 / p.effective.width,
+        };
+        let expected = render_presentation(&original, p, full, DecodeLimits::default()).unwrap();
+        for first_row in [0, 7, 19] {
+            let plan = DisplayWindowPlan {
+                first_row,
+                rows: full.full_height - first_row,
+                ..full
+            };
+            let result = render_presentation(&original, p, plan, DecodeLimits::default()).unwrap();
+            assert_eq!(
+                result,
+                image::imageops::crop_imm(&expected, 0, first_row, 19, plan.rows).to_image()
+            );
+        }
+        let limits = DecodeLimits {
+            max_decoded_bytes: original.as_raw().len() as u64 + full.byte_len() as u64 - 1,
+            ..DecodeLimits::default()
+        };
+        assert!(matches!(
+            render_presentation(&original, p, full, limits),
+            Err(Error::Limit)
+        ));
+        let bytes = encoded(&original);
+        let mut decoder = DisplayDecoder::default();
+        assert!(matches!(
+            decoder.decode_window_with_options(
+                &bytes,
+                DecodeLimits::default(),
+                19,
+                0.,
+                1.,
+                1,
+                DisplayOptions {
+                    crop_borders: true,
+                    ..DisplayOptions::default()
+                }
+            ),
+            Err(Error::Limit)
+        ));
+    }
     fn pattern(x: u32, y: u32) -> image::Rgba<u8> {
         if x.is_multiple_of(9) || y.is_multiple_of(13) || (x % 9 == 6 && y % 13 < 7) {
             image::Rgba([0, 0, 0, 255])

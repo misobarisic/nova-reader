@@ -17,8 +17,13 @@ pub mod image_storage;
 mod metadata_refresh;
 mod paths;
 mod progress_checkpoint;
+#[cfg(not(target_os = "android"))]
+mod reader_desktop;
 mod reader_export;
 pub mod reader_modes;
+mod reader_navigation;
+pub mod reader_settings;
+mod reader_settings_ui;
 pub mod reading_preferences;
 pub mod services;
 mod source_browser;

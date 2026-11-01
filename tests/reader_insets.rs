@@ -53,7 +53,7 @@ fn reader_art_reaches_status_area_while_controls_and_normal_pages_respect_insets
     settle();
     insets(&ui, 32., 24., 0., 0.);
     let viewport = geometry(&element(&ui, "AppWindow::reader"));
-    assert_eq!(viewport, (0., 0., 390., 820.));
+    assert_eq!(viewport, (0., 0., 390., 844.));
     assert_eq!(
         button(&ui, "Page 1 image").absolute_position().y,
         0.,
@@ -63,7 +63,7 @@ fn reader_art_reaches_status_area_while_controls_and_normal_pages_respect_insets
         ui.set_reader_osd(true);
         insets(&ui, 32., 24., 0., 0.);
         assert_eq!(geometry(&element(&ui, "AppWindow::reader")), viewport);
-        assert!(button(&ui, "Back to chapters").absolute_position().y >= 40.);
+        assert!(button(&ui, "Back").absolute_position().y >= 40.);
         ui.set_reader_osd(false);
         // Some devices retain a cutout inset after hiding the status bar.
         insets(&ui, 32., 24., 0., 0.);
@@ -138,15 +138,15 @@ fn reader_art_reaches_status_area_while_controls_and_normal_pages_respect_insets
     insets(&ui, 0., 24., 44., 0.);
     assert_eq!(
         geometry(&element(&ui, "AppWindow::reader")),
-        (0., 0., 844., 366.)
+        (0., 0., 844., 390.)
     );
     assert!(button(&ui, "Page 1 image").absolute_position().x < 44.);
     ui.set_reader_osd(true);
     settle();
-    assert!(button(&ui, "Back to chapters").absolute_position().x >= 52.);
+    assert!(button(&ui, "Back").absolute_position().x >= 52.);
     assert_eq!(
         geometry(&element(&ui, "AppWindow::reader")),
-        (0., 0., 844., 366.)
+        (0., 0., 844., 390.)
     );
     // Downloads exposes the same chapter action with usable phone targets.
     let chosen = std::rc::Rc::new(std::cell::RefCell::new(None));

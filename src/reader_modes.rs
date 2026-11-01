@@ -6,8 +6,9 @@
 //! defaultReaderType and its tag/source helpers (lines 166–239).
 //! Copyright 2015 Javier Tomás; Tachiyomi/TachiyomiJ2K contributors.
 //! Upstream Apache-2.0; see docs/reader-modes.md and packaged third-party notices.
-//! Nova changes: Rust port, explicit Automatic option, composite series keys,
-//! fallible atomic persistence, and no global preference or chapter-mode writes.
+//! Nova changes: Rust port, explicit Default/Automatic options, composite series
+//! keys, fallible persistence, device-default inheritance without progress writes,
+//! and explicit RTL for recognized manga tags while retaining unknown fallback.
 use reader_domain::{ReadingMode, SeriesId};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
@@ -17,19 +18,50 @@ static SERIAL: Mutex<()> = Mutex::new(());
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModeChoice {
     #[default]
+    Default,
     Automatic,
     Manual(ReadingMode),
+    LongStripWithGaps,
 }
 impl ModeChoice {
     pub fn resolve(self, automatic: ReadingMode) -> ReadingMode {
         match self {
+            Self::Default => self
+                .resolve_with_default(crate::reader_settings::snapshot().default_mode, automatic),
             Self::Automatic => automatic,
+            Self::LongStripWithGaps => ReadingMode::Webtoon,
             Self::Manual(mode) => mode,
         }
     }
+    /// Pure resolution keeps Automatic independent of the device default.
+    /// A defensive Default global value resolves automatically rather than cycling.
+    pub fn resolve_with_default(self, global: Self, automatic: ReadingMode) -> ReadingMode {
+        match self.inherit(global) {
+            Self::Default | Self::Automatic => automatic,
+            Self::LongStripWithGaps => ReadingMode::Webtoon,
+            Self::Manual(mode) => mode,
+        }
+    }
+    pub fn inherit(self, global: Self) -> Self {
+        if self == Self::Default { global } else { self }
+    }
+    pub fn is_gapped(self) -> bool {
+        match self {
+            Self::Default => {
+                self.is_gapped_with_default(crate::reader_settings::snapshot().default_mode)
+            }
+            Self::LongStripWithGaps => true,
+            _ => false,
+        }
+    }
+    pub fn is_gapped_with_default(self, global: Self) -> bool {
+        self.inherit(global) == Self::LongStripWithGaps
+    }
     pub fn selection(self) -> i32 {
         match self {
+            Self::Default => 6,
             Self::Automatic => 4,
+            Self::LongStripWithGaps => 5,
             Self::Manual(ReadingMode::Webtoon) => 0,
             Self::Manual(ReadingMode::LeftToRight) => 1,
             Self::Manual(ReadingMode::RightToLeft) => 2,
@@ -43,6 +75,8 @@ impl ModeChoice {
             2 => Self::Manual(ReadingMode::RightToLeft),
             3 => Self::Manual(ReadingMode::Vertical),
             4 => Self::Automatic,
+            5 => Self::LongStripWithGaps,
+            6 => Self::Default,
             _ => return None,
         })
     }
@@ -81,9 +115,9 @@ pub fn load(series: &SeriesId, legacy: Option<ReadingMode>) -> Result<ModeChoice
             Ok(record) if record.schema_version == 1 => Ok(record.choice),
             _ => {
                 eprintln!(
-                    "Nova Reader: invalid reader mode preference; preserving record and using Automatic"
+                    "Nova Reader: invalid reader mode preference; preserving record and using Default"
                 );
-                Ok(ModeChoice::Automatic)
+                Ok(ModeChoice::Default)
             }
         };
     }
@@ -98,7 +132,7 @@ pub fn load(series: &SeriesId, legacy: Option<ReadingMode>) -> Result<ModeChoice
         }
         return Ok(choice);
     }
-    Ok(ModeChoice::Automatic)
+    Ok(ModeChoice::Default)
 }
 fn manga_tag(tag: &str) -> bool {
     matches!(tag, "manga" | "манга" | "jp") || tag.starts_with("japanese")
@@ -118,7 +152,10 @@ fn comic_tag(tag: &str) -> bool {
     matches!(tag, "comic" | "комикс" | "en" | "gb") || tag.starts_with("english")
 }
 /// J2K uses metadata, not page dimensions. No aspect-ratio thresholds are
-/// implied here. An unrecognized series keeps Reader's existing global fallback.
+/// implied here. An unrecognized series keeps Reader's existing domain fallback.
+/// Upstream leaves manga tags unset and normally inherits its RTL default; Reader
+/// makes recognized manga explicit so its legacy Webtoon fallback applies only
+/// to unrecognized metadata, independently of a manual device default.
 pub fn automatic(genres: &[String], source_name: &str, fallback: ReadingMode) -> ReadingMode {
     let tags = genres
         .iter()
@@ -156,6 +193,8 @@ pub fn automatic(genres: &[String], source_name: &str, fallback: ReadingMode) ->
         || (source.contains("manhua") && !tags.iter().any(|tag| manga_tag(tag)))
     {
         ReadingMode::LeftToRight
+    } else if tags.iter().any(|tag| manga_tag(tag)) {
+        ReadingMode::RightToLeft
     } else {
         fallback
     }
@@ -197,6 +236,63 @@ pub fn automatic_for_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fresh_automatic_defaults_classify_manga_without_using_legacy_webtoon_fallback() {
+        let mut state = reader_domain::ReaderState::default();
+        assert_eq!(state.preferences.mode, ReadingMode::Webtoon);
+        let global_manual = ModeChoice::Manual(ReadingMode::Vertical);
+        for (index, genres, source, expected) in [
+            (0, "manga", "Unknown", ReadingMode::RightToLeft),
+            (1, "Japanese comics", "Unknown", ReadingMode::RightToLeft),
+            (2, "Манга", "Unknown", ReadingMode::RightToLeft),
+            (3, "JP", "Unknown", ReadingMode::RightToLeft),
+            (4, "manhwa", "Unknown", ReadingMode::Webtoon),
+            (5, "manhua", "Unknown", ReadingMode::LeftToRight),
+            (6, "action", "Unknown", ReadingMode::Webtoon),
+            (7, "Japanese", "ComicExtra", ReadingMode::RightToLeft),
+            // Retain the pinned classifier's Webtoon and explicit LTR priority.
+            (8, "manga, webtoon", "Unknown", ReadingMode::Webtoon),
+            (9, "Japanese, English", "Unknown", ReadingMode::LeftToRight),
+        ] {
+            let id = SeriesId::new("source", index.to_string());
+            state.series.push(reader_domain::Series {
+                publication_status: Default::default(),
+                id: id.clone(),
+                title: format!("Title {index}"),
+                description: String::new(),
+                authors: vec![],
+                genres: vec![genres.into()],
+                cover_url: None,
+                canonical_url: None,
+            });
+            let automatic = automatic_for_state(&state, &id, Some(source));
+            assert_eq!(automatic, expected, "{genres} / {source}");
+            assert_eq!(
+                ModeChoice::Default.resolve_with_default(ModeChoice::Automatic, automatic),
+                expected
+            );
+            assert_eq!(
+                ModeChoice::Automatic.resolve_with_default(global_manual, automatic),
+                expected
+            );
+            assert_eq!(
+                ModeChoice::Default.resolve_with_default(global_manual, automatic),
+                ReadingMode::Vertical
+            );
+        }
+        // Changing the legacy fallback still affects unknown metadata only.
+        state.preferences.mode = ReadingMode::LeftToRight;
+        assert_eq!(
+            automatic_for_state(&state, &SeriesId::new("source", "0"), Some("Unknown")),
+            ReadingMode::RightToLeft
+        );
+        assert_eq!(
+            automatic_for_state(&state, &SeriesId::new("source", "6"), Some("Unknown")),
+            ReadingMode::LeftToRight
+        );
+    }
+
     fn detect(tags: &[&str], source: &str) -> ReadingMode {
         automatic(
             &tags.iter().map(|s| (*s).into()).collect::<Vec<_>>(),
@@ -275,7 +371,12 @@ mod tests {
             );
         }
         assert_eq!(ModeChoice::from_selection(4), Some(ModeChoice::Automatic));
-        assert!(ModeChoice::from_selection(5).is_none());
+        assert_eq!(
+            ModeChoice::from_selection(5),
+            Some(ModeChoice::LongStripWithGaps)
+        );
+        assert_eq!(ModeChoice::from_selection(6), Some(ModeChoice::Default));
+        assert!(ModeChoice::from_selection(7).is_none());
         assert_ne!(
             key(&SeriesId::new("a", "b:c")),
             key(&SeriesId::new("a:b", "c"))
@@ -284,5 +385,39 @@ mod tests {
             key(&SeriesId::new("a", "same")),
             key(&SeriesId::new("b", "same"))
         );
+    }
+    #[test]
+    fn default_inherits_but_explicit_automatic_bypasses_the_global_choice() {
+        let global = ModeChoice::Manual(ReadingMode::RightToLeft);
+        assert_eq!(ModeChoice::default(), ModeChoice::Default);
+        assert_eq!(
+            ModeChoice::Default.resolve_with_default(global, ReadingMode::Webtoon),
+            ReadingMode::RightToLeft
+        );
+        assert_eq!(
+            ModeChoice::Automatic.resolve_with_default(global, ReadingMode::Webtoon),
+            ReadingMode::Webtoon
+        );
+        assert_eq!(
+            ModeChoice::Default.resolve_with_default(ModeChoice::Automatic, ReadingMode::Vertical),
+            ReadingMode::Vertical
+        );
+        assert_eq!(
+            ModeChoice::Default.resolve_with_default(ModeChoice::Default, ReadingMode::Vertical),
+            ReadingMode::Vertical
+        );
+        assert_eq!(
+            ModeChoice::LongStripWithGaps.resolve_with_default(global, ReadingMode::RightToLeft),
+            ReadingMode::Webtoon
+        );
+        assert!(ModeChoice::Default.is_gapped_with_default(ModeChoice::LongStripWithGaps));
+        assert!(!ModeChoice::Automatic.is_gapped_with_default(ModeChoice::LongStripWithGaps));
+        assert!(ModeChoice::LongStripWithGaps.is_gapped_with_default(global));
+        for index in 0..=6 {
+            assert_eq!(
+                ModeChoice::from_selection(index).unwrap().selection(),
+                index
+            );
+        }
     }
 }

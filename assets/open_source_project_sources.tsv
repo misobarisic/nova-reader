@@ -15,3 +15,5 @@ Nova shared cache (b5cb50325bf1e359811dc73aa85f641687e4ecd3)	GPL-3.0-or-later	ht
 Nova shared image codecs (b5cb50325bf1e359811dc73aa85f641687e4ecd3)	GPL-3.0-or-later	https://github.com/misobarisic/nova-kit/tree/b5cb50325bf1e359811dc73aa85f641687e4ecd3/crates/image
 Keiyoushi Kagane v37 and addon icons (1dfd0bcf25b48cb5bd42d9191918a29072c67a61)	Apache-2.0	https://github.com/keiyoushi/extensions-source/tree/1dfd0bcf25b48cb5bd42d9191918a29072c67a61/src/all/kagane
 JPEG XL decoder jxl-oxide 0.12.6	MIT OR Apache-2.0	https://github.com/tirr-c/jxl-oxide
+Mihon tap navigation maps (feadad5e1e2bf638be6e2ca317d11657b09d4596)	Apache-2.0	https://github.com/mihonapp/mihon/tree/feadad5e1e2bf638be6e2ca317d11657b09d4596/app/src/main/java/eu/kanade/tachiyomi/ui/reader/viewer
+Nova player OSD and idle worker (ac1c981955b812e4766202646aa45bb61321aaf4)	GPL-3.0-or-later	https://github.com/misobarisic/nova/tree/ac1c981955b812e4766202646aa45bb61321aaf4

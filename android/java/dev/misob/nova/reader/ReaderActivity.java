@@ -19,6 +19,7 @@ import android.provider.DocumentsContract;
 import android.provider.OpenableColumns;
 import android.provider.MediaStore;
 import android.content.ContentValues;
+import android.content.pm.ActivityInfo;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowManager;
@@ -53,8 +54,23 @@ public final class ReaderActivity extends NativeActivity {
     private static Request active;
     private static long lastCancelledId;
     private static volatile WeakReference<ReaderActivity> foreground = new WeakReference<>(null);
-    private static volatile boolean readerImmersive;
+    private static final class ReaderPresentation {
+        final boolean reading,immersive,keepAwake,cutout;
+        final int rotation;
+        ReaderPresentation(boolean reading,boolean immersive,int rotation,boolean keepAwake,boolean cutout) {
+            this.reading=reading;this.immersive=immersive;this.rotation=rotation;
+            this.keepAwake=keepAwake;this.cutout=cutout;
+        }
+    }
+    private static volatile ReaderPresentation readerPresentation=new ReaderPresentation(false,false,0,false,true);
     private boolean decorFitsConfigured;
+    private boolean readerWindowActive;
+    private boolean activityResumed;
+    private boolean presentationConfigured;
+    private int normalOrientation;
+    private boolean normalKeepAwake;
+    private boolean normalWakePending;
+    private int normalCutoutMode;
     private static native void nativeDocumentResult(long id, String path, String name, String error);
     private static native void nativeImageConflict(long id,String name);
     private static native boolean nativeImageSaveCurrent(long id);
@@ -98,16 +114,55 @@ public final class ReaderActivity extends NativeActivity {
     }
 
     public static void setReaderImmersive(boolean immersive) {
-        // Keep the latest intent even between activities. Resolve the weak
-        // reference on main so a queued update never touches a destroyed window.
-        readerImmersive=immersive;
+        // Compatibility entry point: only change status-bar visibility.
+        ReaderPresentation current=readerPresentation;
+        readerPresentation=new ReaderPresentation(current.reading,immersive,current.rotation,current.keepAwake,current.cutout);
+        postReaderPresentation();
+    }
+    public static void setReaderPresentation(boolean reading,boolean immersive,int rotation,boolean keepAwake,boolean cutout) {
+        if (rotation<0 || rotation>6) throw new IllegalArgumentException("Unknown reader rotation");
+        readerPresentation=new ReaderPresentation(reading,reading&&immersive,rotation,keepAwake,cutout);
+        postReaderPresentation();
+    }
+    private static void postReaderPresentation() {
+        // Resolve on main and read the latest immutable snapshot, so queued
+        // requests cannot affect a destroyed or superseded Activity window.
         boolean posted=new Handler(Looper.getMainLooper()).post(() -> {
             ReaderActivity activity=foreground.get();
-            if (activity!=null && !activity.isFinishing() && !activity.isDestroyed()) {
-                activity.applyReaderImmersive();
-            }
+            if (activity!=null && !activity.isFinishing() && !activity.isDestroyed()) activity.applyReaderImmersive();
         });
         if (!posted) throw new IllegalStateException("Reader UI thread is unavailable");
+    }
+    private static int readerOrientation(int rotation) {
+        switch(rotation) {
+            case 1:return ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR;
+            case 2:return ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT;
+            case 3:return ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE;
+            case 4:return ActivityInfo.SCREEN_ORIENTATION_PORTRAIT;
+            case 5:return ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE;
+            case 6:return ActivityInfo.SCREEN_ORIENTATION_REVERSE_PORTRAIT;
+            default:return ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED;
+        }
+    }
+    @SuppressWarnings("deprecation")
+    private void applyReaderWindow(ReaderPresentation state,Window window) {
+        if (state.reading && !readerWindowActive) {
+            normalOrientation=getRequestedOrientation();
+            if (!normalWakePending) normalKeepAwake=(window.getAttributes().flags&WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)!=0;
+            if (Build.VERSION.SDK_INT>=28 && presentationConfigured) normalCutoutMode=window.getAttributes().layoutInDisplayCutoutMode;
+            readerWindowActive=true;
+        }
+        if (state.reading) {
+            int orientation=readerOrientation(state.rotation);
+            if (getRequestedOrientation()!=orientation) setRequestedOrientation(orientation);
+            if (activityResumed && state.keepAwake) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        } else if (readerWindowActive) {
+            if (getRequestedOrientation()!=normalOrientation) setRequestedOrientation(normalOrientation);
+            if (activityResumed && normalKeepAwake) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            readerWindowActive=false;
+        }
     }
     private void applyReaderImmersive() {
         applyReaderImmersive(true);
@@ -115,6 +170,8 @@ public final class ReaderActivity extends NativeActivity {
     @SuppressWarnings("deprecation")
     private void applyReaderImmersive(boolean retryOnAttach) {
         Window window=getWindow();
+        ReaderPresentation state=readerPresentation;
+        applyReaderWindow(state,window);
         // Slint reports system-bar/cutout insets to the UI. Keep the native
         // surface behind them in both OSD states so showing controls cannot
         // resize the chapter or reserve a black strip above the image.
@@ -123,9 +180,9 @@ public final class ReaderActivity extends NativeActivity {
         window.setStatusBarColor(Color.TRANSPARENT);
         if (Build.VERSION.SDK_INT>=28) {
             WindowManager.LayoutParams attributes=window.getAttributes();
-            int cutoutMode=Build.VERSION.SDK_INT>=30
-                ?WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
-                :WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+            int cutoutMode=state.reading
+                ?(state.cutout?WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES:WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_NEVER)
+                :normalCutoutMode;
             if (attributes.layoutInDisplayCutoutMode!=cutoutMode) {
                 attributes.layoutInDisplayCutoutMode=cutoutMode;
                 window.setAttributes(attributes);
@@ -146,7 +203,7 @@ public final class ReaderActivity extends NativeActivity {
             if (controller!=null) {
                 controller.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
                 controller.show(WindowInsets.Type.navigationBars());
-                if (readerImmersive) controller.hide(WindowInsets.Type.statusBars());
+                if (state.immersive) controller.hide(WindowInsets.Type.statusBars());
                 else controller.show(WindowInsets.Type.statusBars());
             } else if (retryOnAttach) {
                 // View.post waits for attachment when onCreate has no insets
@@ -162,8 +219,9 @@ public final class ReaderActivity extends NativeActivity {
             int flags=(decor.getSystemUiVisibility()&~View.SYSTEM_UI_FLAG_HIDE_NAVIGATION)
                 |View.SYSTEM_UI_FLAG_LAYOUT_STABLE|View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION|View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN;
             int readerFlags=View.SYSTEM_UI_FLAG_FULLSCREEN|View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY;
-            decor.setSystemUiVisibility(readerImmersive?flags|readerFlags:flags&~readerFlags);
+            decor.setSystemUiVisibility(state.immersive?flags|readerFlags:flags&~readerFlags);
         }
+        presentationConfigured=true;
     }
     @Override public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
@@ -661,10 +719,32 @@ public final class ReaderActivity extends NativeActivity {
     @Override protected void onCreate(Bundle state) {
         foreground=new WeakReference<>(this);
         super.onCreate(state);
+        normalCutoutMode=Build.VERSION.SDK_INT>=30
+            ?WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            :WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
         applyReaderImmersive();
         synchronized(LOCK) {if(active!=null)active.activity=new WeakReference<>(this);}
     }
+    @Override protected void onResume() {
+        super.onResume();
+        activityResumed=true;
+        if (normalWakePending && !readerPresentation.reading) {
+            if (normalKeepAwake) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        }
+        applyReaderImmersive();
+        normalWakePending=false;
+    }
+    @Override protected void onPause() {
+        if (!readerWindowActive) normalKeepAwake=(getWindow().getAttributes().flags&WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)!=0;
+        normalWakePending=true;
+        activityResumed=false;
+        getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        super.onPause();
+    }
     @Override protected void onDestroy() {
+        activityResumed=false;
+        getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         if(foreground.get()==this)foreground=new WeakReference<>(null);
         Request request; synchronized(LOCK){request=active;}
         if(request!=null && request.activity.get()==this && !isChangingConfigurations())cancelDocument(request.id);

@@ -26,6 +26,18 @@ fn library_progress_starts_at_left_in_grid_and_list() {
                     ..Default::default()
                 }])));
                 settle();
+                if completed == 0 {
+                    assert!(
+                        ElementHandle::find_by_element_id(
+                            &ui,
+                            "LibraryCard::library_progress_track"
+                        )
+                        .next()
+                        .is_none(),
+                        "unread titles have no empty progress rail"
+                    );
+                    continue;
+                }
                 let track =
                     ElementHandle::find_by_element_id(&ui, "LibraryCard::library_progress_track")
                         .next()

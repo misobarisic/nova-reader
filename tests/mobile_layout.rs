@@ -106,6 +106,16 @@ fn nova_navigation_more_and_responsive_controls() {
         let step = chapter_step.clone();
         move |value| step.set(value)
     });
+    ui.on_reader_action({
+        let step = chapter_step.clone();
+        let weak = ui.as_weak();
+        move |action| match action.as_str() {
+            "previous-chapter" => step.set(-1),
+            "next-chapter" => step.set(1),
+            "back" | "chapters" => weak.unwrap().set_section(5),
+            _ => {}
+        }
+    });
     ui.set_sources(ModelRc::new(VecModel::from(vec![
         "A very long installed source name that must never widen the window".into(),
     ])));
@@ -233,13 +243,15 @@ fn nova_navigation_more_and_responsive_controls() {
         assert!(!ui.get_reader_osd(), "chapters open with controls hidden");
         action(&ui, "Toggle reader controls").invoke_accessible_default_action();
         settle();
-        action(&ui, "Options").invoke_accessible_default_action();
+        action(&ui, "Settings").invoke_accessible_default_action();
         settle();
         assert_controls_fit(&ui, width);
         assert!(
             reader.size().height >= 48.,
             "options must leave room for reading"
         );
+        action(&ui, "Close reader settings").invoke_accessible_default_action();
+        settle();
         ui.set_can_previous(false);
         chapter_step.set(0);
         action(&ui, "Previous chapter").invoke_accessible_default_action();
@@ -251,6 +263,9 @@ fn nova_navigation_more_and_responsive_controls() {
         ui.set_can_previous(true);
         tap(&ui, "Previous chapter");
         assert_eq!(chapter_step.get(), -1);
+        back(&ui);
+        assert_eq!(ui.get_section(), 6);
+        assert!(!ui.get_reader_osd(), "Back first dismisses the controls");
         back(&ui);
         assert_eq!(ui.get_section(), 5);
     }

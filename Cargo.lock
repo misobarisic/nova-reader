@@ -3902,7 +3902,7 @@ dependencies = [
 
 [[package]]
 name = "nova-reader"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "arboard",
  "directories",
@@ -3933,6 +3933,7 @@ dependencies = [
  "url",
  "webp",
  "webpki-roots",
+ "zbus",
  "zip",
  "zstd",
 ]

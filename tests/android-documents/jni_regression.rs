@@ -1055,6 +1055,108 @@ fn reader_immersive_follows_controls_and_activity_lifecycle(env: &mut JNIEnv<'_>
     );
 }
 
+fn reader_presentation_restores_orientation_wake_and_cutout(env: &mut JNIEnv<'_>) {
+    for api in [26, 28, 29, 30, 35] {
+        set_reader_presentation(false, false, 0, false, true).unwrap();
+        fixture_run(env, "drain");
+        fixture_run(env, "destroy");
+        env.call_static_method(FIXTURE, "setApi", "(I)V", &[JValue::Int(api)])
+            .unwrap();
+        fixture_run(env, "create");
+        fixture_run(env, "resume");
+        fixture_run(env, "seedReaderBaseline");
+        set_reader_presentation(true, true, 1, true, false).unwrap();
+        assert_eq!(
+            fixture_updates(env, "orientation"),
+            8,
+            "presentation must queue to main"
+        );
+        assert!(!fixture_bool(env, "keepAwake"));
+        fixture_run(env, "drain");
+        assert_eq!(fixture_updates(env, "orientation"), 10);
+        assert!(fixture_bool(env, "keepAwake"));
+        assert!(fixture_bool(env, "statusHidden"));
+        if api >= 28 {
+            assert_eq!(fixture_updates(env, "cutoutMode"), 2);
+        }
+        let layout_changes = fixture_updates(env, "layoutChanges");
+        for (rotation, expected) in [(0, -1), (1, 10), (2, 7), (3, 6), (4, 1), (5, 0), (6, 9)] {
+            set_reader_presentation(true, false, rotation, false, true).unwrap();
+            fixture_run(env, "drain");
+            assert_eq!(fixture_updates(env, "orientation"), expected);
+            assert!(!fixture_bool(env, "keepAwake"));
+            assert!(!fixture_bool(env, "statusHidden"));
+            if api >= 28 {
+                assert_eq!(fixture_updates(env, "cutoutMode"), 1);
+            }
+            assert_eq!(
+                fixture_updates(env, "layoutChanges"),
+                layout_changes,
+                "OSD must preserve edge-to-edge layout"
+            );
+        }
+        set_reader_presentation(true, true, 4, true, false).unwrap();
+        fixture_run(env, "drain");
+        fixture_run(env, "pause");
+        assert!(!fixture_bool(env, "keepAwake"));
+        set_reader_presentation(true, true, 4, true, false).unwrap();
+        fixture_run(env, "drain");
+        assert!(
+            !fixture_bool(env, "keepAwake"),
+            "paused requests must not reactivate the wake flag"
+        );
+        fixture_run(env, "resume");
+        assert!(fixture_bool(env, "keepAwake"));
+        set_reader_presentation(false, true, 6, true, false).unwrap();
+        fixture_run(env, "drain");
+        assert_eq!(fixture_updates(env, "orientation"), 8);
+        assert!(!fixture_bool(env, "keepAwake"));
+        assert!(!fixture_bool(env, "statusHidden"));
+        assert!(fixture_bool(env, "cutoutAllowed"));
+        set_reader_presentation(true, true, 5, true, false).unwrap();
+        fixture_run(env, "drain");
+        fixture_run(env, "recreate");
+        assert!(!fixture_bool(env, "previousKeepAwake"));
+        assert!(
+            !fixture_bool(env, "keepAwake"),
+            "creation must wait for resume before keeping awake"
+        );
+        fixture_run(env, "resume");
+        assert!(fixture_bool(env, "keepAwake"));
+        assert_eq!(fixture_updates(env, "orientation"), 0);
+        set_reader_presentation(true, true, 2, true, false).unwrap();
+        set_reader_presentation(false, false, 0, false, true).unwrap();
+        fixture_run(env, "drain");
+        assert_eq!(
+            fixture_updates(env, "orientation"),
+            -1,
+            "replacement Activity restores its own baseline"
+        );
+        assert!(!fixture_bool(env, "statusHidden"));
+        assert!(fixture_bool(env, "cutoutAllowed"));
+    }
+    // A pre-existing normal wake flag survives a reader exit while paused,
+    // while the paused window itself always releases it.
+    fixture_run(env, "seedKeepAwake");
+    set_reader_presentation(true, false, 2, false, true).unwrap();
+    fixture_run(env, "drain");
+    assert!(!fixture_bool(env, "keepAwake"));
+    fixture_run(env, "pause");
+    set_reader_presentation(false, false, 0, false, true).unwrap();
+    fixture_run(env, "drain");
+    assert!(!fixture_bool(env, "keepAwake"));
+    fixture_run(env, "resume");
+    assert!(
+        fixture_bool(env, "keepAwake"),
+        "reader exit restores the prior normal wake flag after resume"
+    );
+    let error = set_reader_presentation(true, true, 7, true, true).unwrap_err();
+    assert!(error.contains("Unknown reader rotation"), "{error}");
+    assert!(!env.exception_check().unwrap());
+    set_reader_presentation(false, false, 0, false, true).unwrap();
+    fixture_run(env, "drain");
+}
+
 #[test]
 fn application_context_launches_and_callbacks_resolve() {
     let classpath = format!(
@@ -1092,6 +1194,7 @@ fn application_context_launches_and_callbacks_resolve() {
         PathBuf::from(std::env::var("READER_JNI_CACHE").unwrap())
     );
     reader_immersive_follows_controls_and_activity_lifecycle(&mut env);
+    reader_presentation_restores_orientation_wake_and_cutout(&mut env);
     image_export_and_clipboard_have_real_readable_bytes(&mut env);
     media_store_publishes_complete_images_and_rolls_back_failures(&mut env);
     avif_save_and_clipboard_preserve_encoded_bytes(&mut env);
