@@ -893,9 +893,12 @@ fn write_fetched(
 /// Original resolution avoids this intermediate conversion entirely.
 fn transform_new_image(
     bytes: &[u8],
-    compression: crate::image_storage::ImageCompression,
+    mut compression: crate::image_storage::ImageCompression,
     max_side: Option<u32>,
 ) -> Result<Option<Vec<u8>>, String> {
+    // Classify before resizing: its intermediate PNG must not make a lossy
+    // source look like a lossless input.
+    compression.lossless_inputs &= nova_image::is_lossless_input(bytes);
     let resized = if let Some(max_side) = max_side {
         let image = reader_engine::decode_image(bytes, COVER_LIMITS).map_err(|e| e.to_string())?;
         if image.width().max(image.height()) > max_side {
@@ -1940,6 +1943,76 @@ mod tests {
     }
 
     #[test]
+    fn resized_artwork_lossless_policy_classifies_original_bytes() {
+        use crate::image_storage::ImageCompression;
+        let pixels: Vec<u8> = (0..64 * 96 * 3).map(|i| (i * 17) as u8).collect();
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 80)
+            .encode(&pixels, 64, 96, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        let compression = ImageCompression {
+            quality: 20,
+            lossless_inputs: true,
+            ..ImageCompression::default()
+        };
+        let low = transform_new_image(&jpeg, compression, Some(48))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            low,
+            transform_new_image(
+                &jpeg,
+                ImageCompression {
+                    lossless_inputs: false,
+                    ..compression
+                },
+                Some(48)
+            )
+            .unwrap()
+            .unwrap()
+        );
+        assert_ne!(
+            low,
+            transform_new_image(
+                &jpeg,
+                ImageCompression {
+                    quality: 95,
+                    ..compression
+                },
+                Some(48)
+            )
+            .unwrap()
+            .unwrap()
+        );
+        let source = png(64, 96, [137, 28, 201, 255]);
+        let low = transform_new_image(&source, compression, Some(48))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            low,
+            transform_new_image(
+                &source,
+                ImageCompression {
+                    quality: 95,
+                    ..compression
+                },
+                Some(48)
+            )
+            .unwrap()
+            .unwrap()
+        );
+        let expected = nova_cache::fit_rgba(
+            reader_engine::decode_image(&source, COVER_LIMITS).unwrap(),
+            Some(48),
+        )
+        .unwrap();
+        assert_eq!(
+            reader_engine::decode_image(&low, COVER_LIMITS).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
     fn fetched_cache_compression_changes_new_files_and_preserves_existing_png() {
         use crate::image_storage::{ImageCompression, ImageStorageFormat};
         let png = png(64, 96, [130, 130, 130, 255]);
@@ -1964,6 +2037,7 @@ mod tests {
                 format,
                 quality: 85,
                 jxl_lossless_jpeg: false,
+                lossless_inputs: false,
             };
             let key = format!("new-{index}");
             write_fetched(&cache, &key, epoch, &png, compression, None, || true);
@@ -1985,7 +2059,18 @@ mod tests {
             assert_eq!(inspect(&bytes).unwrap(), (64, 96));
             let rendered = decode(&bytes).unwrap();
             assert_eq!((rendered.width(), rendered.height()), (64, 96));
-            write_fetched(&cache, "old", epoch, &png, compression, None, || true);
+            write_fetched(
+                &cache,
+                "old",
+                epoch,
+                &png,
+                ImageCompression {
+                    lossless_inputs: true,
+                    ..compression
+                },
+                None,
+                || true,
+            );
             assert_eq!(cache.get("old", inspect).unwrap().unwrap(), png);
         }
         write_fetched(
@@ -2061,6 +2146,7 @@ mod tests {
                 format: ImageStorageFormat::Jpeg,
                 quality: 85,
                 jxl_lossless_jpeg: false,
+                lossless_inputs: false,
             },
             None,
             || true,

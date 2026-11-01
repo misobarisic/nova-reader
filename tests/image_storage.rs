@@ -50,15 +50,18 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
                     ("downloads_format", 2),
                     ("downloads_quality", 73),
                     ("cache_jxl_lossless_jpeg", 1),
+                    ("cache_lossless_inputs", 1),
                     ("downloads_jxl_lossless_jpeg", 1),
                 ] {
                     settings.invoke_settings_changed(key.into(), value);
                 }
                 for (key, value) in [
+                    ("cache_format", 4),
                     ("cache_format", 5),
                     ("cache_quality", 0),
                     ("downloads_quality", 101),
                     ("downloads_enabled", 2),
+                    ("downloads_lossless_inputs", 1),
                     ("unknown", 1),
                 ] {
                     settings.invoke_settings_changed(key.into(), value);
@@ -75,12 +78,14 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
                         format: ImageStorageFormat::Avif,
                         quality: 64,
                         jxl_lossless_jpeg: true,
+                        lossless_inputs: true,
                     },
                     downloads: ImageCompression {
                         enabled: true,
                         format: ImageStorageFormat::Avif,
                         quality: 73,
                         jxl_lossless_jpeg: true,
+                        lossless_inputs: false,
                     },
                     policy: CachePolicyPreferences::default(),
                 }
@@ -88,7 +93,7 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
             "controls" => {
                 for (key, value) in [
                     ("cache_enabled", 1),
-                    ("cache_format", 4),
+                    ("cache_format", 3),
                     ("cache_quality", 85),
                     ("downloads_enabled", 1),
                     ("downloads_format", 4),
@@ -106,6 +111,10 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
                 toggle(&ui, "Losslessly transcode download JPEG");
                 assert!(image_storage::load().cache.jxl_lossless_jpeg);
                 assert!(image_storage::load().downloads.jxl_lossless_jpeg);
+                toggle(&ui, "Lossless encoding for lossless inputs");
+                assert!(!image_storage::load().cache.lossless_inputs);
+                toggle(&ui, "Lossless encoding for lossless inputs");
+                assert!(image_storage::load().cache.lossless_inputs);
                 quality(&ui, "Cache quality").invoke_accessible_increment_action();
                 quality(&ui, "Download quality").invoke_accessible_increment_action();
                 assert_eq!(image_storage::load().cache.quality, 86);
@@ -127,7 +136,13 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
                         let format = row("format");
                         let quality = row("quality");
                         let transcode = row("transcode");
-                        for (before, after) in [(&format, &quality), (&quality, &transcode)] {
+                        let lossless = if prefix == "cache" {
+                            Some(row("lossless"))
+                        } else {
+                            None
+                        };
+                        let next = lossless.as_ref().unwrap_or(&transcode);
+                        for (before, after) in [(&format, &quality), (&quality, next)] {
                             assert!(
                                 (after.absolute_position().y
                                     - before.absolute_position().y
@@ -141,7 +156,10 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
                 }
                 ui.window().set_size(slint::LogicalSize::new(390., 3000.));
                 settle();
-                for (id, index) in [("cache_format", 3), ("downloads_format", 3)] {
+                for (id, index, label) in [
+                    ("cache_format", 3, "JPEG XL"),
+                    ("downloads_format", 3, "JPEG XL (lossless)"),
+                ] {
                     let dropdown = ElementHandle::find_by_element_id(
                         &ui,
                         &format!("ImageStorageSettingsPage::{id}"),
@@ -150,7 +168,18 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
                     .unwrap();
                     dropdown.invoke_accessible_default_action();
                     settle();
-                    ElementHandle::find_by_accessible_label(&ui, "JPEG XL (lossless)")
+                    if id == "cache_format" {
+                        for old_label in ["JPEG XL (lossless)", "JPEG XL (lossy)"] {
+                            assert!(
+                                !ElementHandle::find_by_accessible_label(&ui, old_label).any(
+                                    |element| element.accessible_role()
+                                        == Some(AccessibleRole::Button)
+                                        && element.type_name().as_deref() != Some("Dropdown")
+                                )
+                            );
+                        }
+                    }
+                    ElementHandle::find_by_accessible_label(&ui, label)
                         .filter(|element| {
                             element.accessible_role() == Some(AccessibleRole::Button)
                                 && element.type_name().as_deref() != Some("Dropdown")
@@ -171,13 +200,30 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
                 assert!(
                     ElementHandle::find_by_accessible_label(&ui, "Cache quality")
                         .find(|element| element.accessible_role() == Some(AccessibleRole::Slider))
-                        .is_none()
+                        .is_some()
                 );
                 assert!(
                     ElementHandle::find_by_accessible_label(&ui, "Download quality")
                         .find(|element| element.accessible_role() == Some(AccessibleRole::Slider))
                         .is_none()
                 );
+                assert_eq!(
+                    image_storage::load().cache.format,
+                    ImageStorageFormat::JxlLossy
+                );
+                for (index, visible) in [(0, false), (1, true), (2, false), (3, true)] {
+                    settings.invoke_settings_changed("cache_format".into(), index);
+                    settle();
+                    assert_eq!(
+                        ElementHandle::find_by_accessible_label(
+                            &ui,
+                            "Lossless encoding for lossless inputs"
+                        )
+                        .any(|element| element.accessible_checkable() == Some(true)),
+                        visible
+                    );
+                    assert!(quality(&ui, "Cache quality").accessible_enabled().unwrap());
+                }
                 toggle(&ui, "Compress new cached images");
                 assert!(!image_storage::load().cache.enabled);
                 assert!(image_storage::load().downloads.enabled);
@@ -197,6 +243,44 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
                         );
                     }
                 }
+            }
+            "legacy-jxl" => {
+                let raw = r#"{"cache":{"enabled":true,"format":3,"quality":63},"downloads":{"enabled":true,"format":3,"quality":72}}"#;
+                nova_storage::try_set_str("reader:image-storage", raw).unwrap();
+                image_storage::init(&ui).unwrap();
+                assert_eq!(
+                    image_storage::load().cache.format,
+                    ImageStorageFormat::JxlLossy
+                );
+                assert!(image_storage::load().cache.lossless_inputs);
+                assert_eq!(
+                    image_storage::load().downloads.format,
+                    ImageStorageFormat::JxlLossless
+                );
+                assert!(!image_storage::load().downloads.lossless_inputs);
+                assert_eq!(settings.get_cache_format(), 3);
+                assert_eq!(
+                    nova_storage::try_get_str("reader:image-storage")
+                        .unwrap()
+                        .as_deref(),
+                    Some(raw)
+                );
+                settings.invoke_settings_changed("cache_quality".into(), 63);
+            }
+            "legacy-reload" => {
+                assert_eq!(
+                    image_storage::load().cache.format,
+                    ImageStorageFormat::JxlLossy
+                );
+                assert!(settings.get_cache_lossless_inputs());
+                assert_eq!(settings.get_cache_quality(), 63.);
+                let raw = nova_storage::try_get_str("reader:image-storage")
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&raw).unwrap()["cache"]["format"],
+                    4
+                );
             }
             "corrupt" => {
                 for raw in [
@@ -238,7 +322,14 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
         return;
     }
     let directory = tempfile::tempdir().unwrap();
-    for mode in ["write", "reload", "controls", "corrupt"] {
+    for mode in [
+        "write",
+        "reload",
+        "controls",
+        "legacy-jxl",
+        "legacy-reload",
+        "corrupt",
+    ] {
         let output = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",

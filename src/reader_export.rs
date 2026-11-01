@@ -122,6 +122,20 @@ pub(crate) fn reencode_storage_image(
     compression: crate::image_storage::ImageCompression,
     limits: reader_engine::DecodeLimits,
 ) -> Result<Vec<u8>, String> {
+    let lossless = compression.lossless_inputs
+        && matches!(
+            compression.format,
+            ImageStorageFormat::Webp
+                | ImageStorageFormat::JxlLossless
+                | ImageStorageFormat::JxlLossy
+        )
+        && nova_image::is_lossless_input(bytes);
+    if lossless && nova_image::lossless_input_requires_original(bytes) {
+        // The shared display decoder produces RGBA8. Keep high-depth source
+        // samples intact until an encoder can preserve them.
+        reader_engine::inspect_image(bytes, limits).map_err(|error| error.to_string())?;
+        return Ok(bytes.to_vec());
+    }
     if compression.jxl_lossless_jpeg
         && matches!(
             compression.format,
@@ -134,14 +148,31 @@ pub(crate) fn reencode_storage_image(
         nova_image::decode_jxl(&encoded, limits).map_err(|error| error.to_string())?;
         return Ok(encoded);
     }
-    reencode_image(bytes, compression.format, compression.quality, limits)
+    reencode_image_with_lossless(
+        bytes,
+        compression.format,
+        compression.quality,
+        limits,
+        lossless,
+    )
 }
 
+#[cfg(test)]
 pub(crate) fn reencode_image(
     bytes: &[u8],
     format: ImageStorageFormat,
     quality: u8,
     limits: reader_engine::DecodeLimits,
+) -> Result<Vec<u8>, String> {
+    reencode_image_with_lossless(bytes, format, quality, limits, false)
+}
+
+fn reencode_image_with_lossless(
+    bytes: &[u8],
+    format: ImageStorageFormat,
+    quality: u8,
+    limits: reader_engine::DecodeLimits,
+    lossless: bool,
 ) -> Result<Vec<u8>, String> {
     let image = reader_engine::decode_image(bytes, limits)
         .map_err(|error| format!("Cannot decode image for compression: {error}"))?;
@@ -155,7 +186,7 @@ pub(crate) fn reencode_image(
             image.width(),
             image.height(),
             image.as_raw(),
-            if format == ImageStorageFormat::JxlLossless {
+            if lossless || format == ImageStorageFormat::JxlLossless {
                 nova_image::JxlEncoding::Lossless
             } else {
                 nova_image::JxlEncoding::Lossy { quality }
@@ -171,6 +202,23 @@ pub(crate) fn reencode_image(
             quality,
             limits,
         )?,
+        ImageStorageFormat::Webp if lossless => {
+            if image.width() > 16383 || image.height() > 16383 {
+                return Err("WebP supports image dimensions up to 16383 pixels".into());
+            }
+            let mut config =
+                webp::WebPConfig::new().map_err(|_| "Cannot configure WebP encoder")?;
+            config.lossless = 1;
+            config.alpha_compression = 0;
+            // Keep RGB beneath transparent pixels; the basic encoder permits
+            // discarding it. Fixed effort makes this independent of quality.
+            config.exact = 1;
+            config.quality = 75.;
+            webp::Encoder::from_rgba(image.as_raw(), image.width(), image.height())
+                .encode_advanced(&config)
+                .map_err(|error| format!("Cannot encode image: {error:?}"))?
+                .to_vec()
+        }
         ImageStorageFormat::Webp => encode_rgba(
             image.width(),
             image.height(),
@@ -1279,6 +1327,125 @@ mod tests {
 mod jxl_storage_tests {
     use super::*;
     use crate::image_storage::ImageCompression;
+    #[test]
+    fn lossless_input_policy_preserves_png_and_webp_pixels_and_keeps_jpeg_quality() {
+        let pixels: Vec<u8> = (0..32 * 24)
+            .flat_map(|i| {
+                [
+                    (i * 17) as u8,
+                    (i * 7) as u8,
+                    (i * 31) as u8,
+                    if i % 7 == 0 { 0 } else { 255 },
+                ]
+            })
+            .collect();
+        let image = image::RgbaImage::from_raw(32, 24, pixels.clone()).unwrap();
+        let mut png = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let png = png.into_inner();
+        let limits = reader_engine::DecodeLimits::default();
+        let webp = reencode_storage_image(
+            &png,
+            ImageCompression {
+                lossless_inputs: true,
+                ..ImageCompression::default()
+            },
+            limits,
+        )
+        .unwrap();
+        for source in [&png, &webp] {
+            for format in [ImageStorageFormat::Webp, ImageStorageFormat::JxlLossy] {
+                let compression = ImageCompression {
+                    format,
+                    quality: 20,
+                    lossless_inputs: true,
+                    ..ImageCompression::default()
+                };
+                let low = reencode_storage_image(source, compression, limits).unwrap();
+                let high = reencode_storage_image(
+                    source,
+                    ImageCompression {
+                        quality: 95,
+                        ..compression
+                    },
+                    limits,
+                )
+                .unwrap();
+                assert_eq!(
+                    low, high,
+                    "lossless input must ignore quality for {format:?}"
+                );
+                assert_eq!(
+                    reader_engine::decode_image(&low, limits).unwrap().as_raw(),
+                    &pixels
+                );
+            }
+        }
+        let rgb = image::DynamicImage::ImageRgba8(image).to_rgb8();
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 80)
+            .encode(rgb.as_raw(), 32, 24, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        let lossy_webp =
+            reencode_storage_image(&jpeg, ImageCompression::default(), limits).unwrap();
+        let unrecognized_jxl =
+            nova_image::encode_jxl(32, 24, &pixels, nova_image::JxlEncoding::Lossless, limits)
+                .unwrap();
+        for source in [&jpeg, &lossy_webp, &unrecognized_jxl] {
+            for format in [ImageStorageFormat::Webp, ImageStorageFormat::JxlLossy] {
+                let compression = ImageCompression {
+                    format,
+                    quality: 20,
+                    lossless_inputs: true,
+                    ..ImageCompression::default()
+                };
+                assert_ne!(
+                    reencode_storage_image(source, compression, limits).unwrap(),
+                    reencode_storage_image(
+                        source,
+                        ImageCompression {
+                            quality: 95,
+                            ..compression
+                        },
+                        limits
+                    )
+                    .unwrap(),
+                    "lossy or unrecognized source must still use quality for {format:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lossless_input_policy_retains_high_depth_png_originals() {
+        let image = image::ImageBuffer::<image::Rgba<u16>, _>::from_raw(
+            2,
+            1,
+            vec![1, 255, 1023, 65535, 17, 40000, 65534, 65535],
+        )
+        .unwrap();
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba16(image)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let png = png.into_inner();
+        for format in [ImageStorageFormat::Webp, ImageStorageFormat::JxlLossy] {
+            assert_eq!(
+                reencode_storage_image(
+                    &png,
+                    ImageCompression {
+                        format,
+                        lossless_inputs: true,
+                        ..ImageCompression::default()
+                    },
+                    reader_engine::DecodeLimits::default()
+                )
+                .unwrap(),
+                png
+            );
+        }
+    }
+
     #[test]
     fn jpeg_transcoding_bypasses_quality_only_for_jpeg_and_is_opt_in() {
         let pixels: Vec<u8> = (0..32 * 24 * 3).map(|i| (i * 17) as u8).collect();

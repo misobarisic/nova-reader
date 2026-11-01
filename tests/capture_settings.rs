@@ -525,7 +525,7 @@ fn render_capture_and_cache_settings_previews() {
     nova_reader::image_storage::init(&ui).unwrap();
     ui.global::<CaptureSettings>().set_format_index(6);
     let cache = ui.global::<nova_reader::ImageStorageSettings>();
-    cache.set_cache_format(4);
+    cache.set_cache_format(3);
     cache.set_downloads_format(4);
     cache.set_downloads_enabled(true);
     ui.show().unwrap();

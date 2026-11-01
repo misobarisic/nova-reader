@@ -96,6 +96,7 @@ fn only_new_download_pages_follow_compression_and_keep_offline_integrity() {
             format: ImageStorageFormat::Jpeg,
             quality: 35,
             jxl_lossless_jpeg: false,
+            lossless_inputs: false,
         },
         ..ImageStoragePreferences::default()
     };

@@ -11,6 +11,7 @@ export global ImageStorageSettings {
     in-out property <int> cache-format: 1;
     in-out property <float> cache-quality: 85;
     in-out property <bool> cache-jxl-lossless-jpeg: false;
+    in-out property <bool> cache-lossless-inputs: false;
     in-out property <bool> downloads-enabled: false;
     in-out property <int> downloads-format: 1;
     in-out property <float> downloads-quality: 85;
@@ -94,13 +95,13 @@ export component ImageStorageSettingsPage inherits VerticalLayout {
             row-title: @tr("Cache format"); row-desc: @tr("JPEG, WebP, AVIF or JPEG XL for newly cached images.");
             cache_format := Dropdown {
                 width: Math.min(252px, Math.max(0px, root.width - 32px)); roomy: true;
-                model: [@tr("JPEG"), @tr("WebP"), @tr("AVIF"), @tr("JPEG XL (lossless)"), @tr("JPEG XL (lossy)")];
+                model: [@tr("JPEG"), @tr("WebP"), @tr("AVIF"), @tr("JPEG XL")];
                 enabled: !(!root.interactive || root.maintenance || !ImageStorageSettings.disk-enabled) && ImageStorageSettings.cache-enabled;
                 current-index <=> ImageStorageSettings.cache-format;
                 selected(i) => { ImageStorageSettings.settings-changed("cache_format", self.current-index); }
             }
         }
-        if ImageStorageSettings.cache-format != 3: cache_quality_row := SettingsRow {
+        cache_quality_row := SettingsRow {
             row-title: @tr("Cache quality"); row-desc: @tr("Higher values retain more detail and use more disk space.");
             CacheQualityControl {
                 width: Math.min(InterfaceStyle.tv ? 320px : 252px, Math.max(0px, root.width - 32px));
@@ -111,9 +112,19 @@ export component ImageStorageSettingsPage inherits VerticalLayout {
                 changed(v) => { ImageStorageSettings.settings-changed("cache_quality", Math.round(v)); }
             }
         }
-        if ImageStorageSettings.cache-format == 3 || ImageStorageSettings.cache-format == 4: cache_transcode_row := SettingsRow {
+        if ImageStorageSettings.cache-format == 1 || ImageStorageSettings.cache-format == 3: cache_lossless_row := SettingsRow {
+            row-title: @tr("Lossless encoding for lossless inputs");
+            row-desc: @tr("Preserve pixels from lossless PNG and WebP inputs. Lossy and unrecognized inputs use the selected quality. Unresized high-depth PNGs keep their original encoding.");
+            CacheCompressionToggle {
+                name: @tr("Lossless encoding for lossless inputs");
+                busy: !root.interactive || root.maintenance || !ImageStorageSettings.disk-enabled || !ImageStorageSettings.cache-enabled;
+                checked <=> ImageStorageSettings.cache-lossless-inputs;
+                toggled => { ImageStorageSettings.settings-changed("cache_lossless_inputs", self.checked ? 1 : 0); }
+            }
+        }
+        if ImageStorageSettings.cache-format == 3: cache_transcode_row := SettingsRow {
             row-title: @tr("Losslessly transcode JPEG");
-            row-desc: @tr("Preserve original JPEG data when no resize is needed. Other images and resized JPEGs use the selected quality.");
+            row-desc: @tr("Preserve original JPEG data when no resize is needed. Other images follow the cache compression settings.");
             CacheCompressionToggle {
                 name: @tr("Losslessly transcode cache JPEG");
                 busy: !root.interactive || root.maintenance || !ImageStorageSettings.disk-enabled || !ImageStorageSettings.cache-enabled;
