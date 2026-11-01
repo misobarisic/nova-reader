@@ -73,11 +73,16 @@ physical-device acceptance.
 
 
 The collection and detail views also reuse Nova b69a1e5. `library-cards.slint`
-adapts its 2:3 poster/list geometry, captions, progress rail, hover lift and
+adapts its 2:3 poster/list geometry, captions, left-anchored progress rail, hover lift and
 responsive 160px/230px sizing; `title-artwork.slint` is Nova's original component.
 `detail-hero.slint` adapts the edge-to-edge artwork, baked palette scrims,
 responsive title/metadata, expandable synopsis and primary/library actions.
 Display settings retain the selected layout and minimum column counts.
+The progress fill copies Nova's explicit zero x/y origin, so even one read
+chapter fills from the left in grid and list layouts. The synopsis uses Nova's
+12px drag guard and has no focus outline or focus-triggered scroll jump; tap,
+keyboard and accessible expansion remain available. Details open immediately
+while metadata and chapters load without a loading label or spinner.
 Library search reuses Nova’s retained 58px reveal and Kit `SearchField`. The
 search action or Ctrl+F exposes and focuses it, edits filter immediately, and
 Escape/Back closes it and clears the query. Deferred focus and viewport

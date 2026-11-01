@@ -189,9 +189,32 @@ fn detail_chapter_return_restores_scroll_and_expanded_synopsis_for_the_same_seri
     );
     ui.set_detail_series_key("source:first".into());
     ui.set_section(5);
+    ui.set_busy(true);
     ui.show().unwrap();
     ui.window().set_size(LogicalSize::new(390., 844.));
     settle();
+    assert!(
+        ElementHandle::find_by_element_type_name(&ui, "Spinner")
+            .next()
+            .is_none(),
+        "details must not show a loading spinner"
+    );
+    assert!(
+        ElementHandle::find_by_accessible_label(&ui, "Loading chapters…")
+            .next()
+            .is_none()
+    );
+    assert_eq!(button(&ui, "Continue").accessible_enabled(), Some(false));
+    ui.set_status("Fixture metadata error".into());
+    settle();
+    assert!(
+        ElementHandle::find_by_accessible_label(&ui, "Fixture metadata error")
+            .next()
+            .is_some(),
+        "actual detail errors remain visible"
+    );
+    ui.set_status("".into());
+    ui.set_busy(false);
     // The optimistic hero is already usable while chapters are loading, but
     // Continue must never try to open a chapter from the previous entry.
     button(&ui, "Continue").mock_single_click(PointerEventButton::Left);
@@ -234,4 +257,124 @@ fn detail_chapter_return_restores_scroll_and_expanded_synopsis_for_the_same_seri
         !ui.get_detail_synopsis_expanded(),
         "new series starts at its own header"
     );
+}
+
+#[test]
+fn synopsis_uses_nova_tap_drag_and_borderless_keyboard_behavior() {
+    use i_slint_backend_testing::{TestingBackend, TestingBackendOptions};
+    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+        mock_time: true,
+        renderer_name: Some("software".into()),
+        ..Default::default()
+    })))
+    .unwrap();
+    let ui = AppWindow::new().unwrap();
+    let theme = ui.global::<nova_reader::Theme>();
+    let mut palette = theme.get_current();
+    palette.focus_ring = slint::Color::from_rgb_u8(10, 240, 34);
+    theme.set_current(palette);
+    ui.set_series_title("Synopsis fixture".into());
+    ui.set_series_description(
+        "Synopsis text with enough words to wrap to several readable lines. "
+            .repeat(6)
+            .into(),
+    );
+    ui.set_detail_series_key("fixture:synopsis".into());
+    ui.set_section(5);
+    ui.show().unwrap();
+    ui.window().set_size(LogicalSize::new(390., 844.));
+    settle();
+    let before = ui.get_detail_scroll_y();
+    let more = button(&ui, "Read more");
+    let point = slint::LogicalPosition::new(
+        more.absolute_position().x + more.size().width / 2.,
+        more.absolute_position().y + more.size().height / 2.,
+    );
+    // Nova's native pointer test recipe: release at the original tap point.
+    ui.window().dispatch_event(WindowEvent::PointerPressed {
+        position: point,
+        button: PointerEventButton::Left,
+    });
+    ui.window().dispatch_event(WindowEvent::PointerReleased {
+        position: point,
+        button: PointerEventButton::Left,
+    });
+    settle();
+    assert!(
+        ui.get_detail_synopsis_expanded(),
+        "tap at {point:?}, synopsis={:?}/{:?}, scroll={}",
+        more.absolute_position(),
+        more.size(),
+        ui.get_detail_scroll_y()
+    );
+    assert!((ui.get_detail_scroll_y() - before).abs() < 1.);
+    button(&ui, "Show less").invoke_accessible_default_action();
+    settle();
+    assert!(!ui.get_detail_synopsis_expanded());
+
+    let synopsis = element(&ui, "DetailHero::synopsis");
+    let start = slint::LogicalPosition::new(
+        synopsis.absolute_position().x + synopsis.size().width / 2.,
+        synopsis.absolute_position().y + 20.,
+    );
+    ui.window().dispatch_event(WindowEvent::PointerPressed {
+        position: start,
+        button: PointerEventButton::Left,
+    });
+    // Admit the press through the native scroller before testing the child's
+    // horizontal movement guard; a drag within the synopsis must not toggle it.
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(120));
+    for distance in [10., 20., 30., 40.] {
+        ui.window().dispatch_event(WindowEvent::PointerMoved {
+            position: slint::LogicalPosition::new(start.x + distance, start.y),
+        });
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(16));
+    }
+    ui.window().dispatch_event(WindowEvent::PointerReleased {
+        position: slint::LogicalPosition::new(start.x + 40., start.y),
+        button: PointerEventButton::Left,
+    });
+    settle();
+    assert!(
+        !ui.get_detail_synopsis_expanded(),
+        "dragging must not expand the synopsis"
+    );
+
+    // Tab traversal still reaches the retained invisible keyboard scope.
+    let mut keyboard_activated = false;
+    for _ in 0..24 {
+        key(&ui, Key::Tab);
+        let scroll = ui.get_detail_scroll_y();
+        key(&ui, " ");
+        if ui.get_detail_synopsis_expanded() {
+            assert!(
+                (ui.get_detail_scroll_y() - scroll).abs() < 1.,
+                "keyboard expansion must not jump the page"
+            );
+            keyboard_activated = true;
+            break;
+        }
+    }
+    assert!(keyboard_activated, "synopsis remains keyboard operable");
+    let synopsis = element(&ui, "DetailHero::synopsis");
+    let pixels = ui
+        .window()
+        .take_snapshot()
+        .expect("software synopsis pixels");
+    let x = synopsis.absolute_position().x.floor() as u32;
+    let right = (synopsis.absolute_position().x + synopsis.size().width).floor() as u32;
+    let top = synopsis.absolute_position().y.ceil().max(0.) as u32 + 2;
+    let bottom = ((synopsis.absolute_position().y + synopsis.size().height).floor() as u32)
+        .min(pixels.height())
+        .saturating_sub(2);
+    assert!(bottom > top + 2);
+    for row in top..bottom {
+        for column in [x, x + 1, right - 2, right - 1] {
+            let pixel = pixels.as_slice()[(row * pixels.width() + column) as usize];
+            assert!(
+                !(pixel.g > 200 && pixel.r < 40 && pixel.b < 80),
+                "synopsis must not paint a focus outline at {column},{row}: {pixel:?}"
+            );
+        }
+    }
 }

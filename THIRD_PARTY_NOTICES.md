@@ -36,19 +36,21 @@ GPL declaration does not replace Slint's terms or other dependencies' licenses.
 This open-source build uses the applicable GPL option. Review upstream terms
 before distributing under another licensing arrangement.
 
-Release tooling `.github/scripts/dependency-licenses.sh` uses cargo-about with
-locked target/features and fails on unresolved license inventory entries. It
-produces full dependency license texts/upstream links separately for Linux,
-Windows and Android; those inventories accompany packaged artifacts. This notice
-is attribution, not a substitute for that target-specific dependency inventory.
+The root build script copies Nova's actual current-target cargo-about license
+and source-catalogue generation, using the locked dependency graph and active
+features and failing on unresolved entries. Full dependency license texts and
+upstream links, these complete notices, local AVIF vendor COPYING and the Roboto
+license are compressed with Nova's zstd recipe and compiled into Settings →
+About. There is no separate all-platform inventory generation step. This notice
+is attribution, not a substitute for the embedded dependency catalogue.
 The inherited launcher art is not newly commissioned Reader branding.
 
 The UI uses the same Roboto Regular and Bold faces as Nova, derived from
 [googlefonts/roboto-2](https://github.com/googlefonts/roboto-2) revision
 `38062f4b4a0be4346d07a928408da21602545e9e` under Apache-2.0. Nova's prepared
 faces are retained unchanged; see `assets/fonts/README.md` and the full license
-in `assets/fonts/LICENSE.txt`. That license is included in every packaged
-platform dependency inventory. Navigation and menu artwork is reused from Nova
+in `assets/fonts/LICENSE.txt`. That license is included in the embedded
+current-target catalogue. Navigation and menu artwork is reused from Nova
 under the project's existing license and attribution.
 
 The AVIF decoder uses the complete published ferri-pdf-rav1d 1.1.2 source
@@ -56,7 +58,7 @@ under `vendor/ferri-pdf-rav1d`, with only ARM/RISC-V nightly-feature predicates
 gated by its existing assembly feature for stable portable builds. The original
 BSD-2-Clause license, source provenance and malformed-input fixes are retained;
 see its `COPYING` and appended `PATCHES.md`. Its full license is also included
-in each generated platform dependency inventory.
+in the embedded current-target catalogue.
 
 ## AVIF adapter and test fixture attribution
 

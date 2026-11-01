@@ -68,10 +68,17 @@ export component LibraryCard inherits Rectangle {
             width: max(1px, parent.width - self.x - 9px); height: 18px; spacing: root.width > 100px ? 8px : 4px;
             Rectangle {
                 horizontal-stretch: 1; min-width: 1px; height: 100%;
-                Rectangle {
+                library_progress_track := Rectangle {
                     y: (parent.height - self.height) / 2; width: 100%; height: 6px; border-radius: 3px;
                     background: Theme.current.progress_track_overlay;
-                    Rectangle { width: parent.width * min(1, root.card.completed * 1.0 / max(1, root.card.total)); height: 100%; border-radius: 3px; background: Theme.current.progress_fill; }
+                    // Nova library.slint: anchor the fill explicitly. A smaller
+                    // unpositioned child is centered by Slint's default layout.
+                    library_progress_fill := Rectangle {
+                        x: 0px; y: 0px;
+                        width: parent.width * Math.min(1, root.card.completed * 1.0 / root.card.total);
+                        height: 100%; border-radius: 3px;
+                        background: Theme.current.progress_fill;
+                    }
                 }
             }
             Text { text: root.card.completed + " / " + root.card.total; min-width: 0px; max-width: parent.width * 0.65; overflow: elide; color: Theme.current.text_primary; font-size: 11px; vertical-alignment: center; }

@@ -8,12 +8,22 @@ import { CaptureSettingsPage } from "capture-settings.slint";
 import { ImageStorageSettingsPage } from "image-storage-settings.slint";
 import { ThemeSettings, MotionSettings } from "theme-settings.slint";
 import { PageHeader } from "page-header.slint";
+import { AboutPage } from "about.slint";
+import { LicenseSource } from "about-models.slint";
 import { MenuLink, ActionButton, ReaderField } from "controls.slint";
 
 export component MorePage inherits Rectangle {
     in property <int> section;
     in property <bool> narrow;
     in property <string> app-version;
+    in property <[string]> license-text-chunks;
+    in property <[LicenseSource]> license-sources;
+    in property <bool> update-checks-enabled: false;
+    in-out property <bool> about-licenses-open;
+    in-out property <length> about-scroll-y;
+    in-out property <length> about-licenses-scroll-y;
+    in property <int> about-back-request;
+    callback license-source-requested(string);
     in property <string> status;
     in property <string> image-cache-info;
     in property <string> image-cache-status;
@@ -32,6 +42,7 @@ export component MorePage inherits Rectangle {
     private property <int> choice: root.narrow ? 1 : 2;
     public function focus_shell() {
         if root.section == 4 { nav-scope.focus(); }
+        else if root.section == 13 { about-page.focus_shell(); about-focus.start(); }
         else if root.detail-open { detail-scope.focus(); }
         else { child-scope.focus(); }
     }
@@ -89,9 +100,13 @@ export component MorePage inherits Rectangle {
             if root.child-section != root.section { child-scroll.content-y = 0px; root.child-scroll-y = 0px; }
             root.child-section = root.section;
         }
+        if root.section == 13 { about-focus.start(); }
         if root.detail-open { root.child-section = 10; root.detail-section = root.section; detail-scroll.content-y = 0px; }
         if root.section == 4 { root.restore-pending = true; }
     }
+    about-focus := Timer { interval: 1ms; running: false; triggered => {
+        self.stop(); if root.section == 13 { about-page.focus_shell(); }
+    } }
     child-restore := Timer {
         interval: 16ms; running: root.child-restore-pending && root.local-open;
         triggered => {
@@ -208,8 +223,9 @@ export component MorePage inherits Rectangle {
         x: root.width * (1 - root.slide) - 0.28 * root.width * root.sub-slide;
         opacity: root.alpha * (1 - root.sub-alpha);
         child-scope := FocusScope {
-            width: parent.width; height: parent.height; enabled: root.child-active;
+            width: parent.width; height: parent.height; enabled: root.child-active && root.child-section != 13;
             child-scroll := ScrollView {
+                visible: root.child-section != 13;
                 width: parent.width; height: parent.height;
                 mouse-drag-pan-enabled: true; content-width: self.visible-width;
                 changed content-y => { if root.child-active && !root.child-restore-pending { root.child-scroll-y = self.content-y; } }
@@ -266,24 +282,29 @@ export component MorePage inherits Rectangle {
                             picked => { root.navigate(17); root.image-cache-refresh(); }
                         } }
                     }
-                    if root.child-section == 13: VerticalLayout {
-                        spacing: 12px;
-                        SettingsCard {
-                            VerticalLayout {
-                                padding: 16px; spacing: 8px;
-                                Text { min-width: 0px; text: "Nova Reader"; font-size: 24px; font-weight: 700; color: Theme.current.text_bright; }
-                                Text { text: root.app-version; color: Theme.current.text_settings; }
-                                Text { min-width: 0px; text: @tr("GPL-3.0-or-later. Built with Nova Kit and Slint."); color: Theme.current.text_secondary; wrap: word-wrap; }
-                                Text { min-width: 0px; text: @tr("Source addons are installed explicitly and may become unavailable."); color: Theme.current.text_secondary; wrap: word-wrap; }
-                            }
-                        }
-                        SettingsCard { MenuLink {
-                            interactive: root.child-active; title: @tr("Check for app updates"); subtitle: @tr("Look for a new Nova Reader release"); icon-kind: 6;
-                            picked => { root.check-update(); }
-                        } }
-                    }
+
                 }
             }
+        }
+        about-page := AboutPage {
+            width: parent.width; height: parent.height;
+            visible: root.child-section == 13;
+            active: root.child-active && root.section == 13;
+            external_navigation: true;
+            narrow: root.narrow;
+            nav-viewport-width: root.width;
+            app_version: root.app-version;
+            license_text_chunks: root.license-text-chunks;
+            license_sources: root.license-sources;
+            licenses_open <=> root.about-licenses-open;
+            scroll_y <=> root.about-scroll-y;
+            licenses_scroll_y <=> root.about-licenses-scroll-y;
+            system_back_request: root.about-back-request;
+            update_checks_enabled: root.update-checks-enabled;
+            update_status_text: root.status;
+            update_check_requested => { root.check-update(); }
+            license_source_requested(url) => { root.license-source-requested(url); }
+            back_picked => { if root.child-active { root.navigate(4); } }
         }
     }
     detail := Rectangle {

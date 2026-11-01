@@ -37,6 +37,129 @@ fn fixture_run(env: &mut JNIEnv<'_>, method: &str) {
     env.call_static_method(FIXTURE, method, "()V", &[]).unwrap();
 }
 
+fn browser_links_use_application_and_recover_from_launch_exceptions(
+    env: &mut JNIEnv<'_>,
+    application: &JObject<'_>,
+) {
+    fn assert_link(env: &mut JNIEnv<'_>, application: &JObject<'_>, expected: &str) {
+        let context = env
+            .get_static_field(
+                "android/content/Context",
+                "browserContext",
+                "Landroid/content/Context;",
+            )
+            .unwrap()
+            .l()
+            .unwrap();
+        assert!(
+            env.is_same_object(&context, application).unwrap(),
+            "browser intents must use the actual Application"
+        );
+        let intent = env
+            .get_static_field(
+                "android/content/Context",
+                "browserIntent",
+                "Landroid/content/Intent;",
+            )
+            .unwrap()
+            .l()
+            .unwrap();
+        let action = env
+            .get_field(&intent, "action", "Ljava/lang/String;")
+            .unwrap()
+            .l()
+            .unwrap();
+        let action: String = env.get_string(&JString::from(action)).unwrap().into();
+        assert_eq!(action, "android.intent.action.VIEW");
+        let uri = env
+            .call_method(&intent, "getData", "()Landroid/net/Uri;", &[])
+            .unwrap()
+            .l()
+            .unwrap();
+        let uri = env
+            .call_method(&uri, "toString", "()Ljava/lang/String;", &[])
+            .unwrap()
+            .l()
+            .unwrap();
+        let uri: String = env.get_string(&JString::from(uri)).unwrap().into();
+        assert_eq!(uri, expected);
+        assert_eq!(
+            env.call_method(&intent, "getFlags", "()I", &[])
+                .unwrap()
+                .i()
+                .unwrap(),
+            0x1000_0000
+        );
+        let category = env.new_string("android.intent.category.BROWSABLE").unwrap();
+        assert!(
+            env.call_method(
+                &intent,
+                "hasCategory",
+                "(Ljava/lang/String;)Z",
+                &[JValue::Object(&category)]
+            )
+            .unwrap()
+            .z()
+            .unwrap()
+        );
+        assert!(
+            env.get_field(&intent, "type", "Ljava/lang/String;")
+                .unwrap()
+                .l()
+                .unwrap()
+                .is_null(),
+            "links must resolve without an image/video MIME filter"
+        );
+    }
+
+    // No ReaderActivity has been created yet; browser links require no weak
+    // Activity, picker reservation or Java-main-queue launch.
+    let source = "https://github.com/misobarisic/nova-reader/blob/main/LICENSE?plain=1#L1";
+    open_browser(source).unwrap();
+    assert_link(env, application, source);
+    fixture_run(env, "create");
+    fixture_run(env, "recreate");
+    fixture_run(env, "destroy");
+    let license = "https://www.gnu.org/licenses/gpl-3.0.html";
+    open_browser(license).unwrap();
+    assert_link(env, application, license);
+    let launches = env
+        .get_static_field("android/content/Context", "browserLaunches", "I")
+        .unwrap()
+        .i()
+        .unwrap();
+    env.set_static_field(
+        "android/content/Context",
+        ("android/content/Context", "failBrowserLaunch", "Z"),
+        JValue::Bool(1),
+    )
+    .unwrap();
+    let error = open_browser(source).unwrap_err();
+    assert!(error.starts_with("no app can open this link ("), "{error}");
+    assert!(
+        error.contains("java.lang.IllegalStateException: fixture no browser activity"),
+        "{error}"
+    );
+    assert!(!env.exception_check().unwrap());
+    assert_eq!(
+        env.get_static_field("android/content/Context", "browserLaunches", "I")
+            .unwrap()
+            .i()
+            .unwrap(),
+        launches
+    );
+    env.set_static_field(
+        "android/content/Context",
+        ("android/content/Context", "failBrowserLaunch", "Z"),
+        JValue::Bool(0),
+    )
+    .unwrap();
+    let retry = "https://github.com/misobarisic/nova-reader";
+    open_browser(retry).unwrap();
+    assert_link(env, application, retry);
+    assert!(!env.exception_check().unwrap());
+}
+
 fn image_export_and_clipboard_have_real_readable_bytes(env: &mut JNIEnv<'_>) {
     let staged = cache_dir().unwrap().join("page.png");
     std::fs::write(&staged, b"fixture encoded image").unwrap();
@@ -570,6 +693,7 @@ fn application_context_launches_and_callbacks_resolve() {
             app.as_obj().as_raw().cast(),
         );
     }
+    browser_links_use_application_and_recover_from_launch_exceptions(&mut env, app.as_obj());
     env.call_static_method(FIXTURE, "create", "()V", &[])
         .unwrap();
     assert_eq!(

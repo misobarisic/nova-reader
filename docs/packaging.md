@@ -78,12 +78,33 @@ system libraries such as UIAutomationCore are supplied by Windows. The upload
 uses `archive: false` and publication downloads that artifact by ID with
 `skip-decompress: true`, preserving the original release ZIP.
 
-`dependency-licenses.sh` uses cargo-about 0.9.1 (Nix-provided or explicitly
-installed by Linux CI) with `--locked --fail` for the exact release targets and
-features. Full license texts and upstream links accompany LICENSE and project
-attribution in desktop packages and Android assets. The inventory also includes
-the Apache license for the bundled Roboto faces reused from Nova. The launcher artwork is
-inherited from Nova under the same license; it is not a new branding claim.
+The root `build.rs` copies Nova's actual `generate_license_catalog`,
+`render_cargo_about` and `write_if_changed` functions from verified clean revision
+`b69a1e5765ecc65ac3b00acdfe2f16e2f46a5dda`. `about.toml` and the crate-source
+Handlebars template are byte-for-byte Nova copies; the license template changes
+only the application header. Reader adaptations select its watched manifests,
+actual desktop/Android/update-check features and local legal inputs. No Nova
+media, unavailable font or brand-asset notices are added.
+
+For the current Cargo target only, the builder performs the same two cargo-about
+renders as Nova: source links and full license texts, both with `--locked --fail`.
+Reader explicitly disables defaults and passes only the active features so an
+Android or distro build does not acquire desktop/updater inventory. It appends
+Reader's complete third-party notices, local AVIF adapter/vendor COPYING,
+project GPL text and bundled Roboto Apache license. The compressed catalogue and
+source rows are compiled into About, so no separate `target/licenses` output is
+required by the Linux/Windows packagers. Android ABI jobs no longer generate
+inventories for every other ABI before their own build.
+
+Nova's compression code and recipe remain unchanged: zstd level 22, frame
+checksum and pledged original size, with the original readable text, compressed
+frame, exact-size Rust constant, source TSV and recipe in `OUT_DIR`. Identical
+text plus the same recipe reuses the compressed frame on build-script reruns;
+the two cargo-about renders still occur when the script runs. Missing tools,
+unresolved licenses and invalid tool output fail the build rather than silently
+omitting text. Nix shells still provide cargo-about; Linux CI retains its pinned
+cargo-about installation. The old independent inventory script and its duplicate
+policy/template are removed.
 
 The workflow is copied from Nova with reader-specific names, paths and native
 dependencies. Its job conditions and dependencies match Nova exactly: Linux,
@@ -91,8 +112,8 @@ Windows and Android check jobs run on pull requests and pushes to main, while
 tag pushes start the three Android ABI builds, Linux build and Windows build
 directly. Tag builds do not run or depend on check jobs. Android assembly waits
 for its ABI builds; publication waits for Android assembly, Linux and Windows.
-The existing reader signing override and license inventory steps are retained
-because these provide the signing identity and files used by the reader build.
+The existing Reader signing override and pinned cargo-about installation are
+retained. License generation now runs inside the actual build, as Nova does.
 Nova's pinned Actions, caches, disk cleanup, artifact transport and permissions
 are unchanged. Tag names select the release version; version 0.1.2 carries this
 correction without moving previously pushed tags.
@@ -128,8 +149,9 @@ from 0.1.8 remains, and its real-ELF regression is a development test only.
 Make's build recipes now follow Nova directly, without the added preflight fetch.
 
 Only Reader IDs/artifact names, its independent Android version-code policy,
-omission of absent media libraries, the existing license inventory/signing
-integration and the dated AppImage tool resource pins below differ. `test_package_nova_parity.py` compares all three packagers
+omission of absent media libraries, Reader signing integration and the dated
+AppImage tool resource pins below differ. Dependency notices are embedded by
+Nova's copied build-time catalogue instead of separate package-copy steps. `test_package_nova_parity.py` compares all three packagers
 with canonical digests derived from Nova b69a1e5, ignoring only these documented
 app-specific adaptations and the exact reviewed tool URL/hash/comment literals;
 adding a Reader-only release check still changes the digest. The separate Linux
@@ -193,3 +215,15 @@ cargo check --locked -p ferri-pdf-rav1d -p ravif --target armv7-linux-androideab
 
 Full application APK builds still use Nova's existing three-ABI NDK workflow.
 No nightly compiler, `RUSTC_BOOTSTRAP`, AVIF removal or tag-check job was added.
+
+
+`test_package_license_build.py` pins canonical function/resource digests from
+Nova's immutable source revision, normalizing only Reader-specific watched
+inputs, active-feature selection, legal inputs and display header.
+`tests/license_catalog_build.rs` invokes the actual copied generator in child
+processes with mock cargo-about output. It checks current-target-only renders,
+precise feature arguments, full local notice retention, exact zstd roundtrip,
+checksum/content size, unchanged-frame reuse and recipe invalidation. Missing
+tools, unresolved licenses and invalid UTF-8 must fail while preserving any
+previous generated catalogue. The Android real-ELF alignment regression isolates
+the unchanged final-link directive from this separately exercised license code.

@@ -17,7 +17,6 @@ mkdir -p "$bundle" "$dist"
 profile="${NOVA_RELEASE_PROFILE:-release}"
 cp "target/x86_64-pc-windows-gnu/$profile/nova-reader.exe" "$bundle/nova-reader.exe"
 cp LICENSE THIRD_PARTY_NOTICES.md "$bundle/"
-cp target/licenses/x86_64-pc-windows-gnu.txt "$bundle/DEPENDENCY_LICENSES.txt"
 
 # Include only DLL files from the compiler's Nix dependency closure. This
 # supplies MinGW's runtime DLLs without committing toolchain binaries.

@@ -77,8 +77,6 @@ if [[ "$icon_dimensions" != "512x512" ]]; then
   exit 1
 fi
 install -D -m 644 "$icon_512" "$app_icon"
-install -D -m 644 target/licenses/x86_64-unknown-linux-gnu.txt "$appdir/usr/share/doc/nova-reader/DEPENDENCY_LICENSES.txt"
-install -D -m 644 target/licenses/x86_64-unknown-linux-gnu.txt "$deb_root/usr/share/doc/nova-reader/DEPENDENCY_LICENSES.txt"
 install -D -m 644 LICENSE "$appdir/usr/share/doc/nova-reader/LICENSE"
 install -D -m 644 THIRD_PARTY_NOTICES.md "$appdir/usr/share/doc/nova-reader/THIRD_PARTY_NOTICES.md"
 install -D -m 644 .github/scripts/nova-reader.desktop "$deb_root/usr/share/applications/nova-reader.desktop"

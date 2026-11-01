@@ -2840,6 +2840,21 @@ fn wire_reader_context(app: &Arc<Controller>, ui: &AppWindow) {
 pub fn run(services: Services) -> Result<()> {
     let ui = AppWindow::new().map_err(error)?;
     ui.set_app_version(env!("CARGO_PKG_VERSION").into());
+    ui.set_about_update_checks_enabled(cfg!(feature = "update-check"));
+    crate::about::prepare_license_text(&ui);
+    ui.set_license_sources(ModelRc::new(VecModel::from(
+        crate::about::open_source_license_sources(),
+    )));
+    // Nova's About source-link guard and platform browser dispatch.
+    ui.on_license_source_requested(move |url| {
+        if !url.starts_with("https://") {
+            eprintln!("Nova Reader: refusing non-HTTPS license source URL");
+            return;
+        }
+        if let Err(error) = crate::browser::open_browser(&url) {
+            eprintln!("Nova Reader: could not open license source page {url}: {error}");
+        }
+    });
     crate::appearance::init(&ui)?;
     crate::capture_settings::init(&ui)?;
     crate::image_storage::init(&ui)?;

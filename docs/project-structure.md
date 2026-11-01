@@ -6,7 +6,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 
 | Location | Responsibility |
 | --- | --- |
-| `build.rs` | Final Android cdylib 16 KiB ELF alignment, preserved when cargo-apk2 overrides Cargo rustflags |
+| `build.rs`, `about.toml` | Nova’s copied current-target license/source catalogue generation, zstd-22 embedding recipe and final Android cdylib 16 KiB ELF alignment |
 | `src/main.rs`, `src/lib.rs` | Desktop entry, Android entry/lifecycle, CLI routing |
 | `src/app.rs` | Worker orchestration, navigation, source/settings selection, visible-page loading, display tiles, lifecycle progress flush |
 | `src/services.rs` | Shared UI/test services: install, validated source/date conversion, library, downloads and local import |
@@ -21,10 +21,12 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `src/reader_modes.rs`, `docs/reader-modes.md` | Pinned TachiyomiJ2K genre/source classification, Automatic/manual selection, and per-series persisted mode overrides |
 | `src/timeline.rs`, `src/source_filters.rs`, `src/source_browser.rs` | Local date groups/provider date parsing, bounded typed filter values and persistent source pins/last-used grouping |
 | `src/updates.rs` | Optional reader application release discovery |
+| `src/about.rs` | Nova’s exact-size catalogue decompression, bounded text chunks and source-row ordering/fallbacks; publishes About models from a worker |
+| `src/browser.rs` | Nova’s desktop browser launching and Reader Android intent adapter for About source links |
 | `src/appearance.rs` | Device appearance/motion preferences, validated edits, immediate application and KV persistence |
 | `crates/ui/app.slint` | Shared pages/reader models, safe-area layout, platform/width shell selection, detail origin and translated text |
 | `crates/ui/media-models.slint` | Shared series/chapter/timeline/source/extension/filter row models |
-| `crates/ui/library-cards.slint`, `crates/ui/display-settings.slint` | Nova poster/list painting, per-entry context gestures, viewport admission, grid/list switch and persisted display choices |
+| `crates/ui/library-cards.slint`, `crates/ui/display-settings.slint` | Nova poster/list painting and left-anchored progress fill, per-entry context gestures, viewport admission, grid/list switch and persisted display choices |
 | `crates/ui/library-search.slint` | Retained Nova search reveal, deferred focus, live filtering and viewport-aware field exposure |
 | `crates/ui/entry-menu.slint` | Per-title Kit action sheet/anchored desktop menu, stable-identity category editing and library/refresh actions |
 | `crates/ui/detail-hero.slint`, `crates/ui/title-artwork.slint`, `crates/ui/chapter-row.slint` | Nova detail artwork/title/metadata/actions, retained synopsis state, chapter-ready Continue gating, compact chapter rows and accessible action popup |
@@ -33,9 +35,11 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `crates/ui/navigation.slint` | Nova’s 64px icon rail, flat five-tab bottom bar, icon feedback and keyboard navigation |
 | `crates/ui/controls.slint`, `crates/ui/page-header.slint` | Thin Nova Kit control adapters and Nova’s PageHeader; shared palette, typography and accessibility |
 | `crates/ui/more.slint` | Retained Nova-style More/Settings landings, nested slide/fade layers, scroll/focus restoration and local import/categories/data/About pages |
+| `crates/ui/about.slint`, `crates/ui/about-models.slint`, `crates/ui/about-controls.slint` | Nova’s copied About/source/license viewer with Reader shell routing and shared header adapter |
 | `crates/ui/appearance.slint`, `crates/ui/theme-settings.slint`, `crates/ui/settings-row.slint`, `crates/ui/src/appearance.rs` | Nova theme/motion settings controls, responsive setting rows and adapted Nova palette derivation |
 | `crates/ui/build.rs` | Kit source aliases, embedded resources, debug layout metadata and narrow Kit dropdown/segmented keyboard/accessibility adaptations |
 | `assets/fonts` | Nova’s bundled Roboto faces and Apache notices; More/settings artwork comes directly from Kit |
+| `assets/open_source_*.hbs`, `assets/open_source_project_sources.tsv`, `assets/open_source_vendors.txt` | Nova catalogue templates and Reader-specific source/vendor attribution; full local notices are appended by `build.rs` |
 | `assets/icons/navigation` | Embedded SVG navigation and reader controls, independent of system font glyph coverage |
 | `crates/reader-domain` | Source-local identities, schema-1 state, library/categories, progress/history/bookmarks, backup/restore |
 | `crates/reader-sources` | Reader v2 ZIP validation, durable registry, typed profile settings, QuickJS host, HTML/URL capabilities and checked source HTTP |
@@ -56,8 +60,11 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `tests/capture_settings.rs`, `tests/image_storage.rs` | Process-boundary capture/compression persistence, corruption recovery, independent policies and accessible settings controls |
 | `tests/reader_modes.rs` | Per-series mode restart persistence, explicit Automatic/legacy migration, source identity isolation and accessible short-viewport mode options |
 | `tests/library_navigation.rs`, `tests/source_paging.rs` | Search reveal/focus and retained detail context; automatic viewport paging, short-page fill, Retry and saved catalogue scroll |
+| `tests/library_progress.rs` | Phone/desktop grid/list progress geometry from unread through complete, including small left-anchored fills |
 | `tests/entry_menu.rs`, `tests/reading_preferences.rs` | Per-title gestures/category identity, durable source visibility/chapter ordering and failed-write behavior |
 | `tests/reader_pixel_edges.rs`, `crates/reader-engine/tests` | Physical-pixel shared tile/page edges across fractional scroll/scales, plus AVIF fixtures and decode admission |
+| `tests/license_catalog_build.rs`, `.github/scripts/test_package_license_build.py` | Actual generator feature/target/failure/frame-reuse regressions and immutable Nova function/template parity |
+| `tests/about.rs` | Retained About/license scrolling, bounded-layout source links, delayed models and keyboard/system Back |
 | `tests/image_download_encoding.rs` | Production Services partial-resume encoding: verified pages remain intact, new pages follow compression policy, completed bundles survive policy changes, disabled future writes retain source bytes and offline hashes survive addon removal |
 | `tools/test-android-documents.py`, `tests/android-documents` | Production Java/JNI host regression with checked JNI and deterministic main-queue/lifecycle fixtures |
 | `android/java/dev/misob/nova/reader/ReaderImageProvider.java`, `tools/test-android-provider-manifest.py` | Android image clipboard URI provider and packaged provider-manifest regression |
@@ -198,12 +205,15 @@ Source examples are intended for independent future publication in nova-addons.
 - Tall-page row windows and display admission: `crates/reader-engine/src/display.rs`, `src/app.rs` (`request_images`).
 - Reader tile seams and physical-pixel edges: `crates/ui/app.slint`, `tests/reader_pixel_edges.rs`.
 - Series/chapter layouts, timeline/source groups and reader controls: `crates/ui/library-cards.slint`, `crates/ui/detail-hero.slint`, `crates/ui/timeline.slint`, `crates/ui/source-list.slint`, `tests/reader_design.rs`.
+- Left-anchored library reading progress: `crates/ui/library-cards.slint`, `tests/library_progress.rs`.
 - Reader image/screencap actions and export settings: `crates/ui/reader-context-menu.slint`, `src/reader_export.rs`, `src/chapter_capture.rs`, `src/capture_settings.rs`, More → Settings → Screenshots.
 - New cache/download image compression: `src/image_storage.rs`, `crates/ui/image-storage-settings.slint`, More → Settings → Cache.
 - Appearance controls, palette and device persistence: `crates/ui/theme-settings.slint`, `crates/ui/src/appearance.rs`, `src/appearance.rs`.
 - Android picker context, callbacks and host JVM regression: [Android documents](android-documents.md).
 - Android/desktop shells and touch layout checks: `crates/ui/navigation.slint`, `crates/ui/app.slint`, `tests/mobile_layout.rs`.
 - Static review scope and outcome: [review record](../REVIEW.md).
+- Build-time license catalogue and source inventory: `build.rs`, `about.toml`, `assets/open_source_*`, `tests/license_catalog_build.rs`.
+- About license/source viewer: `src/about.rs`, `crates/ui/about.slint`, `tests/about.rs`.
 - Run/build/install and CLI: [README](../README.md), [packaging](packaging.md).
 - Source manifest, HTTP permissions, limits and error contract: [source API](source-api.md).
 - Manhwa routes, languages, parser tests and upstream license: [reference source](manhwa18.md).

@@ -1,0 +1,29 @@
+// Nova's re-exported Kit SettingsHeader, copied from nova-kit 63141dfc6abd39a247edde1f33ebaeb59dc7229a.
+// The BackButton adapter adds the same accessible action used throughout Reader.
+import { Theme, InterfaceStyle } from "@NovaUiShared";
+import { BackButton } from "controls.slint";
+export component SettingsHeader inherits Rectangle {
+    in property <string> title;
+    in property <string> introduction;
+    in property <bool> overview: false;
+    in property <bool> show-back: !root.overview;
+    in property <bool> back_focused: false;
+    callback back();
+    vertical-stretch: 0;
+    height: Math.max(108px, heading_measure.preferred-height + intro_measure.preferred-height + 48px);
+    clip: true;
+    Rectangle {
+        height: 0px; clip: true;
+        heading_measure := Text { width: Math.max(0px, root.width - (root.show-back ? 88px : 32px)); text: root.title; font-size: root.overview ? 32px : 24px; font-weight: 700; wrap: word-wrap; }
+        intro_measure := Text { width: Math.max(0px, root.width - 32px); text: root.introduction; font-size: InterfaceStyle.tv ? 20px : 14px; wrap: word-wrap; }
+    }
+    VerticalLayout {
+        padding: 16px; spacing: 8px;
+        HorizontalLayout {
+            spacing: 12px;
+            if root.show-back: BackButton { focused: root.back_focused; clicked => { root.back(); } }
+            Text { text: root.title; font-size: root.overview ? 32px : 24px; font-weight: 700; color: Theme.current.text_bright; wrap: word-wrap; min-width: 0px; vertical-alignment: center; }
+        }
+        Text { text: root.introduction; font-size: InterfaceStyle.tv ? 20px : 14px; color: Theme.current.text_settings; wrap: word-wrap; min-width: 0px; }
+    }
+}

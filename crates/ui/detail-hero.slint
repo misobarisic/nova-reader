@@ -103,16 +103,31 @@ export component DetailHero inherits Rectangle {
                     Text { text: root.description; width: 100%; height: 100%; color: Theme.current.text_description; font-size: root.narrow ? 15px : 19px; wrap: word-wrap; overflow: elide; vertical-alignment: top; }
                     TouchArea {
                         enabled: measure.preferred-height > (root.narrow ? 66px : 84px);
+                        mouse-cursor: pointer;
                         accessible-role: button; accessible-label: root.expanded ? @tr("Show less") : @tr("Read more");
                         accessible-action-default => { if self.enabled { root.expanded = !root.expanded; } }
-                        clicked => { root.expanded = !root.expanded; }
+                        // Copied from Nova detail.slint hero_description_touch,
+                        // b69a1e5765ecc65ac3b00acdfe2f16e2f46a5dda.
+                        property <bool> dragged: false;
+                        pointer-event(ev) => {
+                            if (ev.kind == PointerEventKind.down) { self.dragged = false; }
+                        }
+                        moved => {
+                            if (Math.abs(self.mouse-x - self.pressed-x) + Math.abs(self.mouse-y - self.pressed-y) > 12px) {
+                                self.dragged = true;
+                            }
+                        }
+                        clicked => {
+                            if (!self.dragged) {
+                                root.expanded = !root.expanded;
+                            }
+                        }
                     }
                     synopsis-focus := FocusScope {
                         enabled: measure.preferred-height > (root.narrow ? 66px : 84px);
-                        changed has-focus => { if self.has-focus { SettingsStyle.reveal_control(synopsis.absolute-position.y,synopsis.height,false); } }
+                        focus-on-click: false;
                         key-pressed(e) => { if e.text == Key.Return || e.text == " " { if !e.repeat { root.expanded = !root.expanded; } return accept; } return reject; }
                     }
-                    Rectangle { width: parent.width; height: parent.height; background: transparent; border-width: synopsis-focus.has-focus ? 2px : 0px; border-color: Theme.current.focus_ring; }
                 }
                 HorizontalLayout {
                     spacing: 12px;

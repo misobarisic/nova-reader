@@ -7,7 +7,12 @@ https://github.com/misobarisic/nova-kit/tree/63141dfc6abd39a247edde1f33ebaeb59dc
 
 The complete Reader source and Cargo.lock identify all Rust dependencies:
 https://github.com/misobarisic/nova-reader
-Rust dependency licensing is generated for distribution alongside this notice.
+The root build script copies Nova's actual current-target cargo-about license
+and source-catalogue generation, using the locked dependency graph and active
+features and failing on unresolved entries. Full dependency texts and links,
+Reader's complete root third-party notices, local AVIF vendor COPYING and the
+Roboto license are compressed with Nova's zstd recipe and compiled into
+More → About. There is no separate all-platform inventory generation step.
 
 The MangaFire reference JavaScript port derives from the same Keiyoushi
 extensions-source revision `0d83f6be79e12b0a8b6c6f20a500c0e9456c222a` under
@@ -20,7 +25,7 @@ under `vendor/ferri-pdf-rav1d`, with only ARM/RISC-V nightly-feature predicates
 gated by its existing assembly feature for stable portable builds. The original
 BSD-2-Clause license, source provenance and malformed-input fixes are retained;
 see its `COPYING` and appended `PATCHES.md`. Its full license is also included
-in each generated platform dependency inventory.
+in the embedded current-target catalogue.
 
 ## AVIF adapter and test fixture attribution
 

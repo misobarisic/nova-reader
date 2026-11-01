@@ -420,3 +420,36 @@ formats and executed their CLI using the existing local debug binary. That
 Debian 13 smoke is not an Ubuntu 22.04 release artifact or device acceptance.
 The copied workflow job graph and tag-build conditions are unchanged; the new
 release run remains the final platform build/assembly/publication gate.
+
+## Nova license/About reuse and UI corrections (0.1.16)
+
+The 0.1.15 release completed all Linux, Windows and Android builds, APK assembly
+and publication successfully. Its stable ARMv7 fix and pinned AppImage tools
+remain unchanged.
+
+The license flow now copies Nova b69a1e5's actual build-script generator,
+cargo-about policy/templates, zstd-22 recipe, bounded runtime decompressor and
+About source/license viewer. Reader adapts only its identity, active features,
+local notices, source rows and existing shell/platform browser integration.
+Each build renders only its current target's inventory; the redundant release
+inventory steps and obsolete sidecar files are removed. Tag-only release builds
+and separate main/PR checks retain their existing job graph and conditions.
+Generator regressions cover feature/target arguments, tool/license failures,
+complete notices, frame checksums and unchanged output reuse; immutable-source
+tests check the copied Nova code and resources.
+
+Settings now labels Device/Chapter capture sizing as Screencap resolution.
+The detail synopsis copies Nova's 12px tap/drag guard without a focus outline
+or focus-triggered scrolling. Detail metadata fetching shows no loading label
+or spinner. Library progress uses Nova's explicit left/top fill origin in grid
+and list layouts, including the one-read-chapter case. MangaFire's installable
+ZIP is published in `addons/` with its source and checksum.
+
+Astra 6 medium reviewed the copied license flow and final UI corrections with
+no residual P1/P2 findings. Verification passed formatting, all-target workspace
+Clippy with warnings denied, workspace check and all workspace tests/doc tests,
+including actual synopsis pointer/drag/keyboard/accessibility and rendered-edge
+checks, busy-detail error/Continue behavior, and phone/desktop progress geometry.
+All 33 packaging regressions passed without skips. The Android API 35 Java/JNI
+browser bridge harness and Clippy passed; the actual Linux About/source/license
+viewer was rendered locally. Physical Android acceptance remains unverified.

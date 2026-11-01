@@ -23,6 +23,8 @@ import { LibrarySearchReveal } from "library-search.slint";
 import { EntryMenu, EntryCategoryRow } from "entry-menu.slint";
 export { EntryCategoryRow } from "entry-menu.slint";
 import { MorePage } from "more.slint";
+import { LicenseSource } from "about-models.slint";
+export { LicenseSource } from "about-models.slint";
 export { Appearance } from "appearance.slint";
 export { CaptureSettings } from "capture-settings.slint";
 export { ImageStorageSettings } from "image-storage-settings.slint";
@@ -41,6 +43,14 @@ import { SettingRow } from "media-models.slint";
 export component AppWindow inherits Window {
     title: "Nova Reader";
     in property <string> app-version;
+    in-out property <[string]> license-text-chunks;
+    in-out property <[LicenseSource]> license-sources;
+    in-out property <bool> about-licenses-open: false;
+    in-out property <length> about-scroll-y: 0px;
+    in-out property <length> about-licenses-scroll-y: 0px;
+    in-out property <int> about-back-request: 0;
+    in-out property <bool> about-update-checks-enabled: false;
+    callback license-source-requested(string);
     in-out property <string> image-cache-info;
     in-out property <string> image-cache-status;
     in-out property <bool> image-cache-busy;
@@ -283,6 +293,7 @@ export component AppWindow inherits Window {
     callback flush-progress;
 
     public function go-back() {
+        if root.section == 13 { root.about-back-request += 1; return; }
         if root.entry-menu-visible { root.close-entry-menu(); return; }
         if root.reader-context-visible { root.close-reader-context(); return; }
         if root.section == 0 && root.library-search-open { root.close-library-search(); return; }
@@ -563,10 +574,6 @@ export component AppWindow inherits Window {
                                     padding-left: root.safe-area-insets.left + (root.mobile-ui ? 20px : 64px);
                                     padding-right: root.safe-area-insets.right + (root.mobile-ui ? 20px : 64px);
                                     spacing: 4px;
-                                    if root.busy: HorizontalLayout {
-                                        Spinner { width: 24px; height: 24px; }
-                                        Text { min-width: 0px; text: @tr("Loading chapters…"); color: Theme.current.text_secondary; }
-                                    }
                                     if root.status != "": Text { text: root.status; color: Theme.current.text_settings; wrap: word-wrap; min-width: 0px; }
                                     HorizontalLayout {
                                         Text { text: @tr("{n} chapter" | "{n} chapters" % root.items.length); font-size: 20px; font-weight: 600; color: Theme.current.text_bright; vertical-alignment: center; min-width: 0px; }
@@ -804,6 +811,14 @@ export component AppWindow inherits Window {
                             visible: root.section == 4 || root.section >= 9;
                             section: root.section; narrow: root.mobile-ui;
                             app-version: root.app-version; status: root.status;
+                            license-text-chunks: root.license-text-chunks;
+                            license-sources: root.license-sources;
+                            about-licenses-open <=> root.about-licenses-open;
+                            about-scroll-y <=> root.about-scroll-y;
+                            about-licenses-scroll-y <=> root.about-licenses-scroll-y;
+                            about-back-request: root.about-back-request;
+                            update-checks-enabled: root.about-update-checks-enabled;
+                            license-source-requested(url) => { root.license-source-requested(url); }
                             category-text <=> root.category-text;
                             image-cache-info: root.image-cache-info;
                             image-cache-status: root.image-cache-status;

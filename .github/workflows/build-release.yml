@@ -17,7 +17,7 @@ on:
       - ".cargo/**"
       - "Cargo.toml"
       - "Cargo.lock"
-      - ".github/scripts/about.toml"
+      - "about.toml"
       - "build.rs"
       - "build-support/**"
       - "crates/**"
@@ -46,7 +46,7 @@ on:
       - ".cargo/**"
       - "Cargo.toml"
       - "Cargo.lock"
-      - ".github/scripts/about.toml"
+      - "about.toml"
       - "build.rs"
       - "build-support/**"
       - "crates/**"
@@ -247,9 +247,6 @@ jobs:
             echo "CARGO_APK_CD_RELEASE_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
           fi
 
-      - name: Generate Android dependency license inventory
-        run: nix develop .#android --command bash .github/scripts/dependency-licenses.sh android
-
       - name: Build release APK for this ABI
         env:
           ANDROID_TARGET: ${{ matrix.target }}
@@ -355,9 +352,6 @@ jobs:
       - name: Install cargo-about
         run: cargo install cargo-about --locked --version 0.9.1 --features cli
 
-      - name: Generate Linux dependency license inventory
-        run: bash .github/scripts/dependency-licenses.sh linux
-
       - name: Build Nova Reader release binary
         run: cargo build --locked --profile "$NOVA_RELEASE_PROFILE" --bin nova-reader
 
@@ -395,9 +389,6 @@ jobs:
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
           github_access_token: ${{ github.token }}
-
-      - name: Generate Windows dependency license inventory
-        run: nix develop .#windows --command bash .github/scripts/dependency-licenses.sh windows
 
       - name: Build Windows executable
         run: >-

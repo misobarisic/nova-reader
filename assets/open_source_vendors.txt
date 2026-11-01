@@ -1,0 +1,38 @@
+THIRD-PARTY VENDOR INVENTORY
+
+NOVA READER APPLICATION AND SHARED CRATES
+Nova Reader and its reader-domain, reader-sources, reader-engine,
+reader-downloads, reader-catalogue and UI crates are GPL-3.0-or-later.
+Application/build/UI foundations derive from Nova revision
+b69a1e5765ecc65ac3b00acdfe2f16e2f46a5dda. nova-storage and nova-ui-base are
+consumed from nova-kit revision 63141dfc6abd39a247edde1f33ebaeb59dc7229a.
+The generated Cargo catalog lists runtime crates for the actual target and
+features; the complete project license and third-party notices follow.
+
+BUNDLED FONTS AND ARTWORK
+Roboto-Regular.ttf and Roboto-Bold.ttf are retained unchanged from Nova,
+prepared from googlefonts/roboto-2 revision
+38062f4b4a0be4346d07a928408da21602545e9e under Apache-2.0.
+The full assets/fonts/LICENSE.txt follows. Launcher and UI artwork derives from
+Nova under the existing project attribution.
+
+AVIF ADAPTER AND LOCAL CODEC SOURCE
+reader-engine/src/avif.rs adapts avif-decode 3.0.0 plane/CICP handling under
+BSD-3-Clause; its full notice follows. vendor/ferri-pdf-rav1d is the published
+ferri-pdf-rav1d 1.1.2 archive, SHA-256
+bb4072634f94938773523af4005a080ff3e2b3a0328eaa9bd222eb52d85e2cd3,
+with the two stable scalar feature-predicate adaptations recorded in PATCHES.md.
+Its existing malformed-input repairs, upstream provenance and full BSD-2-Clause
+COPYING are retained.
+
+AUTOMATIC MODE CLASSIFICATION
+Reader mode classification adapts TachiyomiJ2K revision
+b83defe42b2ac9f460667bda3a42fdd9d12e767e under Apache-2.0. The full applicable
+notice and license are in the appended THIRD_PARTY_NOTICES.md.
+
+REFERENCE ADDONS AND CATALOGUE METADATA
+Keiyoushi-derived source ports and catalogue schema retain their Apache-2.0
+provenance. Executable addon packages are independent installs; their own
+NOTICES/LICENSE files travel inside their ZIPs. The included neutral geometric
+fixture material is CC0-1.0. Upstream APK/JAR metadata does not grant Reader
+runtime compatibility or native package trust.

@@ -79,13 +79,13 @@ export component CaptureSettingsPage inherits VerticalLayout {
             }
         }
         SettingsRow {
-            row-title: @tr("Screenshot resolution");
+            row-title: @tr("Screencap resolution");
             row-desc: @tr("Capture the visible chapter area using device pixels or the chapter's original pixels.");
-            accessible-label: @tr("Screenshot resolution");
+            accessible-label: @tr("Screencap resolution");
             ReaderSelect {
                 width: Math.min(252px, Math.max(0px, root.width - 32px));
                 enabled: root.interactive;
-                placeholder-text: @tr("Screenshot resolution");
+                placeholder-text: @tr("Screencap resolution");
                 model: [@tr("Device resolution"), @tr("Chapter resolution")];
                 current-index <=> CaptureSettings.resolution-index;
                 selected(_) => { CaptureSettings.settings-changed("resolution", self.current-index); }

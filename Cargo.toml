@@ -19,7 +19,7 @@ slint-build = "=1.18.0"
 
 [package]
 name = "nova-reader"
-version = "0.1.15"
+version = "0.1.16"
 edition = "2024"
 license.workspace = true
 description = "A source-based manga and webtoon reader for desktop and Android"
@@ -36,6 +36,8 @@ android = ["slint/backend-android-activity-06"]
 update-check = ["dep:reqwest", "dep:semver"]
 
 [dependencies]
+# Nova's embedded license catalog uses the same zstd implementation as storage.
+zstd = { version = "0.13", default-features = false }
 sha2 = "0.10"
 time = { version = "0.3", features = ["formatting", "local-offset", "parsing"] }
 nova-storage = { workspace = true }
@@ -66,6 +68,9 @@ jni = "0.21"
 ndk-context = "0.1"
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "aws-lc-rs"] }
 webpki-roots = "1"
+
+[build-dependencies]
+zstd = { version = "0.13", default-features = false }
 
 [dev-dependencies]
 i-slint-core = { version = "=1.18.0", default-features = false }

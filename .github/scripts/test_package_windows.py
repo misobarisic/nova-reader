@@ -17,9 +17,6 @@ class WindowsPackagingTests(unittest.TestCase):
             executable.write_bytes(b'MZ reader fixture')
             (root / 'LICENSE').write_text('application license')
             (root / 'THIRD_PARTY_NOTICES.md').write_text('source attribution')
-            inventory = root / 'target/licenses/x86_64-pc-windows-gnu.txt'
-            inventory.parent.mkdir(parents=True)
-            inventory.write_text('dependency licenses')
             inputs = root / 'runtime-inputs'
             inputs.mkdir()
             dll = inputs / 'libwinpthread-1.dll'
@@ -40,7 +37,7 @@ class WindowsPackagingTests(unittest.TestCase):
                 with ZipFile(root / 'dist/Nova-Reader-Windows-x86_64-0.1.1.zip') as archive:
                     self.assertEqual(set(archive.namelist()), {
                         'nova-reader.exe', 'LICENSE', 'THIRD_PARTY_NOTICES.md',
-                        'DEPENDENCY_LICENSES.txt', 'libwinpthread-1.dll',
+                        'libwinpthread-1.dll',
                     })
                     self.assertEqual(archive.read('libwinpthread-1.dll'), dll.read_bytes())
                 # Repackaging must recover old read-only staging directories.

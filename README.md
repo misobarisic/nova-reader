@@ -35,7 +35,8 @@ See [UI design reuse](docs/ui-design.md) for the source/component mapping.
 ## Run a neutral reading flow
 
 Use the pinned Nix development shell, or install a Rust toolchain and the desktop
-libraries specified in [flake.nix](flake.nix):
+libraries specified in [flake.nix](flake.nix), plus `cargo-about` 0.9.1 for
+Nova’s build-time About catalogue:
 
 ```sh
 nix develop
@@ -144,5 +145,6 @@ nova-kit `63141dfc6abd39a247edde1f33ebaeb59dc7229a`; this is the inherited Nova
 pin, not the newer kit revision listed in the plan. Generic addon runtime
 extraction into kit and Nova consumer compatibility are still pending.
 Slint carries its own license alternatives; dependency license texts are
-produced separately by release tooling. The Manhwa18/YiiMadara port retains its
+generated for the actual build target/features and embedded into About using
+Nova’s copied build-time catalogue. The Manhwa18/YiiMadara port retains its
 upstream Apache-2.0 license and provenance. Neutral fixture material is CC0-1.0.

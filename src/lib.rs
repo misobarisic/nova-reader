@@ -1,10 +1,12 @@
 //! Nova Reader's platform entry points. Reader services live in leaf crates.
 pub use nova_reader_ui::*;
+mod about;
 #[cfg(target_os = "android")]
 pub mod android_documents;
 mod app;
 pub mod appearance;
 mod artwork;
+mod browser;
 pub mod capture_settings;
 mod chapter_capture;
 mod cli;

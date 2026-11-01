@@ -64,6 +64,13 @@ After Android startup, call:
 - `cancel_pending()` to cancel the current request explicitly.
 - `set_reader_immersive(bool)` to synchronize the Android status bar with reader
   controls. It returns JNI/queue errors and does not require a document request.
+- `open_browser(url)` for license and source links. Adapted from Nova's
+  `crates/player/src/external.rs` `open_browser` at revision `b69a1e5`, it launches
+  `ACTION_VIEW` with `Uri.parse(url)`, `CATEGORY_BROWSABLE` and
+  `FLAG_ACTIVITY_NEW_TASK`, with no MIME filter. The actual Application starts
+  the intent, so browser links do not depend on a live ReaderActivity or picker
+  state. JNI launch errors preserve the Java cause and clear exceptions before
+  another link is opened.
 - `export_image(staged_path, suggested_name, mime, callback)` to save a PNG,
   JPEG, WebP, GIF or AVIF through `ACTION_CREATE_DOCUMENT` with the matching image
   MIME type. The suggested filename is sanitized and receives its extension.
@@ -185,8 +192,11 @@ It checks cache access through Application, all four import launch types,
 backup export launch, cancellation/native callback registration, recreation
 between request and launch, missing activity errors, Java exception reporting
 and successful retry after clearing the exception. The Rust callback test also
-checks single completion, busy rejection and stale-result rejection. The window
-fixtures exercise API 26/28/29 decor flags and API 30/35 insets: queued hide/show,
+checks single completion, busy rejection and stale-result rejection.
+Browser fixtures verify the original URI, browsable category, new-task flag,
+missing MIME filter and Application identity before activity creation and after
+recreation/destruction, plus launch exception reporting and successful recovery.
+The window fixtures exercise API 26/28/29 decor flags and API 30/35 insets: queued hide/show,
 transient swipe behavior, retained state across recreation and missing activity,
 focus reapplication, rapid toggles, and rejection of updates to stale windows.
 They also check transparent status bars, the matching cutout policies and
@@ -232,3 +242,5 @@ on API 26-28, cleanup after interrupted saves, and pasting into another app afte
 Reader is closed. Confirm the APK manifest includes the private image provider and DEX
 includes both Java classes. Screenshot composition is tested by the reader
 export backend; the Android bridge transfers the staged encoded bytes.
+Open About's license and source links and confirm Android dispatches them to the
+system browser while the reader's normal navigation remains usable afterward.

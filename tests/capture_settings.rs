@@ -122,12 +122,12 @@ fn capture_preferences_persist_recover_and_drive_accessible_controls() {
                         .next()
                         .is_some()
                 );
-                select_option(&ui, "Screenshot resolution", "Chapter resolution");
+                select_option(&ui, "Screencap resolution", "Chapter resolution");
                 assert_eq!(
                     capture_settings::preferences(&ui).resolution,
                     CaptureResolution::Chapter
                 );
-                select_option(&ui, "Screenshot resolution", "Device resolution");
+                select_option(&ui, "Screencap resolution", "Device resolution");
                 assert_eq!(
                     capture_settings::preferences(&ui).resolution,
                     CaptureResolution::Device
@@ -191,7 +191,7 @@ fn capture_preferences_persist_recover_and_drive_accessible_controls() {
                             .unwrap();
                     assert!(selector.size().width <= width && selector.size().width > 0.);
                     let resolution =
-                        ElementHandle::find_by_accessible_label(&ui, "Screenshot resolution")
+                        ElementHandle::find_by_accessible_label(&ui, "Screencap resolution")
                             .find(|element| {
                                 element.accessible_role() == Some(AccessibleRole::Combobox)
                             })
@@ -201,12 +201,12 @@ fn capture_preferences_persist_recover_and_drive_accessible_controls() {
                     assert!(
                         resolution.absolute_position().x + resolution.size().width <= width + 0.5
                     );
-                    select_option(&ui, "Screenshot resolution", "Chapter resolution");
+                    select_option(&ui, "Screencap resolution", "Chapter resolution");
                     assert_eq!(
                         capture_settings::preferences(&ui).resolution,
                         CaptureResolution::Chapter
                     );
-                    select_option(&ui, "Screenshot resolution", "Device resolution");
+                    select_option(&ui, "Screencap resolution", "Device resolution");
                     assert_eq!(
                         capture_settings::preferences(&ui).resolution,
                         CaptureResolution::Device

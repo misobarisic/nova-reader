@@ -1,6 +1,7 @@
-//! Android window and SAF bridge. Payloads cross JNI as app-private file paths, never as
-//! large Java byte arrays. Callbacks run on the result/copy thread; UI callers
-//! must hop back through Slint's event loop. Only use after Android startup.
+//! Android window, browser and SAF bridge. Payloads cross JNI as app-private
+//! file paths, never as large Java byte arrays. Callbacks run on the result/copy
+//! thread; UI callers must hop back through Slint's event loop. Only use after
+//! Android startup.
 #![cfg(target_os = "android")]
 
 use jni::{
@@ -268,6 +269,55 @@ pub fn copy_image(
     callback: impl FnOnce(Result<(), String>) + Send + 'static,
 ) {
     image_action(6, staged, "Reader image", mime, None, callback);
+}
+/// Open a source/license link in the system browser, following Nova's link
+/// intent policy. The Application context needs NEW_TASK and never retains an Activity.
+pub fn open_browser(url: &str) -> Result<(), String> {
+    with_context(|env, application, _| {
+        let raw = env.new_string(url)?;
+        let uri = env
+            .call_static_method(
+                "android/net/Uri",
+                "parse",
+                "(Ljava/lang/String;)Landroid/net/Uri;",
+                &[JValue::Object(&raw)],
+            )?
+            .l()?;
+        let action = env.new_string("android.intent.action.VIEW")?;
+        let intent = env.new_object(
+            "android/content/Intent",
+            "(Ljava/lang/String;Landroid/net/Uri;)V",
+            &[JValue::Object(&action), JValue::Object(&uri)],
+        )?;
+        let browsable = env.new_string("android.intent.category.BROWSABLE")?;
+        env.call_method(
+            &intent,
+            "addCategory",
+            "(Ljava/lang/String;)Landroid/content/Intent;",
+            &[JValue::Object(&browsable)],
+        )?;
+        env.call_method(
+            &intent,
+            "addFlags",
+            "(I)Landroid/content/Intent;",
+            &[JValue::Int(0x1000_0000)],
+        )?;
+        env.call_method(
+            application,
+            "startActivity",
+            "(Landroid/content/Intent;)V",
+            &[JValue::Object(&intent)],
+        )?;
+        Ok(())
+    })
+    .map_err(|error| {
+        format!(
+            "no app can open this link ({})",
+            error
+                .strip_prefix("Android document picker: ")
+                .unwrap_or(&error)
+        )
+    })
 }
 /// Hide the Android status bar while reader controls are hidden, or restore it
 /// with the controls. Java applies this on main and retains it across recreation.

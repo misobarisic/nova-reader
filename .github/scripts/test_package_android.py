@@ -121,11 +121,19 @@ class AndroidPackagingTests(unittest.TestCase):
                    CARGO_ENCODED_RUSTFLAGS="-C\x1fdebuginfo=0")
         env.pop("RUSTFLAGS", None)
         root_build = Path(__file__).resolve().parents[2] / "build.rs"
+        # License generation is exercised separately with its actual functions
+        # and mock cargo-about. Keep this real-link test focused on the actual
+        # root main's Android gate, without adding codec dependencies to it.
+        alignment_source = root_build.read_text().split(
+            "/// Generate the license and source catalog", 1
+        )[0].replace("    generate_license_catalog();\n", "")
+        alignment_build = fixture / "alignment.rs"
+        alignment_build.write_text(alignment_source)
         for target_os, compatible in [("linux", False), ("android", True)]:
             # Only simulate the build-script target gate; Cargo still uses the
             # installed host toolchain to produce and inspect real ELF bytes.
             (fixture / "build.rs").write_text(
-                'mod reader { include!(' + json.dumps(str(root_build)) + '); '
+                'mod reader { include!(' + json.dumps(str(alignment_build)) + '); '
                 'pub fn run() { main(); } }\n'
                 'fn main() { unsafe { std::env::set_var("CARGO_CFG_TARGET_OS", '
                 + json.dumps(target_os) + '); } reader::run(); }\n'
