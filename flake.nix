@@ -37,9 +37,11 @@
       default = pkgs.mkShell {
         # Node/npm run addon parser fixtures in `make check`; addons themselves
         # execute in Reader's embedded QuickJS runtime.
-        nativeBuildInputs = [ (toolchain []) pkgs.pkg-config pkgs.cargo-about pkgs.cargo-sweep pkgs.python3 pkgs.nodejs ];
-        buildInputs = with pkgs; [ fontconfig freetype libxkbcommon libGL libx11 libxcursor libxi libxrandr vulkan-loader ] ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ wayland ];
-        LD_LIBRARY_PATH = lib.makeLibraryPath (with pkgs; [ fontconfig libxkbcommon libGL libx11 libxcursor libxi libxrandr vulkan-loader ] ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ wayland ]);
+        nativeBuildInputs = [ (toolchain []) pkgs.pkg-config pkgs.cargo-about pkgs.cargo-sweep pkgs.python3 pkgs.nodejs ] ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.zenity ];
+        buildInputs = with pkgs; [ fontconfig freetype libxkbcommon libGL libx11 libxcursor libxi libxrandr vulkan-loader ] ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ wayland dbus ];
+        # rfd 0.17 dlopens libdbus instead of linking it; explicitly expose it
+        # for portal dialogs. Zenity above supplies rfd's native fallback.
+        LD_LIBRARY_PATH = lib.makeLibraryPath (with pkgs; [ fontconfig libxkbcommon libGL libx11 libxcursor libxi libxrandr vulkan-loader ] ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ wayland dbus ]);
       };
       spelling = pkgs.mkShell { buildInputs = [ (pkgs.aspellWithDicts (d: [ d.en ])) ]; };
     } // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {

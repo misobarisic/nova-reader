@@ -66,6 +66,12 @@ The app runs addons through embedded QuickJS and needs no Node.js at runtime.
 The default, Android and Windows shells include `cargo-sweep` for cleaning unused
 Cargo build artifacts.
 
+Linux addon installation uses Nova's native ZIP picker on a dedicated worker,
+independently of catalogue loading. The Nix shell exposes the dynamically loaded
+D-Bus library for the desktop portal and includes Zenity as the fallback. After
+updating the flake, re-enter `nix develop` before launching Reader. Non-Nix builds
+need the desktop's file-chooser portal or Zenity available at runtime.
+
 In Browse, select **Neutral reader fixtures**, open the series, add it to the
 library, and choose a chapter. Fixtures include portrait, wide, tall, mixed and
 320-page chapters. Reader controls offer Webtoon, left-to-right, right-to-left

@@ -51,6 +51,90 @@ fn rows(count: usize) -> ModelRc<ItemRow> {
             .collect::<Vec<_>>(),
     ))
 }
+
+#[test]
+fn detail_entrance_fades_like_nova_and_respects_motion_settings_on_both_shells() {
+    use nova_reader::Anim;
+    slint::platform::set_platform(Box::new(i_slint_backend_testing::TestingBackend::new(
+        i_slint_backend_testing::TestingBackendOptions {
+            mock_time: true,
+            threading: false,
+            renderer_name: Some("software".into()),
+            ..Default::default()
+        },
+    )))
+    .unwrap();
+    let ui = AppWindow::new().unwrap();
+    let mut poster = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(1, 1);
+    poster.make_mut_slice()[0] = slint::Rgba8Pixel::new(230, 40, 30, 255);
+    ui.set_series_poster(slint::Image::from_rgba8(poster));
+    ui.set_series_title("Entrance fixture".into());
+    ui.set_items(rows(8));
+    ui.show().unwrap();
+    let red = || {
+        let pixels = ui.window().take_snapshot().unwrap();
+        pixels.as_slice()[(130 * pixels.width() + pixels.width() - 32) as usize].r
+    };
+    let advance = |ms| {
+        for _ in 0..ms / 10 {
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(10));
+            let _ = red(); // Paint intermediate frames, as the real event loop does.
+        }
+    };
+    for (width, height) in [(390., 844.), (1120., 780.)] {
+        ui.window().set_size(LogicalSize::new(width, height));
+        ui.set_section(0);
+        ui.global::<Anim>().set_enabled(true);
+        ui.global::<Anim>().set_transitions(true);
+        advance(300);
+        ui.set_detail_series_key(format!("entry-{width}").into());
+        ui.set_section(5);
+        let initial = red();
+        advance(120);
+        let middle = red();
+        advance(300);
+        let settled = red();
+        assert!(
+            settled > initial + 40,
+            "poster must fade into view at {width}px"
+        );
+        assert!(
+            middle > initial + 5 && middle + 5 < settled,
+            "entrance must have intermediate painted frames: {initial}/{middle}/{settled}"
+        );
+        ui.set_series_title("Updated fixture".into());
+        assert_eq!(red(), settled, "metadata completion must not restart entry");
+
+        // Replacing a title while its detail is mounted starts a new entrance.
+        ui.set_detail_series_key(format!("replacement-{width}").into());
+        assert_eq!(red(), initial);
+        advance(120);
+        assert!(red() < settled);
+        ui.global::<Anim>().set_enabled(false);
+        assert_eq!(
+            red(),
+            settled,
+            "master-off must finish an active fade immediately"
+        );
+        ui.global::<Anim>().set_enabled(true);
+        assert_eq!(
+            red(),
+            settled,
+            "re-enabling motion must not hide an open detail"
+        );
+
+        // Both switches bypass the deferred entrance entirely.
+        for master_off in [true, false] {
+            ui.set_section(0);
+            ui.global::<Anim>().set_enabled(!master_off);
+            ui.global::<Anim>().set_transitions(master_off);
+            ui.set_section(5);
+            assert_eq!(red(), settled);
+            advance(20);
+            assert_eq!(red(), settled);
+        }
+    }
+}
 #[test]
 fn library_search_reveals_focuses_filters_and_closes_like_nova() {
     i_slint_backend_testing::init_no_event_loop();

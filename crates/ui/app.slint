@@ -2,7 +2,7 @@ export { ReaderSettingsSync, SettingSyncInfo } from "settings-sync.slint";
 import { SettingSyncBadge } from "settings-sync.slint";
 import { ControlTouchArea } from "@NovaUiBase/control-input.slint";
 import { Spinner } from "std-widgets.slint";
-import { Theme, SettingsStyle, ControlInput } from "@NovaUiShared";
+import { Theme, Anim, SettingsStyle, ControlInput } from "@NovaUiShared";
 import { ScrollView } from "@NovaUiBase/scrollview.slint";
 import { ReaderField as LineEdit, ReaderSelect as ComboBox, ReaderToggle as CheckBox } from "controls.slint";
 import { PageHeader } from "page-header.slint";
@@ -93,6 +93,32 @@ export component AppWindow inherits Window {
     in property <string> caption: @tr("A home for your next chapter.");
     in property <string> status;
     in property <bool> busy;
+    in property <bool> addon-zip-import-busy;
+    // Nova detail.slint defers its entrance by 40ms so the initial opacity
+    // is painted before the shared transition fade starts.
+    private property <bool> detail-motion: Anim.enabled && Anim.transitions;
+    private property <bool> detail-entry-animate: false;
+    private property <bool> detail-entered: true;
+    private property <float> detail-fade: root.detail-entered ? 1 : 0;
+    private property <float> detail-opacity: root.detail-motion && root.detail-entry-animate ? root.detail-fade : 1;
+    animate detail-fade { duration: root.detail-entry-animate && root.detail-entered ? Anim.transition_fade : 0ms; }
+    function begin-detail-entry() {
+        detail-enter-timer.stop();
+        root.detail-entry-animate = root.detail-motion;
+        root.detail-entered = !root.detail-motion;
+        if root.detail-motion { detail-enter-timer.start(); }
+    }
+    changed detail-motion => {
+        if !root.detail-motion {
+            detail-enter-timer.stop();
+            root.detail-entry-animate = false;
+            root.detail-entered = true;
+        }
+    }
+    detail-enter-timer := Timer {
+        interval: 40ms; running: false;
+        triggered => { self.stop(); if root.section == 5 { root.detail-entered = true; } }
+    }
     in property <[ItemRow]> items;
     in property <[string]> sources;
     in property <[SourceRow]> source-rows;
@@ -129,7 +155,7 @@ export component AppWindow inherits Window {
     changed detail-series-key => {
         root.detail-scroll-y = 0px;
         root.detail-synopsis-expanded = false;
-        if root.section == 5 { root.detail-restore-pending = true; }
+        if root.section == 5 { root.detail-restore-pending = true; root.begin-detail-entry(); }
     }
     in property <string> series-description;
     in property <string> resume-chapter;
@@ -394,6 +420,12 @@ export component AppWindow inherits Window {
     }
 
     changed section => {
+        if root.section == 5 { root.begin-detail-entry(); }
+        else {
+            detail-enter-timer.stop();
+            root.detail-entry-animate = false;
+            root.detail-entered = true;
+        }
         if root.section != 20 {
             ReaderSyncSettings.sync_inspector_active = false;
             SyncContent.sync_remove_prompt_visible = false;
@@ -441,8 +473,9 @@ export component AppWindow inherits Window {
                         section: root.section >= 9 ? 4 : root.section;
                         navigate(section) => { root.navigate(section); }
                     }
-                    Rectangle {
+                    page-content := Rectangle {
                         min-width: 0px;
+                        opacity: root.section == 5 ? root.detail-opacity : 1;
                         if root.section != 6 && root.section != 4 && root.section < 9: page-scroll := ScrollView {
                             private property <int> control-focus-request: SettingsStyle.focus-request;
                             changed control-focus-request => {
@@ -505,7 +538,7 @@ export component AppWindow inherits Window {
                                         x: 12px; y: 12px; width: max(0px, parent.width - 24px);
                                     }
                                 }
-                                if root.busy && root.section != 5 && (root.section != 3 || root.source-catalog-open): HorizontalLayout {
+                                if root.busy && root.section != 1 && root.section != 2 && root.section != 5 && (root.section != 3 || root.source-catalog-open): HorizontalLayout {
                                     Spinner { width: 24px; height: 24px; }
                                     Text { min-width: 0px; text: @tr("Loading…"); color: Theme.current.text_secondary; }
                                 }
@@ -529,7 +562,7 @@ export component AppWindow inherits Window {
                                     }
                                     if root.browse-tab == 1: VerticalLayout {
                                         spacing: 12px;
-                                        ActionButton { text: @tr("Install addon"); clicked => { root.install-addon(); } }
+                                        ActionButton { text: @tr("Install addon"); enabled: !root.addon-zip-import-busy; clicked => { root.install-addon(); } }
                                         ExtensionList { items: root.extensions; action(id,action) => { root.extension-action(id,action); } }
                                     }
                                 }
@@ -678,7 +711,12 @@ export component AppWindow inherits Window {
                                     if root.status != "": Text { text: root.status; color: Theme.current.text_settings; wrap: word-wrap; min-width: 0px; }
                                     HorizontalLayout {
                                         Text { text: @tr("{n} chapter" | "{n} chapters" % root.items.length); font-size: 20px; font-weight: 600; color: Theme.current.text_bright; vertical-alignment: center; min-width: 0px; }
-                                        IconAction { width: 44px; text: @tr("Reverse chapter order"); icon: @image-url("../../assets/icons/navigation/updates.svg"); clicked => { root.chapter-order-changed(!root.chapters-descending); } }
+                                        IconAction {
+                                            width: 44px;
+                                            text: root.chapters-descending ? @tr("Chapter order: descending") : @tr("Chapter order: ascending");
+                                            icon: root.chapters-descending ? @image-url("../../assets/icons/navigation/sort-descending.svg") : @image-url("../../assets/icons/navigation/sort-ascending.svg");
+                                            clicked => { root.chapter-order-changed(!root.chapters-descending); }
+                                        }
                                     }
                                     for chapter[i] in root.items: ChapterRow {
                                         chapter: chapter; picked => { root.detail-scroll-y = page-scroll.content-y; root.open-item(i); } action(action) => { root.item-action(i,action); }

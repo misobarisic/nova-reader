@@ -39,9 +39,9 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `src/sync_ui.rs`, `crates/ui/sync-bridge.slint`, `crates/ui/sync-settings.slint` | Shared Kit Settings → Sync page (section 20), worker-owned startup/shutdown/projection, pairing/invites/QR/peer status and chapter inspector; preserves the UI event-loop boundary |
 | `src/sync_addons.rs` | Per-package desired sync state, hash-verified paired-device addon transfers, nonsecret settings/catalogue switches and permission-confirmation state |
 | `src/android_sync.rs`, `android/java/dev/misob/nova/reader/ReaderSync*.java`, `QrScanActivity.java`, `tools/test-android-sync.py` | Android periodic/headless sync leases, generation-scoped cancellation, network recovery, clipboard and Camera2 invite scanning; Java/JNI regressions |
-| `src/desktop_dialogs.rs` | Nova’s exact titled/filter ZIP addon picker, invoked from Reader’s task worker |
+| `src/desktop_dialogs.rs` | Nova’s dedicated native ZIP picker worker and picker-only busy guard; bounded bytes return to the original window before Reader starts installation |
 | `src/appearance.rs` | Device appearance/motion preferences, validated edits, immediate application and KV persistence |
-| `crates/ui/app.slint` | Shared pages/reader models, safe-area layout, platform/width shell selection, detail origin and translated text |
+| `crates/ui/app.slint` | Shared pages/reader models, safe-area layout, platform/width shell selection, detail origin, Nova's deferred detail-entry fade and translated text |
 | `crates/ui/media-models.slint` | Shared series/chapter/timeline/source/extension/filter row models |
 | `crates/ui/library-cards.slint`, `crates/ui/display-settings.slint` | Nova poster/list painting and left-anchored progress fill shown after a chapter is read, per-entry context gestures, viewport admission, grid/list switch and persisted display choices |
 | `../nova-kit/crates/cache`, `../nova-kit/crates/ui-base/slint/cache-settings-controls.slint` | Actual Nova cache/settings implementations and NumericSetting/cache controls shared by Nova and Reader; app persistence/search/sync adapters remain local |

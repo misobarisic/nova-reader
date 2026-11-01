@@ -24,6 +24,11 @@ navigation or settings design system.
   returns to Library.
 - `page-header.slint` is adapted directly from Nova's `PageHeader`, with the
   same typography and back-button placement. Page gutters are 18px.
+- Detail entry copies Nova's 40ms deferred entrance and shared
+  `Anim.transition_fade`, applied to the artwork, chapter body and toolbar
+  together. It replays for a new title or a return from reading on both desktop
+  and Android. Disabling animations or page transitions shows the detail
+  immediately, including when a fade is already running.
 - `controls.slint` only adapts Reader's API/accessibility to Nova Kit's
   `PillButton`, `AddonIconButton`, `SettingsInput`, `ToggleSwitch`, `Dropdown`,
   `SettingsLink` and `SettingsBackButton`. Cards and scroll views are imported
@@ -37,8 +42,8 @@ navigation or settings design system.
   after mounting; outgoing layers survive the reverse transition. Disabling
   motion selects explicit endpoints even during an interrupted transition.
   Supported destinations are local import,
-  settings (theme, display, look and feel, sources, categories, data and cache) and About. It does not advertise
-  unsupported video, sync or tracking features.
+  settings (theme, display, look and feel, sources, categories, data, cache and sync) and About. It does not advertise
+  unsupported video or tracking features.
 - `theme-settings.slint` adapts Nova's Theme and Look and feel modules with Kit
   cards, segmented controls, swatches and toggles. `settings-row.slint` preserves
   Nova's side-by-side/stacked measurement without its app-specific sync/search

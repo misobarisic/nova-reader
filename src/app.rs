@@ -3189,9 +3189,14 @@ impl Controller {
         if metadata.len() > 8 * 1024 * 1024 {
             return Err("Addon ZIP exceeds 8 MiB".into());
         }
-        let id = self
-            .services
-            .install(&std::fs::read(path).map_err(error)?)?;
+        self.install_source_bytes(&std::fs::read(path).map_err(error)?, adult)
+    }
+    fn install_source_bytes(
+        &self,
+        bytes: &[u8],
+        adult: bool,
+    ) -> Result<(SourceDescriptor, BrowseSources)> {
+        let id = self.services.install(bytes)?;
         let sources = self.browse_sources(adult)?;
         let descriptor = sources
             .extensions
@@ -3202,10 +3207,25 @@ impl Controller {
         Ok((descriptor, sources))
     }
     fn install(self: &Arc<Self>, ui: &AppWindow, path: PathBuf) {
+        self.install_task(ui, move |app, adult| app.install_sources(path, adult));
+    }
+    #[cfg(not(target_os = "android"))]
+    fn install_bytes(self: &Arc<Self>, ui: &AppWindow, bytes: Vec<u8>) {
+        self.install_task(ui, move |app, adult| {
+            app.install_source_bytes(&bytes, adult)
+        });
+    }
+    fn install_task(
+        self: &Arc<Self>,
+        ui: &AppWindow,
+        work: impl FnOnce(&Arc<Self>, bool) -> Result<(SourceDescriptor, BrowseSources)>
+        + Send
+        + 'static,
+    ) {
         let adult = ui.get_show_adult();
         self.task(
             ui,
-            move |app, _| app.install_sources(path, adult),
+            move |app, _| work(app, adult),
             |app, ui, (descriptor, sources)| {
                 app.view().section = 3;
                 ui.set_source_catalog_open(false);
@@ -4301,20 +4321,8 @@ pub fn run(services: Services) -> Result<()> {
     wire!(on_install_addon, |app, ui| {
         #[cfg(not(target_os = "android"))]
         {
-            if ui.get_busy() {
-                return;
-            }
-            // Match Nova's addon picker: keep native selection on a worker so
-            // the desktop event loop can display and service the dialog.
-            app.task(
-                &ui,
-                |_, _| Ok(crate::desktop_dialogs::choose_addon()),
-                |app, ui, path| match path {
-                    Some(path) => app.install(ui, path),
-                    None => ui.set_status("".into()),
-                },
-            );
-            ui.set_status(text::tr("Choose an addon ZIP file…").into());
+            let app = app.clone();
+            crate::desktop_dialogs::pick_zip(&ui, move |ui, bytes| app.install_bytes(ui, bytes));
         }
         #[cfg(target_os = "android")]
         {
