@@ -9,7 +9,7 @@ Nova and this project's code are GPL-3.0-or-later; the full GPL text is in LICEN
 
 Shared storage, caching, codecs and UI utilities are consumed from
 [nova-kit](https://github.com/misobarisic/nova-kit), pinned in Cargo.toml/Cargo.lock
-to `138f29e33d4f7d8ae9204b6bd6118eb458740f70`, the shared cache and codec revision.
+to `b5cb50325bf1e359811dc73aa85f641687e4ecd3`, the shared cache and codec revision.
 Kit retains its own GPL-3.0-or-later notices.
 Generic addon extraction and the Nova compatibility gate remain pending.
 

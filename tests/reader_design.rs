@@ -687,3 +687,73 @@ fn poster_layout_timelines_chapters_and_reader_controls() {
     settle();
     assert!(!immersive.get(), "leaving reader restores status bar");
 }
+
+#[test]
+fn browse_root_refreshes_do_not_show_loading_indicators() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().unwrap();
+    ui.set_section(3);
+    ui.set_busy(true);
+    ui.show().unwrap();
+    ui.window().set_size(LogicalSize::new(390., 844.));
+    for adult in [false, true, false] {
+        ui.set_show_adult(adult);
+        settle();
+        assert!(
+            ElementHandle::find_by_accessible_label(&ui, "Loading…")
+                .next()
+                .is_none()
+        );
+        assert!(
+            ElementHandle::find_by_element_type_name(&ui, "Spinner")
+                .next()
+                .is_none()
+        );
+    }
+    // Actual source requests retain their existing loading feedback.
+    ui.set_source_catalog_open(true);
+    settle();
+    assert!(
+        ElementHandle::find_by_element_type_name(&ui, "Spinner")
+            .next()
+            .is_some()
+    );
+}
+
+#[test]
+fn addon_settings_show_disabled_catalogues_for_reenabling() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().unwrap();
+    ui.set_source_catalog_settings(ModelRc::new(VecModel::from(vec![
+        nova_reader::SettingRow {
+            key: "fixture.en".into(),
+            name: "English catalogue".into(),
+            checked: true,
+            ..Default::default()
+        },
+        nova_reader::SettingRow {
+            key: "fixture.es".into(),
+            name: "Spanish catalogue".into(),
+            checked: false,
+            ..Default::default()
+        },
+    ])));
+    let changes = Rc::new(RefCell::new(Vec::new()));
+    ui.on_catalog_enabled_changed({
+        let changes = changes.clone();
+        move |id, enabled| changes.borrow_mut().push((id.to_string(), enabled))
+    });
+    ui.set_section(8);
+    ui.show().unwrap();
+    ui.window().set_size(LogicalSize::new(390., 844.));
+    settle();
+    ElementHandle::find_by_accessible_label(&ui, "Spanish catalogue")
+        .find(|element| element.accessible_checkable() == Some(true))
+        .unwrap()
+        .invoke_accessible_default_action();
+    assert_eq!(
+        changes.borrow().last().unwrap(),
+        &("fixture.es".into(), true)
+    );
+    assert_eq!(ui.get_source_catalog_settings().row_count(), 2);
+}

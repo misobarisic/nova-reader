@@ -471,10 +471,9 @@ fn compress(bytes: &[u8], compression: ImageCompression) -> Result<Vec<u8>> {
     {
         return Err("cache codec admission retains original image".into());
     }
-    crate::reader_export::reencode_image(
+    crate::reader_export::reencode_storage_image(
         bytes,
-        compression.format,
-        compression.quality,
+        compression,
         reader_engine::DecodeLimits {
             max_pixels: 8_000_000,
             max_decoded_bytes: 64 * 1024 * 1024,

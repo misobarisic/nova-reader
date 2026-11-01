@@ -233,10 +233,9 @@ impl Services {
                     // Some tall pages exceed a codec's dimensional limit.
                     // Preserve the original rather than resizing or losing it;
                     // the download store still validates all committed bytes.
-                    crate::reader_export::reencode_image(
+                    crate::reader_export::reencode_storage_image(
                         &original,
-                        compression.format,
-                        compression.quality,
+                        compression,
                         reader_engine::DecodeLimits::default(),
                     )
                     .unwrap_or(original)

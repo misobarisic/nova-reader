@@ -1,19 +1,12 @@
 //! Reader's AVIF boundary delegates to Nova Kit's shared bounded codec.
 use super::{DecodeLimits, Error, PageDimensions, Result};
 
-fn error(error: nova_image::Error) -> Error {
-    match error {
-        nova_image::Error::Limit => Error::Limit,
-        nova_image::Error::Avif(message) => Error::Avif(message),
-    }
-}
-
 pub(super) fn inspect(bytes: &[u8], limits: DecodeLimits) -> Result<PageDimensions> {
-    nova_image::inspect_avif(bytes, limits).map_err(error)
+    nova_image::inspect_avif(bytes, limits).map_err(Error::from)
 }
 
 pub(super) fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<image::RgbaImage> {
-    nova_image::decode_avif(bytes, limits).map_err(error)
+    nova_image::decode_avif(bytes, limits).map_err(Error::from)
 }
 
 #[cfg(test)]

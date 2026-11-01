@@ -1,17 +1,20 @@
 // Nova's actual cache controls are owned by Kit; Reader owns labels and durable
 // preferences for independent temporary namespaces and explicit offline jobs.
+import { Dropdown } from "@NovaUiBase/dropdown.slint";
 import { InterfaceStyle, Theme } from "@NovaUiShared";
 import { SettingsCard, SectionHeader } from "@NovaUiBase/settings-controls.slint";
-import { CacheDiskToggle, CacheDiskLimit, CacheCompressionToggle, CacheFormatControl, CacheQualityControl, CacheMemoryControl, CacheResolutionControl, CacheClearControl } from "@NovaUiBase/cache-settings-controls.slint";
+import { CacheDiskToggle, CacheDiskLimit, CacheCompressionToggle, CacheQualityControl, CacheMemoryControl, CacheResolutionControl, CacheClearControl } from "@NovaUiBase/cache-settings-controls.slint";
 import { SettingsRow } from "settings-row.slint";
 
 export global ImageStorageSettings {
     in-out property <bool> cache-enabled: true;
     in-out property <int> cache-format: 1;
     in-out property <float> cache-quality: 85;
+    in-out property <bool> cache-jxl-lossless-jpeg: false;
     in-out property <bool> downloads-enabled: false;
     in-out property <int> downloads-format: 1;
     in-out property <float> downloads-quality: 85;
+    in-out property <bool> downloads-jxl-lossless-jpeg: false;
     in-out property <bool> disk-enabled: true;
     in-out property <[string]> disk-limit-names;
     in-out property <int> chapter-disk-limit-index: 3;
@@ -123,16 +126,26 @@ export component ImageStorageSettingsPage inherits VerticalLayout {
             }
         }
         SettingsRow {
-            row-title: @tr("Cache format"); row-desc: @tr("JPEG, WebP or AVIF for newly cached images.");
-            CacheFormatControl {
-                labels: [@tr("JPEG"), @tr("WebP"), @tr("AVIF")];
-                disk-enabled: ImageStorageSettings.disk-enabled; compression-enabled: ImageStorageSettings.cache-enabled;
-                busy: !root.interactive || root.maintenance;
-                current-index: ImageStorageSettings.cache-format;
-                picked(i) => { ImageStorageSettings.settings-changed("cache_format", i); }
+            row-title: @tr("Cache format"); row-desc: @tr("JPEG, WebP, AVIF or JPEG XL for newly cached images.");
+            cache_format := Dropdown {
+                width: Math.min(252px, Math.max(0px, root.width - 32px)); roomy: true;
+                model: [@tr("JPEG"), @tr("WebP"), @tr("AVIF"), @tr("JPEG XL (lossless)"), @tr("JPEG XL (lossy)")];
+                enabled: !(!root.interactive || root.maintenance || !ImageStorageSettings.disk-enabled) && ImageStorageSettings.cache-enabled;
+                current-index <=> ImageStorageSettings.cache-format;
+                selected(i) => { ImageStorageSettings.settings-changed("cache_format", self.current-index); }
             }
         }
-        SettingsRow {
+        if ImageStorageSettings.cache-format == 3 || ImageStorageSettings.cache-format == 4: SettingsRow {
+            row-title: @tr("Losslessly transcode JPEG");
+            row-desc: @tr("Preserve original JPEG data when no resize is needed. Other images and resized JPEGs use the selected quality.");
+            CacheCompressionToggle {
+                name: @tr("Losslessly transcode cache JPEG");
+                busy: !root.interactive || root.maintenance || !ImageStorageSettings.disk-enabled || !ImageStorageSettings.cache-enabled;
+                checked <=> ImageStorageSettings.cache-jxl-lossless-jpeg;
+                toggled => { ImageStorageSettings.settings-changed("cache_jxl_lossless_jpeg", self.checked ? 1 : 0); }
+            }
+        }
+        if ImageStorageSettings.cache-format != 3: SettingsRow {
             row-title: @tr("Cache quality"); row-desc: @tr("Higher values retain more detail and use more disk space.");
             CacheQualityControl {
                 width: Math.min(InterfaceStyle.tv ? 320px : 252px, Math.max(0px, root.width - 32px));
@@ -156,15 +169,26 @@ export component ImageStorageSettingsPage inherits VerticalLayout {
             }
         }
         SettingsRow {
-            row-title: @tr("Download format"); row-desc: @tr("JPEG, WebP or AVIF for new offline chapter pages.");
-            CacheFormatControl {
-                labels: [@tr("JPEG"), @tr("WebP"), @tr("AVIF")];
-                busy: !root.interactive; compression-enabled: ImageStorageSettings.downloads-enabled;
-                current-index: ImageStorageSettings.downloads-format;
-                picked(i) => { ImageStorageSettings.settings-changed("downloads_format", i); }
+            row-title: @tr("Download format"); row-desc: @tr("JPEG, WebP, AVIF or JPEG XL for new offline chapter pages.");
+            downloads_format := Dropdown {
+                width: Math.min(252px, Math.max(0px, root.width - 32px)); roomy: true;
+                model: [@tr("JPEG"), @tr("WebP"), @tr("AVIF"), @tr("JPEG XL (lossless)"), @tr("JPEG XL (lossy)")];
+                enabled: !(!root.interactive) && ImageStorageSettings.downloads-enabled;
+                current-index <=> ImageStorageSettings.downloads-format;
+                selected(i) => { ImageStorageSettings.settings-changed("downloads_format", self.current-index); }
             }
         }
-        SettingsRow {
+        if ImageStorageSettings.downloads-format == 3 || ImageStorageSettings.downloads-format == 4: SettingsRow {
+            row-title: @tr("Losslessly transcode JPEG");
+            row-desc: @tr("Preserve original JPEG data when no resize is needed. Other images and resized JPEGs use the selected quality.");
+            CacheCompressionToggle {
+                name: @tr("Losslessly transcode download JPEG");
+                busy: !root.interactive || !ImageStorageSettings.downloads-enabled;
+                checked <=> ImageStorageSettings.downloads-jxl-lossless-jpeg;
+                toggled => { ImageStorageSettings.settings-changed("downloads_jxl_lossless_jpeg", self.checked ? 1 : 0); }
+            }
+        }
+        if ImageStorageSettings.downloads-format != 3: SettingsRow {
             row-title: @tr("Download quality"); row-desc: @tr("Higher values retain more detail and use more disk space.");
             CacheQualityControl {
                 width: Math.min(InterfaceStyle.tv ? 320px : 252px, Math.max(0px, root.width - 32px));

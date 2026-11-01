@@ -921,10 +921,9 @@ fn transform_new_image(
     if compression.enabled {
         // JPEG alpha/unsupported codec failures retain the lossless resized
         // source when available, otherwise the admitted original bytes.
-        match crate::reader_export::reencode_image(
+        match crate::reader_export::reencode_storage_image(
             resized.as_deref().unwrap_or(bytes),
-            compression.format,
-            compression.quality,
+            compression,
             COVER_LIMITS,
         ) {
             Ok(bytes) => Ok(Some(bytes)),
@@ -1963,6 +1962,7 @@ mod tests {
                 enabled: true,
                 format,
                 quality: 85,
+                jxl_lossless_jpeg: false,
             };
             let key = format!("new-{index}");
             write_fetched(&cache, &key, epoch, &png, compression, None, || true);
@@ -1972,6 +1972,9 @@ mod tests {
                 ImageStorageFormat::Webp => {
                     assert_eq!(&bytes[..4], b"RIFF");
                     assert_eq!(&bytes[8..12], b"WEBP");
+                }
+                ImageStorageFormat::JxlLossless | ImageStorageFormat::JxlLossy => {
+                    assert!(nova_image::is_jpeg_xl(&bytes))
                 }
                 ImageStorageFormat::Avif => {
                     assert_eq!(&bytes[4..8], b"ftyp");
@@ -2056,6 +2059,7 @@ mod tests {
                 enabled: true,
                 format: ImageStorageFormat::Jpeg,
                 quality: 85,
+                jxl_lossless_jpeg: false,
             },
             None,
             || true,

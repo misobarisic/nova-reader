@@ -49,11 +49,13 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
                     ("downloads_enabled", 1),
                     ("downloads_format", 2),
                     ("downloads_quality", 73),
+                    ("cache_jxl_lossless_jpeg", 1),
+                    ("downloads_jxl_lossless_jpeg", 1),
                 ] {
                     settings.invoke_settings_changed(key.into(), value);
                 }
                 for (key, value) in [
-                    ("cache_format", 3),
+                    ("cache_format", 5),
                     ("cache_quality", 0),
                     ("downloads_quality", 101),
                     ("downloads_enabled", 2),
@@ -71,12 +73,14 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
                     cache: ImageCompression {
                         enabled: false,
                         format: ImageStorageFormat::Avif,
-                        quality: 64
+                        quality: 64,
+                        jxl_lossless_jpeg: true,
                     },
                     downloads: ImageCompression {
                         enabled: true,
                         format: ImageStorageFormat::Avif,
-                        quality: 73
+                        quality: 73,
+                        jxl_lossless_jpeg: true,
                     },
                     policy: CachePolicyPreferences::default(),
                 }
@@ -84,97 +88,89 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
             "controls" => {
                 for (key, value) in [
                     ("cache_enabled", 1),
-                    ("cache_format", 1),
+                    ("cache_format", 4),
                     ("cache_quality", 85),
-                    ("downloads_enabled", 0),
-                    ("downloads_format", 1),
+                    ("downloads_enabled", 1),
+                    ("downloads_format", 4),
                     ("downloads_quality", 85),
+                    ("cache_jxl_lossless_jpeg", 0),
+                    ("downloads_jxl_lossless_jpeg", 0),
                 ] {
                     settings.invoke_settings_changed(key.into(), value);
                 }
                 ui.show().unwrap();
-                ui.window().set_size(slint::LogicalSize::new(390., 2400.));
+                ui.window().set_size(slint::LogicalSize::new(390., 3000.));
                 ui.set_section(17);
                 settle();
-                quality(&ui, "Download quality").invoke_accessible_increment_action();
-                assert_eq!(
-                    image_storage::load().downloads.quality,
-                    85,
-                    "disabled download quality rejects activation"
-                );
+                toggle(&ui, "Losslessly transcode cache JPEG");
+                toggle(&ui, "Losslessly transcode download JPEG");
+                assert!(image_storage::load().cache.jxl_lossless_jpeg);
+                assert!(image_storage::load().downloads.jxl_lossless_jpeg);
                 quality(&ui, "Cache quality").invoke_accessible_increment_action();
+                quality(&ui, "Download quality").invoke_accessible_increment_action();
                 assert_eq!(image_storage::load().cache.quality, 86);
-                ElementHandle::find_by_accessible_label(&ui, "AVIF")
-                    .find(|element| element.accessible_enabled() == Some(false))
-                    .unwrap()
-                    .invoke_accessible_default_action();
-                assert_eq!(
-                    image_storage::load().downloads.format,
-                    ImageStorageFormat::Webp,
-                    "disabled AVIF option rejects activation"
+                assert_eq!(image_storage::load().downloads.quality, 86);
+                for (id, index) in [("cache_format", 3), ("downloads_format", 3)] {
+                    let dropdown = ElementHandle::find_by_element_id(
+                        &ui,
+                        &format!("ImageStorageSettingsPage::{id}"),
+                    )
+                    .next()
+                    .unwrap();
+                    dropdown.invoke_accessible_default_action();
+                    settle();
+                    ElementHandle::find_by_accessible_label(&ui, "JPEG XL (lossless)")
+                        .filter(|element| {
+                            element.accessible_role() == Some(AccessibleRole::Button)
+                                && element.type_name().as_deref() != Some("Dropdown")
+                        })
+                        .last()
+                        .unwrap()
+                        .invoke_accessible_default_action();
+                    settle();
+                    assert_eq!(
+                        if id == "cache_format" {
+                            settings.get_cache_format()
+                        } else {
+                            settings.get_downloads_format()
+                        },
+                        index
+                    );
+                }
+                assert!(
+                    ElementHandle::find_by_accessible_label(&ui, "Cache quality")
+                        .find(|element| element.accessible_role() == Some(AccessibleRole::Slider))
+                        .is_none()
                 );
-                ElementHandle::find_by_accessible_label(&ui, "JPEG")
-                    .find(|element| {
-                        element.accessible_checkable() == Some(true)
-                            && element.accessible_enabled() == Some(true)
-                    })
-                    .unwrap()
-                    .invoke_accessible_default_action();
-                assert_eq!(image_storage::load().cache.format, ImageStorageFormat::Jpeg);
-                ElementHandle::find_by_accessible_label(&ui, "AVIF")
-                    .find(|element| element.accessible_enabled() == Some(true))
-                    .unwrap()
-                    .invoke_accessible_default_action();
-                assert_eq!(image_storage::load().cache.format, ImageStorageFormat::Avif);
+                assert!(
+                    ElementHandle::find_by_accessible_label(&ui, "Download quality")
+                        .find(|element| element.accessible_role() == Some(AccessibleRole::Slider))
+                        .is_none()
+                );
                 toggle(&ui, "Compress new cached images");
                 assert!(!image_storage::load().cache.enabled);
-                quality(&ui, "Cache quality").invoke_accessible_increment_action();
-                assert_eq!(image_storage::load().cache.quality, 86);
-                toggle(&ui, "Compress new chapter downloads");
                 assert!(image_storage::load().downloads.enabled);
-                ElementHandle::find_by_accessible_label(&ui, "JPEG")
-                    .find(|element| {
-                        element.accessible_checkable() == Some(true)
-                            && element.accessible_enabled() == Some(true)
-                    })
-                    .unwrap()
-                    .invoke_accessible_default_action();
-                assert_eq!(
-                    image_storage::load().downloads.format,
-                    ImageStorageFormat::Jpeg
-                );
-                ElementHandle::find_by_accessible_label(&ui, "AVIF")
-                    .find(|element| element.accessible_enabled() == Some(true))
-                    .unwrap()
-                    .invoke_accessible_default_action();
-                assert_eq!(
-                    image_storage::load().downloads.format,
-                    ImageStorageFormat::Avif
-                );
-                ElementHandle::find_by_accessible_label(&ui, "Increase download quality")
-                    .find(|element| element.accessible_role() == Some(AccessibleRole::Button))
-                    .unwrap()
-                    .invoke_accessible_default_action();
-                assert_eq!(image_storage::load().downloads.quality, 86);
-                assert!(!image_storage::load().cache.enabled);
                 for width in [320., 390., 768.] {
-                    ui.window().set_size(slint::LogicalSize::new(width, 2400.));
+                    ui.window().set_size(slint::LogicalSize::new(width, 3000.));
                     settle();
-                    assert!(quality(&ui, "Download quality").size().width > 0.);
-                    let option = ElementHandle::find_by_accessible_label(&ui, "AVIF")
-                        .find(|element| element.accessible_enabled() == Some(true))
+                    for id in ["cache_format", "downloads_format"] {
+                        let dropdown = ElementHandle::find_by_element_id(
+                            &ui,
+                            &format!("ImageStorageSettingsPage::{id}"),
+                        )
+                        .next()
                         .unwrap();
-                    assert!(option.absolute_position().x >= 0.);
-                    assert!(
-                        option.absolute_position().x + option.size().width <= width + 1.,
-                        "AVIF option must fit a {width}px window"
-                    );
+                        assert!(dropdown.absolute_position().x >= 0.);
+                        assert!(
+                            dropdown.absolute_position().x + dropdown.size().width <= width + 1.
+                        );
+                    }
                 }
             }
             "corrupt" => {
                 for raw in [
                     "broken JSON",
-                    r#"{"cache":{"enabled":true,"format":3,"quality":85}}"#,
+                    r#"{"cache":{"enabled":true,"format":5,"quality":85}}"#,
                     r#"{"downloads":{"quality":0}}"#,
                     r#"{"downloads":{"format":1,"quality":85}}"#,
                     r#"{"unknown":true}"#,
@@ -237,6 +233,8 @@ fn image_storage_format_indices_roundtrip_without_changing_existing_values() {
         ImageStorageFormat::Jpeg,
         ImageStorageFormat::Webp,
         ImageStorageFormat::Avif,
+        ImageStorageFormat::JxlLossless,
+        ImageStorageFormat::JxlLossy,
     ]
     .into_iter()
     .enumerate()

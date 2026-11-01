@@ -55,26 +55,3 @@ fn jpeg_xl_preserves_native_rgb_alpha_and_admission() {
     }
     assert!(!is_jpeg_xl(b"not an image"));
 }
-
-#[test]
-fn jpeg_xl_container_ignores_compressed_auxiliary_metadata() {
-    let mut parser = jxl_bitstream::ContainerParser::new();
-    let mut raw = Vec::new();
-    for event in parser.feed_bytes(RGB) {
-        if let jxl_bitstream::ParseEvent::Codestream(data) = event.unwrap() {
-            raw.extend_from_slice(data);
-        }
-    }
-    let mut boxed = b"\0\0\0\x0cJXL \r\n\x87\n\0\0\0\x14ftypjxl \0\0\0\0jxl ".to_vec();
-    let mut add_box = |kind: &[u8], payload: &[u8]| {
-        boxed.extend_from_slice(&((payload.len() + 8) as u32).to_be_bytes());
-        boxed.extend_from_slice(kind);
-        boxed.extend_from_slice(payload);
-    };
-    // This is deliberately not a valid Brotli stream. Pixel decoding must not
-    // attempt to inflate unrelated container decoration.
-    add_box(b"brob", b"xml deliberately invalid compressed metadata");
-    add_box(b"jxlc", &raw);
-    let decoded = decode_image(&boxed, DecodeLimits::default()).unwrap();
-    assert_eq!(decoded, decode_image(RGB, DecodeLimits::default()).unwrap());
-}

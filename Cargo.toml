@@ -6,10 +6,10 @@ resolver = "3"
 license = "GPL-3.0-or-later"
 
 [workspace.dependencies]
-nova-storage = { git = "https://github.com/misobarisic/nova-kit", rev = "138f29e33d4f7d8ae9204b6bd6118eb458740f70" }
-nova-ui-base = { git = "https://github.com/misobarisic/nova-kit", rev = "138f29e33d4f7d8ae9204b6bd6118eb458740f70" }
-nova-cache = { git = "https://github.com/misobarisic/nova-kit", rev = "138f29e33d4f7d8ae9204b6bd6118eb458740f70" }
-nova-image = { git = "https://github.com/misobarisic/nova-kit", rev = "138f29e33d4f7d8ae9204b6bd6118eb458740f70" }
+nova-storage = { git = "https://github.com/misobarisic/nova-kit", rev = "b5cb50325bf1e359811dc73aa85f641687e4ecd3" }
+nova-ui-base = { git = "https://github.com/misobarisic/nova-kit", rev = "b5cb50325bf1e359811dc73aa85f641687e4ecd3" }
+nova-cache = { git = "https://github.com/misobarisic/nova-kit", rev = "b5cb50325bf1e359811dc73aa85f641687e4ecd3" }
+nova-image = { git = "https://github.com/misobarisic/nova-kit", rev = "b5cb50325bf1e359811dc73aa85f641687e4ecd3" }
 slint = { version = "=1.18.0", default-features = false, features = ["std", "compat-1-2", "accessibility"] }
 slint-build = "=1.18.0"
 

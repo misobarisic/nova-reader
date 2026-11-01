@@ -21,6 +21,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `src/chapter_capture.rs` | Bounded source-resolution compositor for visible chapter areas; captures original pixels rather than enlarging a device snapshot |
 | `src/capture_settings.rs`, `crates/ui/capture-settings.slint` | Validated device capture preferences and retained More → Settings → Screenshots controls for format, quality, Device/Chapter screencap resolution, per-series folders and duplicate policy |
 | `src/image_storage.rs`, `crates/ui/image-storage-settings.slint` | Durable cache policy and independent JPEG/WebP/AVIF compression; shared Kit cache controls with chapter-first maintenance and separate artwork settings |
+| `src/source_catalogs.rs` | Host-owned per-addon catalogue switches under `reader:disabled-catalogs:<JSON package ID>`; filters Browse while preserving direct/history/offline access |
 | `src/reading_preferences.rs` | Fallible Nova KV persistence for adult-source visibility and chapter order keyed by full source-local series identity |
 | `src/reader_modes.rs`, `docs/reader-modes.md` | Pinned TachiyomiJ2K genre/source classification, Automatic/manual selection, and per-series persisted mode overrides |
 | `src/timeline.rs`, `src/source_filters.rs`, `src/source_browser.rs` | Local date groups/provider date parsing, bounded typed filter values and persistent source pins/last-used grouping |
@@ -49,10 +50,10 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `crates/reader-domain` | Source-local identities, schema-1 state, library/categories, progress/history/bookmarks, backup/restore |
 | `crates/reader-sources` | Reader v2 ZIP validation, durable registry, typed profile settings, QuickJS host, HTML/URL capabilities and checked source HTTP |
 | `crates/reader-engine` | Dimension probing, bounded PNG/JPEG/WebP decode and shared Kit AVIF delegation, display geometry, resume anchors and decoded cache utility |
-| `crates/reader-engine/src/jxl.rs`, `crates/reader-engine/tests/jpeg_xl.rs` | Pure Rust single-threaded JPEG XL still-page probing/decoding with metadata admission, skipped auxiliary boxes, tracked grid budget and native row conversion; synthetic RGB/alpha fixtures |
-| `crates/reader-engine/src/display.rs`, `crates/reader-engine/src/avif.rs` | Width-preserving visible-row display admission/resampling and one-original worker reuse; thin boundary to Kit `nova-image` AVIF with independent Reader fixture/display/admission regressions |
+| `crates/reader-engine/src/jxl.rs`, `crates/reader-engine/tests/jpeg_xl.rs` | Thin adapter to Kit JPEG XL probing/decoding; Reader retains synthetic RGB/alpha integration fixtures while Kit owns metadata admission, auxiliary-box skipping, tracked grid budget and native row conversion |
+| `crates/reader-engine/src/display.rs`, `crates/reader-engine/src/avif.rs` | Width-preserving visible-row display admission/resampling and one-original worker reuse; thin boundary to Kit `nova-image` AVIF/JPEG XL with independent Reader fixture/display/admission regressions |
 | `crates/reader-engine/examples/tall_scroll.rs`, `docs/tall-scroll-performance.md` | Deterministic 720×25,000 CPU scroll profile and actual Mihon stable/main rendering comparison |
-| Kit `crates/image`, `vendor/ferri-pdf-rav1d` | Shared bounded AVIF codec and published 1.1.2 portable decoder; Reader retains only thin adapters, fixture attribution and distribution licenses |
+| Kit `crates/image`, `vendor/ferri-pdf-rav1d` | Shared bounded AVIF/JPEG XL codecs and published 1.1.2 portable decoder; Reader retains only thin adapters, fixture attribution and distribution licenses |
 | `crates/reader-downloads` | Durable queue, checksummed page bundles, recovery, quota, source-free offline lookup, local folder/CBZ import, bundle removal and manifest-only status hints |
 | `crates/reader-catalogue` | Bounded Keiyoushi protobuf discovery, exact port mappings, signed native catalogue verification and availability states |
 | `examples/addons/kagane`, `crates/reader-sources/tests/kagane.rs` | Keiyoushi Kagane v37 native port, 18 languages, compact chapter index, typed filters/settings, public token/one-retry flow, bundled icon and synthetic QuickJS host regressions |
@@ -128,6 +129,10 @@ poster resolution. Preference changes do not rewrite existing cache files or
 downloaded chapter bundles. Successful writes publish a thread-safe policy
 snapshot before waking workers; hot cache hits never read the database.
 Adult-source visibility lives under `reader:show-adult`, defaulting to hidden.
+Browse navigation and successful addon installation share a worker snapshot of
+filtered sources, all extensions and bundled icons; installation honors the
+current adult-source choice immediately. Root source-list refreshes keep the
+loading indicator hidden, including visibility-toggle refreshes.
 `reader:chapter-order:<serialized SeriesId>` stores descending/ascending chapter
 order separately for each full source-local series identity, defaulting to
 descending. Both use fallible Nova KV writes; failed saves preserve the prior UI
@@ -275,3 +280,12 @@ Source examples are intended for independent future publication in nova-addons.
 - MangaFire VRF/JSON API, seven languages, filters and upstream provenance: [MangaFire source](mangafire.md).
 - Discovery, actual upstream IDs and signing trust API: [catalogues](catalogues.md).
 - Implemented behavior versus outstanding plan gates: [implementation status](implementation-status.md).
+
+Reader cache/download format indices append JPEG XL lossless (3) and lossy (4),
+with a per-group `jxl_lossless_jpeg` flag defaulting false for older saved settings.
+Both groups use Nova's dropdown. The quality control remains active for lossy
+JXL; opting into JPEG transcoding bypasses it only for supported original JPEGs.
+Artwork resizing produces PNG before compression, so resized covers use normal
+encoding. All three writers delegate JPEG coefficient conversion to Kit.
+
+Addon settings list all declared source/language catalogue entries separately from addon-defined configuration. Host switches default to enabled, persist independently by package/source ID, and affect Browse inventory rather than whole-addon authority. Hidden entries remain available in the settings list for re-enabling.

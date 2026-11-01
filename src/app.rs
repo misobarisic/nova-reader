@@ -7,7 +7,7 @@ use nova_reader_ui::backend_text as text;
 use reader_domain::{
     Bookmark, Chapter, ChapterId, ReadingMode, ReadingProgress, ResumeAnchor, Series,
 };
-use reader_sources::{CancelToken, Source};
+use reader_sources::{CancelToken, Source, SourceDescriptor};
 use serde_json::json;
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use std::{
@@ -37,6 +37,23 @@ struct Choice {
     filters: bool,
     language: String,
     latest: bool,
+}
+fn catalogue_rows((choices, disabled): (Vec<Choice>, BTreeSet<String>)) -> Vec<SettingRow> {
+    choices
+        .into_iter()
+        .map(|choice| SettingRow {
+            checked: !disabled.contains(&choice.id),
+            key: choice.id.into(),
+            name: choice.name.into(),
+            kind: "bool".into(),
+            ..Default::default()
+        })
+        .collect()
+}
+struct BrowseSources {
+    choices: Vec<Choice>,
+    extensions: Vec<SourceDescriptor>,
+    icons: Vec<crate::addon_icons::PreparedIcon>,
 }
 #[derive(Clone)]
 enum Row {
@@ -589,6 +606,9 @@ impl Controller {
         });
     }
     fn sources(&self, adult: bool) -> Result<Vec<Choice>> {
+        self.source_choices(adult, false)
+    }
+    fn source_choices(&self, adult: bool, include_hidden: bool) -> Result<Vec<Choice>> {
         let mut choices = Vec::new();
         for package in self
             .services
@@ -662,7 +682,25 @@ impl Controller {
                 }
             }
         }
+        if !include_hidden {
+            let mut disabled = BTreeMap::new();
+            choices.retain(|choice| {
+                !disabled
+                    .entry(choice.package.clone())
+                    .or_insert_with(|| crate::source_catalogs::disabled(&choice.package))
+                    .contains(&choice.id)
+            });
+        }
         Ok(choices)
+    }
+    fn catalogue_choices(&self, package: &str) -> Result<(Vec<Choice>, BTreeSet<String>)> {
+        Ok((
+            self.source_choices(true, true)?
+                .into_iter()
+                .filter(|choice| choice.package == package)
+                .collect(),
+            crate::source_catalogs::disabled(package),
+        ))
     }
     fn render(&self, ui: &AppWindow) {
         let snapshot = match self.services.domain.snapshot() {
@@ -1091,9 +1129,10 @@ impl Controller {
                         .settings_schema(&package)
                         .map_err(error)?;
                     let values = app.services.sources.settings(&package).map_err(error)?;
-                    Ok((package, schema, values))
+                    let catalogues = app.catalogue_choices(&package)?;
+                    Ok((package, schema, values, catalogues))
                 },
-                |app, ui, (package, schema, values)| {
+                |app, ui, (package, schema, values, catalogues)| {
                     {
                         let mut view = app.view();
                         view.section = 8;
@@ -1130,6 +1169,9 @@ impl Controller {
                             }
                         })
                         .collect::<Vec<_>>();
+                    ui.set_source_catalog_settings(ModelRc::new(VecModel::from(catalogue_rows(
+                        catalogues,
+                    ))));
                     ui.set_settings(ModelRc::new(VecModel::from(rows)));
                     app.render(ui);
                 },
@@ -1277,33 +1319,8 @@ impl Controller {
             let adult = ui.get_show_adult();
             self.task(
                 ui,
-                move |app, _| {
-                    let extensions = app.services.sources.list().map_err(error)?;
-                    let icons = crate::addon_icons::prepare(&app.services.sources, &extensions);
-                    Ok((app.sources(adult)?, extensions, icons))
-                },
-                |app, ui, (choices, extensions, icons)| {
-                    crate::addon_icons::publish(icons);
-                    ui.set_extensions(ModelRc::new(VecModel::from(
-                        extensions
-                            .into_iter()
-                            .map(|e| ExtensionRow {
-                                icon: crate::addon_icons::image(&e.id),
-                                id: e.id.into(),
-                                name: e.name.into(),
-                                version: e.version.into(),
-                                language: e.language.into(),
-                                enabled: e.enabled,
-                            })
-                            .collect::<Vec<_>>(),
-                    )));
-                    let mut view = app.view();
-                    view.choices = choices;
-                    view.rows.clear();
-                    view.selected = 0;
-                    drop(view);
-                    app.render(ui);
-                },
+                move |app, _| app.browse_sources(adult),
+                |app, ui, sources| app.publish_sources(ui, sources),
             );
         } else if section == 7 {
             self.download_list(ui);
@@ -2718,36 +2735,71 @@ impl Controller {
                 message => error(message),
             })
     }
+    fn browse_sources(&self, adult: bool) -> Result<BrowseSources> {
+        let extensions = self.services.sources.list().map_err(error)?;
+        let icons = crate::addon_icons::prepare(&self.services.sources, &extensions);
+        Ok(BrowseSources {
+            choices: self.sources(adult)?,
+            extensions,
+            icons,
+        })
+    }
+    fn publish_sources(&self, ui: &AppWindow, sources: BrowseSources) {
+        crate::addon_icons::publish(sources.icons);
+        ui.set_extensions(ModelRc::new(VecModel::from(
+            sources
+                .extensions
+                .into_iter()
+                .map(|e| ExtensionRow {
+                    icon: crate::addon_icons::image(&e.id),
+                    id: e.id.into(),
+                    name: e.name.into(),
+                    version: e.version.into(),
+                    language: e.language.into(),
+                    enabled: e.enabled,
+                })
+                .collect::<Vec<_>>(),
+        )));
+        {
+            let mut view = self.view();
+            view.choices = sources.choices;
+            view.rows.clear();
+            view.selected = 0;
+        }
+        self.render(ui);
+    }
+    fn install_sources(
+        &self,
+        path: PathBuf,
+        adult: bool,
+    ) -> Result<(SourceDescriptor, BrowseSources)> {
+        let metadata = std::fs::metadata(&path).map_err(error)?;
+        if metadata.len() > 8 * 1024 * 1024 {
+            return Err("Addon ZIP exceeds 8 MiB".into());
+        }
+        let id = self
+            .services
+            .install(&std::fs::read(path).map_err(error)?)?;
+        let sources = self.browse_sources(adult)?;
+        let descriptor = sources
+            .extensions
+            .iter()
+            .find(|s| s.id == id)
+            .cloned()
+            .ok_or_else(|| "Installed source is unavailable".to_string())?;
+        Ok((descriptor, sources))
+    }
     fn install(self: &Arc<Self>, ui: &AppWindow, path: PathBuf) {
+        let adult = ui.get_show_adult();
         self.task(
             ui,
-            move |app, _| {
-                let metadata = std::fs::metadata(&path).map_err(error)?;
-                if metadata.len() > 8 * 1024 * 1024 {
-                    return Err("Addon ZIP exceeds 8 MiB".into());
-                }
-                let id = app.services.install(&std::fs::read(path).map_err(error)?)?;
-                let descriptor = app
-                    .services
-                    .sources
-                    .list()
-                    .map_err(error)?
-                    .into_iter()
-                    .find(|s| s.id == id)
-                    .ok_or_else(|| "Installed source is unavailable".to_string())?;
-                Ok((descriptor, app.sources(false)?))
-            },
-            |app, ui, (descriptor, choices)| {
-                {
-                    let mut view = app.view();
-                    view.section = 3;
-                    view.rows.clear();
-                    view.choices = choices;
-                    view.selected = 0;
-                }
-                app.render(ui);
+            move |app, _| app.install_sources(path, adult),
+            |app, ui, (descriptor, sources)| {
+                app.view().section = 3;
+                ui.set_source_catalog_open(false);
+                app.publish_sources(ui, sources);
                 ui.set_status(
-                    text::tr(if descriptor.nsfw {
+                    text::tr(if descriptor.nsfw && !ui.get_show_adult() {
                         "Addon installed. Turn on Show adult sources to select it."
                     } else if !descriptor.enabled {
                         "Updated addon needs explicit enabling before use."
@@ -3843,6 +3895,33 @@ pub fn run(services: Services) -> Result<()> {
     });
     wire!(on_entry_action, |app, ui, key, action| app
         .entry_action(&ui, &key, &action));
+    wire!(on_catalog_enabled_changed, |app, ui, id, enabled| {
+        let package = { app.view().settings_package.clone() };
+        if let Some(package) = package {
+            let result = crate::source_catalogs::set_enabled(&package, &id, enabled);
+            let saved = result.is_ok();
+            match result {
+                Ok(()) => {
+                    app.view()
+                        .choices
+                        .retain(|choice| choice.id != id.as_str() || enabled);
+                    ui.set_status(text::tr("Catalogue settings saved.").into());
+                }
+                Err(error) => ui.set_status(error.into()),
+            }
+            let rows = ui
+                .get_source_catalog_settings()
+                .iter()
+                .map(|mut row| {
+                    if saved && row.key == id {
+                        row.checked = enabled;
+                    }
+                    row
+                })
+                .collect::<Vec<_>>();
+            ui.set_source_catalog_settings(ModelRc::new(VecModel::from(rows)));
+        }
+    });
     wire!(on_setting_changed, |app, ui, key, value| {
         let package = { app.view().settings_package.clone() };
         if let Some(package) = package {
@@ -3954,6 +4033,123 @@ pub fn run(services: Services) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn installed_adult_source_is_visible_without_toggling() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "app::tests::installed_adult_source_child",
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[test]
+    #[ignore = "isolated process for Nova's single application directory"]
+    fn installed_adult_source_child() {
+        use std::io::{Cursor, Write};
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = AppWindow::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let services = Services::open(&dir.path().join("data")).unwrap();
+        let (images, _receiver) = mpsc::channel();
+        let app = Controller {
+            artwork: crate::artwork::ArtworkLoader::new(
+                services.clone(),
+                ui.as_weak(),
+                dir.path().join("posters"),
+            ),
+            services,
+            chapter_cache: Arc::new(crate::chapter_cache::ChapterCache::new(
+                dir.path().join("chapters"),
+            )),
+            image_worker_live: AtomicBool::new(true),
+            view: Mutex::new(View {
+                section: 3,
+                ..View::default()
+            }),
+            generation: AtomicU64::new(0),
+            cancel: Mutex::new(CancelToken::default()),
+            images,
+            download_serial: Mutex::new(()),
+            active_image: Mutex::new(None),
+        };
+        let mut manifest: serde_json::Value = serde_json::from_str(include_str!(
+            "../examples/addons/neutral-fixture/manifest.json"
+        ))
+        .unwrap();
+        manifest["nsfw"] = json!(true);
+        manifest["assets"] = json!(["icon.png"]);
+        manifest["icon"] = json!("icon.png");
+        let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for (name, bytes) in [
+            ("manifest.json", serde_json::to_vec(&manifest).unwrap()),
+            (
+                "main.js",
+                include_bytes!("../examples/addons/neutral-fixture/main.js").to_vec(),
+            ),
+            (
+                "icon.png",
+                include_bytes!("../examples/addons/mangafire/icon.png").to_vec(),
+            ),
+        ] {
+            archive
+                .start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            archive.write_all(&bytes).unwrap();
+        }
+        let path = dir.path().join("addon.zip");
+        std::fs::write(&path, archive.finish().unwrap().into_inner()).unwrap();
+        ui.set_show_adult(true);
+        let (descriptor, sources) = app
+            .install_sources(path.clone(), ui.get_show_adult())
+            .unwrap();
+        assert!(descriptor.nsfw && descriptor.enabled);
+        app.publish_sources(&ui, sources);
+        assert_eq!(ui.get_source_rows().row_count(), 1);
+        assert_eq!(
+            ui.get_source_rows().row_data(0).unwrap().id,
+            "neutral-fixture"
+        );
+        assert_eq!(ui.get_extensions().row_count(), 1);
+        assert_eq!(
+            ui.get_extensions().row_data(0).unwrap().icon.size().width,
+            64
+        );
+        assert_eq!(
+            ui.get_source_rows().row_data(0).unwrap().icon.size().width,
+            64
+        );
+
+        crate::source_catalogs::set_enabled("neutral-fixture", "neutral-fixture", false).unwrap();
+        assert!(app.sources(true).unwrap().is_empty());
+        let settings = catalogue_rows(app.catalogue_choices("neutral-fixture").unwrap());
+        assert_eq!(settings.len(), 1);
+        assert!(!settings[0].checked);
+        assert_eq!(app.services.sources.list().unwrap().len(), 1);
+        assert!(app.services.sources.source("neutral-fixture").is_ok());
+        assert!(
+            crate::source_catalogs::set_enabled("other-package", "neutral-fixture", false).is_err()
+        );
+        crate::source_catalogs::set_enabled("neutral-fixture", "neutral-fixture", true).unwrap();
+        assert_eq!(app.sources(true).unwrap().len(), 1);
+        assert!(catalogue_rows(app.catalogue_choices("neutral-fixture").unwrap())[0].checked);
+
+        // Reinstalling with visibility off still updates Extensions, without
+        // exposing an adult source in the filtered list.
+        ui.set_show_adult(false);
+        let (_, sources) = app.install_sources(path, ui.get_show_adult()).unwrap();
+        app.publish_sources(&ui, sources);
+        assert_eq!(ui.get_source_rows().row_count(), 0);
+        assert_eq!(ui.get_extensions().row_count(), 1);
+        assert_eq!(
+            ui.get_extensions().row_data(0).unwrap().icon.size().width,
+            64
+        );
+    }
+
     #[test]
     fn export_capture_source_rows_stay_native_across_density_zoom_and_capture_resolution() {
         for density in [1., 1.25, 1.5, 2.75, 3.] {

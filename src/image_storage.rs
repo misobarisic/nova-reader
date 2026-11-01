@@ -20,6 +20,8 @@ pub enum ImageStorageFormat {
     #[default]
     Webp = 1,
     Avif = 2,
+    JxlLossless = 3,
+    JxlLossy = 4,
 }
 
 impl TryFrom<i32> for ImageStorageFormat {
@@ -29,6 +31,8 @@ impl TryFrom<i32> for ImageStorageFormat {
             0 => Ok(Self::Jpeg),
             1 => Ok(Self::Webp),
             2 => Ok(Self::Avif),
+            3 => Ok(Self::JxlLossless),
+            4 => Ok(Self::JxlLossy),
             _ => Err("unsupported image storage format"),
         }
     }
@@ -46,6 +50,8 @@ pub struct ImageCompression {
     pub enabled: bool,
     pub format: ImageStorageFormat,
     pub quality: u8,
+    #[serde(default)]
+    pub jxl_lossless_jpeg: bool,
 }
 
 impl Default for ImageCompression {
@@ -54,6 +60,7 @@ impl Default for ImageCompression {
             enabled: true,
             format: ImageStorageFormat::Webp,
             quality: 85,
+            jxl_lossless_jpeg: false,
         }
     }
 }
@@ -162,9 +169,11 @@ impl ImageStoragePreferences {
         settings.set_cache_enabled(self.cache.enabled);
         settings.set_cache_format(self.cache.format.into());
         settings.set_cache_quality(f32::from(self.cache.quality));
+        settings.set_cache_jxl_lossless_jpeg(self.cache.jxl_lossless_jpeg);
         settings.set_downloads_enabled(self.downloads.enabled);
         settings.set_downloads_format(self.downloads.format.into());
         settings.set_downloads_quality(f32::from(self.downloads.quality));
+        settings.set_downloads_jxl_lossless_jpeg(self.downloads.jxl_lossless_jpeg);
         settings.set_disk_enabled(self.policy.disk_enabled);
         settings.set_disk_limit_names(ModelRc::new(VecModel::from(
             DISK_CACHE_LIMITS
@@ -263,6 +272,9 @@ impl ImageStoragePreferences {
                 Err(_) => return false,
             },
             "quality" if (1..=100).contains(&value) => compression.quality = value as u8,
+            "jxl_lossless_jpeg" if value == 0 || value == 1 => {
+                compression.jxl_lossless_jpeg = value == 1
+            }
             _ => return false,
         }
         true
@@ -372,11 +384,13 @@ mod tests {
                 enabled: false,
                 format: ImageStorageFormat::Jpeg,
                 quality: 40,
+                jxl_lossless_jpeg: false,
             },
             downloads: ImageCompression {
                 enabled: true,
                 format: ImageStorageFormat::Jpeg,
                 quality: 60,
+                jxl_lossless_jpeg: false,
             },
             policy: CachePolicyPreferences {
                 disk_enabled: false,

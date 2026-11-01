@@ -20,6 +20,7 @@ pub mod reader_modes;
 pub mod reading_preferences;
 pub mod services;
 mod source_browser;
+mod source_catalogs;
 mod source_filters;
 mod timeline;
 mod updates;

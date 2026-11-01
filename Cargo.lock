@@ -1706,7 +1706,7 @@ dependencies = [
 [[package]]
 name = "ferri-pdf-rav1d"
 version = "1.1.2"
-source = "git+https://github.com/misobarisic/nova-kit?rev=138f29e33d4f7d8ae9204b6bd6118eb458740f70#138f29e33d4f7d8ae9204b6bd6118eb458740f70"
+source = "git+https://github.com/misobarisic/nova-kit?rev=b5cb50325bf1e359811dc73aa85f641687e4ecd3#b5cb50325bf1e359811dc73aa85f641687e4ecd3"
 dependencies = [
  "assert_matches",
  "atomig",
@@ -3075,6 +3075,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "jixel"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ce2242dc53f94faa1687d4203204fbf9d2ca555e7d5a4fbbc992c5cf45fe519"
+
+[[package]]
 name = "jni"
 version = "0.21.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3866,7 +3872,7 @@ checksum = "0676bb32a98c1a483ce53e500a81ad9c3d5b3f7c920c28c24e9cb0980d0b5bc8"
 [[package]]
 name = "nova-cache"
 version = "0.1.0"
-source = "git+https://github.com/misobarisic/nova-kit?rev=138f29e33d4f7d8ae9204b6bd6118eb458740f70#138f29e33d4f7d8ae9204b6bd6118eb458740f70"
+source = "git+https://github.com/misobarisic/nova-kit?rev=b5cb50325bf1e359811dc73aa85f641687e4ecd3#b5cb50325bf1e359811dc73aa85f641687e4ecd3"
 dependencies = [
  "image",
  "libc",
@@ -3880,11 +3886,15 @@ dependencies = [
 [[package]]
 name = "nova-image"
 version = "0.1.0"
-source = "git+https://github.com/misobarisic/nova-kit?rev=138f29e33d4f7d8ae9204b6bd6118eb458740f70#138f29e33d4f7d8ae9204b6bd6118eb458740f70"
+source = "git+https://github.com/misobarisic/nova-kit?rev=b5cb50325bf1e359811dc73aa85f641687e4ecd3#b5cb50325bf1e359811dc73aa85f641687e4ecd3"
 dependencies = [
  "avif-parse",
  "ferri-pdf-rav1d",
  "image",
+ "jixel",
+ "jxl-bitstream",
+ "jxl-oxide",
+ "jxl-oxide-common",
  "ravif",
  "thiserror 2.0.21",
  "yuv",
@@ -3940,7 +3950,7 @@ dependencies = [
 [[package]]
 name = "nova-storage"
 version = "0.1.0"
-source = "git+https://github.com/misobarisic/nova-kit?rev=138f29e33d4f7d8ae9204b6bd6118eb458740f70#138f29e33d4f7d8ae9204b6bd6118eb458740f70"
+source = "git+https://github.com/misobarisic/nova-kit?rev=b5cb50325bf1e359811dc73aa85f641687e4ecd3#b5cb50325bf1e359811dc73aa85f641687e4ecd3"
 dependencies = [
  "redb",
  "serde",
@@ -3951,7 +3961,7 @@ dependencies = [
 [[package]]
 name = "nova-ui-base"
 version = "0.1.0"
-source = "git+https://github.com/misobarisic/nova-kit?rev=138f29e33d4f7d8ae9204b6bd6118eb458740f70#138f29e33d4f7d8ae9204b6bd6118eb458740f70"
+source = "git+https://github.com/misobarisic/nova-kit?rev=b5cb50325bf1e359811dc73aa85f641687e4ecd3#b5cb50325bf1e359811dc73aa85f641687e4ecd3"
 
 [[package]]
 name = "num-bigint"
@@ -5229,9 +5239,6 @@ name = "reader-engine"
 version = "0.1.0"
 dependencies = [
  "image",
- "jxl-bitstream",
- "jxl-oxide",
- "jxl-oxide-common",
  "nova-image",
  "reader-domain",
  "thiserror 2.0.21",

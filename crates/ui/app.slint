@@ -166,6 +166,8 @@ export component AppWindow inherits Window {
         else { root.close-entry-menu(); }
     }
     in property <[SettingRow]> settings;
+    in property <[SettingRow]> source-catalog-settings;
+    callback catalog-enabled-changed(string,bool);
     // Nova's responsive breakpoint applies equally to Android and desktop.
     out property <bool> mobile-ui: root.width < 700px;
     private property <bool> edge-to-edge-artwork: root.section == 5 || root.section == 6;
@@ -420,7 +422,7 @@ export component AppWindow inherits Window {
                                         x: 12px; y: 12px; width: max(0px, parent.width - 24px);
                                     }
                                 }
-                                if root.busy && root.section != 5: HorizontalLayout {
+                                if root.busy && root.section != 5 && (root.section != 3 || root.source-catalog-open): HorizontalLayout {
                                     Spinner { width: 24px; height: 24px; }
                                     Text { min-width: 0px; text: @tr("Loading…"); color: Theme.current.text_secondary; }
                                 }
@@ -436,7 +438,7 @@ export component AppWindow inherits Window {
                                             latest-picked(i) => { root.source-index = i; root.source-catalog-open = true; root.source-catalogue-kind = "latest"; root.source-latest-selected(i); }
                                             pin-picked(id) => { root.source-pin-picked(id); }
                                         }
-                                        if root.source-rows.length == 0: Text { text: @tr("Install an extension to add a source."); color: Theme.current.text_secondary; wrap: word-wrap; min-width: 0px; }
+                                        if root.source-rows.length == 0: Text { text: root.extensions.length == 0 ? @tr("Install an extension to add a source.") : @tr("No sources visible. Check extension settings and adult-source visibility."); color: Theme.current.text_secondary; wrap: word-wrap; min-width: 0px; }
                                     }
                                     if root.browse-tab == 1: VerticalLayout {
                                         spacing: 12px;
@@ -659,6 +661,11 @@ export component AppWindow inherits Window {
                                 }
                                 if root.section == 8: VerticalLayout {
                                     spacing: 16px;
+                                    if root.source-catalog-settings.length > 0: Text { text: @tr("Catalogues"); color: Theme.current.text_bright; font-size: 18px; font-weight: 600; }
+                                    for catalogue in root.source-catalog-settings: CheckBox {
+                                        text: catalogue.name; checked: catalogue.checked;
+                                        toggled => { root.catalog-enabled-changed(catalogue.key, self.checked); }
+                                    }
                                     for setting in root.settings: VerticalLayout {
                                         spacing: 8px;
                                         Text { min-width: 0px; text: setting.name; color: Theme.current.text_bright; wrap: word-wrap; }
@@ -666,7 +673,7 @@ export component AppWindow inherits Window {
                                         if setting.kind == "text" || setting.kind == "secret": LineEdit { min-width: 0px; text: setting.value; input-type: setting.kind == "secret" ? InputType.password : InputType.text; placeholder-text: setting.kind == "secret" ? @tr("Enter a new secret to replace it") : ""; accepted => { root.setting-changed(setting.key, self.text); } }
                                         if setting.kind == "select": ComboBox { min-width: 0px; model: setting.options; current-index: setting.selected; selected(value) => { root.setting-changed(setting.key, value); } }
                                     }
-                                    if root.settings.length == 0: Text { min-width: 0px; text: @tr("This source has no configurable settings."); color: Theme.current.text_secondary; wrap: word-wrap; }
+                                    if root.settings.length == 0 && root.source-catalog-settings.length == 0: Text { min-width: 0px; text: @tr("This source has no configurable settings."); color: Theme.current.text_secondary; wrap: word-wrap; }
                                     Text { min-width: 0px; text: @tr("Text fields save when you press Enter. Secrets are stored only in this profile and are excluded from backups."); color: Theme.current.text_secondary; wrap: word-wrap; }
                                 }
                             }

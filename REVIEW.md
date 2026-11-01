@@ -587,3 +587,65 @@ production JXL adapter compiled for ARMv7 in an isolated pure-codec harness.
 The full local ARMv7 engine check was blocked by the missing Android NDK C linker
 in the existing storage dependency; APK/whole-app validation remains in release
 CI. Reference addon parsers and deterministic package/source-byte checks passed.
+
+
+## Shared JPEG XL codec follow-up
+
+The actual Reader decoder and auxiliary-metadata regressions now live in Kit
+`nova-image` at b5cb50325bf1e359811dc73aa85f641687e4ecd3. Reader's AVIF/JXL
+adapters only map shared errors and delegate; no direct jxl-oxide/bitstream/common
+dependencies remain. Reader retains its native-pixel/admission integration
+fixtures. Kit owns JPEG XL lossless/lossy RGBA encoding via jixel 0.5.2 with all
+optional features disabled, one scalar worker and lossless alpha. Reader's
+existing compression and capture selections remain compatible. Both consumers
+use the same shared source revision; codec fixture tests, quality/alpha checks,
+cache disk-hit tests, full Kit tests/Clippy and ARMv7 codec compilation passed.
+
+
+## Browse installation refresh
+
+Installation previously rebuilt choices through `sources(false)`, hiding adult
+addons regardless of the persisted toggle, and left extension/icon models stale.
+Navigation and installation now share a worker-prepared source/extension/icon
+snapshot and the same UI publisher. Installation captures the active visibility
+choice and only suggests enabling adult sources when it is actually off. The
+Browse root keeps refresh work asynchronous without displaying the loading row;
+source catalogue requests retain their existing feedback.
+
+A process-isolated regression installs a real ZIP marked adult with a bundled
+icon and publishes through the production helpers, verifying Sources and
+Extensions immediately with visibility on and after reinstalling with it off.
+A headless UI regression checks both toggle states without loading text or a
+spinner, and verifies catalogue loading feedback remains available.
+
+
+## Optional JPEG transcoding and catalogue controls
+
+Reader cache/download selectors append JPEG XL lossless/lossy, using Kit's
+existing bounded codec and Nova dropdown. Each group stores an independent
+`jxl_lossless_jpeg` flag, defaulting false for old data. The flag chooses Kit's
+coefficient/reconstruction path only for supported, unresized JPEG inputs.
+Normal lossy JPEG XL retains its quality control. Resized artwork and other
+formats use the normal encoder. Reader fully checks JXL output against its decode
+budget before storage; failures preserve the admitted original bytes.
+
+Host-owned catalogue switches are Reader-only and separate from source-defined
+settings. `src/source_catalogs.rs` persists disabled source IDs by package in
+Nova KV. The settings inventory includes hidden catalogues for re-enabling;
+Browse filtering never disables a source's direct chapter/library/history access.
+Source capabilities run on workers; Slint setting rows are built on the UI thread.
+The process-isolated install regression covers hiding, restoring, namespace
+separation and direct source availability. Headless settings regressions cover
+both catalogue controls and independent compression/persistence groups.
+
+Kit's transcode fixture reconstructs the original JPEG byte for byte using
+jxl-oxide. Its full workspace tests, production Clippy and codec/cache all-target
+Clippy pass, and the exact new codec API compiles for ARMv7. GitHub Kit checks
+pass on Linux/Nix and Windows at b5cb50325bf1e359811dc73aa85f641687e4ecd3.
+
+
+Final Reader verification passed formatting, locked workspace check, workspace
+Clippy with warnings denied, all workspace tests/doc tests, and all 33 packaging
+regressions without skips. This includes the final two-way dropdown bindings,
+visibility refresh without a Browse loading row, catalogue re-enabling, saved
+transcode flags, real JPEG reconstruction selection and JXL decode admission.

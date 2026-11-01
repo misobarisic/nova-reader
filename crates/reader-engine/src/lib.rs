@@ -7,7 +7,7 @@ pub use display::{
     DISPLAY_WINDOW_BYTES, DisplayDecoder, DisplayWindow, DisplayWindowPlan, decode_display_image,
     decode_display_window, plan_display_window,
 };
-pub use jxl::matches as is_jpeg_xl;
+pub use nova_image::is_jpeg_xl;
 pub use nova_image::{DecodeLimits, PageDimensions};
 use reader_domain::{ReadingMode, ResumeAnchor};
 use std::{
@@ -30,6 +30,15 @@ pub enum Error {
     Jxl(String),
 }
 pub type Result<T> = std::result::Result<T, Error>;
+impl From<nova_image::Error> for Error {
+    fn from(error: nova_image::Error) -> Self {
+        match error {
+            nova_image::Error::Limit => Self::Limit,
+            nova_image::Error::Avif(message) => Self::Avif(message),
+            nova_image::Error::Jxl(message) => Self::Jxl(message),
+        }
+    }
+}
 fn reader(bytes: &[u8], limits: DecodeLimits) -> Result<image::ImageReader<Cursor<&[u8]>>> {
     if bytes.len() > limits.max_encoded_bytes {
         return Err(Error::Limit);

@@ -107,6 +107,26 @@ impl ExportImage {
 
 /// Reencode only newly fetched storage bytes. Source dimensions are preserved;
 /// callers choose their admission limits and retain existing stored files.
+pub(crate) fn reencode_storage_image(
+    bytes: &[u8],
+    compression: crate::image_storage::ImageCompression,
+    limits: reader_engine::DecodeLimits,
+) -> Result<Vec<u8>, String> {
+    if compression.jxl_lossless_jpeg
+        && matches!(
+            compression.format,
+            ImageStorageFormat::JxlLossless | ImageStorageFormat::JxlLossy
+        )
+        && let Ok(encoded) = nova_image::transcode_jpeg_to_jxl(bytes, limits)
+    {
+        // A valid JXL header does not establish that its float grids fit the
+        // reader's decode budget. Never commit an unreadable offline variant.
+        nova_image::decode_jxl(&encoded, limits).map_err(|error| error.to_string())?;
+        return Ok(encoded);
+    }
+    reencode_image(bytes, compression.format, compression.quality, limits)
+}
+
 pub(crate) fn reencode_image(
     bytes: &[u8],
     format: ImageStorageFormat,
@@ -120,24 +140,58 @@ pub(crate) fn reencode_image(
     if format == ImageStorageFormat::Jpeg && image.pixels().any(|pixel| pixel[3] != 255) {
         return Err("JPEG compression cannot preserve image transparency".into());
     }
-    let format = match format {
-        ImageStorageFormat::Jpeg => CaptureFormat::Jpeg,
-        ImageStorageFormat::Webp => CaptureFormat::WebpLossy,
-        ImageStorageFormat::Avif => CaptureFormat::Avif,
+    let encoded = match format {
+        ImageStorageFormat::JxlLossless | ImageStorageFormat::JxlLossy => nova_image::encode_jxl(
+            image.width(),
+            image.height(),
+            image.as_raw(),
+            if format == ImageStorageFormat::JxlLossless {
+                nova_image::JxlEncoding::Lossless
+            } else {
+                nova_image::JxlEncoding::Lossy { quality }
+            },
+            limits,
+        )
+        .map_err(|error| error.to_string())?,
+        ImageStorageFormat::Jpeg => encode_rgba(
+            image.width(),
+            image.height(),
+            image.as_raw(),
+            CaptureFormat::Jpeg,
+            quality,
+            limits,
+        )?,
+        ImageStorageFormat::Webp => encode_rgba(
+            image.width(),
+            image.height(),
+            image.as_raw(),
+            CaptureFormat::WebpLossy,
+            quality,
+            limits,
+        )?,
+        ImageStorageFormat::Avif => encode_rgba(
+            image.width(),
+            image.height(),
+            image.as_raw(),
+            CaptureFormat::Avif,
+            quality,
+            limits,
+        )?,
     };
-    let encoded = encode_rgba(
-        image.width(),
-        image.height(),
-        image.as_raw(),
-        format,
-        quality,
-        limits,
-    )?;
     if encoded.len() > limits.max_encoded_bytes {
         return Err("Compressed image exceeds encoded byte limit".into());
     }
-    reader_engine::inspect_image(&encoded, limits)
-        .map_err(|error| format!("Compressed image exceeds decode admission: {error}"))?;
+    drop(image);
+    if matches!(
+        format,
+        ImageStorageFormat::JxlLossless | ImageStorageFormat::JxlLossy
+    ) {
+        nova_image::decode_jxl(&encoded, limits)
+            .map_err(|error| format!("Compressed image exceeds decode admission: {error}"))?;
+    } else {
+        reader_engine::inspect_image(&encoded, limits)
+            .map_err(|error| format!("Compressed image exceeds decode admission: {error}"))?;
+    }
     Ok(encoded)
 }
 
@@ -1155,5 +1209,84 @@ mod tests {
             drop(observer);
         }
         shutdown();
+    }
+}
+
+#[cfg(test)]
+mod jxl_storage_tests {
+    use super::*;
+    use crate::image_storage::ImageCompression;
+    #[test]
+    fn jpeg_transcoding_bypasses_quality_only_for_jpeg_and_is_opt_in() {
+        let pixels: Vec<u8> = (0..32 * 24 * 3).map(|i| (i * 17) as u8).collect();
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 80)
+            .encode(&pixels, 32, 24, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        let limits = reader_engine::DecodeLimits::default();
+        let compression = ImageCompression {
+            format: ImageStorageFormat::JxlLossy,
+            quality: 20,
+            jxl_lossless_jpeg: true,
+            ..ImageCompression::default()
+        };
+        let low = reencode_storage_image(&jpeg, compression, limits).unwrap();
+        let high = reencode_storage_image(
+            &jpeg,
+            ImageCompression {
+                quality: 95,
+                ..compression
+            },
+            limits,
+        )
+        .unwrap();
+        assert!(
+            reencode_storage_image(
+                &jpeg,
+                compression,
+                reader_engine::DecodeLimits {
+                    max_decoded_bytes: 32 * 24 * 4,
+                    ..limits
+                }
+            )
+            .is_err()
+        );
+        assert_eq!(low, high);
+        assert_eq!(
+            low,
+            nova_image::transcode_jpeg_to_jxl(&jpeg, limits).unwrap()
+        );
+        assert_ne!(
+            low,
+            reencode_storage_image(
+                &jpeg,
+                ImageCompression {
+                    jxl_lossless_jpeg: false,
+                    ..compression
+                },
+                limits
+            )
+            .unwrap()
+        );
+        let image = image::RgbImage::from_raw(32, 24, pixels).unwrap();
+        let mut png = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let png = png.into_inner();
+        assert_ne!(
+            reencode_storage_image(&png, compression, limits).unwrap(),
+            reencode_storage_image(
+                &png,
+                ImageCompression {
+                    quality: 95,
+                    ..compression
+                },
+                limits
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            reader_engine::inspect_image(&low, limits).unwrap(),
+            reader_engine::inspect_image(&jpeg, limits).unwrap()
+        );
     }
 }
