@@ -427,7 +427,7 @@ fn poster_layout_timelines_chapters_and_reader_controls() {
             }
         }
     });
-    ui.set_categories(ModelRc::new(VecModel::from(vec!["All categories".into()])));
+    ui.set_categories(ModelRc::new(VecModel::from(vec!["All".into()])));
     ui.set_items(ModelRc::new(VecModel::from(
         (0..24)
             .map(|i| ItemRow {
@@ -756,4 +756,88 @@ fn addon_settings_show_disabled_catalogues_for_reenabling() {
         &("fixture.es".into(), true)
     );
     assert_eq!(ui.get_source_catalog_settings().row_count(), 2);
+}
+
+#[test]
+fn android_scrolls_do_not_lift_cards_or_open_titles_while_desktop_hover_remains() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().unwrap();
+    ui.global::<nova_reader::Anim>().set_enabled(true);
+    ui.global::<nova_reader::Anim>().set_hover(true);
+    ui.set_items(ModelRc::new(VecModel::from(
+        (0..40)
+            .map(|index| ItemRow {
+                title: format!("Scroll title {index}").into(),
+                series_key: format!("series-{index}").into(),
+                ..Default::default()
+            })
+            .collect::<Vec<_>>(),
+    )));
+    let opens = Rc::new(Cell::new(0));
+    ui.on_open_item({
+        let opens = opens.clone();
+        move |_| opens.set(opens.get() + 1)
+    });
+    ui.show().unwrap();
+    for width in [390., 1120.] {
+        ui.window().set_size(LogicalSize::new(width, 844.));
+        for section in [0, 3] {
+            ui.set_section(section);
+            ui.set_source_catalog_open(section == 3);
+            ui.invoke_reset_catalogue_scroll();
+            ui.set_touch_menus(false);
+            settle();
+            let card = button(&ui, "Scroll title 0");
+            let start = slint::LogicalPosition::new(
+                card.absolute_position().x + 30.,
+                card.absolute_position().y + 70.,
+            );
+            ui.window()
+                .dispatch_event(WindowEvent::PointerMoved { position: start });
+            settle();
+            let lift = ElementHandle::find_by_element_id(&ui, "LibraryCard::lift")
+                .next()
+                .unwrap();
+            assert!(
+                (lift.absolute_position().y - card.absolute_position().y + 4.).abs() < 0.5,
+                "desktop hover lifts the card at {width}px"
+            );
+
+            ui.set_touch_menus(true);
+            settle();
+            assert!(
+                (lift.absolute_position().y - card.absolute_position().y).abs() < 0.5,
+                "Android does not inherit mouse hover, including wide layouts"
+            );
+            pointer(&ui, start, true);
+            for distance in [8., 18., 36., 70., 110.] {
+                ui.window().dispatch_event(WindowEvent::PointerMoved {
+                    position: slint::LogicalPosition::new(start.x, start.y - distance),
+                });
+                i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(32));
+            }
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(800));
+            pointer(
+                &ui,
+                slint::LogicalPosition::new(start.x, start.y - 110.),
+                false,
+            );
+            settle();
+            assert_eq!(opens.get(), 0, "scroll never activates a title");
+            assert!(
+                !ui.get_entry_menu_visible(),
+                "scroll never becomes a long press"
+            );
+            assert!(
+                (lift.absolute_position().y - card.absolute_position().y).abs() < 0.5,
+                "no lingering lift after touch scrolling"
+            );
+            if section == 3 {
+                assert!(
+                    ui.get_catalogue_scroll_y() < 0.,
+                    "the gesture actually scrolls Browse"
+                );
+            }
+        }
+    }
 }

@@ -24,6 +24,7 @@ static LIFECYCLE: OnceLock<Weak<Controller>> = OnceLock::new();
 #[cfg(target_os = "android")]
 pub fn flush_lifecycle() {
     if let Some(app) = LIFECYCLE.get().and_then(Weak::upgrade) {
+        app.metadata_refresh.pause();
         app.flush();
     }
 }
@@ -454,7 +455,18 @@ fn update_entry_membership(
     series: &reader_domain::SeriesId,
     action: &str,
 ) -> reader_domain::Result<()> {
-    if let Some(category) = action.strip_prefix("category:") {
+    if let Some(status) = action.strip_prefix("status:") {
+        let status = reader_domain::ReadingStatus::from_action(status.parse().unwrap_or(-1))
+            .ok_or_else(|| reader_domain::Error::Invalid("Unknown reading status".into()))?;
+        let entry = state
+            .library
+            .iter_mut()
+            .find(|entry| &entry.series == series)
+            .ok_or_else(|| {
+                reader_domain::Error::Invalid("Title is no longer in your library.".into())
+            })?;
+        entry.reading_status = status;
+    } else if let Some(category) = action.strip_prefix("category:") {
         if !state.categories.iter().any(|entry| entry.id == category) {
             return Err(reader_domain::Error::Invalid(text::tr(
                 "Category is no longer available.",
@@ -475,6 +487,7 @@ fn update_entry_membership(
     } else if action == "add" {
         if !state.library.iter().any(|entry| &entry.series == series) {
             state.library.push(reader_domain::LibraryEntry {
+                reading_status: Default::default(),
                 series: series.clone(),
                 categories: BTreeSet::new(),
                 preferences: None,
@@ -500,12 +513,38 @@ struct Controller {
     images: mpsc::Sender<ImageTask>,
     download_serial: Mutex<()>,
     active_image: Mutex<Option<(usize, CancelToken)>>,
+    metadata_refresh: Arc<crate::metadata_refresh::Scheduler>,
 }
 impl Controller {
+    fn metadata_refresh_allowed(&self, ui: &AppWindow) -> bool {
+        crate::metadata_refresh::foreground()
+            && crate::metadata_refresh::surface_allowed(self.view().section)
+            && ui.window().is_visible()
+            && !ui.window().is_minimized()
+            && !ui.get_busy()
+    }
+    fn refresh_metadata(self: &Arc<Self>, ui: &AppWindow) {
+        if !self.metadata_refresh_allowed(ui) {
+            self.metadata_refresh.pause();
+            return;
+        }
+        let weak = ui.as_weak();
+        let app = Arc::downgrade(self);
+        self.metadata_refresh.tick(self.services.clone(), move || {
+            let _ = weak.upgrade_in_event_loop(move |ui| {
+                if let Some(app) = app.upgrade()
+                    && app.metadata_refresh_allowed(&ui)
+                {
+                    app.render(&ui);
+                }
+            });
+        });
+    }
     fn view(&self) -> std::sync::MutexGuard<'_, View> {
         self.view.lock().unwrap_or_else(|e| e.into_inner())
     }
     fn invalidate(&self) -> (u64, CancelToken) {
+        self.metadata_refresh.pause();
         self.artwork.invalidate();
         self.chapter_cache.deactivate();
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
@@ -711,30 +750,47 @@ impl Controller {
             }
         };
         let mut view = self.view();
+        if !crate::metadata_refresh::surface_allowed(view.section) {
+            self.metadata_refresh.pause();
+        }
         ui.set_section(view.section);
         if view.section == 6 {
             ui.set_series_title(reader_series_title(&view).unwrap_or("Series").into());
         }
-        let category_id = snapshot
-            .categories
-            .get(view.category.saturating_sub(1))
-            .map(|c| c.id.clone())
-            .filter(|_| view.category > 0);
+        let builtins = reader_domain::ReadingStatus::BUILTINS;
+        if view.category > builtins.len() + snapshot.categories.len() {
+            view.category = 0;
+        }
+        ui.set_category_index(view.category as i32);
+        let category_id = view
+            .category
+            .checked_sub(builtins.len() + 1)
+            .and_then(|index| snapshot.categories.get(index))
+            .map(|category| category.id.clone());
+        let status_filter = view
+            .category
+            .checked_sub(1)
+            .and_then(|index| builtins.get(index))
+            .copied();
         ui.set_categories(ModelRc::new(VecModel::from(
-            std::iter::once(text::tr("All categories").into())
-                .chain(snapshot.categories.iter().map(|c| c.name.clone().into()))
+            std::iter::once(text::tr("All").into())
+                .chain(
+                    builtins
+                        .iter()
+                        .map(|status| text::tr(status.label()).into()),
+                )
+                .chain(
+                    snapshot
+                        .categories
+                        .iter()
+                        .map(|category| category.name.clone().into()),
+                )
                 .collect::<Vec<_>>(),
         )));
         let (heading, caption) = match view.section {
-            0 => (
-                "My Library",
-                "Your saved titles, reading progress and downloads.",
-            ),
-            1 => (
-                "Updates",
-                "Unread chapters from your library. Refresh to look for new releases.",
-            ),
-            2 => ("History", "Pick up where you left off."),
+            0 => ("My Library", ""),
+            1 => ("Updates", ""),
+            2 => ("History", ""),
             3 => ("Browse", ""),
             4 => ("More", "Make this reading space your own."),
             5 => (
@@ -765,6 +821,19 @@ impl Controller {
                         category_id
                             .as_ref()
                             .is_none_or(|id| l.categories.contains(id))
+                            && status_filter.is_none_or(|status| {
+                                reader_domain::library_bucket(
+                                    l,
+                                    &snapshot.chapters,
+                                    &snapshot.progress,
+                                    snapshot
+                                        .series
+                                        .iter()
+                                        .find(|series| series.id == l.series)
+                                        .map(|series| series.publication_status)
+                                        .unwrap_or_default(),
+                                ) == status
+                            })
                     })
                     .filter_map(|l| snapshot.series.iter().find(|s| s.id == l.series))
                     .filter(|s| s.title.to_lowercase().contains(&query))
@@ -966,7 +1035,27 @@ impl Controller {
                     ItemRow {
                         series_key: serde_json::to_string(&s.id).unwrap_or_default().into(),
                         title: s.title.clone().into(),
-                        subtitle: text::chapter_count(unread, chapters.len()).into(),
+                        subtitle: snapshot
+                            .library
+                            .iter()
+                            .find(|entry| entry.series == s.id)
+                            .map(|entry| {
+                                format!(
+                                    "{} · {}",
+                                    text::tr(
+                                        reader_domain::library_bucket(
+                                            entry,
+                                            &snapshot.chapters,
+                                            &snapshot.progress,
+                                            s.publication_status
+                                        )
+                                        .label()
+                                    ),
+                                    text::chapter_count(unread, chapters.len())
+                                )
+                            })
+                            .unwrap_or_else(|| text::chapter_count(unread, chapters.len()))
+                            .into(),
                         badge: s.id.source_id.clone().into(),
                         bookmarked: snapshot.library.iter().any(|l| l.series == s.id),
                         poster: self.artwork.cached_image(s).unwrap_or_default(),
@@ -1334,6 +1423,7 @@ impl Controller {
                 self.refresh_download_states(ui);
             }
         }
+        self.refresh_metadata(ui);
     }
     fn return_to_catalogue(&self, ui: &AppWindow) {
         ui.invoke_prepare_catalogue_return();
@@ -2508,6 +2598,9 @@ impl Controller {
         });
     }
     fn entry_action(self: &Arc<Self>, ui: &AppWindow, key: &str, action: &str) {
+        if action == "change-status" {
+            return;
+        }
         if action == "categories" {
             ui.set_entry_categories(ModelRc::new(VecModel::from(Vec::<EntryCategoryRow>::new())));
         }
@@ -3391,6 +3484,7 @@ fn wire_reader_context(app: &Arc<Controller>, ui: &AppWindow) {
 pub fn run(services: Services) -> Result<()> {
     let ui = AppWindow::new().map_err(error)?;
     ui.set_app_version(env!("CARGO_PKG_VERSION").into());
+    ui.set_touch_menus(cfg!(target_os = "android"));
     ui.set_about_update_checks_enabled(cfg!(feature = "update-check"));
     crate::about::prepare_license_text(&ui);
     ui.set_license_sources(ModelRc::new(VecModel::from(
@@ -3432,6 +3526,7 @@ pub fn run(services: Services) -> Result<()> {
         images: sender,
         download_serial: Mutex::new(()),
         active_image: Mutex::new(None),
+        metadata_refresh: Arc::default(),
     });
     let _ = LIFECYCLE.set(Arc::downgrade(&app));
     let weak = ui.as_weak();
@@ -3676,6 +3771,7 @@ pub fn run(services: Services) -> Result<()> {
                     state.library.retain(|l| l.series != series.id);
                 } else {
                     state.library.push(reader_domain::LibraryEntry {
+                        reading_status: Default::default(),
                         series: series.id,
                         categories: BTreeSet::new(),
                         preferences: None,
@@ -3989,13 +4085,36 @@ pub fn run(services: Services) -> Result<()> {
     }
     let timer = slint::Timer::default();
     let checkpoint = app.clone();
+    let refresh_ui = ui.as_weak();
+    let mut inventory_check = std::time::Instant::now();
     timer.start(
         slint::TimerMode::Repeated,
         std::time::Duration::from_millis(600),
-        move || checkpoint.flush(),
+        move || {
+            checkpoint.flush();
+            if let Some(ui) = refresh_ui.upgrade()
+                && !checkpoint.metadata_refresh_allowed(&ui)
+            {
+                checkpoint.metadata_refresh.pause();
+            }
+            if inventory_check.elapsed() >= std::time::Duration::from_secs(60) {
+                inventory_check = std::time::Instant::now();
+                if let Some(ui) = refresh_ui.upgrade() {
+                    checkpoint.refresh_metadata(&ui);
+                }
+            }
+        },
     );
+    let initial = Arc::downgrade(&app);
+    let initial_ui = ui.as_weak();
+    slint::Timer::single_shot(std::time::Duration::from_secs(1), move || {
+        if let (Some(app), Some(ui)) = (initial.upgrade(), initial_ui.upgrade()) {
+            app.refresh_metadata(&ui);
+        }
+    });
     let close = app.clone();
     ui.window().on_close_requested(move || {
+        close.metadata_refresh.pause();
         close.flush();
         slint::CloseRequestResponse::HideWindow
     });
@@ -4022,6 +4141,7 @@ pub fn run(services: Services) -> Result<()> {
         }
     });
     let result = ui.run().map_err(error);
+    app.metadata_refresh.pause();
     app.image_worker_live.store(false, Ordering::Release);
     app.invalidate();
     crate::reader_export::shutdown();
@@ -4075,6 +4195,7 @@ mod tests {
             images,
             download_serial: Mutex::new(()),
             active_image: Mutex::new(None),
+            metadata_refresh: Arc::default(),
         };
         let mut manifest: serde_json::Value = serde_json::from_str(include_str!(
             "../examples/addons/neutral-fixture/manifest.json"
@@ -4505,6 +4626,7 @@ mod tests {
                         ];
                         for id in [&first, &second] {
                             state.series.push(Series {
+                                publication_status: Default::default(),
                                 id: id.clone(),
                                 title: "Shared title".into(),
                                 description: String::new(),
@@ -4553,6 +4675,21 @@ mod tests {
                         .update(|state| update_entry_membership(state, &first, action))
                         .unwrap();
                 }
+                let original = store.snapshot().unwrap();
+                for code in [6, 5, 7, 2, 1, 0, 7] {
+                    store
+                        .update(|state| {
+                            update_entry_membership(state, &first, &format!("status:{code}"))
+                        })
+                        .unwrap();
+                }
+                let after = store.snapshot().unwrap();
+                assert_eq!(after.progress, original.progress);
+                assert_eq!(after.history, original.history);
+                assert_eq!(
+                    after.library.iter().find(|entry| entry.series == second),
+                    original.library.iter().find(|entry| entry.series == second)
+                );
                 let before = store.snapshot().unwrap();
                 assert!(
                     store
@@ -4565,6 +4702,28 @@ mod tests {
                 );
                 assert_eq!(store.snapshot().unwrap(), before);
             }
+            assert_eq!(
+                store
+                    .snapshot()
+                    .unwrap()
+                    .library
+                    .iter()
+                    .find(|entry| entry.series == first)
+                    .unwrap()
+                    .reading_status,
+                reader_domain::ReadingStatus::Completed
+            );
+            assert_eq!(
+                store
+                    .snapshot()
+                    .unwrap()
+                    .library
+                    .iter()
+                    .find(|entry| entry.series == second)
+                    .unwrap()
+                    .reading_status,
+                reader_domain::ReadingStatus::Auto
+            );
             let snapshot = store.snapshot().unwrap();
             let first = snapshot
                 .library
@@ -4708,11 +4867,13 @@ mod tests {
             images,
             download_serial: Mutex::new(()),
             active_image: Mutex::new(None),
+            metadata_refresh: Arc::default(),
         });
         // A direct History/Updates chapter open has no mounted detail hero.
         // Its OSD and capture folder must use the active series identity.
         let active_series = app.view().reader.as_ref().unwrap().chapter.series.clone();
         app.view().series = Some(Series {
+            publication_status: Default::default(),
             id: active_series,
             title: "Current reader series".into(),
             description: String::new(),
@@ -5013,6 +5174,7 @@ mod tests {
             view.saved_catalogue = Some(CatalogueState {
                 source_id: "fixture.1".into(),
                 rows: vec![Series {
+                    publication_status: Default::default(),
                     id: reader_domain::SeriesId::new("fixture.1", "result"),
                     title: "Saved result".into(),
                     description: String::new(),

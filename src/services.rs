@@ -37,6 +37,21 @@ pub(crate) fn chapter_from_source(
     })
 }
 
+// Retain vanished chapters so bookmarks, history and offline bundles survive
+// source edits. Fresh rows replace matching IDs, never reading progress.
+pub(crate) fn merge_details(
+    state: &mut reader_domain::ReaderState,
+    series: Series,
+    chapters: Vec<Chapter>,
+) {
+    state.series.retain(|saved| saved.id != series.id);
+    state.series.push(series);
+    for chapter in chapters {
+        state.chapters.retain(|saved| saved.id != chapter.id);
+        state.chapters.push(chapter);
+    }
+}
+
 #[derive(Clone)]
 pub struct Services {
     pub domain: DomainStore,
@@ -98,6 +113,9 @@ impl Services {
     }
     pub fn series(&self, source_id: &str, dto: reader_sources::Series) -> Series {
         Series {
+            publication_status: reader_domain::PublicationStatus::from_source(
+                dto.status.as_deref(),
+            ),
             id: SeriesId::new(source_id, dto.id),
             title: dto.title,
             description: dto.description.unwrap_or_default(),
@@ -110,20 +128,25 @@ impl Services {
     pub fn save_details(&self, series: Series, chapters: Vec<Chapter>) -> Result<()> {
         self.domain
             .update(|state| {
-                state.series.retain(|s| s.id != series.id);
-                state.series.push(series);
-                // Retain vanished chapters so their bookmarks, history and offline
-                // bundles survive source edits. Fresh rows replace matching IDs.
-                for chapter in chapters {
-                    state.chapters.retain(|c| c.id != chapter.id);
-                    state.chapters.push(chapter);
-                }
+                merge_details(state, series, chapters);
                 Ok(())
             })
             .map_err(error)
     }
     pub fn details(&self, series: &Series, cancel: &CancelToken) -> Result<(Series, Vec<Chapter>)> {
         let source = self.source(&series.id.source_id)?;
+        let (series, chapters) = self.fetch_details_from(&source, series, cancel)?;
+        self.save_details(series.clone(), chapters.clone())?;
+        crate::metadata_refresh::note_manual_success(self, &series.id);
+        Ok((series, chapters))
+    }
+    // The scheduler must validate ownership and its baseline before publication.
+    pub(crate) fn fetch_details_from(
+        &self,
+        source: &Source,
+        series: &Series,
+        cancel: &CancelToken,
+    ) -> Result<(Series, Vec<Chapter>)> {
         let request = json!({"sourceId":series.id.source_id,"id":series.id.local_id,"seriesId":series.id.local_id,"url":series.canonical_url});
         let dto: reader_sources::Series = serde_json::from_value(
             source
@@ -146,7 +169,6 @@ impl Services {
             .into_iter()
             .map(|chapter| chapter_from_source(&series.id, chapter))
             .collect::<Result<Vec<_>>>()?;
-        self.save_details(series.clone(), chapters.clone())?;
         Ok((series, chapters))
     }
     pub fn pages(
@@ -167,6 +189,7 @@ impl Services {
             .update(|state| {
                 if !state.library.iter().any(|l| &l.series == series) {
                     state.library.push(LibraryEntry {
+                        reading_status: Default::default(),
                         series: series.clone(),
                         categories: BTreeSet::new(),
                         preferences: None,
@@ -264,6 +287,7 @@ impl Services {
                 .subsec_nanos()
         );
         let series = Series {
+            publication_status: Default::default(),
             id: SeriesId::new("local", local_id),
             title: if title.is_empty() {
                 "Local chapter".into()

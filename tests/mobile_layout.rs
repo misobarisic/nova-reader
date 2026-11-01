@@ -109,7 +109,7 @@ fn nova_navigation_more_and_responsive_controls() {
     ui.set_sources(ModelRc::new(VecModel::from(vec![
         "A very long installed source name that must never widen the window".into(),
     ])));
-    ui.set_categories(ModelRc::new(VecModel::from(vec!["All categories".into()])));
+    ui.set_categories(ModelRc::new(VecModel::from(vec!["All".into()])));
     ui.set_items(ModelRc::new(VecModel::from(vec![ItemRow {
         title: "A long series or chapter title that should fit in a phone list".into(),
         subtitle: "A long subtitle with source and chapter information".into(),

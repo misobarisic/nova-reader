@@ -14,6 +14,7 @@ mod chapter_capture;
 mod cli;
 pub mod export_names;
 pub mod image_storage;
+mod metadata_refresh;
 mod paths;
 mod reader_export;
 pub mod reader_modes;
@@ -41,11 +42,13 @@ fn android_main(app: slint::android::AndroidApp) {
     }
     slint::android::init_with_event_listener(app, |event| {
         use slint::android::android_activity::{MainEvent, PollEvent};
-        if matches!(
-            event,
-            PollEvent::Main(MainEvent::Pause | MainEvent::Destroy)
-        ) {
-            app::flush_lifecycle();
+        match event {
+            PollEvent::Main(MainEvent::Resume { .. }) => metadata_refresh::set_foreground(true),
+            PollEvent::Main(MainEvent::Pause | MainEvent::Destroy) => {
+                metadata_refresh::set_foreground(false);
+                app::flush_lifecycle();
+            }
+            _ => {}
         }
     })
     .expect("initialize Android UI");

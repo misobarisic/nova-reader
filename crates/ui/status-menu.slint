@@ -1,0 +1,16 @@
+import { MenuSheet } from "@ReaderMenuSheet";
+export component StatusMenu inherits MenuSheet {
+    keyboard_navigation: true;
+    sheet_title: @tr("Change status");
+    items: [
+        { label: @tr("Mark as reading"), enabled: true },
+        { label: @tr("Mark as Plan to read"), enabled: true },
+        { label: @tr("Mark as completed"), enabled: true },
+        { label: @tr("Mark on hold"), enabled: true },
+        { label: @tr("Mark dropped"), enabled: true },
+        { label: @tr("Back to automatic"), enabled: true },
+    ];
+    private property <[int]> codes: [6, 5, 7, 1, 2, 0];
+    callback status-picked(int);
+    picked(index) => { root.status-picked(root.codes[index]); }
+}

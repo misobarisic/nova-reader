@@ -649,3 +649,45 @@ Clippy with warnings denied, all workspace tests/doc tests, and all 33 packaging
 regressions without skips. This includes the final two-way dropdown bindings,
 visibility refresh without a Browse loading row, catalogue re-enabling, saved
 transcode flags, real JPEG reconstruction selection and JXL decode admission.
+
+
+## Library status, touch behavior and automatic metadata refresh
+
+Copied Nova's Change status component/action codes into Reader, adapting reading
+labels and omitting video-only New episodes. Both title menus preserve full
+source-local identities. Manual pins change category membership only; chapter
+progress and history are independent. Automatic Completed now requires explicit
+source publication completion plus all known chapters read. Old metadata defaults
+to Unknown and stays Reading when caught up; legacy Read pins deserialize as
+Completed. Addon publication status is retained through Services and backups.
+
+Android shares Kit's active-press feedback policy and Nova's hover-lift platform
+gate. Actual drag regressions cover phone/tablet, no accidental opening/menus,
+and unchanged desktop mouse feedback. The category rail precedes sorting/icons,
+All is the default tab, and Library/History/Updates omit descriptive subtitles.
+
+Automatic refresh adapts Nova's minute poll, four-item sequential batch, five
+minute batch spacing, 30-minute recent/six-hour old cadence and half-budget
+fairness rule. Explicit Reading and automatically classified started titles are
+eligible, including caught-up/Completed publications; other manual pins opt out.
+It runs in foreground Library/Updates/History and cancels for reading, detail,
+settings, foreground requests, Android pause, minimization or closing. Persistent
+source-qualified deadlines avoid restart storms and coalesce manual refreshes.
+Failures preserve saved data. Publication requires the same series/chapter
+baseline, live source guard, current cancellation and eligible saved entry.
+Newer foreground results and removed/pinned targets reject stale work; merges
+retain disappeared chapters, progress, history, bookmarks and preferences.
+
+The actual-source refresh regression installs a ZIP, updates metadata/chapters,
+verifies publication status and unchanged progress/history, then checks restart
+cooldowns, cancellation and source namespace isolation. Pure scheduler/admission
+regressions cover bounded fairness, expiry, caught-up ongoing titles, all pins,
+empty results and superseded metadata.
+
+
+Final v0.1.18 verification passed formatting, locked workspace check, workspace
+Clippy with warnings denied, the full workspace tests/doc tests and all 33
+packaging regressions. Final focused refresh tests/check/Clippy also pass after
+monotonic batch spacing, cancellation cooldown retention and local-import
+exclusion. The final title-menu tests pass at phone and desktop widths, including
+all six status choices and full source-qualified identities.

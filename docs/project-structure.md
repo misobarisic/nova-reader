@@ -26,6 +26,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `src/reader_modes.rs`, `docs/reader-modes.md` | Pinned TachiyomiJ2K genre/source classification, Automatic/manual selection, and per-series persisted mode overrides |
 | `src/timeline.rs`, `src/source_filters.rs`, `src/source_browser.rs` | Local date groups/provider date parsing, bounded typed filter values and persistent source pins/last-used grouping |
 | `src/updates.rs` | Optional reader application release discovery |
+| `src/metadata_refresh.rs` | Nova-derived foreground metadata/chapter scheduler, bounded fair batches, persisted per-series deadlines and stale-result admission |
 | `src/about.rs` | Nova’s exact-size catalogue decompression, bounded text chunks and source-row ordering/fallbacks; publishes About models from a worker |
 | `src/browser.rs` | Nova’s desktop browser launching and Reader Android intent adapter for About source links |
 | `src/appearance.rs` | Device appearance/motion preferences, validated edits, immediate application and KV persistence |
@@ -34,7 +35,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `crates/ui/library-cards.slint`, `crates/ui/display-settings.slint` | Nova poster/list painting and left-anchored progress fill, per-entry context gestures, viewport admission, grid/list switch and persisted display choices |
 | `../nova-kit/crates/cache`, `../nova-kit/crates/ui-base/slint/cache-settings-controls.slint` | Actual Nova cache/settings implementations and NumericSetting/cache controls shared by Nova and Reader; app persistence/search/sync adapters remain local |
 | `crates/ui/library-search.slint` | Retained Nova search reveal, deferred focus, live filtering and viewport-aware field exposure |
-| `crates/ui/entry-menu.slint` | Per-title Kit action sheet/anchored desktop menu, stable-identity category editing and library/refresh actions |
+| `crates/ui/entry-menu.slint`, `crates/ui/status-menu.slint` | Per-title Kit action sheet/anchored desktop menu, copied Nova Change status picker, stable-identity category editing and library/refresh actions |
 | `crates/ui/detail-hero.slint`, `crates/ui/title-artwork.slint`, `crates/ui/chapter-row.slint` | Nova detail artwork/title/metadata/actions, retained synopsis state, chapter-ready Continue gating, compact chapter rows and accessible action popup |
 | `crates/ui/timeline.slint`, `crates/ui/source-list.slint`, `crates/ui/extensions.slint`, `crates/ui/source-filters.slint` | Dated History/Updates, grouped sources with bundled icons, extension management and actual source-defined browse filters |
 | `crates/ui/reader-context-menu.slint` | Custom four-action image/screencap menu, stationary-hold/right-click handling, viewport clamping and keyboard navigation; `app.slint` owns capture/action/close callbacks and reader export feedback |
@@ -47,7 +48,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `assets/fonts` | Nova’s bundled Roboto faces and Apache notices; More/settings artwork comes directly from Kit |
 | `assets/open_source_*.hbs`, `assets/open_source_project_sources.tsv`, `assets/open_source_vendors.txt` | Nova catalogue templates and Reader-specific source/vendor attribution; full local notices are appended by `build.rs` |
 | `assets/icons/navigation` | Embedded SVG navigation and reader controls, independent of system font glyph coverage |
-| `crates/reader-domain` | Source-local identities, schema-1 state, library/categories, progress/history/bookmarks, backup/restore |
+| `crates/reader-domain` | Source-local identities, schema-1 state, library/categories, publication/reading status in `src/library_status.rs`, progress/history/bookmarks and backup/restore |
 | `crates/reader-sources` | Reader v2 ZIP validation, durable registry, typed profile settings, QuickJS host, HTML/URL capabilities and checked source HTTP |
 | `crates/reader-engine` | Dimension probing, bounded PNG/JPEG/WebP decode and shared Kit AVIF delegation, display geometry, resume anchors and decoded cache utility |
 | `crates/reader-engine/src/jxl.rs`, `crates/reader-engine/tests/jpeg_xl.rs` | Thin adapter to Kit JPEG XL probing/decoding; Reader retains synthetic RGB/alpha integration fixtures while Kit owns metadata admission, auxiliary-box skipping, tracked grid budget and native row conversion |
@@ -289,3 +290,45 @@ Artwork resizing produces PNG before compression, so resized covers use normal
 encoding. All three writers delegate JPEG coefficient conversion to Kit.
 
 Addon settings list all declared source/language catalogue entries separately from addon-defined configuration. Host switches default to enabled, persist independently by package/source ID, and affect Browse inventory rather than whole-addon authority. Hidden entries remain available in the settings list for re-enabling.
+
+Android touch feedback binds `AppWindow.touch-menus` to Kit's `ControlInput`,
+matching Nova. The real platform sets it independently of window width, so wide
+Android layouts suppress card hover lift too, while narrow desktop windows keep
+mouse hover. Rows, navigation, hero actions and context sheets use Kit's exact
+`ControlTouchArea.feedback-active` policy; Flickable cancellation ends touch
+feedback. Reader image/card gestures keep their existing drag/hold cancellation.
+
+Library follows Nova’s control order: category rail (the default tab is “All”),
+then sorting and the grid/list/search icons. Search retains its existing narrow
+and wide reveal placement and keyboard viewport handling.
+
+`reader-domain/src/library_status.rs` adapts Nova's actual `WatchStatus` and
+progress bucket decision order to Reading, Plan to read, Completed, Dropped and On hold.
+LibraryEntry.reading_status defaults to Auto for old metadata and participates in
+backups. Manual pins override the derived bucket without changing chapter
+progress/history; Back to automatic restores derivation. Built-in filters appear
+ahead of user categories. Library/detail title menus share Change status sheets.
+
+`crates/ui/status-menu.slint` is copied directly from Nova, with the host import,
+reading labels and omission of its video-only New episodes choice adapted. The
+action codes match Nova; both library and detail context menus use this picker.
+Reading and Completed may also be pinned explicitly, without modifying chapter progress.
+
+
+`src/metadata_refresh.rs` adapts Nova's saved-episode scheduler: check each minute,
+sequential batches of four at five-minute intervals, recently read titles every
+30 minutes and older titles every six hours. Half the budget protects overdue
+recent titles; the rest rotates through older/unvisited entries. Only foreground
+Library/Updates/History run work; reading, detail, settings, minimization, Android
+pause and foreground requests cancel it. User-pinned Reading remains eligible;
+Plan to read, Completed, On hold and Dropped pins opt out. Automatic caught-up
+entries remain eligible. Deadlines persist as `reader:metadata-refresh:<SeriesId JSON>` in Nova KV, including bounded failure retry and manual-refresh cooldowns.
+Fetch and publication are separate: source revocation, removal/status changes,
+empty results and a newer foreground metadata baseline reject stale results.
+Progress, history and disappeared chapters survive successful merges.
+
+`Series.publication_status` now retains normalized addon publication state
+(Unknown/Ongoing/Completed/OnHiatus/Cancelled), defaulting Unknown for old data.
+Automatic Completed requires source Completed plus every known chapter read;
+ongoing/unknown caught-up entries stay Reading. Explicit Completed overrides the
+source/progress decision. It is independent of the user's `reading_status` pin.

@@ -1,5 +1,7 @@
 //! Reader-owned identities and metadata. Backups deliberately have no path,
 //! executable, session, cookie, or credential fields.
+mod library_status;
+pub use library_status::{PublicationStatus, ReadingStatus, library_bucket};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
@@ -81,6 +83,8 @@ pub struct SourceDescriptor {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Series {
+    #[serde(default, skip_serializing_if = "PublicationStatus::is_unknown")]
+    pub publication_status: PublicationStatus,
     pub id: SeriesId,
     pub title: String,
     #[serde(default)]
@@ -141,6 +145,8 @@ pub struct ReadingProgress {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LibraryEntry {
+    #[serde(default, skip_serializing_if = "ReadingStatus::is_auto")]
+    pub reading_status: ReadingStatus,
     pub series: SeriesId,
     pub categories: BTreeSet<String>,
     pub preferences: Option<ReaderPreferences>,
@@ -387,6 +393,7 @@ mod tests {
         store
             .update(|s| {
                 s.series.push(Series {
+                    publication_status: Default::default(),
                     id: chapter.series.clone(),
                     title: "Fixture".into(),
                     description: String::new(),

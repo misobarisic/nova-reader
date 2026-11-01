@@ -1,3 +1,4 @@
+import { ControlTouchArea } from "@NovaUiBase/control-input.slint";
 // Mihon's source hierarchy with Nova's Kit controls, palette and focus rules.
 import { Theme, SettingsStyle } from "@NovaUiShared";
 import { AddonIcon } from "addon-icon.slint";
@@ -22,7 +23,7 @@ component SourceListRow inherits Rectangle {
     callback pin-picked;
     min-width: 0px; height: 80px;
     private property <bool> show-latest: root.item.enabled && root.item.latest;
-    background: entry-touch.has-hover ? Theme.current.control_hover : transparent;
+    background: entry-touch.feedback-active ? Theme.current.control_hover : transparent;
     border-radius: Theme.card_corner_radius;
     border-width: scope.has-focus ? 2px : 0px;
     border-color: Theme.current.focus_ring;
@@ -67,7 +68,7 @@ component SourceListRow inherits Rectangle {
                 return reject;
             }
         }
-        entry-touch := TouchArea {
+        entry-touch := ControlTouchArea {
             enabled: root.item.enabled; mouse-cursor: pointer;
             clicked => { root.picked(); }
         }

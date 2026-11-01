@@ -1,3 +1,4 @@
+import { ControlTouchArea } from "@NovaUiBase/control-input.slint";
 // Adapted from Nova b69a1e5, sidenav.slint and bottomnav.slint.
 // Preserve Nova's geometry/selection/motion; only destinations are Reader-owned.
 import { Theme, Anim, SettingsStyle } from "@NovaUiShared";
@@ -63,7 +64,7 @@ component NavigationItem inherits Rectangle {
     Rectangle {
         width: 48px; height: 48px;
         x: (parent.width - self.width) / 2; y: 4px;
-        background: root.active || item-focus.has-focus ? transparent : item-touch.has-hover ? Theme.current.control_hover : transparent;
+        background: root.active || item-focus.has-focus ? transparent : item-touch.feedback-active ? Theme.current.control_hover : transparent;
         border-radius: 24px;
         border-width: item-focus.has-focus ? 2px : 0px;
         border-color: Theme.current.text_bright;
@@ -88,7 +89,7 @@ component NavigationItem inherits Rectangle {
             return reject;
         }
     }
-    item-touch := TouchArea { mouse-cursor: pointer; clicked => { SettingsStyle.keyboard-mode = false; root.picked(); } }
+    item-touch := ControlTouchArea { mouse-cursor: pointer; clicked => { SettingsStyle.keyboard-mode = false; root.picked(); } }
     forward-focus: item-focus;
 }
 

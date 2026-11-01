@@ -1,3 +1,4 @@
+import { ControlTouchArea } from "@NovaUiBase/control-input.slint";
 // Nova b69a1e5 detail.slint: edge-to-edge artwork, baked scrims, title,
 // metadata, expandable synopsis and primary/library action geometry.
 import { Theme, Anim, SettingsStyle } from "@NovaUiShared";
@@ -14,7 +15,7 @@ export component HeroAction inherits Rectangle {
     height: root.narrow ? 56px : 62px;
     min-width: 0px;
     border-radius: root.primary ? (root.narrow ? 22px : 26px) : self.height / 2;
-    background: root.primary ? (touch.has-hover ? Theme.current.primary_button_hover : Theme.current.primary_button) : (touch.has-hover ? Theme.current.hero_library_hover : Theme.current.hero_library);
+    background: root.primary ? (touch.feedback-active ? Theme.current.primary_button_hover : Theme.current.primary_button) : (touch.feedback-active ? Theme.current.hero_library_hover : Theme.current.hero_library);
     border-width: 1px; border-color: scope.has-focus ? Theme.current.focus_ring : root.primary ? Theme.current.primary_button_border : Theme.current.border_overlay;
     accessible-role: button; accessible-label: root.label;
     accessible-enabled: root.enabled;
@@ -36,7 +37,7 @@ export component HeroAction inherits Rectangle {
         changed has-focus => { if self.has-focus { SettingsStyle.reveal_control(root.absolute-position.y, root.height, false); } }
         key-pressed(e) => { if e.text == Key.Return || e.text == " " { if !e.repeat { root.clicked(); } return accept; } return reject; }
     }
-    touch := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { root.clicked(); } }
+    touch := ControlTouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { root.clicked(); } }
 }
 
 export component DetailHero inherits Rectangle {

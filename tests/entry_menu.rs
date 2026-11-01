@@ -59,7 +59,7 @@ fn per_title_menu_gestures_and_category_editor_keep_the_full_identity() {
             .collect::<Vec<_>>(),
     )));
     ui.set_categories(ModelRc::new(VecModel::from(vec![
-        "All categories".into(),
+        "All".into(),
         "Favorites".into(),
     ])));
     let opens = Rc::new(Cell::new(0));
@@ -292,5 +292,47 @@ fn category_keyboard_navigation_reveals_rows_and_keeps_done_visible() {
             !ui.get_entry_menu_visible(),
             "Done owns the final keyboard selection"
         );
+    }
+}
+
+#[test]
+fn change_status_opens_a_second_menu_and_keeps_the_full_series_identity() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().unwrap();
+    let key = serde_json::to_string(&SeriesId::new("source-a", "shared")).unwrap();
+    let changes = Rc::new(RefCell::new(Vec::new()));
+    ui.on_entry_action({
+        let changes = changes.clone();
+        move |id, action| {
+            changes
+                .borrow_mut()
+                .push((id.to_string(), action.to_string()))
+        }
+    });
+    ui.show().unwrap();
+    for width in [390., 1120.] {
+        ui.window().set_size(LogicalSize::new(width, 844.));
+        settle();
+        for (label, code) in [
+            ("Mark as reading", 6),
+            ("Mark as Plan to read", 5),
+            ("Mark as completed", 7),
+            ("Mark on hold", 1),
+            ("Mark dropped", 2),
+            ("Back to automatic", 0),
+        ] {
+            ui.invoke_open_entry_menu(key.clone().into(), "Shared title".into(), true, 30., 70.);
+            settle();
+            button(&ui, "Change status").invoke_accessible_default_action();
+            settle();
+            assert!(ui.get_entry_menu_visible());
+            button(&ui, label).invoke_accessible_default_action();
+            settle();
+            assert!(!ui.get_entry_menu_visible());
+            assert_eq!(
+                changes.borrow().last().unwrap(),
+                &(key.clone(), format!("status:{code}"))
+            );
+        }
     }
 }

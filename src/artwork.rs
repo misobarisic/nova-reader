@@ -1122,6 +1122,7 @@ mod tests {
 
     fn series(source: &str, id: &str, url: &str) -> Series {
         Series {
+            publication_status: Default::default(),
             id: SeriesId::new(source, id),
             title: String::new(),
             description: String::new(),

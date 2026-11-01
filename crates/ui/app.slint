@@ -1,5 +1,6 @@
+import { ControlTouchArea } from "@NovaUiBase/control-input.slint";
 import { Spinner } from "std-widgets.slint";
-import { Theme, SettingsStyle } from "@NovaUiShared";
+import { Theme, SettingsStyle, ControlInput } from "@NovaUiShared";
 import { ScrollView } from "@NovaUiBase/scrollview.slint";
 import { ReaderField as LineEdit, ReaderSelect as ComboBox, ReaderToggle as CheckBox } from "controls.slint";
 import { PageHeader } from "page-header.slint";
@@ -43,6 +44,7 @@ import { SettingRow } from "media-models.slint";
 
 export component AppWindow inherits Window {
     title: "Nova Reader";
+    in-out property <bool> touch-menus <=> ControlInput.touch-feedback;
     in property <string> app-version;
     in-out property <[string]> license-text-chunks;
     in-out property <[LicenseSource]> license-sources;
@@ -148,21 +150,23 @@ export component AppWindow inherits Window {
     private property <string> entry-menu-title;
     private property <bool> entry-menu-library;
     private property <bool> entry-menu-editing;
+    private property <bool> entry-menu-status-editing;
     private property <length> entry-menu-x;
     private property <length> entry-menu-y;
     callback entry-action(string,string);
     public function open-entry-menu(key: string,title: string,in-library: bool,x: length,y: length) {
         if key == "" { return; }
         root.entry-menu-key = key; root.entry-menu-title = title;
-        root.entry-menu-library = in-library; root.entry-menu-editing = false;
+        root.entry-menu-library = in-library; root.entry-menu-editing = false; root.entry-menu-status-editing = false;
         root.entry-menu-x = x; root.entry-menu-y = y; root.entry-menu-visible = true;
     }
-    public function close-entry-menu() { root.entry-menu-visible = false; root.entry-menu-editing = false; keyboard.focus(); }
+    public function close-entry-menu() { root.entry-menu-visible = false; root.entry-menu-editing = false; root.entry-menu-status-editing = false; keyboard.focus(); }
     function entry-menu-picked(action: string) {
         // Dispatch before the conditional overlay is destroyed, including
         // accessibility actions. Category toggles retain this captured ID.
         root.entry-action(root.entry-menu-key,action);
         if action == "categories" { root.entry-menu-editing = true; }
+        else if action == "change-status" { root.entry-menu-status-editing = true; }
         else { root.close-entry-menu(); }
     }
     in property <[SettingRow]> settings;
@@ -457,13 +461,13 @@ export component AppWindow inherits Window {
                                     }
                                     HorizontalLayout {
                                         spacing: 8px;
-                                        LibraryFilterChip { label: @tr("Popular"); selected: root.source-catalogue-kind == "popular"; keyboard-focusable: true;
+                                        LibraryFilterChip { touch_feedback: root.touch-menus; label: @tr("Popular"); selected: root.source-catalogue-kind == "popular"; keyboard-focusable: true;
                                             accessible-action-default => { root.source-catalogue-kind = "popular"; root.browse("popular"); }
                                             picked => { root.source-catalogue-kind = "popular"; root.browse("popular"); } }
-                                        LibraryFilterChip { label: @tr("Latest"); selected: root.source-catalogue-kind == "latest"; keyboard-focusable: true;
+                                        LibraryFilterChip { touch_feedback: root.touch-menus; label: @tr("Latest"); selected: root.source-catalogue-kind == "latest"; keyboard-focusable: true;
                                             accessible-action-default => { root.source-catalogue-kind = "latest"; root.browse("latest"); }
                                             picked => { root.source-catalogue-kind = "latest"; root.browse("latest"); } }
-                                        if root.source-has-filters: LibraryFilterChip { label: @tr("Filter"); selected: root.source-filters-open; keyboard-focusable: true;
+                                        if root.source-has-filters: LibraryFilterChip { touch_feedback: root.touch-menus; label: @tr("Filter"); selected: root.source-filters-open; keyboard-focusable: true;
                                             accessible-action-default => { root.source-filters-requested(); }
                                             picked => { root.source-filters-requested(); } }
                                     }
@@ -515,6 +519,20 @@ export component AppWindow inherits Window {
                                         library-toolbar := VerticalLayout {
                                             x: 0px; y: root.mobile-ui ? 0px : library-search.height;
                                             width: 100%; height: self.preferred-height; spacing: 12px;
+                                            ScrollView {
+                                                height: 44px; content-height: 44px;
+                                                content-width: categories-row.preferred-width;
+                                                mouse-drag-pan-enabled: true;
+                                                categories-row := HorizontalLayout {
+                                                    spacing: 8px; alignment: start;
+                                                    for category[i] in root.categories: LibraryFilterChip { touch_feedback: root.touch-menus;
+                                                        keyboard-focusable: true;
+                                                        label: category; selected: i == root.category-index;
+                                                        accessible-action-default => { root.category-index = i; root.category-selected(i); }
+                                                        picked => { root.category-index = i; root.category-selected(i); }
+                                                    }
+                                                }
+                                            }
                                             HorizontalLayout {
                                                 spacing: 10px;
                                                 ComboBox {
@@ -530,20 +548,6 @@ export component AppWindow inherits Window {
                                                     text: root.library-search-open ? @tr("Close library search") : @tr("Search library");
                                                     icon: root.library-search-open ? @image-url("../../assets/icons/navigation/close.svg") : @image-url("../../assets/icons/navigation/search.svg");
                                                     clicked => { root.toggle-library-search(); }
-                                                }
-                                            }
-                                            ScrollView {
-                                                height: 44px; content-height: 44px;
-                                                content-width: categories-row.preferred-width;
-                                                mouse-drag-pan-enabled: true;
-                                                categories-row := HorizontalLayout {
-                                                    spacing: 8px; alignment: start;
-                                                    for category[i] in root.categories: LibraryFilterChip {
-                                                        keyboard-focusable: true;
-                                                        label: category; selected: i == root.category-index;
-                                                        accessible-action-default => { root.category-index = i; root.category-selected(i); }
-                                                        picked => { root.category-index = i; root.category-selected(i); }
-                                                    }
                                                 }
                                             }
                                         }
@@ -603,7 +607,7 @@ export component AppWindow inherits Window {
                                     spacing: Theme.card_spacing;
                                     for row[index] in root.items: Rectangle {
                                         height: (root.section == 5 || root.section == 7) ? 136px : 80px;
-                                        border-radius: Theme.card_corner_radius; background: hover.has-hover ? Theme.current.control_hover : Theme.current.card;
+                                        border-radius: Theme.card_corner_radius; background: hover.feedback-active ? Theme.current.control_hover : Theme.current.card;
                                         border-width: 1px; border-color: Theme.current.border_soft;
                                         VerticalLayout {
                                             padding: 8px; spacing: 0px;
@@ -619,7 +623,7 @@ export component AppWindow inherits Window {
                                                     }
                                                     Text { width: root.mobile-ui ? 64px : 96px; text: row.badge; color: Theme.current.accent_soft; font-size: 11px; overflow: elide; horizontal-alignment: right; }
                                                 }
-                                                hover := TouchArea { clicked => { root.open-item(index); } }
+                                                hover := ControlTouchArea { clicked => { root.open-item(index); } }
                                             }
                                             if root.section == 5: HorizontalLayout {
                                                 spacing: 6px;
@@ -917,7 +921,7 @@ export component AppWindow inherits Window {
     }
     if root.entry-menu-visible: EntryMenu {
         width: root.width; height: root.height;
-        narrow: root.mobile-ui; editing: root.entry-menu-editing;
+        narrow: root.mobile-ui; editing: root.entry-menu-editing; status-editing: root.entry-menu-status-editing;
         title: root.entry-menu-title; in-library: root.entry-menu-library;
         categories: root.entry-categories;
         anchor-x: root.entry-menu-x; anchor-y: root.entry-menu-y;

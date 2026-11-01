@@ -1,3 +1,4 @@
+import { ControlTouchArea } from "@NovaUiBase/control-input.slint";
 // Mihon's dated reading/release rows, painted with Nova's shared palette and
 // Kit actions. Only lightweight layout slots remain outside the viewport.
 import { Theme, SettingsStyle } from "@NovaUiShared";
@@ -12,7 +13,7 @@ component TimelineRow inherits Rectangle {
     callback action(string);
     min-width: 0px;
     height: root.history ? 110px : 80px;
-    background: touch.has-hover ? Theme.current.control_hover : transparent;
+    background: touch.feedback-active ? Theme.current.control_hover : transparent;
     border-radius: Theme.card_corner_radius;
     border-width: scope.has-focus ? 2px : 0px;
     border-color: Theme.current.focus_ring;
@@ -45,7 +46,7 @@ component TimelineRow inherits Rectangle {
                 changed has-focus => { if self.has-focus { SettingsStyle.reveal_control(root.absolute-position.y,root.height,false); } }
                 key-pressed(e) => { if e.text == Key.Return || e.text == " " { if !e.repeat { root.series-picked(); } return accept; } return reject; }
             }
-            poster-touch := TouchArea { x: 0px; y: 0px; width: parent.width; height: parent.height; mouse-cursor: pointer; clicked => { root.series-picked(); } }
+            poster-touch := ControlTouchArea { x: 0px; y: 0px; width: parent.width; height: parent.height; mouse-cursor: pointer; clicked => { root.series-picked(); } }
         }
     }
     VerticalLayout {
@@ -90,7 +91,7 @@ component TimelineRow inherits Rectangle {
             return reject;
         }
     }
-    touch := TouchArea {
+    touch := ControlTouchArea {
         x: root.history ? cover.width + 16px : 0px;
         width: root.width - self.x;
         mouse-cursor: pointer; clicked => { root.picked(); }

@@ -1,5 +1,5 @@
 // Poster/list geometry and painting adapted from Nova b69a1e5 library.slint.
-import { Theme, Anim, SettingsStyle } from "@NovaUiShared";
+import { Theme, Anim, SettingsStyle, ControlInput } from "@NovaUiShared";
 import { FeedbackProgress } from "@NovaUiBase/feedback-motion.slint";
 import { ItemRow } from "media-models.slint";
 import { ReaderImageInteraction } from "reader-context-menu.slint";
@@ -46,7 +46,7 @@ export component LibraryCard inherits Rectangle {
         border-width: scope.has-focus ? 2px : 1px;
         border-color: scope.has-focus ? Theme.current.accent : Theme.current.border_card;
         clip: true;
-        y: hover.has-hover && !hover.pressed && Anim.enabled && Anim.hover ? -4px : 0px;
+        y: hover.has-hover && !hover.pressed && !ControlInput.touch-feedback && Anim.enabled && Anim.hover ? -4px : 0px;
         animate y { duration: Anim.hover_fast; easing: ease-out; }
         Rectangle {
             x: 1px; y: 1px;

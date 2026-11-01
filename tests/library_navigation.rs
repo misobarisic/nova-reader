@@ -70,7 +70,7 @@ fn library_search_reveals_focuses_filters_and_closes_like_nova() {
         }
     });
     ui.set_items(rows(80));
-    ui.set_categories(ModelRc::new(VecModel::from(vec!["All categories".into()])));
+    ui.set_categories(ModelRc::new(VecModel::from(vec!["All".into()])));
     ui.show().unwrap();
     for (width, height) in [(390., 844.), (1120., 780.), (640., 240.), (320., 640.)] {
         ui.window().set_size(LogicalSize::new(width, height));
@@ -84,6 +84,19 @@ fn library_search_reveals_focuses_filters_and_closes_like_nova() {
         assert!(
             ui.get_library_query().is_empty(),
             "closed field cannot receive typing"
+        );
+        let category = button(&ui, "All");
+        let sort = ElementHandle::find_by_accessible_label(&ui, "Sort library")
+            .next()
+            .unwrap();
+        assert!(
+            category.absolute_position().y + category.size().height <= sort.absolute_position().y,
+            "categories sit above sort and toolbar icons at {width}px"
+        );
+        assert!(
+            (sort.absolute_position().y - button(&ui, "Search library").absolute_position().y)
+                .abs()
+                < 1.
         );
         button(&ui, "Search library").mock_single_click(PointerEventButton::Left);
         settle();

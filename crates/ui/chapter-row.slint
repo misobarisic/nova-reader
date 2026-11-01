@@ -1,3 +1,4 @@
+import { ControlTouchArea } from "@NovaUiBase/control-input.slint";
 // Compact chapter list requested from the Mihon reference; Nova Kit controls.
 import { Theme, SettingsStyle } from "@NovaUiShared";
 import { ItemRow } from "media-models.slint";
@@ -7,7 +8,7 @@ export component ChapterRow inherits Rectangle {
     callback picked;
     callback action(string);
     height: 80px; min-width: 0px;
-    background: touch.has-hover ? Theme.current.control_hover : transparent;
+    background: touch.feedback-active ? Theme.current.control_hover : transparent;
     border-radius: Theme.card_corner_radius;
     accessible-role: button; accessible-label: root.chapter.title;
     accessible-action-default => { root.picked(); }
@@ -22,7 +23,7 @@ export component ChapterRow inherits Rectangle {
         changed has-focus => { if self.has-focus { SettingsStyle.reveal_control(root.absolute-position.y, root.height, false); } }
         key-pressed(e) => { if e.text == Key.Menu || (e.text == Key.F10 && e.modifiers.shift) { actions.show(); return accept; } if e.text == Key.Return || e.text == " " { if !e.repeat { root.picked(); } return accept; } return reject; }
     }
-    touch := TouchArea {
+    touch := ControlTouchArea {
         private property <bool> held: false;
         mouse-cursor: pointer;
         clicked => { if !self.held { root.picked(); } self.held = false; }

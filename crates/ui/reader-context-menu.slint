@@ -1,9 +1,10 @@
+import { ControlTouchArea } from "@NovaUiBase/control-input.slint";
 import { Theme, SettingsStyle } from "@NovaUiShared";
 import { Spinner } from "std-widgets.slint";
 
 // TouchArea remains inside the reader's Flickable: a pan cancels its pointer
 // grab, while only a stationary press can become an image context request.
-export component ReaderImageInteraction inherits TouchArea {
+export component ReaderImageInteraction inherits ControlTouchArea {
     in property <bool> context-enabled: true;
     callback tapped;
     callback context-requested(length, length);
@@ -104,7 +105,7 @@ export component ReaderContextMenu inherits Rectangle {
                 x: 8px; y: 8px + index * 54px + (index >= 2 ? 9px : 0px);
                 width: max(1px, menu-scroll.width - 16px); height: 54px;
                 border-radius: max(6px, min(12px, Theme.button_corner_radius));
-                background: !root.busy && (touch.has-hover || (scope.has-focus && SettingsStyle.keyboard-mode && root.selected == index))
+                background: !root.busy && (touch.feedback-active || (scope.has-focus && SettingsStyle.keyboard-mode && root.selected == index))
                     ? Theme.current.settings_control_hover : transparent;
                 opacity: root.busy ? 0.45 : 1;
                 accessible-role: button; accessible-label: action.label;
@@ -128,7 +129,7 @@ export component ReaderContextMenu inherits Rectangle {
                     x: parent.width - 30px; y: 17px; width: 20px; height: 20px;
                     accessible-label: @tr("Preparing image…");
                 }
-                touch := TouchArea {
+                touch := ControlTouchArea {
                     enabled: !root.busy; mouse-cursor: pointer;
                     clicked => { root.picked(action.id); }
                     moved => { root.selected = index; SettingsStyle.keyboard-mode = false; }
