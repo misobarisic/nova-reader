@@ -1,9 +1,10 @@
 //! Reader image encoding and delivery. Completion can run on a worker thread; UI callers
 //! must return through Slint's event loop before updating UI state.
 
-use crate::capture_settings::{CaptureFormat, CapturePreferences};
+use crate::capture_settings::{CaptureFormat, CapturePreferences, ConflictPolicy};
 use crate::image_storage::ImageStorageFormat;
 use image::ImageEncoder;
+use std::sync::Arc;
 
 pub struct ExportImage {
     pub bytes: Vec<u8>,
@@ -75,7 +76,14 @@ impl ExportImage {
             CaptureFormat::Avif => preferences.avif_quality,
             _ => preferences.webp_quality,
         };
-        let bytes = encode_rgba(width, height, pixels, preferences.format, quality)?;
+        let bytes = encode_rgba(
+            width,
+            height,
+            pixels,
+            preferences.format,
+            quality,
+            reader_engine::DecodeLimits::default(),
+        )?;
         if preferences.format == CaptureFormat::Avif {
             reader_engine::inspect_image(&bytes, reader_engine::DecodeLimits::default())
                 .map_err(|error| format!("AVIF screenshot exceeds decode admission: {error}"))?;
@@ -120,6 +128,7 @@ pub(crate) fn reencode_image(
         image.as_raw(),
         format,
         quality,
+        limits,
     )?;
     if encoded.len() > limits.max_encoded_bytes {
         return Err("Compressed image exceeds encoded byte limit".into());
@@ -135,6 +144,7 @@ fn encode_rgba(
     pixels: &[u8],
     format: CaptureFormat,
     quality: u8,
+    limits: reader_engine::DecodeLimits,
 ) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     let quality = quality.clamp(1, 100);
@@ -166,22 +176,8 @@ fn encode_rgba(
                 .to_vec();
         }
         CaptureFormat::Avif => {
-            let rgba = pixels
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|pixel| ravif::RGBA8::new(pixel[0], pixel[1], pixel[2], pixel[3]))
-                .collect::<Vec<_>>();
-            bytes = ravif::Encoder::new()
-                .with_bit_depth(ravif::BitDepth::Eight)
-                .with_quality(f32::from(quality))
-                .with_alpha_quality(100.)
-                .with_alpha_color_mode(ravif::AlphaColorMode::UnassociatedDirty)
-                .with_num_threads(Some(1))
-                .with_speed(8)
-                .encode_rgba(ravif::Img::new(&rgba, width as usize, height as usize))
-                .map_err(|error| format!("Cannot encode AVIF image: {error}"))?
-                .avif_file;
+            bytes = nova_image::encode_avif(width, height, pixels, quality, limits)
+                .map_err(|error| format!("Cannot encode AVIF image: {error}"))?;
         }
     }
     Ok(bytes)
@@ -196,95 +192,81 @@ pub fn deliver(
     clipboard: bool,
     callback: impl FnOnce(Result<(), String>) + Send + 'static,
 ) {
+    let name = image.name.clone();
     deliver_with_context(
         image,
         clipboard,
-        "",
-        &CapturePreferences::default(),
+        SaveContext::new(
+            name,
+            "",
+            &CapturePreferences::default(),
+            Arc::new(|_, _, reply| reply(ConflictChoice::Cancel)),
+            Arc::new(|| true),
+        ),
         callback,
     );
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConflictChoice {
+    Overwrite,
+    AddNumber,
+    Cancel,
+}
+pub type ConflictReply = Box<dyn FnOnce(ConflictChoice) + Send + 'static>;
+pub type ConflictResolver = Arc<dyn Fn(String, ExportCurrent, ConflictReply) + Send + Sync>;
+pub type ExportCurrent = Arc<dyn Fn() -> bool + Send + Sync>;
+
 pub fn deliver_with_context(
     image: ExportImage,
     clipboard: bool,
-    series_title: &str,
-    preferences: &CapturePreferences,
+    context: SaveContext,
     callback: impl FnOnce(Result<(), String>) + Send + 'static,
 ) {
-    let series = safe_component(series_title, 40);
-    let context = SaveContext {
-        folder: preferences.series_folders.then(|| series.clone()),
-        series,
-    };
+    if !matches!(
+        image.mime.as_str(),
+        "image/png" | "image/jpeg" | "image/webp" | "image/avif"
+    ) {
+        callback(Err("Unsupported image export format".into()));
+        return;
+    }
     platform::deliver(image, clipboard, context, Box::new(callback));
 }
 
-struct SaveContext {
-    series: String,
-    folder: Option<String>,
+pub struct SaveContext {
+    pub filename: String,
+    pub folder: Option<String>,
+    pub policy: ConflictPolicy,
+    pub resolver: ConflictResolver,
+    pub current: ExportCurrent,
 }
 
-fn safe_component(value: &str, max_bytes: usize) -> String {
-    let mut result = String::new();
-    for character in value.chars() {
-        let character = if character.is_alphanumeric() || matches!(character, '-' | '_') {
-            character
-        } else {
-            '_'
-        };
-        if character == '_' && (result.is_empty() || result.ends_with('_')) {
-            continue;
+impl SaveContext {
+    pub fn new(
+        filename: String,
+        series_title: &str,
+        preferences: &CapturePreferences,
+        resolver: ConflictResolver,
+        current: ExportCurrent,
+    ) -> Self {
+        Self {
+            filename,
+            folder: preferences
+                .series_folders
+                .then(|| crate::export_names::folder(series_title)),
+            policy: preferences.conflict,
+            resolver,
+            current,
         }
-        if result.len() + character.len_utf8() > max_bytes {
-            break;
-        }
-        result.push(character);
     }
-    let mut result = result.trim_matches('_').to_string();
-    let upper = result.to_ascii_uppercase();
-    let device = matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || ["COM", "LPT"].iter().any(|prefix| {
-            upper.strip_prefix(prefix).is_some_and(|suffix| {
-                matches!(
-                    suffix,
-                    "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
-                )
-            })
-        });
-    if result.is_empty() {
-        result = "Series".into();
-    }
-    if device {
-        result.insert(0, '_');
-    }
-    result
 }
 
-fn unique_filename(image: &ExportImage, context: &SaveContext) -> Result<String, String> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
-    let extension = match image.mime.as_str() {
-        "image/png" => "png",
-        "image/jpeg" => "jpg",
-        "image/webp" => "webp",
-        "image/avif" => "avif",
-        _ => return Err("Unsupported image export format".into()),
-    };
-    let stem = std::path::Path::new(&image.name)
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("image");
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|error| error.to_string())?
-        .as_nanos();
-    Ok(format!(
-        "{}_{}_{timestamp:x}-{:x}.{extension}",
-        context.series,
-        safe_component(stem, 60),
-        SEQUENCE.fetch_add(1, Ordering::Relaxed)
-    ))
+pub fn request_conflict(context: &SaveContext, name: String, callback: ConflictReply) {
+    if !(context.current)() {
+        callback(ConflictChoice::Cancel);
+        return;
+    }
+    (context.resolver)(name, context.current.clone(), callback);
 }
 
 #[cfg(not(target_os = "android"))]
@@ -298,42 +280,95 @@ fn publish_file(
         .folder
         .as_ref()
         .map_or_else(|| root.to_path_buf(), |folder| root.join(folder));
-    let mut path = directory.join(unique_filename(image, context)?);
-    let validate = |path: &std::path::Path| -> Result<(), String> {
-        let text = path.to_string_lossy();
-        if text.len() > 240 || text.encode_utf16().count() > 240 {
-            return Err("Image destination path is too long".into());
-        }
-        Ok(())
-    };
-    validate(&path)?;
-    std::fs::create_dir_all(&directory)
-        .map_err(|error| format!("Cannot create image folder: {error}"))?;
-    // Stage beside the destination so publication is atomic on the same
-    // filesystem. Dropping an unfinished stage removes its hidden file.
+    let filename = &context.filename;
+    if filename.is_empty()
+        || filename.len() > 160
+        || std::path::Path::new(filename)
+            .file_name()
+            .and_then(|s| s.to_str())
+            != Some(filename)
+    {
+        return Err("Invalid image filename".into());
+    }
+    let destination = directory.join(filename);
+    if !(context.current)() {
+        return Err("Image action cancelled".into());
+    }
+    std::fs::create_dir_all(&directory).map_err(|e| format!("Cannot create image folder: {e}"))?;
     let mut staged = tempfile::Builder::new()
         .prefix(".nova-reader-image-")
         .tempfile_in(&directory)
-        .map_err(|error| format!("Cannot stage saved image: {error}"))?;
+        .map_err(|e| format!("Cannot stage saved image: {e}"))?;
     staged
         .write_all(&image.bytes)
         .and_then(|_| staged.flush())
         .and_then(|_| staged.as_file().sync_all())
-        .map_err(|error| format!("Cannot write saved image: {error}"))?;
-    for attempt in 0..32 {
-        if attempt > 0 {
-            path = directory.join(unique_filename(image, context)?);
-            validate(&path)?;
+        .map_err(|e| format!("Cannot write saved image: {e}"))?;
+    let mut path = destination.clone();
+    let mut number = 0u32;
+    loop {
+        if !(context.current)() {
+            return Err("Image action cancelled".into());
         }
         match staged.persist_noclobber(&path) {
             Ok(_) => return Ok(path),
             Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
-                staged = error.file;
+                staged = error.file
             }
             Err(error) => return Err(format!("Cannot publish saved image: {}", error.error)),
         }
+        if number == 0 {
+            let choice = match context.policy {
+                ConflictPolicy::Overwrite => ConflictChoice::Overwrite,
+                ConflictPolicy::DoNothing => {
+                    return Err("Image already exists; nothing saved.".into());
+                }
+                ConflictPolicy::Ask => {
+                    let (send, receive) = std::sync::mpsc::sync_channel(1);
+                    request_conflict(
+                        context,
+                        filename.clone(),
+                        Box::new(move |choice| {
+                            let _ = send.try_send(choice);
+                        }),
+                    );
+                    loop {
+                        match receive.recv_timeout(std::time::Duration::from_millis(50)) {
+                            Ok(choice) => break choice,
+                            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                                break ConflictChoice::Cancel;
+                            }
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                                if !(context.current)() =>
+                            {
+                                break ConflictChoice::Cancel;
+                            }
+                            Err(_) => {}
+                        }
+                    }
+                }
+            };
+            match choice {
+                ConflictChoice::Cancel => return Err("Image action cancelled".into()),
+                ConflictChoice::Overwrite => {
+                    if !(context.current)() {
+                        return Err("Image action cancelled".into());
+                    }
+                    // tempfile persist replaces atomically, including on Windows.
+                    return staged
+                        .persist(&destination)
+                        .map(|_| destination)
+                        .map_err(|e| format!("Cannot replace saved image: {}", e.error));
+                }
+                ConflictChoice::AddNumber => {}
+            }
+        }
+        number = number
+            .checked_add(1)
+            .filter(|n| *n <= 10000)
+            .ok_or("Cannot allocate an image filename")?;
+        path = directory.join(crate::export_names::numbered(filename, number));
     }
-    Err("Cannot allocate an image filename".into())
 }
 
 /// Called after the UI event loop exits so the clipboard owner can hand its
@@ -345,7 +380,12 @@ pub fn shutdown() {
 #[cfg(not(target_os = "android"))]
 mod platform {
     use super::{Callback, ExportImage, SaveContext};
-    use std::sync::{Mutex, OnceLock, mpsc};
+    use std::sync::{
+        Mutex, OnceLock,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    };
+    static BUSY: AtomicBool = AtomicBool::new(false);
 
     struct Job {
         image: ExportImage,
@@ -370,6 +410,14 @@ mod platform {
         context: SaveContext,
         callback: Callback,
     ) {
+        if BUSY.swap(true, Ordering::AcqRel) {
+            complete(callback, Err("Another image export is active".into()));
+            return;
+        }
+        let callback: Callback = Box::new(move |result| {
+            BUSY.store(false, Ordering::Release);
+            callback(result);
+        });
         let mut worker = WORKER
             .get_or_init(|| Mutex::new(None))
             .lock()
@@ -384,11 +432,15 @@ mod platform {
                     // selections are served by their owner after set_image.
                     let mut clipboard = None;
                     while let Ok(job) = receiver.recv() {
-                        let result = if job.clipboard {
-                            copy(&job.image, &mut clipboard)
-                        } else {
-                            save(&job.image, &job.context)
-                        };
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            if job.clipboard {
+                                copy(&job.image, &mut clipboard)
+                            } else {
+                                save(&job.image, &job.context)
+                            }
+                        }))
+                        .unwrap_or_else(|_| Err("Image export worker failed".into()));
+                        drop(job.image);
                         complete(job.callback, result);
                     }
                     drop(clipboard);
@@ -489,7 +541,7 @@ mod platform {
 
 #[cfg(target_os = "android")]
 mod platform {
-    use super::{Callback, ExportImage, SaveContext};
+    use super::{Callback, ConflictPolicy, ExportImage, SaveContext};
     use std::sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -527,13 +579,8 @@ mod platform {
         let thread = std::thread::Builder::new()
             .name("reader-image-export".into())
             .spawn(move || {
-                let name = match super::unique_filename(&image, &context) {
-                    Ok(name) => name,
-                    Err(error) => {
-                        finish(completion, Err(error));
-                        return;
-                    }
-                };
+                if !(context.current)() {finish(completion,Err("Image action cancelled".into()));return;}
+                let name = context.filename.clone();
                 let staged = (|| {
                     let root = crate::android_documents::cache_dir()?.join("image-export");
                     std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
@@ -574,6 +621,7 @@ mod platform {
                     }
                 };
                 let cleanup = path.clone();
+                if !(context.current)() {let _=std::fs::remove_file(&cleanup);finish(completion,Err("Image action cancelled".into()));return;}
                 let finished = move |result| {
                     let _ = std::fs::remove_file(cleanup);
                     finish(completion, result);
@@ -581,11 +629,30 @@ mod platform {
                 if clipboard {
                     crate::android_documents::copy_image(path, &image.mime, finished);
                 } else {
-                    crate::android_documents::publish_image(
+                    let policy=match context.policy {
+                        ConflictPolicy::Ask=>crate::android_documents::ImageConflictPolicy::Ask,
+                        ConflictPolicy::Overwrite=>crate::android_documents::ImageConflictPolicy::Overwrite,
+                        ConflictPolicy::DoNothing=>crate::android_documents::ImageConflictPolicy::DoNothing,
+                    };
+                    let context=Arc::new(context);
+                    let resolver_context=context.clone();
+                    let resolver:crate::android_documents::ImageConflictResolver=Arc::new(move |name,reply| {
+                        let current=resolver_context.current.clone();
+                        super::request_conflict(&resolver_context,name,Box::new(move |choice| {
+                            let choice=if !current() {crate::android_documents::ImageConflictChoice::Cancel} else {match choice {
+                                super::ConflictChoice::Overwrite=>crate::android_documents::ImageConflictChoice::Overwrite,
+                                super::ConflictChoice::AddNumber=>crate::android_documents::ImageConflictChoice::AddNumber,
+                                super::ConflictChoice::Cancel=>crate::android_documents::ImageConflictChoice::Cancel,
+                            }};
+                            reply(choice);
+                        }));
+                    });
+                    crate::android_documents::publish_image_with_policy(
                         path,
                         &name,
                         &image.mime,
                         context.folder.as_deref(),
+                        crate::android_documents::ImageSaveOptions {policy,resolver,current:context.current.clone()},
                         finished,
                     );
                 }
@@ -598,7 +665,11 @@ mod platform {
         }
     }
 
-    pub(super) fn shutdown() {}
+    pub(super) fn shutdown() {
+        if BUSY.load(Ordering::Acquire) {
+            crate::android_documents::cancel_pending();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -930,62 +1001,108 @@ mod tests {
     }
 
     #[cfg(not(target_os = "android"))]
+    fn save_context(policy: ConflictPolicy, choice: ConflictChoice) -> SaveContext {
+        SaveContext {
+            filename: crate::export_names::filename("My Series", "1", 17, None, "png"),
+            folder: Some(crate::export_names::folder("My Series")),
+            policy,
+            resolver: Arc::new(move |_, _, reply| reply(choice)),
+            current: Arc::new(|| true),
+        }
+    }
+    #[cfg(not(target_os = "android"))]
     #[test]
-    fn autosave_uses_series_folders_and_preserves_previous_images() {
-        let temporary = tempfile::tempdir().unwrap();
-        let root = temporary.path().join("Pictures/Nova Reader");
+    fn image_conflicts_ask_before_overwrite_and_auto_skip_preserves_existing() {
+        let root = tempfile::tempdir().unwrap();
         let image = ExportImage::from_rgba(1, 1, &[23, 37, 51, 255]).unwrap();
-        let series = safe_component("My Series/Name", 40);
-        for folders in [false, true] {
-            let context = SaveContext {
-                series: series.clone(),
-                folder: folders.then(|| series.clone()),
-            };
-            let first = publish_file(&root, &image, &context).unwrap();
-            let second = publish_file(&root, &image, &context).unwrap();
-            assert_ne!(first, second);
-            let expected = if folders {
-                root.join(&series)
-            } else {
-                root.clone()
-            };
-            assert_eq!(first.parent().unwrap(), expected);
-            assert_eq!(first.extension().unwrap(), "png");
-            assert_eq!(std::fs::read(first).unwrap(), image.bytes);
-            assert_eq!(std::fs::read(second).unwrap(), image.bytes);
-            assert!(std::fs::read_dir(expected).unwrap().all(|entry| {
-                !entry
+        let context = save_context(ConflictPolicy::DoNothing, ConflictChoice::Cancel);
+        let path = publish_file(root.path(), &image, &context).unwrap();
+        std::fs::write(&path, b"previous bytes").unwrap();
+        assert!(
+            publish_file(root.path(), &image, &context)
+                .unwrap_err()
+                .contains("nothing saved")
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"previous bytes");
+        let mut context = save_context(ConflictPolicy::Ask, ConflictChoice::Cancel);
+        let (prompt, receive) = std::sync::mpsc::channel();
+        context.resolver = Arc::new(move |name, _, reply| {
+            prompt.send((name, reply)).unwrap();
+        });
+        let directory = root.path().to_path_buf();
+        let expected = image.bytes.clone();
+        let worker = std::thread::spawn(move || publish_file(&directory, &image, &context));
+        let (name, reply) = receive
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(name, path.file_name().unwrap().to_str().unwrap());
+        assert!(!worker.is_finished());
+        assert_eq!(std::fs::read(&path).unwrap(), b"previous bytes");
+        reply(ConflictChoice::Overwrite);
+        assert_eq!(worker.join().unwrap().unwrap(), path);
+        assert_eq!(std::fs::read(&path).unwrap(), expected);
+        let image = ExportImage::from_rgba(1, 1, &[10, 20, 30, 255]).unwrap();
+        let cancelled = save_context(ConflictPolicy::Ask, ConflictChoice::Cancel);
+        assert!(publish_file(root.path(), &image, &cancelled).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), expected);
+        let overwrite = save_context(ConflictPolicy::Overwrite, ConflictChoice::Cancel);
+        assert_eq!(publish_file(root.path(), &image, &overwrite).unwrap(), path);
+        assert_eq!(std::fs::read(&path).unwrap(), image.bytes);
+    }
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn numbered_exports_are_race_safe_and_cancelled_prompt_releases_image() {
+        let root = tempfile::tempdir().unwrap();
+        let mut workers = Vec::new();
+        for color in 0..4 {
+            let directory = root.path().to_path_buf();
+            workers.push(std::thread::spawn(move || {
+                let image = ExportImage::from_rgba(1, 1, &[color, 0, 0, 255]).unwrap();
+                let expected = image.bytes.clone();
+                let path = publish_file(
+                    &directory,
+                    &image,
+                    &save_context(ConflictPolicy::Ask, ConflictChoice::AddNumber),
+                )
+                .unwrap();
+                assert!(path.file_name().unwrap().len() <= 160);
+                assert_eq!(std::fs::read(&path).unwrap(), expected);
+                path
+            }));
+        }
+        let paths = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(paths.len(), 4);
+        let mut context = save_context(ConflictPolicy::Ask, ConflictChoice::Cancel);
+        let live = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let current = live.clone();
+        context.current = Arc::new(move || current.load(std::sync::atomic::Ordering::Acquire));
+        let (prompt, receive) = std::sync::mpsc::channel();
+        context.resolver = Arc::new(move |_, _, reply| {
+            prompt.send(reply).unwrap();
+        });
+        let directory = root.path().to_path_buf();
+        let worker = std::thread::spawn(move || {
+            let image = ExportImage::from_rgba(1, 1, &[255, 0, 0, 255]).unwrap();
+            publish_file(&directory, &image, &context)
+        });
+        let reply = receive
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        live.store(false, std::sync::atomic::Ordering::Release);
+        assert!(worker.join().unwrap().unwrap_err().contains("cancelled"));
+        drop(reply);
+        assert!(
+            std::fs::read_dir(root.path().join(crate::export_names::folder("My Series")))
+                .unwrap()
+                .all(|entry| !entry
                     .unwrap()
                     .file_name()
                     .to_string_lossy()
-                    .starts_with(".nova-reader-image-")
-            }));
-        }
-        for value in [
-            "../CON",
-            "AUX",
-            "COM¹",
-            "../\\<>:\"|?*\n\0",
-            "",
-            "長い題名".repeat(50).as_str(),
-        ] {
-            let safe = safe_component(value, 40);
-            assert!(!safe.is_empty());
-            assert!(safe.len() <= 41);
-            assert!(
-                !safe
-                    .chars()
-                    .any(|character| character.is_control() || "<>:\"/\\|?*. ".contains(character))
-            );
-            assert!(!["CON", "AUX", "COM¹"].contains(&safe.to_ascii_uppercase().as_str()));
-        }
-        let context = SaveContext {
-            series,
-            folder: None,
-        };
-        let too_long = temporary.path().join("a".repeat(240));
-        assert!(publish_file(&too_long, &image, &context).is_err());
-        assert!(!too_long.exists());
+                    .starts_with(".nova-reader-image-"))
+        );
     }
 
     #[cfg(target_os = "linux")]

@@ -2,6 +2,7 @@ package dev.misob.nova.reader;
 
 import android.app.NativeActivity;
 import android.content.ContentResolver;
+import android.content.ContentUris;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
@@ -36,6 +37,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -54,6 +56,8 @@ public final class ReaderActivity extends NativeActivity {
     private static volatile boolean readerImmersive;
     private boolean decorFitsConfigured;
     private static native void nativeDocumentResult(long id, String path, String name, String error);
+    private static native void nativeImageConflict(long id,String name);
+    private static native boolean nativeImageSaveCurrent(long id);
 
     private static final class Request {
         final long id;
@@ -62,21 +66,30 @@ public final class ReaderActivity extends NativeActivity {
         final String suggestedName;
         final String mime;
         final String seriesFolder;
+        final int collisionPolicy;
+        final Context application;
+        volatile Uri tree;
+        volatile boolean selectingTree;
+        volatile boolean awaitingChoice;
+        volatile ImageStore store;
+        volatile ImageTarget target;
+        volatile String targetName;
         final AtomicBoolean cancelled = new AtomicBoolean();
         final AtomicBoolean copying = new AtomicBoolean();
         volatile WeakReference<ReaderActivity> activity;
         final File cache;
         final int requestCode;
-        Request(long id, int kind, String exportPath, String suggestedName, String mime, String seriesFolder, ReaderActivity activity) {
+        Request(long id, int kind, String exportPath, String suggestedName, String mime, String seriesFolder, int collisionPolicy, ReaderActivity activity) {
             this.id=id; this.kind=kind; this.exportPath=exportPath;
             this.suggestedName=suggestedName; this.mime=mime;
             this.seriesFolder=seriesFolder;
+            this.collisionPolicy=collisionPolicy;this.application=activity.getApplicationContext();
             this.activity=new WeakReference<>(activity);
             this.cache=activity.getCacheDir();
             this.requestCode=(int)id;
         }
         void check() throws IOException {
-            if (cancelled.get()) throw new IOException("Document selection cancelled");
+            if (cancelled.get() || ((kind==7 || kind==8) && !nativeImageSaveCurrent(id))) throw new IOException("Image action cancelled");
         }
     }
     private static final class ImageDocument {
@@ -158,16 +171,20 @@ public final class ReaderActivity extends NativeActivity {
     }
 
     public static void requestDocument(int kind, long id, String exportPath) {
-        queueDocument(kind,id,exportPath,"nova-reader-backup.json","application/json","");
+        queueDocument(kind,id,exportPath,"nova-reader-backup.json","application/json","",0);
     }
     public static void requestImage(int kind, long id, String exportPath, String suggestedName, String mime) {
         if (kind!=5 && kind!=6) {nativeDocumentResult(id,null,null,"Unknown image operation");return;}
-        queueDocument(kind,id,exportPath,suggestedName,mime,"");
+        queueDocument(kind,id,exportPath,suggestedName,mime,"",0);
     }
     public static void publishImage(long id, String exportPath, String suggestedName, String mime, String seriesFolder) {
-        queueDocument(Build.VERSION.SDK_INT>=29?7:5,id,exportPath,suggestedName,mime,seriesFolder);
+        publishImageWithPolicy(id,exportPath,suggestedName,mime,seriesFolder,0);
     }
-    private static void queueDocument(int kind, long id, String exportPath, String suggestedName, String mime, String seriesFolder) {
+    public static void publishImageWithPolicy(long id,String exportPath,String suggestedName,String mime,String seriesFolder,int policy) {
+        if (policy<0 || policy>2) {nativeDocumentResult(id,null,null,"Unknown image collision policy");return;}
+        queueDocument(Build.VERSION.SDK_INT>=29?7:8,id,exportPath,suggestedName,mime,seriesFolder,policy);
+    }
+    private static void queueDocument(int kind, long id, String exportPath, String suggestedName, String mime, String seriesFolder,int policy) {
         // ndk-context exposes the Application, not an Activity. Resolve the
         // current Reader activity after posting, so recreation cannot leave a
         // queued picker launch targeting the activity that was destroyed.
@@ -176,29 +193,38 @@ public final class ReaderActivity extends NativeActivity {
             if (activity==null || activity.isFinishing() || activity.isDestroyed()) {
                 nativeDocumentResult(id,null,null,"Reader document activity is unavailable"); return;
             }
-            activity.openDocument(kind,id,exportPath,suggestedName,mime,seriesFolder);
+            activity.openDocument(kind,id,exportPath,suggestedName,mime,seriesFolder,policy);
         });
         if (!posted) nativeDocumentResult(id,null,null,"Reader UI thread is unavailable");
     }
-    private void openDocument(int kind, long id, String exportPath, String suggestedName, String mime, String seriesFolder) {
+    private void openDocument(int kind, long id, String exportPath, String suggestedName, String mime, String seriesFolder,int policy) {
         if (isFinishing() || isDestroyed()) {
             nativeDocumentResult(id,null,null,"Reader activity is closing"); return;
         }
         if(id<1 || id>65535) {nativeDocumentResult(id,null,null,"Restart the app to open another document");return;}
-        Request request=new Request(id,kind,exportPath,suggestedName,mime,seriesFolder,this);
+        Request request=new Request(id,kind,exportPath,suggestedName,mime,seriesFolder,policy,this);
         synchronized (LOCK) {
             if(id<=lastCancelledId) {nativeDocumentResult(id,null,null,"Document selection cancelled");return;}
             if (active!=null) {nativeDocumentResult(id,null,null,"Another document request is active");return;}
             active=request;
         }
         try {
-            if (kind==7) {
-                File original=validateExport(request);
+            if (kind==7 || kind==8) {
+                validateExport(request);
                 ReaderImageProvider.extensionForMime(mime);
                 validateSeriesFolder(seriesFolder);
+                request.targetName=imageName(suggestedName,mime);
+                if (kind==8) {
+                    String saved=request.application.getSharedPreferences("reader-image-export",Context.MODE_PRIVATE).getString("tree",null);
+                    if (saved==null) {selectImageTree(request);return;}
+                    request.tree=Uri.parse(saved);
+                    if (!DocumentsContract.isTreeUri(request.tree)) {
+                        request.application.getSharedPreferences("reader-image-export",Context.MODE_PRIVATE).edit().remove("tree").apply();
+                        selectImageTree(request);return;
+                    }
+                }
                 request.copying.set(true);
-                ContentResolver resolver=getApplicationContext().getContentResolver();
-                COPIES.execute(() -> publishToMediaStore(request,resolver,original));
+                COPIES.execute(() -> prepareImageSave(request));
                 return;
             }
             if (kind==6) {
@@ -235,6 +261,12 @@ public final class ReaderActivity extends NativeActivity {
             startActivityForResult(intent,request.requestCode);
         } catch (Exception error) {finish(request,null,null,message(error));}
     }
+    private void selectImageTree(Request request) {
+        request.selectingTree=true;
+        Intent intent=new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_WRITE_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION|Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
+        startActivityForResult(intent,request.requestCode);
+    }
     public static void cancelDocument(long id) {
         Request request;
         synchronized (LOCK) {lastCancelledId=Math.max(lastCancelledId,id);request=active;if(request==null || request.id!=id)return;request.cancelled.set(true);}
@@ -250,6 +282,22 @@ public final class ReaderActivity extends NativeActivity {
         synchronized (LOCK) {request=active;}
         if (request==null) return;
         if(code!=request.requestCode)return;
+        if (request.kind==8 && request.selectingTree) {
+            request.selectingTree=false;
+            if (result!=RESULT_OK || data==null || data.getData()==null) {finish(request,null,null,"Image action cancelled");return;}
+            try {
+                request.check();
+                Uri tree=data.getData();
+                if (!"content".equals(tree.getScheme()) || !DocumentsContract.isTreeUri(tree)) throw new IOException("Unsupported image destination folder");
+                int grants=Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_WRITE_URI_PERMISSION;
+                if ((data.getFlags()&grants)!=grants || (data.getFlags()&Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)==0) throw new IOException("Choose a folder that supports persistent read/write access");
+                request.application.getContentResolver().takePersistableUriPermission(tree,grants);
+                if (!request.application.getSharedPreferences("reader-image-export",Context.MODE_PRIVATE).edit().putString("tree",tree.toString()).commit()) throw new IOException("Unable to remember image destination folder");
+                request.tree=tree;request.copying.set(true);
+                COPIES.execute(() -> prepareImageSave(request));
+            } catch (Exception error) {finish(request,null,null,message(error));}
+            return;
+        }
         if (result!=RESULT_OK || data==null || data.getData()==null) {
             finish(request,null,null,"Document selection cancelled");return;
         }
@@ -335,54 +383,203 @@ public final class ReaderActivity extends NativeActivity {
         return original;
     }
     private static String imageName(String suggestedName,String mime) throws IOException {
-        String name=displayName(suggestedName);
+        String name=suggestedName==null?"Reader image":suggestedName.replaceAll("[\\p{Cntrl}/\\\\]","_");
         if (name.trim().isEmpty() || ".".equals(name) || "..".equals(name)) name="Reader image";
         String suffix="."+ReaderImageProvider.extensionForMime(mime);
-        return name.toLowerCase(Locale.ROOT).endsWith(suffix)?name:name+suffix;
+        name=name.toLowerCase(Locale.ROOT).endsWith(suffix)?name:name+suffix;
+        if (name.getBytes(StandardCharsets.UTF_8).length>160) throw new IOException("Image filename exceeds 160 UTF-8 bytes");
+        return name;
     }
     private static void validateSeriesFolder(String folder) throws IOException {
         if (folder==null || folder.isEmpty()) return;
-        if (folder.getBytes(StandardCharsets.UTF_8).length>80 || ".".equals(folder) || "..".equals(folder)
+        if (folder.getBytes(StandardCharsets.UTF_8).length>96 || ".".equals(folder) || "..".equals(folder)
             || !folder.equals(folder.trim()) || folder.endsWith(".") || folder.matches("(?s).*[\\p{Cntrl}/\\\\<>:\"|?*].*")) {
             throw new IOException("Invalid series image folder");
         }
     }
-    private static void publishToMediaStore(Request request,ContentResolver resolver,File original) {
-        Uri destination=null;
-        boolean published=false;
-        try {
-            request.check();
-            ContentValues metadata=new ContentValues();
-            metadata.put(MediaStore.Images.Media.DISPLAY_NAME,imageName(request.suggestedName,request.mime));
-            metadata.put(MediaStore.Images.Media.MIME_TYPE,request.mime);
-            String folder=Environment.DIRECTORY_PICTURES+"/Nova Reader/";
-            if (request.seriesFolder!=null && !request.seriesFolder.isEmpty()) folder+=request.seriesFolder+"/";
-            metadata.put(MediaStore.Images.Media.RELATIVE_PATH,folder);
-            metadata.put(MediaStore.Images.Media.IS_PENDING,1);
-            // A fresh row gives MediaStore responsibility for filename collisions.
-            destination=resolver.insert(MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY),metadata);
-            if (destination==null) throw new IOException("Unable to create saved image");
-            try (InputStream input=new FileInputStream(original);OutputStream output=resolver.openOutputStream(destination,"w")) {
-                if (output==null) throw new IOException("Unable to open saved image");
-                transfer(input,output,PAGE_LIMIT,request);output.flush();
+    private static final class ImageTarget {
+        final Uri uri;final String name,mime;final long size;final int pending;
+        ImageTarget(Uri uri,String name,String mime,long size,int pending) {this.uri=uri;this.name=name;this.mime=mime;this.size=size;this.pending=pending;}
+    }
+    /** Only app-owned MediaStore rows or documents inside an explicit tree grant. */
+    private static final class ImageStore {
+        final Request request;final ContentResolver resolver;final boolean tree;final Uri parent;final String relative;
+        ImageStore(Request request) throws IOException {
+            this.request=request;resolver=request.application.getContentResolver();tree=request.kind==8;
+            relative=Environment.DIRECTORY_PICTURES+"/Nova Reader/"+(request.seriesFolder==null || request.seriesFolder.isEmpty()?"":request.seriesFolder+"/");
+            if (tree) {
+                Uri folder=DocumentsContract.buildDocumentUriUsingTree(request.tree,DocumentsContract.getTreeDocumentId(request.tree));
+                folder=directory(folder,"Nova Reader");
+                if (request.seriesFolder!=null && !request.seriesFolder.isEmpty()) folder=directory(folder,request.seriesFolder);
+                parent=folder;
+            } else {parent=MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY);}
+        }
+        private Uri directory(Uri parent,String name) throws IOException {
+            ImageTarget found=findTree(parent,name);
+            if (found!=null) {
+                if (!DocumentsContract.Document.MIME_TYPE_DIR.equals(found.mime)) throw new IOException("Image destination contains a file named "+name);
+                return found.uri;
             }
+            Uri created=DocumentsContract.createDocument(resolver,parent,DocumentsContract.Document.MIME_TYPE_DIR,name);
+            if (created==null) throw new IOException("Unable to create image destination folder");return created;
+        }
+        private ImageTarget findTree(Uri folder,String name) throws IOException {
+            Uri children=DocumentsContract.buildChildDocumentsUriUsingTree(request.tree,DocumentsContract.getDocumentId(folder));
+            try (Cursor cursor=resolver.query(children,new String[]{DocumentsContract.Document.COLUMN_DOCUMENT_ID,DocumentsContract.Document.COLUMN_DISPLAY_NAME,DocumentsContract.Document.COLUMN_MIME_TYPE,DocumentsContract.Document.COLUMN_SIZE},null,null,null)) {
+                if (cursor==null) throw new IOException("Unable to inspect image destination");
+                int count=0;while (cursor.moveToNext()) {
+                    request.check();if (++count>ENTRY_LIMIT) throw new IOException("Image destination contains too many documents");
+                    if (name.equals(cursor.getString(1))) return new ImageTarget(DocumentsContract.buildDocumentUriUsingTree(request.tree,cursor.getString(0)),cursor.getString(1),cursor.getString(2),cursor.isNull(3)?-1:cursor.getLong(3),0);
+                }
+            }
+            return null;
+        }
+        private ImageTarget media(Uri uri,String name) throws IOException {
+            String selection=MediaStore.Images.Media.RELATIVE_PATH+"=? AND "+MediaStore.Images.Media.OWNER_PACKAGE_NAME+"=?";
+            String[] arguments;
+            if (name==null) arguments=new String[]{relative,request.application.getPackageName()};
+            else {selection+=" AND "+MediaStore.Images.Media.DISPLAY_NAME+"=?";arguments=new String[]{relative,request.application.getPackageName(),name};}
+            try (Cursor cursor=resolver.query(uri,new String[]{MediaStore.Images.Media._ID,MediaStore.Images.Media.DISPLAY_NAME,MediaStore.Images.Media.MIME_TYPE,MediaStore.Images.Media.SIZE,MediaStore.Images.Media.IS_PENDING},selection,arguments,MediaStore.Images.Media._ID+" DESC")) {
+                if (cursor==null) throw new IOException("Unable to inspect saved images");
+                if (!cursor.moveToFirst()) return null;
+                return new ImageTarget(ContentUris.withAppendedId(parent,cursor.getLong(0)),cursor.getString(1),cursor.getString(2),cursor.isNull(3)?-1:cursor.getLong(3),(int)cursor.getLong(4));
+            }
+        }
+        ImageTarget find(String name) throws IOException {return tree?findTree(parent,name):media(parent,name);}
+        ImageTarget stat(Uri uri) throws IOException {
+            if (!tree) return media(uri,null);
+            try (Cursor cursor=resolver.query(uri,new String[]{DocumentsContract.Document.COLUMN_DOCUMENT_ID,DocumentsContract.Document.COLUMN_DISPLAY_NAME,DocumentsContract.Document.COLUMN_MIME_TYPE,DocumentsContract.Document.COLUMN_SIZE},null,null,null)) {
+                if (cursor==null || !cursor.moveToFirst()) return null;
+                return new ImageTarget(uri,cursor.getString(1),cursor.getString(2),cursor.isNull(3)?-1:cursor.getLong(3),0);
+            }
+        }
+        Uri create(String name) throws IOException {
+            if (tree) return DocumentsContract.createDocument(resolver,parent,request.mime,".reader-"+UUID.randomUUID()+"."+ReaderImageProvider.extensionForMime(request.mime));
+            ContentValues metadata=new ContentValues();
+            metadata.put(MediaStore.Images.Media.DISPLAY_NAME,name);metadata.put(MediaStore.Images.Media.MIME_TYPE,request.mime);
+            metadata.put(MediaStore.Images.Media.RELATIVE_PATH,relative);metadata.put(MediaStore.Images.Media.IS_PENDING,1);
+            return resolver.insert(parent,metadata);
+        }
+        void pending(Uri uri,int value,String mime) throws IOException {
+            if (tree) return;
+            ContentValues metadata=new ContentValues();metadata.put(MediaStore.Images.Media.IS_PENDING,value);metadata.put(MediaStore.Images.Media.MIME_TYPE,mime);
+            if (resolver.update(uri,metadata,null,null)!=1) throw new IOException("Unable to publish saved image");
+        }
+        Uri publish(Uri uri,String name) throws IOException {
+            if (!tree) {pending(uri,0,request.mime);return uri;}
+            if (find(name)!=null) throw new IOException("Image destination changed while saving; try again");
+            Uri renamed=DocumentsContract.renameDocument(resolver,uri,name);
+            if (renamed==null) throw new IOException("Unable to publish saved image");
+            ImageTarget actual=stat(renamed);
+            if (actual==null || !name.equals(actual.name)) {remove(renamed);throw new IOException("Image provider changed the requested filename");}
+            return renamed;
+        }
+        void remove(Uri uri) throws IOException {
+            if (tree) {if (!DocumentsContract.deleteDocument(resolver,uri)) throw new IOException("Unable to remove incomplete image");}
+            else resolver.delete(uri,null,null);
+        }
+    }
+    private static void prepareImageSave(Request request) {
+        try {
+            request.check();request.store=new ImageStore(request);
+            request.target=request.store.find(request.targetName);
+            if (request.target==null) {writeNewImage(request);return;}
+            if (request.collisionPolicy==2) {finish(request,null,null,"Image already exists; nothing saved.");return;}
+            if (request.collisionPolicy==1) {overwriteImage(request);return;}
             synchronized (LOCK) {
+                request.check();if (active!=request) return;request.awaitingChoice=true;
+            }
+            nativeImageConflict(request.id,request.targetName);
+        } catch (Exception error) {imageFailure(request,error);}
+    }
+    public static void resolveImage(long id,int choice) {
+        Request request;
+        synchronized (LOCK) {
+            request=active;if (request==null || request.id!=id || !request.awaitingChoice) return;
+            request.awaitingChoice=false;
+        }
+        if (choice==2) {finish(request,null,null,"Image action cancelled");return;}
+        COPIES.execute(() -> {
+            try {
                 request.check();
-                if (active!=request) throw new IOException("Document selection cancelled");
-                ContentValues ready=new ContentValues();
-                ready.put(MediaStore.Images.Media.IS_PENDING,0);
-                if (resolver.update(destination,ready,null,null)!=1) throw new IOException("Unable to publish saved image");
-                published=true;
-                finish(request,original.getAbsolutePath(),request.suggestedName,null);
+                if (choice==0) overwriteImage(request);
+                else if (choice==1) {
+                    String original=imageName(request.suggestedName,request.mime);
+                    int dot=original.lastIndexOf('.');String extension=original.substring(dot),stem=original.substring(0,dot);
+                    boolean selected=false;
+                    for (int number=2;number<=ENTRY_LIMIT;number++) {
+                        request.check();String suffix=" ("+number+")"+extension;String base=stem;
+                        while ((base+suffix).getBytes(StandardCharsets.UTF_8).length>160) base=base.substring(0,base.offsetByCodePoints(base.length(),-1));
+                        String candidate=base+suffix;
+                        if (request.store.find(candidate)==null) {request.targetName=candidate;selected=true;break;}
+                    }
+                    if (!selected) throw new IOException("No unused image filename is available");
+                    writeNewImage(request);
+                } else throw new IOException("Unknown image collision choice");
+            } catch (Exception error) {imageFailure(request,error);}
+        });
+    }
+    private static void writeNewImage(Request request) throws IOException {
+        Uri destination=null;boolean published=false;
+        try {
+            request.check();File original=validateExport(request);destination=request.store.create(request.targetName);
+            if (destination==null) throw new IOException("Unable to create saved image");
+            if (!request.store.tree) {
+                ImageTarget actual=request.store.stat(destination);
+                if (actual==null || !request.targetName.equals(actual.name)) throw new IOException("Image provider changed the requested filename");
+            }
+            copyImageBytes(request,request.store.resolver,original,destination,true);
+            synchronized (LOCK) {
+                request.check();if (active!=request) throw new IOException("Image action cancelled");
+                destination=request.store.publish(destination,request.targetName);published=true;
+                finish(request,original.getAbsolutePath(),request.targetName,null);
+            }
+        } finally {if (destination!=null && !published) request.store.remove(destination);}
+    }
+    private static void overwriteImage(Request request) throws IOException {
+        request.check();ImageTarget current=request.store.find(request.targetName);
+        if (current==null || request.target==null || !current.uri.toString().equals(request.target.uri.toString())) throw new IOException("Existing image changed; save again to choose its replacement");
+        if (current.size>PAGE_LIMIT || DocumentsContract.Document.MIME_TYPE_DIR.equals(current.mime)) throw new IOException("Existing image cannot be safely replaced");
+        if (request.store.tree && !request.mime.equals(current.mime)) throw new IOException("Existing document has a different image type; choose Add number");
+        File[] recovery=request.cache.listFiles(file -> file.getName().startsWith("reader-image-old-") && file.getName().endsWith(".bak"));
+        if (recovery==null || recovery.length>0) throw new IOException("A previous image recovery is retained in the app cache; automatic overwrite is unavailable");
+        File backup=File.createTempFile("reader-image-old-",".bak",request.cache);
+        boolean keepBackup=false,touched=false;
+        try {
+            try (InputStream input=request.store.resolver.openInputStream(current.uri);FileOutputStream output=new FileOutputStream(backup)) {
+                if (input==null) throw new IOException("Unable to back up existing image");
+                transfer(input,output,PAGE_LIMIT,request);output.getFD().sync();
+            }
+            request.check();File original=validateExport(request);
+            touched=true;request.store.pending(current.uri,1,current.mime);
+            copyImageBytes(request,request.store.resolver,original,current.uri,true);
+            synchronized (LOCK) {
+                request.check();if (active!=request) throw new IOException("Image action cancelled");
+                request.store.pending(current.uri,0,request.mime);
+                finish(request,original.getAbsolutePath(),request.targetName,null);
             }
         } catch (Exception error) {
             String failure=message(error);
-            if (destination!=null && !published) {
-                try {resolver.delete(destination,null,null);}
-                catch (Exception cleanup) {failure+="; image cleanup failed: "+message(cleanup);}
+            if (touched) {
+                try {copyImageBytes(request,request.store.resolver,backup,current.uri,false);}
+                catch (Exception restore) {keepBackup=true;failure+="; old image backup retained after recovery failed: "+message(restore);}
+                try {request.store.pending(current.uri,current.pending,current.mime);}
+                catch (Exception restore) {failure+="; old image visibility recovery failed: "+message(restore);}
             }
-            finish(request,null,null,failure);
+            throw new IOException(failure,error);
+        } finally {if (!keepBackup) backup.delete();}
+    }
+    private static void copyImageBytes(Request request,ContentResolver resolver,File source,Uri destination,boolean cancellable) throws IOException {
+        try (InputStream input=new FileInputStream(source);OutputStream output=resolver.openOutputStream(destination,"wt")) {
+            if (output==null) throw new IOException("Unable to open saved image");
+            if (cancellable) transfer(input,output,PAGE_LIMIT,request);
+            else {byte[] buffer=new byte[65536];long total=0;int count;while ((count=input.read(buffer))!=-1) {if (count>PAGE_LIMIT-total) throw new IOException("Image recovery exceeds size limit");output.write(buffer,0,count);total+=count;}}
+            output.flush();
         }
+    }
+    private static void imageFailure(Request request,Exception error) {
+        if (error instanceof SecurityException && request.kind==8) request.application.getSharedPreferences("reader-image-export",Context.MODE_PRIVATE).edit().remove("tree").apply();
+        finish(request,null,null,message(error));
     }
     private static void copyToClipboard(Request request,Context application,File original) {
         File image=null;

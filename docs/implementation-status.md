@@ -113,10 +113,13 @@ Adult visibility and chapter order persist through fallible Nova KV writes
 outside portable backups; order keys include the full source-local series ID.
 
 Poster reuse is shared across Browse, Library, Updates, History and details:
-one 128 MiB decoded-pixel LRU backs UI handles, with visible/selected artwork
+one configurable decoded-pixel LRU (128 MiB by default) backs UI handles, with visible/selected artwork
 plus up to 48 additional recent UI cards. Source availability invalidates cache
 hits on disable/remove/update. The existing 8 MiB encoded, 8-million-pixel/72 MiB
-source decode and 32 MiB/256-file disk limits remain; active decode allocations
+source decode limits remain; the old 32 MiB/256-file disk quota is replaced by
+Kit's indexed GC and an independent 1 GiB artwork budget. Viewed online chapter
+pages have their own 1 GiB disk budget, chapter-group eviction and active-page
+leases. Cache settings share Nova's extracted controls. Active decode allocations
 are separate from retained pixels. These are bounds, not device measurements.
 
 ## Source and distribution limits

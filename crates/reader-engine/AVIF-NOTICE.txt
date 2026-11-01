@@ -1,6 +1,6 @@
 AVIF adapter and test fixture attribution
 
-The plane-access and CICP conversion dispatch in src/avif.rs are adapted from
+The shared nova-image plane-access and CICP conversion dispatch are adapted from
 avif-decode 3.0.0 (https://github.com/kornelski/avif-decode).
 The independent tests/fixtures/tiny.avif is its 16x16 8-bit 4:4:4 fixture,
 encoded using avifenc rather than Reader's ravif encoder.

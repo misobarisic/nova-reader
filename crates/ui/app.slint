@@ -18,6 +18,7 @@ import { SettingsCard } from "@NovaUiBase/settings-controls.slint";
 import { SourceFilterPanel } from "source-filters.slint";
 import { TimelineList } from "timeline.slint";
 import { ReaderContextMenu, ReaderImageInteraction } from "reader-context-menu.slint";
+import { SaveConflictSheet } from "save-conflict-sheet.slint";
 import { LibraryFilterChip } from "@NovaUiBase/filter-chip.slint";
 import { LibrarySearchReveal } from "library-search.slint";
 import { EntryMenu, EntryCategoryRow } from "entry-menu.slint";
@@ -51,6 +52,15 @@ export component AppWindow inherits Window {
     in-out property <int> about-back-request: 0;
     in-out property <bool> about-update-checks-enabled: false;
     callback license-source-requested(string);
+    in-out property <bool> export-conflict-open: false;
+    in-out property <string> export-conflict-name;
+    callback export-conflict-choice(int);
+    function resolve-export-conflict(choice: int) {
+        if !root.export-conflict-open { return; }
+        root.export-conflict-open = false;
+        root.export-conflict-choice(choice);
+        keyboard.focus();
+    }
     in-out property <string> image-cache-info;
     in-out property <string> image-cache-status;
     in-out property <bool> image-cache-busy;
@@ -293,6 +303,7 @@ export component AppWindow inherits Window {
     callback flush-progress;
 
     public function go-back() {
+        if root.export-conflict-open { root.resolve-export-conflict(2); return; }
         if root.section == 13 { root.about-back-request += 1; return; }
         if root.entry-menu-visible { root.close-entry-menu(); return; }
         if root.reader-context-visible { root.close-reader-context(); return; }
@@ -303,6 +314,7 @@ export component AppWindow inherits Window {
     }
 
     changed section => {
+        if root.export-conflict-open { root.resolve-export-conflict(2); }
         if root.entry-menu-visible { root.close-entry-menu(); }
         root.detail-restore-pending = root.section == 5;
         if root.reader-context-visible { root.close-reader-context(); }
@@ -841,6 +853,10 @@ export component AppWindow inherits Window {
             }
         }
         key-pressed(event) => {
+            if root.export-conflict-open {
+                if event.text == Key.Escape || event.text == Key.Back || event.text == Key.Backspace { root.resolve-export-conflict(2); }
+                return accept;
+            }
             if root.section == 0 && event.modifiers.control && (event.text == "f" || event.text == "F") {
                 if !event.repeat { root.focus-library-search(); }
                 return accept;
@@ -902,6 +918,14 @@ export component AppWindow inherits Window {
         picked(action) => { root.entry-menu-picked(action); }
         category-toggled(id) => { root.entry-action(root.entry-menu-key,"category:" + id); }
         dismissed => { root.close-entry-menu(); }
+    }
+    SaveConflictSheet {
+        width: root.width; height: root.height;
+        open: root.export-conflict-open;
+        file-name: root.export-conflict-name;
+        safe-top: root.safe-area-insets.top; safe-bottom: root.safe-area-insets.bottom;
+        safe-left: root.safe-area-insets.left; safe-right: root.safe-area-insets.right;
+        choice(index) => { root.resolve-export-conflict(index); }
     }
     forward-focus: keyboard;
 }

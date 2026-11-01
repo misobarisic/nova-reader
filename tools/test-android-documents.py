@@ -3,12 +3,55 @@
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def braced_item(source, marker):
+    start = source.index(marker)
+    opening = source.index('{', start)
+    depth = 0
+    for index in range(opening, len(source)):
+        # These extracted data declarations/request_conflict contain no string
+        # literals or comments with braces; reject source drift explicitly.
+        if source[index] == '{':
+            depth += 1
+        elif source[index] == '}':
+            depth -= 1
+            if depth == 0:
+                return source[start:index + 1]
+    raise ValueError(f'unterminated Rust item: {marker}')
+
+
+def android_export_adapter():
+    """Type-check the actual cfg(Android) adapter against actual shared shapes.
+
+    No desktop UI/build script/codecs are needed. Data declarations and the
+    conflict dispatcher come from reader_export.rs; policy variants come from
+    capture_settings.rs. The production Android platform body is unchanged.
+    """
+    source = (ROOT / 'src/reader_export.rs').read_text()
+    policy_source = (ROOT / 'src/capture_settings.rs').read_text()
+    marker = '#[cfg(target_os = "android")]\nmod platform {'
+    start = source.index(marker)
+    end = source.index('\n#[cfg(test)]', start)
+    platform = source[start:end].replace('#[cfg(target_os = "android")]\n', '', 1)
+    symbols = sorted(set(re.findall(r'crate::android_documents::([A-Za-z_][A-Za-z0-9_]*)', platform)))
+    aliases = '\n'.join(re.search(rf'(?:pub )?type {name}\b.*?;', source, re.S).group(0)
+                        for name in ['Callback', 'ConflictReply', 'ConflictResolver', 'ExportCurrent'])
+    declarations = '\n'.join(braced_item(source, marker) for marker in [
+        'pub struct ExportImage', 'pub enum ConflictChoice', 'pub struct SaveContext',
+        'pub fn request_conflict(',
+    ])
+    policy = braced_item(policy_source, 'pub enum ConflictPolicy')
+    return ('mod android_documents { pub use crate::{' + ','.join(symbols) + '}; }\n'
+            '#[allow(dead_code)] mod android_export_adapter { use std::sync::Arc;\n'
+            '#[derive(Clone, Copy, Default)]\n' + policy + '\n' + aliases + '\n' + declarations + '\n' + platform + '\n}\n')
 
 
 def main():
@@ -48,7 +91,8 @@ def main():
         )
         production = (ROOT / 'src/android_documents.rs').read_text().replace('#![cfg(target_os = "android")]\n', '')
         regression = json.dumps(str(ROOT / 'tests/android-documents/jni_regression.rs'))
-        (work / 'src/lib.rs').write_text(production + '\n#[cfg(test)] mod host_regression { include!(' + regression + '); }\n')
+        (work / 'src/lib.rs').write_text(production + '\n' + android_export_adapter()
+                                       + '\n#[cfg(test)] mod host_regression { include!(' + regression + '); }\n')
         env = dict(os.environ, READER_JNI_CLASSPATH=os.pathsep.join([str(classes), str(android_jar.resolve())]),
                    READER_JNI_CACHE=str(cache), CARGO_TARGET_DIR=str(ROOT / 'target/android-document-jni-tests'))
         subprocess.run(['cargo', 'test', '--manifest-path', str(work / 'Cargo.toml'), '--lib', '--', '--test-threads=1'],

@@ -1,7 +1,8 @@
-// Nova's compression controls, applied independently to new artwork and pages.
-import { InterfaceStyle } from "@NovaUiShared";
-import { SettingsCard, SectionHeader, ToggleSwitch, PillButton, MiniSlider, ValueBox } from "@NovaUiBase/settings-controls.slint";
-import { Segmented } from "@ReaderSegmented";
+// Nova's actual cache controls are owned by Kit; Reader owns labels and durable
+// preferences for independent temporary namespaces and explicit offline jobs.
+import { InterfaceStyle, Theme } from "@NovaUiShared";
+import { SettingsCard, SectionHeader } from "@NovaUiBase/settings-controls.slint";
+import { CacheDiskToggle, CacheDiskLimit, CacheCompressionToggle, CacheFormatControl, CacheQualityControl, CacheMemoryControl, CacheResolutionControl, CacheClearControl } from "@NovaUiBase/cache-settings-controls.slint";
 import { SettingsRow } from "settings-row.slint";
 
 export global ImageStorageSettings {
@@ -11,77 +12,132 @@ export global ImageStorageSettings {
     in-out property <bool> downloads-enabled: false;
     in-out property <int> downloads-format: 1;
     in-out property <float> downloads-quality: 85;
+    in-out property <bool> disk-enabled: true;
+    in-out property <[string]> disk-limit-names;
+    in-out property <int> chapter-disk-limit-index: 3;
+    in-out property <int> artwork-disk-limit-index: 3;
+    in-out property <float> memory-budget: 128;
+    in-out property <[string]> poster-resolution-names;
+    in-out property <int> poster-resolution-index: 0;
+    in-out property <string> chapter-cache-info;
+    in-out property <string> chapter-cache-status;
+    in-out property <bool> chapter-cache-busy: false;
     callback settings-changed(string, int);
-}
-
-component CompressionQuality inherits Rectangle {
-    in-out property <float> value;
-    in property <bool> enabled: true;
-    in property <string> name;
-    in property <string> increase-label;
-    in property <string> decrease-label;
-    callback changed(float);
-    preferred-width: InterfaceStyle.tv ? 320px : 252px;
-    min-width: 0px; height: InterfaceStyle.tv ? 56px : 44px;
-    function adjust(v: float) { root.value = Math.clamp(v, 1, 100); root.changed(root.value); }
-    value-measure := Text { text: Math.round(root.value); font-size: 20px; visible: false; }
-    HorizontalLayout {
-        spacing: 4px;
-        PillButton {
-            label: "−"; enabled: root.enabled && root.value > 1;
-            compact: true; btn-min-width: 44px;
-            accessible-label: root.decrease-label;
-            accessible-action-default => { if self.enabled { root.adjust(root.value - 1); } }
-            clicked => { root.adjust(root.value - 1); }
-        }
-        MiniSlider {
-            min-width: 36px; horizontal-stretch: 1; enabled: root.enabled; name: root.name;
-            value <=> root.value; minimum: 1; maximum: 100; step: 1;
-            changed(v) => { root.changed(v); }
-        }
-        ValueBox {
-            width: InterfaceStyle.tv ? Math.max(64px, value-measure.preferred-width + 24px) : 36px;
-            height: InterfaceStyle.tv ? 56px : 44px; text: Math.round(root.value);
-        }
-        PillButton {
-            label: "+"; enabled: root.enabled && root.value < 100;
-            compact: true; btn-min-width: 44px;
-            accessible-label: root.increase-label;
-            accessible-action-default => { if self.enabled { root.adjust(root.value + 1); } }
-            clicked => { root.adjust(root.value + 1); }
-        }
-    }
+    callback policy-changed();
+    callback chapter-cache-refresh();
+    callback chapter-cache-clear();
 }
 
 export component ImageStorageSettingsPage inherits VerticalLayout {
     in property <bool> interactive: true;
+    in property <bool> busy: false;
+    private property <bool> maintenance: root.busy || ImageStorageSettings.chapter-cache-busy;
     spacing: 16px; alignment: start;
+    init => { if root.interactive { ImageStorageSettings.chapter-cache-refresh(); } }
+    changed interactive => { if root.interactive { ImageStorageSettings.chapter-cache-refresh(); } }
+    SectionHeader { label: @tr("Chapter cache"); }
+    SettingsCard {
+        SettingsRow {
+            row-title: @tr("Disk caching");
+            row-desc: @tr("Keep viewed chapter pages and artwork on this device to reduce network use. Offline downloads stay independent.");
+            CacheDiskToggle {
+                busy: !root.interactive || root.maintenance;
+                checked <=> ImageStorageSettings.disk-enabled;
+                toggled => { ImageStorageSettings.settings-changed("disk_enabled", self.checked ? 1 : 0); }
+            }
+        }
+        SettingsRow {
+            row-title: @tr("Chapter disk-cache limit");
+            row-desc: @tr("Remove older viewed chapters when this limit is exceeded. Downloaded chapters and local imports are preserved.");
+            CacheDiskLimit {
+                name: @tr("Chapter disk-cache limit"); keyboard-input-enabled: true;
+                model: ImageStorageSettings.disk-limit-names;
+                current-index <=> ImageStorageSettings.chapter-disk-limit-index;
+                disk-enabled: ImageStorageSettings.disk-enabled;
+                busy: !root.interactive || root.maintenance;
+                selected(_) => { ImageStorageSettings.settings-changed("chapter_disk_limit_index", self.current-index); }
+            }
+        }
+        SettingsRow {
+            row-title: @tr("Chapter cache usage");
+            row-desc: ImageStorageSettings.chapter-cache-info;
+            CacheClearControl {
+                label: @tr("Clear chapter cache");
+                busy: !root.interactive || root.maintenance;
+                clicked => { ImageStorageSettings.chapter-cache-clear(); }
+            }
+        }
+    }
+    if ImageStorageSettings.chapter-cache-status != "": Text {
+        text: ImageStorageSettings.chapter-cache-status;
+        color: Theme.current.text_settings; wrap: word-wrap; min-width: 0px;
+    }
+    SectionHeader { label: @tr("Artwork and memory"); }
+    SettingsCard {
+        SettingsRow {
+            row-title: @tr("Artwork disk-cache limit");
+            row-desc: @tr("Artwork has its own budget, so viewed chapter pages cannot evict library covers.");
+            CacheDiskLimit {
+                name: @tr("Artwork disk-cache limit"); keyboard-input-enabled: true;
+                model: ImageStorageSettings.disk-limit-names;
+                current-index <=> ImageStorageSettings.artwork-disk-limit-index;
+                disk-enabled: ImageStorageSettings.disk-enabled;
+                busy: !root.interactive || root.maintenance;
+                selected(_) => { ImageStorageSettings.settings-changed("artwork_disk_limit_index", self.current-index); }
+            }
+        }
+        SettingsRow {
+            row-title: @tr("Decoded-image budget");
+            row-desc: @tr("Memory available for decoded artwork, independent of disk caching.");
+            CacheMemoryControl {
+                width: Math.min(InterfaceStyle.tv ? 320px : 252px, Math.max(0px, root.width - 32px));
+                name: @tr("Decoded-image budget");
+                increase-label: @tr("Increase decoded-image budget"); decrease-label: @tr("Decrease decoded-image budget");
+                enabled: root.interactive;
+                value <=> ImageStorageSettings.memory-budget;
+                changed(v) => { ImageStorageSettings.settings-changed("memory_budget", Math.round(v)); }
+            }
+        }
+        SettingsRow {
+            row-title: @tr("Poster resolution");
+            row-desc: @tr("Limit the longest side of newly processed artwork. Original keeps source dimensions. Chapter pages always keep their original dimensions.");
+            CacheResolutionControl {
+                width: 100%; name: @tr("Poster resolution"); keyboard-input-enabled: true;
+                model: ImageStorageSettings.poster-resolution-names;
+                current-index <=> ImageStorageSettings.poster-resolution-index;
+                busy: !root.interactive || root.maintenance;
+                selected(_) => { ImageStorageSettings.settings-changed("poster_resolution_index", self.current-index); }
+            }
+        }
+    }
     SectionHeader { label: @tr("Cache compression"); }
     SettingsCard {
         SettingsRow {
             row-title: @tr("Compress new cached images");
-            row-desc: @tr("Compress new artwork at its original dimensions. Existing cached images stay unchanged; unsupported images keep their original encoding.");
-            ToggleSwitch {
+            row-desc: @tr("Compress new temporary chapter pages and artwork. Existing files stay unchanged; unsupported images keep their original encoding.");
+            CacheCompressionToggle {
                 name: @tr("Compress new cached images");
-                enabled: root.interactive; checked <=> ImageStorageSettings.cache-enabled;
-                accessible-action-default => { if self.enabled { self.checked = !self.checked; self.toggled(); } }
+                disk-enabled: ImageStorageSettings.disk-enabled; busy: !root.interactive || root.maintenance;
+                checked <=> ImageStorageSettings.cache-enabled;
                 toggled => { ImageStorageSettings.settings-changed("cache_enabled", self.checked ? 1 : 0); }
             }
         }
         SettingsRow {
-            row-title: @tr("Cache format"); row-desc: @tr("JPEG, WebP or AVIF for newly cached artwork.");
-            Segmented {
+            row-title: @tr("Cache format"); row-desc: @tr("JPEG, WebP or AVIF for newly cached images.");
+            CacheFormatControl {
                 labels: [@tr("JPEG"), @tr("WebP"), @tr("AVIF")];
-                enabled: root.interactive && ImageStorageSettings.cache-enabled;
+                disk-enabled: ImageStorageSettings.disk-enabled; compression-enabled: ImageStorageSettings.cache-enabled;
+                busy: !root.interactive || root.maintenance;
                 current-index: ImageStorageSettings.cache-format;
                 picked(i) => { ImageStorageSettings.settings-changed("cache_format", i); }
             }
         }
         SettingsRow {
             row-title: @tr("Cache quality"); row-desc: @tr("Higher values retain more detail and use more disk space.");
-            CompressionQuality {
+            CacheQualityControl {
                 width: Math.min(InterfaceStyle.tv ? 320px : 252px, Math.max(0px, root.width - 32px));
-                enabled: root.interactive && ImageStorageSettings.cache-enabled;
+                disk-enabled: ImageStorageSettings.disk-enabled; compression-enabled: ImageStorageSettings.cache-enabled;
+                busy: !root.interactive || root.maintenance;
                 name: @tr("Cache quality"); increase-label: @tr("Increase cache quality"); decrease-label: @tr("Decrease cache quality");
                 value <=> ImageStorageSettings.cache-quality;
                 changed(v) => { ImageStorageSettings.settings-changed("cache_quality", Math.round(v)); }
@@ -93,27 +149,26 @@ export component ImageStorageSettingsPage inherits VerticalLayout {
         SettingsRow {
             row-title: @tr("Compress new chapter downloads");
             row-desc: @tr("Re-encode new chapter pages at their original dimensions before saving. Existing downloads stay unchanged; unsupported images keep their original encoding.");
-            ToggleSwitch {
+            CacheCompressionToggle {
                 name: @tr("Compress new chapter downloads");
-                enabled: root.interactive; checked <=> ImageStorageSettings.downloads-enabled;
-                accessible-action-default => { if self.enabled { self.checked = !self.checked; self.toggled(); } }
+                busy: !root.interactive; checked <=> ImageStorageSettings.downloads-enabled;
                 toggled => { ImageStorageSettings.settings-changed("downloads_enabled", self.checked ? 1 : 0); }
             }
         }
         SettingsRow {
             row-title: @tr("Download format"); row-desc: @tr("JPEG, WebP or AVIF for new offline chapter pages.");
-            Segmented {
+            CacheFormatControl {
                 labels: [@tr("JPEG"), @tr("WebP"), @tr("AVIF")];
-                enabled: root.interactive && ImageStorageSettings.downloads-enabled;
+                busy: !root.interactive; compression-enabled: ImageStorageSettings.downloads-enabled;
                 current-index: ImageStorageSettings.downloads-format;
                 picked(i) => { ImageStorageSettings.settings-changed("downloads_format", i); }
             }
         }
         SettingsRow {
             row-title: @tr("Download quality"); row-desc: @tr("Higher values retain more detail and use more disk space.");
-            CompressionQuality {
+            CacheQualityControl {
                 width: Math.min(InterfaceStyle.tv ? 320px : 252px, Math.max(0px, root.width - 32px));
-                enabled: root.interactive && ImageStorageSettings.downloads-enabled;
+                busy: !root.interactive; compression-enabled: ImageStorageSettings.downloads-enabled;
                 name: @tr("Download quality"); increase-label: @tr("Increase download quality"); decrease-label: @tr("Decrease download quality");
                 value <=> ImageStorageSettings.downloads-quality;
                 changed(v) => { ImageStorageSettings.settings-changed("downloads_quality", Math.round(v)); }

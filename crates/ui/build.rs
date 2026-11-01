@@ -72,7 +72,15 @@ fn reader_segmented(shared: &std::path::Path, out: &std::path::Path) -> std::pat
         1,
         "Kit Segmented contract changed"
     );
-    component = component.replace(old, &format!("{old}\n        accessible-action-default => {{ if root.enabled && i != root.disabled_index {{ root.picked(i); }} }}"));
+    let action = "accessible-action-default => { if root.enabled && i != root.disabled_index { root.picked(i); } }";
+    if !component.contains(action) {
+        component = component.replace(old, &format!("{old}\n        {action}"));
+    }
+    assert_eq!(
+        component.matches(action).count(),
+        1,
+        "Kit Segmented action drift"
+    );
     let adapted = format!(
         "import {{ Theme, Anim, SettingsStyle, InterfaceStyle }} from \"@NovaUiShared\";\n{component}"
     );
@@ -90,6 +98,31 @@ fn reader_dropdown(shared: &std::path::Path, out: &std::path::Path) -> std::path
     let source = shared.join("dropdown.slint");
     println!("cargo:rerun-if-changed={}", source.display());
     let mut contents = std::fs::read_to_string(&source).expect("read Kit dropdown");
+    // New Kit sources expose the same entry points additively. Older pins
+    // still use the literal Nova adaptation below until their consumer updates.
+    if contents.contains("in property <bool> keyboard-input-enabled: InterfaceStyle.tv;") {
+        assert_eq!(contents.matches("public function open_popup()").count(), 1);
+        assert_eq!(
+            contents
+                .matches("accessible-label: root.text_at(index);")
+                .count(),
+            1
+        );
+        assert_eq!(contents.matches("root.selected(value);").count(), 2);
+        contents = contents.replace(
+            "in property <bool> keyboard-input-enabled: InterfaceStyle.tv;",
+            "in property <bool> keyboard-input-enabled: true;",
+        );
+        contents = contents.replace(
+            "border-width: root.keyboard-input-enabled && index == root.popup-index",
+            "border-width: SettingsStyle.keyboard-mode && index == root.popup-index",
+        );
+        let destination = out.join("reader-dropdown.slint");
+        if std::fs::read_to_string(&destination).ok().as_deref() != Some(&contents) {
+            std::fs::write(&destination, contents).expect("write adapted Kit dropdown");
+        }
+        return destination;
+    }
     for (old, new) in [
         (
             "    function open_popup()",

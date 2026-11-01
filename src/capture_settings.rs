@@ -67,6 +67,33 @@ impl From<CaptureFormat> for i32 {
     }
 }
 
+/// Existing destination handling for saved pages and screencaps.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "i32", into = "i32")]
+#[repr(i32)]
+pub enum ConflictPolicy {
+    #[default]
+    Ask = 0,
+    Overwrite = 1,
+    DoNothing = 2,
+}
+impl TryFrom<i32> for ConflictPolicy {
+    type Error = &'static str;
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Ask),
+            1 => Ok(Self::Overwrite),
+            2 => Ok(Self::DoNothing),
+            _ => Err("unsupported image conflict policy"),
+        }
+    }
+}
+impl From<ConflictPolicy> for i32 {
+    fn from(value: ConflictPolicy) -> Self {
+        value as Self
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CapturePreferences {
@@ -76,6 +103,7 @@ pub struct CapturePreferences {
     pub webp_quality: u8,
     pub avif_quality: u8,
     pub series_folders: bool,
+    pub conflict: ConflictPolicy,
 }
 
 impl Default for CapturePreferences {
@@ -87,6 +115,7 @@ impl Default for CapturePreferences {
             webp_quality: 85,
             avif_quality: 85,
             series_folders: false,
+            conflict: ConflictPolicy::Ask,
         }
     }
 }
@@ -106,12 +135,17 @@ impl CapturePreferences {
         settings.set_webp_quality(f32::from(self.webp_quality));
         settings.set_avif_quality(f32::from(self.avif_quality));
         settings.set_series_folders(self.series_folders);
+        settings.set_conflict_policy(self.conflict.into());
     }
 
     fn change(&mut self, key: &str, value: i32) -> bool {
         match key {
             "format" => match CaptureFormat::try_from(value) {
                 Ok(format) => self.format = format,
+                Err(_) => return false,
+            },
+            "conflict" => match ConflictPolicy::try_from(value) {
+                Ok(policy) => self.conflict = policy,
                 Err(_) => return false,
             },
             "resolution" => match CaptureResolution::try_from(value) {
@@ -146,6 +180,7 @@ pub fn preferences(ui: &AppWindow) -> CapturePreferences {
         webp_quality: quality(settings.get_webp_quality()),
         avif_quality: quality(settings.get_avif_quality()),
         series_folders: settings.get_series_folders(),
+        conflict: ConflictPolicy::try_from(settings.get_conflict_policy()).unwrap_or_default(),
     }
 }
 
@@ -218,6 +253,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn legacy_capture_preferences_default_to_ask_and_reject_unknown_policy() {
+        let old = r#"{"format":0,"resolution":0,"jpeg_quality":85,"webp_quality":85,"avif_quality":85,"series_folders":false}"#;
+        let loaded: CapturePreferences = serde_json::from_str(old).unwrap();
+        assert_eq!(loaded.conflict, ConflictPolicy::Ask);
+        for policy in [
+            ConflictPolicy::Ask,
+            ConflictPolicy::Overwrite,
+            ConflictPolicy::DoNothing,
+        ] {
+            let next = CapturePreferences {
+                conflict: policy,
+                ..loaded
+            };
+            assert_eq!(
+                serde_json::from_str::<CapturePreferences>(&serde_json::to_string(&next).unwrap())
+                    .unwrap(),
+                next
+            );
+        }
+        assert!(
+            serde_json::from_str::<CapturePreferences>(
+                &old.replace("false}", "false,\"conflict\":3}")
+            )
+            .is_err()
+        );
+    }
+    #[test]
     fn failed_capture_save_restores_draft_and_effective_preferences() {
         i_slint_backend_testing::init_no_event_loop();
         let ui = AppWindow::new().unwrap();
@@ -229,6 +291,7 @@ mod tests {
             resolution: CaptureResolution::Chapter,
             jpeg_quality: 70,
             series_folders: true,
+            conflict: ConflictPolicy::Overwrite,
             ..previous
         };
         next.apply(&ui);

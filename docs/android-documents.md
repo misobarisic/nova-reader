@@ -76,8 +76,19 @@ After Android startup, call:
   MIME type. The suggested filename is sanitized and receives its extension.
 - `publish_image(staged_path, suggested_name, mime, series_folder, callback)` for
   reader Save actions: API 29+ saves directly to `Pictures/Nova Reader/`, or its
-  optional per-series subfolder. API 26-28 opens the image destination picker.
+  optional per-series subfolder. API 26–28 requests a document-tree folder once
+  and persists its read/write grant, then saves under its Nova Reader subfolder.
   `series_folder` is `Option<&str>`; `None` or empty uses the common folder.
+- `publish_image_with_policy(staged_path, suggested_name, mime, series_folder,
+  ImageSaveOptions { policy, resolver, current }, callback)` is Reader's current
+  save path. Ask resolves asynchronously through the Slint conflict sheet;
+  Overwrite and Do nothing are persisted automatic policies. Add number starts
+  at `(2)` and retries unused exact names. Names are bounded to 160 UTF-8 bytes,
+  series folders to 96. The current-generation callback is checked before saving
+  and while streaming. MediaStore queries only exact app-owned paths/names and
+  rejects provider renaming. Overwrites back up old bytes before modification;
+  a failed provider rollback retains one bounded private backup and reports the
+  failure instead of silently losing it.
 - `copy_image(staged_path, mime, callback)` to place an image content URI on the
   Android clipboard. All image functions accept
   `FnOnce(Result<(), String>) + Send + 'static`; the caller removes the original

@@ -3,12 +3,12 @@ use crate::{AppWindow, services::Services};
 use nova_reader_ui::backend_text as text;
 use reader_domain::Series;
 use reader_engine::{DecodeLimits, decode_display_image};
-use reader_sources::{CancelToken, SourceAvailability};
+use reader_sources::{CancelToken, PageAccess, SourceAvailability};
 use sha2::{Digest, Sha256};
 use slint::{Image, Model, Rgba8Pixel, SharedPixelBuffer};
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashSet},
     fs,
     io::Read,
     path::{Path, PathBuf},
@@ -24,9 +24,7 @@ const MAX_REQUESTS: usize = 32;
 const ENCODED_LIMIT: usize = 8 * 1024 * 1024;
 // Nova's decoded LRU default and retained-card allowance (media/src/cache.rs).
 const DECODED_CACHE_LIMIT: usize = 128 * 1024 * 1024;
-const UNLOAD_EXTRA_CARDS: usize = 48;
-const DISK_CACHE_LIMIT: u64 = 32 * 1024 * 1024;
-const DISK_CACHE_FILES: usize = 256;
+const UNLOAD_EXTRA_CARDS: usize = nova_cache::UNLOAD_EXTRA_CARDS;
 const COVER_LIMITS: DecodeLimits = DecodeLimits {
     max_encoded_bytes: ENCODED_LIMIT,
     max_width: 8192,
@@ -160,12 +158,20 @@ pub struct ArtworkLoader {
     shared: Arc<Shared>,
     ui: slint::Weak<AppWindow>,
     id: u64,
+    encoded: nova_cache::blob::Cache,
 }
 
 impl ArtworkLoader {
     pub fn new(services: Services, ui: slint::Weak<AppWindow>, cache_dir: PathBuf) -> Self {
         let (sender, receiver) = mpsc::sync_channel::<Task>(MAX_REQUESTS);
         let shared = Arc::new(Shared::default());
+        shared
+            .decoded
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .set_budget(crate::image_storage::memory_limit_bytes());
+        let encoded = nova_cache::blob::Cache::new(cache_dir, ENCODED_LIMIT as u64);
+        let worker_encoded = encoded.clone();
         let id = NEXT_LOADER.fetch_add(1, Ordering::Relaxed);
         let worker_shared = shared.clone();
         let worker_ui = ui.clone();
@@ -174,18 +180,24 @@ impl ArtworkLoader {
             .name("reader-artwork".into())
             .spawn(move || {
                 let mut maintenance_status = None::<String>;
-                prune_disk(&cache_dir);
+                if crate::image_storage::policy_snapshot().disk_enabled {
+                    migrate_legacy(&worker_encoded);
+                }
+                // The real Nova GC owns its timer, index and incremental policy.
+                // Its joining Drop remains on this worker, never on the UI.
+                let _gc = nova_cache::gc::start(
+                    worker_encoded.directory().to_owned(),
+                    Arc::new(ArtworkBackend {
+                        services: services.clone(),
+                        shared: worker_shared.clone(),
+                    }),
+                )
+                .ok();
                 loop {
                     if let Some(command) = worker_shared.take_maintenance() {
                         if command.clear {
-                            maintenance_status =
-                                Some(match clear_cache(&cache_dir, &worker_shared.decoded) {
-                                    Ok(()) => text::tr("Image cache cleared."),
-                                    Err(error) => format!(
-                                        "{}: {error}",
-                                        text::tr("Could not clear image cache")
-                                    ),
-                                });
+                            clear_cache(&worker_encoded, &worker_shared.decoded);
+                            maintenance_status = Some(text::tr("Image cache cleared."));
                             // Old queued tasks are discarded by the generation guard.
                             // Do not unblock requests if a newer clear is pending.
                             let pending = worker_shared
@@ -196,7 +208,7 @@ impl ArtworkLoader {
                                 worker_shared.clearing.store(false, Ordering::Release);
                             }
                         }
-                        let usage = disk_usage(&cache_dir);
+                        let usage = cache_usage(&worker_encoded);
                         let shared = worker_shared.clone();
                         let status = maintenance_status.clone();
                         let _ = worker_ui.upgrade_in_event_loop(move |ui| {
@@ -209,22 +221,11 @@ impl ArtworkLoader {
                             {
                                 return;
                             }
-                            match usage {
-                                Ok((bytes, files)) => {
-                                    ui.set_image_cache_info(
-                                        text::image_cache_usage(bytes, files).into(),
-                                    );
-                                    if let Some(status) = status {
-                                        ui.set_image_cache_status(status.into());
-                                    }
-                                }
-                                Err(error) => ui.set_image_cache_status(
-                                    format!(
-                                        "{}: {error}",
-                                        text::tr("Could not inspect image cache.")
-                                    )
-                                    .into(),
-                                ),
+                            ui.set_image_cache_info(
+                                text::image_cache_usage(usage.0, usage.1).into(),
+                            );
+                            if let Some(status) = status {
+                                ui.set_image_cache_status(status.into());
                             }
                             ui.set_image_cache_busy(false);
                         });
@@ -238,7 +239,7 @@ impl ArtworkLoader {
                     if !worker_shared.current(&task) {
                         continue;
                     }
-                    let result = load(&services, &cache_dir, &worker_shared, &task);
+                    let result = load(&services, &worker_encoded, &worker_shared, &task);
                     if !worker_shared.current(&task) {
                         continue;
                     }
@@ -276,6 +277,7 @@ impl ArtworkLoader {
             shared,
             ui,
             id,
+            encoded,
         }
     }
 
@@ -303,7 +305,35 @@ impl ArtworkLoader {
     pub fn cached_image(&self, series: &Series) -> Option<Image> {
         // Weak upgrades also enforce the component's event-loop thread.
         self.ui.upgrade()?;
-        cached_image(&self.shared, self.id, &key(series), &series.id.source_id)
+        let key = key(series);
+        let image = cached_image(&self.shared, self.id, &key, &series.id.source_id)?;
+        if let Some(permit) = self
+            .shared
+            .decoded
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .permits
+            .get(&key)
+            && let Some(encoded_key) = permit.encoded_key(&key)
+        {
+            self.encoded.touch(&encoded_key);
+        }
+        Some(image)
+    }
+
+    /// Apply a committed policy without filesystem access on the event loop.
+    pub fn apply_policy(&self) {
+        let evicted = self
+            .shared
+            .decoded
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .set_budget(crate::image_storage::memory_limit_bytes());
+        if let Some(ui) = self.ui.upgrade() {
+            forget_images(&ui, self.id, &evicted);
+            trim_ui(&ui, self.id, &self.shared);
+        }
+        nova_cache::gc::wake();
     }
 
     /// Read actual poster cache usage on the worker. Repeated requests coalesce.
@@ -354,8 +384,7 @@ impl ArtworkLoader {
             .decoded
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .protected
-            .insert(key.clone());
+            .protect(key.clone());
         if let Some(image) = self.cached_image(series) {
             if let Some(ui) = self.ui.upgrade() {
                 publish(&ui, &key, image);
@@ -435,10 +464,15 @@ fn cached_image(shared: &Shared, id: u64, key: &str, source_id: &str) -> Option<
 }
 
 fn admit(ui: &AppWindow, id: u64, shared: &Shared, key: &str, loaded: Loaded) {
-    if !loaded.access.is_available() {
+    if !loaded.is_current() {
         return;
     }
     let source_id = loaded.source_id.clone();
+    let uncached_pixels = loaded
+        .proof
+        .as_ref()
+        .is_some_and(|proof| proof.scope.is_none())
+        .then(|| loaded.pixels.clone());
     let evicted = shared
         .decoded
         .lock()
@@ -448,6 +482,16 @@ fn admit(ui: &AppWindow, id: u64, shared: &Shared, key: &str, loaded: Loaded) {
     // turn; the LRU budget cannot hide a second cache of older model images.
     forget_images(ui, id, &evicted);
     if let Some(image) = cached_image(shared, id, key, &source_id) {
+        publish(ui, key, image);
+    } else if let Some(pixels) = uncached_pixels {
+        let image = Image::from_rgba8(pixels);
+        UI_IMAGES.with(|images| {
+            images
+                .borrow_mut()
+                .entry(id)
+                .or_default()
+                .insert(key.into(), image.clone());
+        });
         publish(ui, key, image);
     }
     trim_ui(ui, id, shared);
@@ -530,25 +574,85 @@ fn decode(bytes: &[u8]) -> Result<Pixels, String> {
     ))
 }
 
+#[derive(Clone)]
+struct RequestProof {
+    access: PageAccess,
+    url: String,
+    scope: Option<String>,
+}
+impl RequestProof {
+    fn new(source: &reader_sources::Source, url: &str) -> Result<Self, String> {
+        let access = source.page_access();
+        let scope = access
+            .page_cache_scope(url, &BTreeMap::new())
+            .map_err(|e| e.to_string())?;
+        Ok(Self {
+            access,
+            url: url.into(),
+            scope,
+        })
+    }
+    fn current(&self) -> bool {
+        self.access
+            .page_cache_scope(&self.url, &BTreeMap::new())
+            .is_ok_and(|scope| scope == self.scope)
+    }
+    fn encoded_key(&self, key: &str) -> Option<String> {
+        self.scope.as_ref().map(|scope| format!("{key}:{scope}"))
+    }
+}
+
 struct Loaded {
     pixels: Pixels,
     source_id: String,
     access: SourceAvailability,
+    proof: Option<RequestProof>,
+}
+impl Loaded {
+    fn is_current(&self) -> bool {
+        self.access.is_available() && self.proof.as_ref().is_none_or(RequestProof::current)
+    }
 }
 
+struct Permit {
+    source_id: String,
+    access: SourceAvailability,
+    proof: Option<RequestProof>,
+}
+impl Permit {
+    fn current(&self) -> bool {
+        self.access.is_available() && self.proof.as_ref().is_none_or(RequestProof::current)
+    }
+    fn reusable(&self) -> bool {
+        self.current()
+            && self
+                .proof
+                .as_ref()
+                .is_none_or(|proof| proof.scope.is_some())
+    }
+    fn encoded_key(&self, key: &str) -> Option<String> {
+        if !self.reusable() {
+            return None;
+        }
+        self.proof
+            .as_ref()
+            .map_or_else(|| Some(key.into()), |proof| proof.encoded_key(key))
+    }
+}
+
+/// Reader owns source authorization and UI admission. Nova Kit owns the actual
+/// shared-pixel LRU, its byte accounting, access clock and eviction selection.
 struct DecodedCache {
-    entries: VecDeque<(String, Loaded)>,
-    bytes: usize,
-    max_bytes: usize,
+    inner: nova_cache::DecodedCache,
+    permits: BTreeMap<String, Permit>,
     protected: BTreeSet<String>,
 }
 
 impl Default for DecodedCache {
     fn default() -> Self {
         Self {
-            entries: VecDeque::new(),
-            bytes: 0,
-            max_bytes: DECODED_CACHE_LIMIT,
+            inner: nova_cache::DecodedCache::new(DECODED_CACHE_LIMIT),
+            permits: BTreeMap::new(),
             protected: BTreeSet::new(),
         }
     }
@@ -556,120 +660,160 @@ impl Default for DecodedCache {
 
 impl DecodedCache {
     fn get(&mut self, key: &str, source_id: &str) -> Option<Pixels> {
-        let index = self.entries.iter().position(|(entry, _)| entry == key)?;
-        let entry = &self.entries[index].1;
-        if entry.source_id != source_id || !entry.access.is_available() {
+        let permit = self.permits.get(key)?;
+        if permit.source_id != source_id || !permit.reusable() {
             return None;
         }
-        let entry = self.entries.remove(index)?;
-        let pixels = entry.1.pixels.clone();
-        self.entries.push_back(entry);
-        Some(pixels)
+        self.inner.get(key)
     }
 
     fn insert(&mut self, key: String, loaded: Loaded) -> BTreeSet<String> {
-        let mut evicted = BTreeSet::new();
-        if loaded.pixels.as_bytes().len() > self.max_bytes {
-            return evicted;
+        let Loaded {
+            pixels,
+            source_id,
+            access,
+            proof,
+        } = loaded;
+        let evicted = self.inner.insert(key.clone(), pixels);
+        for key in &evicted {
+            self.permits.remove(key);
         }
-        if let Some(index) = self.entries.iter().position(|(entry, _)| entry == &key)
-            && let Some((_, old)) = self.entries.remove(index)
-        {
-            self.bytes -= old.pixels.as_bytes().len();
+        if self.inner.contains(&key) {
+            self.permits.insert(
+                key,
+                Permit {
+                    source_id,
+                    access,
+                    proof,
+                },
+            );
+        } else {
+            self.permits.remove(&key);
         }
-        while self.bytes + loaded.pixels.as_bytes().len() > self.max_bytes {
-            let index = self
-                .entries
-                .iter()
-                .position(|(key, _)| !self.protected.contains(key))
-                .unwrap_or(0);
-            let Some((key, old)) = self.entries.remove(index) else {
-                break;
-            };
-            self.bytes -= old.pixels.as_bytes().len();
-            evicted.insert(key);
-        }
-        self.bytes += loaded.pixels.as_bytes().len();
-        self.entries.push_back((key, loaded));
-        evicted
+        evicted.into_iter().collect()
     }
 
     fn keys(&self) -> BTreeSet<String> {
-        self.entries.iter().map(|(key, _)| key.clone()).collect()
+        self.inner.keys_by_recency().into_iter().collect()
+    }
+
+    fn protect(&mut self, key: String) {
+        self.protected.insert(key);
+        self.inner
+            .set_protected(self.protected.iter().cloned().collect());
     }
 
     fn retain_visible(&mut self, desired: &BTreeSet<String>) {
         self.protected = desired.clone();
+        let evicted = self.inner.set_protected(desired.iter().cloned().collect());
+        for key in evicted {
+            self.permits.remove(&key);
+        }
         for key in desired {
-            if let Some(index) = self.entries.iter().position(|(entry, _)| entry == key)
-                && let Some(entry) = self.entries.remove(index)
-            {
-                self.entries.push_back(entry);
-            }
+            let _ = self.inner.get(key);
         }
     }
 
     fn ui_keys(&self, selected: &str) -> BTreeSet<String> {
-        let mut keep = self
-            .entries
+        let available = |key: &str| self.permits.get(key).is_some_and(Permit::current);
+        let recent = self.inner.keys_by_recency();
+        let mut keep = recent
             .iter()
-            .filter(|(key, entry)| {
-                entry.access.is_available() && (self.protected.contains(key) || key == selected)
+            .filter(|key| {
+                available(key) && (self.protected.contains(*key) || key.as_str() == selected)
             })
-            .map(|(key, _)| key.clone())
+            .cloned()
             .collect::<BTreeSet<_>>();
-        let extra = self
-            .entries
-            .iter()
+        let extra = recent
+            .into_iter()
             .rev()
-            .filter(|(key, entry)| entry.access.is_available() && !keep.contains(key))
+            .filter(|key| available(key) && !keep.contains(key))
             .take(UNLOAD_EXTRA_CARDS)
-            .map(|(key, _)| key.clone())
             .collect::<Vec<_>>();
         keep.extend(extra);
         keep
+    }
+
+    fn set_budget(&mut self, bytes: usize) -> BTreeSet<String> {
+        let evicted = self.inner.set_budget(bytes);
+        for key in &evicted {
+            self.permits.remove(key);
+        }
+        evicted.into_iter().collect()
+    }
+
+    fn clear(&mut self) {
+        self.inner.clear();
+        self.permits.clear();
+        self.protected.clear();
     }
 }
 
 fn load(
     services: &Services,
-    cache_dir: &Path,
+    encoded: &nova_cache::blob::Cache,
     shared: &Shared,
     task: &Task,
 ) -> Result<Loaded, String> {
     task.cancel.check().map_err(|e| e.to_string())?;
     // Cached artwork must still respect source availability/adult/profile gates.
     let source = services.source(&task.source_id)?;
+    load_source(source, encoded, shared, task)
+}
+
+fn load_source(
+    source: reader_sources::Source,
+    encoded: &nova_cache::blob::Cache,
+    shared: &Shared,
+    task: &Task,
+) -> Result<Loaded, String> {
+    task.cancel.check().map_err(|e| e.to_string())?;
+    let proof = RequestProof::new(&source, &task.url)?;
+    let encoded_key = proof.encoded_key(&task.key);
     let access = source.availability();
     {
         let mut cache = shared.decoded.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((_, entry)) = cache
-            .entries
-            .iter_mut()
-            .find(|(key, entry)| key == &task.key && entry.source_id == task.source_id)
-        {
+        if let Some(entry) = cache.permits.get_mut(&task.key).filter(|entry| {
+            entry.source_id == task.source_id
+                && entry
+                    .proof
+                    .as_ref()
+                    .is_some_and(|old| old.scope == proof.scope && old.url == proof.url)
+        }) {
             entry.access = access.clone();
+            entry.proof = Some(proof.clone());
         }
-        if let Some(pixels) = cache.get(&task.key, &task.source_id) {
+        let same_scope = cache.permits.get(&task.key).is_some_and(|entry| {
+            entry
+                .proof
+                .as_ref()
+                .is_some_and(|old| old.scope == proof.scope && old.url == proof.url)
+        });
+        if same_scope && let Some(pixels) = cache.get(&task.key, &task.source_id) {
+            if let Some(key) = &encoded_key {
+                encoded.touch(key);
+            }
             return Ok(Loaded {
                 pixels,
                 source_id: task.source_id.clone(),
                 access,
+                proof: Some(proof),
             });
         }
     }
-    let path = cache_dir.join(format!("{}.cover", task.key));
-    if let Some(bytes) = read_cached(&path) {
+    let settings = crate::image_storage::settings_snapshot();
+    let epoch = encoded.generation();
+    if settings.policy.disk_enabled
+        && let Some(encoded_key) = &encoded_key
+        && let Some(pixels) = read_cached_pixels(encoded, encoded_key)
+    {
         task.cancel.check().map_err(|e| e.to_string())?;
-        if let Ok(pixels) = decode(&bytes) {
-            task.cancel.check().map_err(|e| e.to_string())?;
-            return Ok(Loaded {
-                pixels,
-                source_id: task.source_id.clone(),
-                access,
-            });
-        }
-        let _ = fs::remove_file(&path);
+        return Ok(Loaded {
+            pixels,
+            source_id: task.source_id.clone(),
+            access,
+            proof: Some(proof),
+        });
     }
     let bytes = source
         .fetch_page(&task.url, &BTreeMap::new(), &task.cancel)
@@ -677,174 +821,297 @@ fn load(
     task.cancel.check().map_err(|e| e.to_string())?;
     let pixels = decode(&bytes)?;
     task.cancel.check().map_err(|e| e.to_string())?;
-    write_fetched(
-        cache_dir,
-        &path,
-        &bytes,
-        &task.cancel,
-        crate::image_storage::load().cache,
-    );
+    if !proof.current() {
+        return Err("Artwork authorization context changed".into());
+    }
+    if settings.policy.disk_enabled
+        && let Some(encoded_key) = &encoded_key
+    {
+        write_fetched(
+            encoded,
+            encoded_key,
+            epoch,
+            &bytes,
+            settings.cache,
+            settings.policy.poster_max_side,
+            || shared.current(task) && access.is_available() && proof.current(),
+        );
+    }
     Ok(Loaded {
         pixels,
         source_id: task.source_id.clone(),
         access,
+        proof: Some(proof),
     })
 }
 
-/// Compression applies only when a newly fetched image is first persisted.
-/// A changed preference never rewrites either cache hits or an existing file.
+fn read_cached_pixels(cache: &nova_cache::blob::Cache, key: &str) -> Option<Pixels> {
+    let decoded = RefCell::new(None);
+    // Full validation happens exactly once on the worker. A cancelled request
+    // must not make Kit mistake a valid existing variant for a corrupt one.
+    cache
+        .get(key, |bytes| {
+            let dimensions = inspect(bytes)?;
+            *decoded.borrow_mut() = Some(decode(bytes)?);
+            Ok(dimensions)
+        })
+        .ok()
+        .flatten()?;
+    decoded.into_inner()
+}
+
+fn inspect(bytes: &[u8]) -> Result<(u32, u32), String> {
+    let dimensions =
+        reader_engine::inspect_image(bytes, COVER_LIMITS).map_err(|e| e.to_string())?;
+    Ok((dimensions.width, dimensions.height))
+}
+
+/// Only a newly fetched image is transformed; Kit owns atomic publication and
+/// refuses stale epochs or overwriting an existing validated variant.
 fn write_fetched(
-    cache_dir: &Path,
-    path: &Path,
+    cache: &nova_cache::blob::Cache,
+    key: &str,
+    epoch: u64,
     bytes: &[u8],
-    cancel: &CancelToken,
     compression: crate::image_storage::ImageCompression,
+    max_side: Option<u32>,
+    still_current: impl Fn() -> bool,
 ) {
-    if cancel.is_cancelled() || path.exists() || bytes.len() > ENCODED_LIMIT {
+    if !still_current() || bytes.len() > ENCODED_LIMIT {
         return;
     }
-    let converted = compression.enabled.then(|| {
-        crate::reader_export::reencode_image(
-            bytes,
+    let converted = transform_new_image(bytes, compression, max_side);
+    let stored = match &converted {
+        Ok(Some(bytes)) if bytes.len() <= ENCODED_LIMIT => bytes.as_slice(),
+        _ => bytes,
+    };
+    // Optional disk failures cannot hide a successfully decoded source poster.
+    let _ = cache.put_if_current(key, stored, epoch, inspect, still_current);
+}
+
+/// Explicit resolution edits use Nova's actual aspect-preserving Triangle fit.
+/// Original resolution avoids this intermediate conversion entirely.
+fn transform_new_image(
+    bytes: &[u8],
+    compression: crate::image_storage::ImageCompression,
+    max_side: Option<u32>,
+) -> Result<Option<Vec<u8>>, String> {
+    let resized = if let Some(max_side) = max_side {
+        let image = reader_engine::decode_image(bytes, COVER_LIMITS).map_err(|e| e.to_string())?;
+        if image.width().max(image.height()) > max_side {
+            let image =
+                nova_cache::fit_rgba(image, Some(max_side)).ok_or("Invalid artwork resolution")?;
+            let mut png = Vec::new();
+            use image::ImageEncoder;
+            image::codecs::png::PngEncoder::new(&mut png)
+                .write_image(
+                    image.as_raw(),
+                    image.width(),
+                    image.height(),
+                    image::ExtendedColorType::Rgba8,
+                )
+                .map_err(|e| e.to_string())?;
+            Some(png)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    if compression.enabled {
+        // JPEG alpha/unsupported codec failures retain the lossless resized
+        // source when available, otherwise the admitted original bytes.
+        match crate::reader_export::reencode_image(
+            resized.as_deref().unwrap_or(bytes),
             compression.format,
             compression.quality,
             COVER_LIMITS,
-        )
-    });
-    // A valid poster remains available when a particular encoding cannot be
-    // produced within its bounds. Conversion never relaxes the source limits.
-    let stored = match converted {
-        Some(Ok(ref encoded)) if encoded.len() <= ENCODED_LIMIT => encoded.as_slice(),
-        _ => bytes,
-    };
-    if cancel.is_cancelled() || fs::create_dir_all(cache_dir).is_err() {
-        return;
+        ) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(_) => Ok(resized),
+        }
+    } else {
+        Ok(resized)
     }
-    let temporary = path.with_extension("pending");
-    if !cancel.is_cancelled()
-        && fs::write(&temporary, stored).is_ok()
-        && !cancel.is_cancelled()
-        && !path.exists()
-    {
-        let _ = fs::rename(&temporary, path);
-    }
-    let _ = fs::remove_file(temporary);
-    prune_disk(cache_dir);
 }
 
-fn read_cached(path: &Path) -> Option<Vec<u8>> {
-    let file = fs::File::open(path).ok()?;
-    if file.metadata().ok()?.len() > ENCODED_LIMIT as u64 {
+fn clear_cache(cache: &nova_cache::blob::Cache, decoded: &Mutex<DecodedCache>) {
+    decoded.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    cache.clear();
+    for path in legacy_paths(cache) {
         let _ = fs::remove_file(path);
-        return None;
-    }
-    let mut bytes = Vec::new();
-    file.take(ENCODED_LIMIT as u64 + 1)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    (bytes.len() <= ENCODED_LIMIT).then_some(bytes)
-}
-
-fn cache_file(path: &Path) -> bool {
-    path.extension()
-        .is_some_and(|ext| ext == "cover" || ext == "pending")
-        && path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .is_some_and(|stem| {
-                stem.len() == 64 && stem.bytes().all(|byte| byte.is_ascii_hexdigit())
-            })
-}
-
-fn disk_usage(directory: &Path) -> std::io::Result<(u64, usize)> {
-    let entries = match fs::read_dir(directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((0, 0)),
-        Err(error) => return Err(error),
-    };
-    let mut bytes = 0u64;
-    let mut files = 0;
-    for entry in entries {
-        let entry = entry?;
-        if cache_file(&entry.path()) {
-            let metadata = entry.metadata()?;
-            if metadata.is_file() {
-                bytes = bytes.saturating_add(metadata.len());
-                files += 1;
-            }
-        }
-    }
-    Ok((bytes, files))
-}
-
-fn clear_cache(directory: &Path, decoded: &Mutex<DecodedCache>) -> std::io::Result<()> {
-    {
-        let mut decoded = decoded.lock().unwrap_or_else(|e| e.into_inner());
-        decoded.entries.clear();
-        decoded.bytes = 0;
-        decoded.protected.clear();
-    }
-    let entries = match fs::read_dir(directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error),
-    };
-    let mut failure = None;
-    for entry in entries {
-        let result = (|| {
-            let entry = entry?;
-            if cache_file(&entry.path()) {
-                let kind = entry.file_type()?;
-                if kind.is_file() || kind.is_symlink() {
-                    fs::remove_file(entry.path())?;
-                }
-            }
-            Ok(())
-        })();
-        if let Err(error) = result {
-            failure.get_or_insert(error);
-        }
-    }
-    match failure {
-        Some(error) => Err(error),
-        None => Ok(()),
     }
 }
 
-fn prune_disk(directory: &Path) {
-    let Ok(entries) = fs::read_dir(directory) else {
-        return;
-    };
-    let mut files = entries
-        .filter_map(Result::ok)
+fn legacy_paths(cache: &nova_cache::blob::Cache) -> Vec<PathBuf> {
+    fs::read_dir(cache.directory())
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
         .filter_map(|entry| {
             let path = entry.path();
-            if !cache_file(&path) {
-                return None;
+            let key = path.file_stem()?.to_str()?;
+            if key.len() == 64
+                && key.bytes().all(|b| b.is_ascii_hexdigit())
+                && path
+                    .extension()
+                    .is_some_and(|ext| ext == "cover" || ext == "pending")
+                && fs::symlink_metadata(&path)
+                    .is_ok_and(|stat| stat.is_file() || stat.file_type().is_symlink())
+            {
+                Some(path)
+            } else {
+                None
             }
-            // A process interrupted before rename must not leave uncounted
-            // encoded files behind on every subsequent launch.
-            if path.extension().is_some_and(|ext| ext == "pending") {
-                let _ = fs::remove_file(path);
-                return None;
-            }
-            let metadata = entry.metadata().ok()?;
-            metadata
-                .is_file()
-                .then(|| (metadata.modified().ok(), metadata.len(), path))
         })
-        .collect::<Vec<_>>();
-    files.sort_by_key(|(modified, _, _)| *modified);
-    let mut bytes: u64 = files.iter().map(|(_, size, _)| size).sum();
-    let mut count = files.len();
-    for (_, size, path) in files {
-        if bytes <= DISK_CACHE_LIMIT && count <= DISK_CACHE_FILES {
-            break;
+        .collect()
+}
+fn cache_usage(cache: &nova_cache::blob::Cache) -> (u64, usize) {
+    let mut usage = cache.usage();
+    for path in legacy_paths(cache) {
+        if let Ok(stat) = fs::symlink_metadata(path)
+            && stat.is_file()
+        {
+            usage.0 = usage.0.saturating_add(stat.len());
+            usage.1 += 1;
         }
-        if fs::remove_file(path).is_ok() {
-            bytes = bytes.saturating_sub(size);
-            count -= 1;
+    }
+    usage
+}
+
+/// Compatibility with Reader's previous raw files is deliberately limited to
+/// importing that format once. All subsequent ownership and maintenance is Kit.
+fn migrate_legacy(cache: &nova_cache::blob::Cache) {
+    let Ok(entries) = fs::read_dir(cache.directory()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(key) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        if key.len() != 64 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
+            continue;
         }
+        let Ok(stat) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        let legacy = path
+            .extension()
+            .is_some_and(|ext| ext == "cover" || ext == "pending");
+        if legacy && stat.file_type().is_symlink() {
+            // Dispose only of the owned link, never read or remove its target.
+            let _ = fs::remove_file(&path);
+            continue;
+        }
+        if !stat.is_file() {
+            continue;
+        }
+        if path.extension().is_some_and(|ext| ext == "pending") {
+            let _ = fs::remove_file(&path);
+        } else if path.extension().is_some_and(|ext| ext == "cover") {
+            let valid = (|| {
+                if stat.len() > ENCODED_LIMIT as u64 {
+                    return None;
+                }
+                let mut bytes = Vec::new();
+                fs::File::open(&path)
+                    .ok()?
+                    .take(ENCODED_LIMIT as u64 + 1)
+                    .read_to_end(&mut bytes)
+                    .ok()?;
+                inspect(&bytes).ok()?;
+                Some(bytes)
+            })();
+            if valid.as_ref().is_none_or(|bytes| {
+                cache
+                    .put_if_current(key, bytes, cache.generation(), inspect, || true)
+                    .is_ok()
+            }) {
+                let _ = fs::remove_file(&path);
+            }
+        }
+    }
+}
+
+// The application adapter follows Nova's actual app/cache_gc.rs markers and
+// Library retention policy; cache traversal, scheduling and eviction live in Kit.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Marker {
+    directory: PathBuf,
+    completed: u64,
+}
+struct ArtworkBackend {
+    services: Services,
+    shared: Arc<Shared>,
+}
+impl nova_cache::gc::Backend for ArtworkBackend {
+    fn policy(&self) -> nova_cache::gc::DiskPolicy {
+        crate::image_storage::cache_policy(crate::image_storage::CacheKind::Artwork)
+    }
+    fn protected_urls(&self) -> std::io::Result<HashSet<String>> {
+        let decoded = self
+            .shared
+            .decoded
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        Ok(decoded
+            .protected
+            .iter()
+            .filter_map(|key| {
+                decoded
+                    .permits
+                    .get(key)
+                    .and_then(|permit| permit.encoded_key(key))
+            })
+            .collect())
+    }
+    fn last_cleanup(&self, directory: &Path) -> std::io::Result<Option<u64>> {
+        let raw = nova_storage::try_get_str("reader:cache-gc:artwork:v1")
+            .map_err(std::io::Error::other)?;
+        Ok(raw
+            .and_then(|raw| serde_json::from_str::<Marker>(&raw).ok())
+            .filter(|marker| marker.directory == directory)
+            .map(|marker| marker.completed))
+    }
+    fn save_cleanup(&self, directory: &Path, completed: u64) -> std::io::Result<()> {
+        nova_storage::try_set_str(
+            "reader:cache-gc:artwork:v1",
+            &serde_json::to_string(&Marker {
+                directory: directory.into(),
+                completed,
+            })?,
+        )
+        .map_err(std::io::Error::other)
+    }
+    fn preferred_urls(&self) -> std::io::Result<HashSet<String>> {
+        let state = self
+            .services
+            .domain
+            .snapshot()
+            .map_err(std::io::Error::other)?;
+        Ok(state
+            .series
+            .iter()
+            .filter(|series| state.library.iter().any(|entry| entry.series == series.id))
+            .filter_map(|series| {
+                let key = key(series);
+                if key.is_empty() {
+                    return None;
+                }
+                let source = self.services.source(&series.id.source_id).ok()?;
+                RequestProof::new(&source, series.cover_url.as_deref()?)
+                    .ok()?
+                    .encoded_key(&key)
+            })
+            .collect())
+    }
+    fn completed(&self, _: nova_cache::gc::Report) {
+        self.shared.queue_maintenance(false);
+    }
+    fn failed(&self, error: &std::io::Error) {
+        eprintln!("artwork cache maintenance failed: {error}");
     }
 }
 
@@ -974,12 +1241,16 @@ mod tests {
     }
 
     fn package(version: &str) -> Vec<u8> {
-        use std::io::{Cursor, Write};
         let domains = if version == "1.0.0" {
             vec!["example.test"]
         } else {
             vec!["example.test", "other.test"]
         };
+        package_domains(version, domains)
+    }
+
+    fn package_domains(version: &str, domains: Vec<&str>) -> Vec<u8> {
+        use std::io::{Cursor, Write};
         let manifest = serde_json::json!({"formatVersion":2,"contract":"nova-reader1","api":"^1.0","id":"fixture","name":"Fixture","version":version,"language":"en","entry":"main.js","permissions":{"domains":domains},"capabilities":["browse","search","filters","details","chapters","pages"]});
         let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
         for (name, bytes) in [
@@ -1011,16 +1282,15 @@ mod tests {
             pixels,
             source_id: "fixture".into(),
             access: access.clone(),
+            proof: None,
         }
     }
 
     #[test]
     fn decoded_lru_evicts_oldest_and_preserves_visible_pixels_within_one_budget() {
         let (_directory, _registry, access) = source_fixture();
-        let mut cache = DecodedCache {
-            max_bytes: 2 * 32 * 32 * 4,
-            ..DecodedCache::default()
-        };
+        let mut cache = DecodedCache::default();
+        cache.set_budget(2 * 32 * 32 * 4);
         cache.insert("first".into(), loaded(Pixels::new(32, 32), &access));
         cache.insert("second".into(), loaded(Pixels::new(32, 32), &access));
         assert!(cache.get("first", "fixture").is_some());
@@ -1031,7 +1301,7 @@ mod tests {
         cache.insert("fourth".into(), loaded(Pixels::new(32, 32), &access));
         assert!(cache.get("first", "fixture").is_some());
         assert!(cache.get("third", "fixture").is_none());
-        assert_eq!(cache.bytes, cache.max_bytes);
+        assert_eq!(cache.inner.stats().1, 2 * 32 * 32 * 4);
     }
 
     #[test]
@@ -1041,7 +1311,7 @@ mod tests {
         let ui = AppWindow::new().unwrap();
         let (_directory, _registry, access) = source_fixture();
         let shared = Shared::default();
-        shared.decoded.lock().unwrap().max_bytes = 2 * 32 * 32 * 4;
+        shared.decoded.lock().unwrap().set_budget(2 * 32 * 32 * 4);
         let id = NEXT_LOADER.fetch_add(1, Ordering::Relaxed);
         ui.set_items(ModelRc::new(VecModel::from(
             ["first", "second", "third"]
@@ -1083,7 +1353,7 @@ mod tests {
         assert_eq!(ui.get_items().row_data(1).unwrap().poster.size().width, 0);
         assert_eq!(ui.get_items().row_data(2).unwrap().poster.size().width, 32);
         let cache = shared.decoded.lock().unwrap();
-        assert_eq!(cache.bytes, cache.max_bytes);
+        assert_eq!(cache.inner.stats().1, 2 * 32 * 32 * 4);
         assert_eq!(
             UI_IMAGES.with(|images| images.borrow()[&id]
                 .keys()
@@ -1109,6 +1379,10 @@ mod tests {
             shared: shared.clone(),
             ui: ui.as_weak(),
             id: NEXT_LOADER.fetch_add(1, Ordering::Relaxed),
+            encoded: nova_cache::blob::Cache::new(
+                _directory.path().join("posters"),
+                ENCODED_LIMIT as u64,
+            ),
         };
         let series = (0..60)
             .map(|i| {
@@ -1130,6 +1404,31 @@ mod tests {
             .iter()
             .map(|series| loader.cached_image(series).unwrap())
             .collect::<Vec<_>>();
+        assert!(
+            !loader.encoded.directory().exists(),
+            "memory hits and GC touches cannot create disk cache files"
+        );
+        assert_eq!(
+            shared
+                .decoded
+                .lock()
+                .unwrap()
+                .inner
+                .keys_by_recency()
+                .last(),
+            Some(&key(&series[59]))
+        );
+        assert!(loader.cached_image(&series[0]).is_some());
+        assert_eq!(
+            shared
+                .decoded
+                .lock()
+                .unwrap()
+                .inner
+                .keys_by_recency()
+                .last(),
+            Some(&key(&series[0]))
+        );
         ui.set_items(ModelRc::new(VecModel::from(
             series
                 .iter()
@@ -1167,13 +1466,16 @@ mod tests {
             receiver.try_recv().is_err(),
             "cached scrolling must not enqueue fetch/decode work"
         );
-        assert_eq!(shared.decoded.lock().unwrap().bytes, 60 * 460 * 690 * 4);
-        assert!(shared.decoded.lock().unwrap().bytes <= DECODED_CACHE_LIMIT);
+        assert_eq!(
+            shared.decoded.lock().unwrap().inner.stats().1,
+            60 * 460 * 690 * 4
+        );
+        assert!(shared.decoded.lock().unwrap().inner.stats().1 <= DECODED_CACHE_LIMIT);
         drop(original);
         shared.worker_available.store(true, Ordering::Release);
         loader.clear();
         assert!(shared.take_maintenance().unwrap().clear);
-        clear_cache(&_directory.path().join("posters"), &shared.decoded).unwrap();
+        clear_cache(&loader.encoded, &shared.decoded);
         shared.clearing.store(false, Ordering::Release);
         assert!(loader.cached_image(&series[0]).is_none());
         assert!(
@@ -1202,6 +1504,10 @@ mod tests {
             shared: shared.clone(),
             ui: ui.as_weak(),
             id: NEXT_LOADER.fetch_add(1, Ordering::Relaxed),
+            encoded: nova_cache::blob::Cache::new(
+                _directory.path().join("posters"),
+                ENCODED_LIMIT as u64,
+            ),
         });
         let series = std::rc::Rc::new(
             (0..60)
@@ -1332,31 +1638,214 @@ mod tests {
     }
 
     #[test]
-    fn disk_cache_prunes_to_budget_and_rejects_large_files() {
-        let directory = tempfile::tempdir().unwrap();
-        let interrupted = directory.path().join(format!("{:064x}.pending", 99));
-        fs::write(&interrupted, b"interrupted cache write").unwrap();
-        for index in 0..5 {
-            let path = directory.path().join(format!("{index:064x}.cover"));
-            fs::File::create(path)
+    fn removed_cover_host_cannot_reauthorize_ram_disk_or_pending_publication() {
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = AppWindow::new().unwrap();
+        let (directory, registry, _) = source_fixture();
+        let source = registry.source("fixture").unwrap();
+        let item = series("fixture", "one", "https://example.test/private.png");
+        let key = key(&item);
+        let proof = RequestProof::new(&source, item.cover_url.as_deref().unwrap()).unwrap();
+        let encoded_key = proof.encoded_key(&key).unwrap();
+        let cache =
+            nova_cache::blob::Cache::new(directory.path().join("posters"), ENCODED_LIMIT as u64);
+        let bytes = png(16, 24, [130, 130, 130, 255]);
+        assert!(
+            cache
+                .put_if_current(&encoded_key, &bytes, cache.generation(), inspect, || true)
                 .unwrap()
-                .set_len(ENCODED_LIMIT as u64)
-                .unwrap();
-        }
-        prune_disk(directory.path());
-        assert!(!interrupted.exists());
-        let bytes: u64 = fs::read_dir(directory.path())
+        );
+        let shared = Shared::default();
+        let make_loaded = || Loaded {
+            pixels: Pixels::new(16, 24),
+            source_id: "fixture".into(),
+            access: source.availability(),
+            proof: Some(proof.clone()),
+        };
+        shared
+            .decoded
+            .lock()
             .unwrap()
-            .map(|entry| entry.unwrap().metadata().unwrap().len())
-            .sum();
-        assert!(bytes <= DISK_CACHE_LIMIT);
-        let large = directory.path().join("large.cover");
-        fs::File::create(&large)
+            .insert(key.clone(), make_loaded());
+        assert!(cached_image(&shared, 0, &key, "fixture").is_some());
+        registry
+            .install_zip(&package_domains("1.0.1", vec!["replacement.test"]))
+            .unwrap();
+        registry.set_enabled("fixture", true).unwrap();
+        let fresh_source = registry.source("fixture").unwrap();
+        assert!(fresh_source.availability().is_available());
+        let task = Task {
+            key: key.clone(),
+            source_id: "fixture".into(),
+            url: item.cover_url.unwrap(),
+            generation: 0,
+            cancel: CancelToken::default(),
+        };
+        assert!(load_source(fresh_source, &cache, &shared, &task).is_err());
+        assert!(cached_image(&shared, 0, &key, "fixture").is_none());
+        ui.set_series_artwork_key(key.clone().into());
+        admit(&ui, 0, &shared, &key, make_loaded());
+        assert_eq!(ui.get_series_poster().size().width, 0);
+        assert_eq!(
+            cache.get(&encoded_key, inspect).unwrap().unwrap(),
+            bytes,
+            "retained data is not published under removed permissions"
+        );
+        UI_IMAGES.with(|images| {
+            images.borrow_mut().remove(&0);
+        });
+    }
+
+    #[test]
+    fn artwork_scopes_partition_profiles_before_ram_or_encoded_reuse() {
+        let (directory, registry, _) = source_fixture();
+        let source = registry.source("fixture").unwrap();
+        let other = registry.with_profile("other").source("fixture").unwrap();
+        let url = "https://example.test/private.png";
+        let first = RequestProof::new(&source, url).unwrap();
+        let second = RequestProof::new(&other, url).unwrap();
+        assert_ne!(first.encoded_key("poster"), second.encoded_key("poster"));
+        let cache =
+            nova_cache::blob::Cache::new(directory.path().join("posters"), ENCODED_LIMIT as u64);
+        let bytes = png(16, 24, [130, 130, 130, 255]);
+        assert!(
+            cache
+                .put_if_current(
+                    &first.encoded_key("poster").unwrap(),
+                    &bytes,
+                    cache.generation(),
+                    inspect,
+                    || true
+                )
+                .unwrap()
+        );
+        assert!(
+            cache
+                .get(&second.encoded_key("poster").unwrap(), inspect)
+                .unwrap()
+                .is_none()
+        );
+        let shared = Shared::default();
+        shared.decoded.lock().unwrap().insert(
+            "poster".into(),
+            Loaded {
+                pixels: Pixels::new(16, 24),
+                source_id: "fixture".into(),
+                access: source.availability(),
+                proof: Some(first),
+            },
+        );
+        // Distinct current-profile disk pixels must win over an old-profile RAM hit.
+        let other_bytes = png(16, 24, [210, 210, 210, 255]);
+        assert!(
+            cache
+                .put_if_current(
+                    &second.encoded_key("poster").unwrap(),
+                    &other_bytes,
+                    cache.generation(),
+                    inspect,
+                    || true
+                )
+                .unwrap()
+        );
+        let task = Task {
+            key: "poster".into(),
+            source_id: "fixture".into(),
+            url: url.into(),
+            generation: 0,
+            cancel: CancelToken::default(),
+        };
+        let current = load_source(other, &cache, &shared, &task).unwrap();
+        assert_eq!(&current.pixels.as_bytes()[..4], &[210, 210, 210, 255]);
+    }
+
+    #[test]
+    fn legacy_originals_migrate_into_shared_bounded_cache_without_reencoding() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = nova_cache::blob::Cache::new(directory.path().into(), ENCODED_LIMIT as u64);
+        let key = format!("{:064x}", 0);
+        let bytes = png(16, 24, [130, 130, 130, 255]);
+        let original = directory.path().join(format!("{key}.cover"));
+        fs::write(&original, &bytes).unwrap();
+        let interrupted = directory.path().join(format!("{:064x}.pending", 99));
+        fs::write(&interrupted, b"partial").unwrap();
+        let oversized = directory.path().join(format!("{:064x}.cover", 100));
+        fs::File::create(&oversized)
             .unwrap()
             .set_len(ENCODED_LIMIT as u64 + 1)
             .unwrap();
-        assert!(read_cached(&large).is_none());
-        assert!(!large.exists());
+        let outside = directory.path().join("chapter-page.bin");
+        fs::write(&outside, b"downloaded chapter").unwrap();
+        #[cfg(unix)]
+        let legacy_link = {
+            let path = directory.path().join(format!("{:064x}.cover", 101));
+            std::os::unix::fs::symlink(&outside, &path).unwrap();
+            path
+        };
+        migrate_legacy(&cache);
+        assert_eq!(fs::read(&outside).unwrap(), b"downloaded chapter");
+        #[cfg(unix)]
+        assert!(!legacy_link.exists());
+        assert!(!original.exists());
+        assert!(!interrupted.exists());
+        assert!(!oversized.exists());
+        assert_eq!(cache.get(&key, inspect).unwrap().unwrap(), bytes);
+        assert!(
+            cache
+                .put_if_current(
+                    "huge",
+                    &vec![0; ENCODED_LIMIT + 1],
+                    cache.generation(),
+                    inspect,
+                    || true
+                )
+                .is_err()
+        );
+        assert_eq!(cache.usage().1, 1);
+    }
+
+    #[test]
+    fn invalid_pixel_payload_is_removed_by_shared_cache_and_can_be_repaired() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = nova_cache::blob::Cache::new(directory.path().into(), ENCODED_LIMIT as u64);
+        let valid = png(16, 24, [130, 130, 130, 255]);
+        let mut corrupt = valid.clone();
+        let idat = corrupt
+            .windows(4)
+            .position(|bytes| bytes == b"IDAT")
+            .unwrap();
+        // Break the compressed stream while preserving its dimension headers.
+        corrupt[idat + 4] ^= 0xff;
+        assert_eq!(inspect(&corrupt).unwrap(), (16, 24));
+        assert!(decode(&corrupt).is_err());
+        assert!(
+            cache
+                .put_if_current("poster", &corrupt, cache.generation(), inspect, || true)
+                .unwrap()
+        );
+        assert!(read_cached_pixels(&cache, "poster").is_none());
+        assert!(cache.get("poster", inspect).unwrap().is_none());
+        assert!(
+            cache
+                .put_if_current("poster", &valid, cache.generation(), inspect, || true)
+                .unwrap()
+        );
+        let pixels = read_cached_pixels(&cache, "poster").unwrap();
+        assert_eq!((pixels.width(), pixels.height()), (16, 24));
+    }
+
+    fn png(width: u32, height: u32, color: [u8; 4]) -> Vec<u8> {
+        use image::ImageEncoder;
+        let mut bytes = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut bytes)
+            .write_image(
+                &color.repeat((width * height) as usize),
+                width,
+                height,
+                image::ExtendedColorType::Rgba8,
+            )
+            .unwrap();
+        bytes
     }
 
     #[test]
@@ -1399,54 +1888,69 @@ mod tests {
     }
 
     #[test]
-    fn clear_removes_only_owned_poster_files_and_cpu_cache() {
+    fn clear_removes_only_kit_owned_posters_and_cpu_cache_and_rejects_stale_writer() {
         let root = tempfile::tempdir().unwrap();
         let directory = root.path().join("cache/posters");
+        let cache = nova_cache::blob::Cache::new(directory.clone(), ENCODED_LIMIT as u64);
         let chapters = root.path().join("chapters");
         fs::create_dir_all(&directory).unwrap();
         fs::create_dir_all(&chapters).unwrap();
         let chapter = chapters.join("page.bin");
         fs::write(&chapter, b"downloaded chapter").unwrap();
-        fs::write(directory.join(format!("{:064x}.cover", 0)), b"data").unwrap();
-        fs::write(directory.join(format!("{:064x}.pending", 1)), b"pending").unwrap();
+        let bytes = png(16, 24, [130, 130, 130, 255]);
+        let epoch = cache.generation();
+        assert!(
+            cache
+                .put_if_current("poster", &bytes, epoch, inspect, || true)
+                .unwrap()
+        );
+        let legacy = directory.join(format!("{:064x}.cover", 1));
+        let pending = directory.join(format!("{:064x}.pending", 2));
+        fs::write(&legacy, b"legacy unscoped bytes").unwrap();
+        fs::write(&pending, b"interrupted").unwrap();
+        assert_eq!(
+            cache_usage(&cache).1,
+            3,
+            "maintenance includes legacy files even when automatic migration is disabled"
+        );
         let unrelated = directory.join("notes.txt");
         fs::write(&unrelated, b"keep").unwrap();
-        let nested = directory.join(format!("{:064x}.cover", 2));
+        let nested = directory.join("nested");
         fs::create_dir(&nested).unwrap();
         fs::write(nested.join("keep.txt"), b"keep nested files").unwrap();
         #[cfg(unix)]
-        std::os::unix::fs::symlink(&chapter, directory.join(format!("{:064x}.cover", 3))).unwrap();
-        assert_eq!(disk_usage(&directory).unwrap(), (11, 2));
+        std::os::unix::fs::symlink(&chapter, directory.join("neighbor-link")).unwrap();
         let mut decoded = DecodedCache::default();
         decoded.insert("old".into(), loaded(Pixels::new(1, 1), &source_fixture().2));
         let decoded = Mutex::new(decoded);
-        clear_cache(&directory, &decoded).unwrap();
-        assert_eq!(disk_usage(&directory).unwrap(), (0, 0));
-        assert_eq!(decoded.lock().unwrap().bytes, 0);
-        assert!(decoded.lock().unwrap().entries.is_empty());
+        clear_cache(&cache, &decoded);
+        assert_eq!(cache_usage(&cache), (0, 0));
+        assert!(!legacy.exists());
+        assert!(!pending.exists());
+        assert_eq!(decoded.lock().unwrap().inner.stats(), (0, 0));
+        assert!(
+            !cache
+                .put_if_current("late", &bytes, epoch, inspect, || true)
+                .unwrap()
+        );
         assert_eq!(fs::read(chapter).unwrap(), b"downloaded chapter");
         assert_eq!(fs::read(unrelated).unwrap(), b"keep");
         assert!(nested.join("keep.txt").exists());
-        clear_cache(&directory, &decoded).unwrap();
-        clear_cache(&root.path().join("missing"), &decoded).unwrap();
+        clear_cache(&cache, &decoded);
     }
 
     #[test]
     fn fetched_cache_compression_changes_new_files_and_preserves_existing_png() {
         use crate::image_storage::{ImageCompression, ImageStorageFormat};
-        use image::ImageEncoder;
-        let mut png = Vec::new();
-        image::codecs::png::PngEncoder::new(&mut png)
-            .write_image(
-                &[130, 130, 130, 255].repeat(64 * 96),
-                64,
-                96,
-                image::ExtendedColorType::Rgba8,
-            )
-            .unwrap();
+        let png = png(64, 96, [130, 130, 130, 255]);
         let directory = tempfile::tempdir().unwrap();
-        let old = directory.path().join(format!("{:064x}.cover", 0));
-        fs::write(&old, &png).unwrap();
+        let cache = nova_cache::blob::Cache::new(directory.path().into(), ENCODED_LIMIT as u64);
+        let epoch = cache.generation();
+        assert!(
+            cache
+                .put_if_current("old", &png, epoch, inspect, || true)
+                .unwrap()
+        );
         for (index, format) in [
             ImageStorageFormat::Jpeg,
             ImageStorageFormat::Webp,
@@ -1460,15 +1964,9 @@ mod tests {
                 format,
                 quality: 85,
             };
-            let path = directory.path().join(format!("{:064x}.cover", index + 1));
-            write_fetched(
-                directory.path(),
-                &path,
-                &png,
-                &CancelToken::default(),
-                compression,
-            );
-            let bytes = fs::read(&path).unwrap();
+            let key = format!("new-{index}");
+            write_fetched(&cache, &key, epoch, &png, compression, None, || true);
+            let bytes = cache.get(&key, inspect).unwrap().unwrap();
             match format {
                 ImageStorageFormat::Jpeg => assert!(bytes.starts_with(&[0xff, 0xd8, 0xff])),
                 ImageStorageFormat::Webp => {
@@ -1480,68 +1978,91 @@ mod tests {
                     assert!(bytes.windows(4).any(|brand| brand == b"avif"));
                 }
             }
-            let dimensions = reader_engine::inspect_image(&bytes, COVER_LIMITS).unwrap();
-            assert_eq!((dimensions.width, dimensions.height), (64, 96));
+            assert_eq!(inspect(&bytes).unwrap(), (64, 96));
             let rendered = decode(&bytes).unwrap();
             assert_eq!((rendered.width(), rendered.height()), (64, 96));
-            write_fetched(
-                directory.path(),
-                &old,
-                &png,
-                &CancelToken::default(),
-                compression,
-            );
-            assert_eq!(fs::read(&old).unwrap(), png);
+            write_fetched(&cache, "old", epoch, &png, compression, None, || true);
+            assert_eq!(cache.get("old", inspect).unwrap().unwrap(), png);
         }
-        let disabled = directory.path().join(format!("{:064x}.cover", 4));
         write_fetched(
-            directory.path(),
-            &disabled,
+            &cache,
+            "disabled",
+            epoch,
             &png,
-            &CancelToken::default(),
             ImageCompression {
                 enabled: false,
                 ..ImageCompression::default()
             },
+            None,
+            || true,
         );
-        assert_eq!(fs::read(disabled).unwrap(), png);
-        let cancelled = directory.path().join(format!("{:064x}.cover", 5));
+        assert_eq!(cache.get("disabled", inspect).unwrap().unwrap(), png);
         let cancel = CancelToken::default();
         cancel.cancel();
         write_fetched(
-            directory.path(),
-            &cancelled,
+            &cache,
+            "cancelled",
+            epoch,
             &png,
-            &cancel,
             ImageCompression::default(),
+            None,
+            || !cancel.is_cancelled(),
         );
-        assert!(!cancelled.exists());
-        assert!(!cancelled.with_extension("pending").exists());
-        let mut transparent_png = Vec::new();
-        image::codecs::png::PngEncoder::new(&mut transparent_png)
-            .write_image(
-                &[0, 0, 0, 0].repeat(16 * 16),
-                16,
-                16,
-                image::ExtendedColorType::Rgba8,
-            )
-            .unwrap();
-        let transparent = directory.path().join(format!("{:064x}.cover", 6));
+        assert!(cache.get("cancelled", inspect).unwrap().is_none());
         write_fetched(
-            directory.path(),
+            &cache,
+            "resized",
+            epoch,
+            &png,
+            ImageCompression {
+                enabled: false,
+                ..ImageCompression::default()
+            },
+            Some(48),
+            || true,
+        );
+        assert_eq!(
+            inspect(&cache.get("resized", inspect).unwrap().unwrap()).unwrap(),
+            (32, 48)
+        );
+        // Applying a new resolution preference never rewrites an existing key.
+        write_fetched(
+            &cache,
+            "old",
+            epoch,
+            &png,
+            ImageCompression::default(),
+            Some(48),
+            || true,
+        );
+        assert_eq!(cache.get("old", inspect).unwrap().unwrap(), png);
+        write_fetched(
+            &cache,
+            "revoked",
+            epoch,
+            &png,
+            ImageCompression::default(),
+            None,
+            || false,
+        );
+        assert!(cache.get("revoked", inspect).unwrap().is_none());
+        let transparent = self::png(16, 16, [0, 0, 0, 0]);
+        write_fetched(
+            &cache,
+            "transparent",
+            epoch,
             &transparent,
-            &transparent_png,
-            &CancelToken::default(),
             ImageCompression {
                 enabled: true,
                 format: ImageStorageFormat::Jpeg,
                 quality: 85,
             },
+            None,
+            || true,
         );
         assert_eq!(
-            fs::read(transparent).unwrap(),
-            transparent_png,
-            "unsupported transparent JPEG conversion keeps original artwork"
+            cache.get("transparent", inspect).unwrap().unwrap(),
+            transparent
         );
     }
 

@@ -173,7 +173,7 @@ mod tests {
         for text in [
             include_str!("../LICENSE"),
             include_str!("../THIRD_PARTY_NOTICES.md"),
-            include_str!("../vendor/ferri-pdf-rav1d/COPYING"),
+            include_str!("../assets/licenses/avif-decoder-BSD-2-Clause.txt"),
             include_str!("../crates/reader-engine/AVIF-NOTICE.txt"),
             include_str!("../assets/fonts/LICENSE.txt"),
         ] {

@@ -36,9 +36,7 @@ fn generate_license_catalog() {
         "crates/reader-engine/AVIF-NOTICE.txt",
         "crates/reader-downloads/Cargo.toml",
         "crates/reader-catalogue/Cargo.toml",
-        "vendor/ferri-pdf-rav1d/Cargo.toml",
-        "vendor/ferri-pdf-rav1d/COPYING",
-        "vendor/ferri-pdf-rav1d/PATCHES.md",
+        "assets/licenses/avif-decoder-BSD-2-Clause.txt",
     ] {
         println!("cargo:rerun-if-changed={path}");
     }
@@ -75,7 +73,9 @@ fn generate_license_catalog() {
     catalog.push_str("\n\n===== Nova Reader third-party notices =====\n\n");
     catalog.push_str(include_str!("THIRD_PARTY_NOTICES.md"));
     catalog.push_str("\n\n===== AVIF decoder: BSD-2-Clause =====\n\n");
-    catalog.push_str(include_str!("vendor/ferri-pdf-rav1d/COPYING"));
+    catalog.push_str(include_str!(
+        "assets/licenses/avif-decoder-BSD-2-Clause.txt"
+    ));
     catalog.push_str("\n\n===== AVIF adapter: BSD-3-Clause =====\n\n");
     catalog.push_str(include_str!("crates/reader-engine/AVIF-NOTICE.txt"));
     catalog.push_str("\n\n===== Nova Reader project license: GPL-3.0-or-later =====\n\n");

@@ -51,6 +51,11 @@ pub struct HttpResponse {
     pub body: Vec<u8>,
 }
 pub trait SourceTransport: Send + Sync {
+    /// Return an opaque profile/session partition for durable page reuse.
+    /// Stateful custom transports must opt in; None disables RAM/disk hits.
+    fn page_cache_partition(&self, _url: &str) -> Option<String> {
+        None
+    }
     fn request(
         &self,
         request: &HttpRequest,
@@ -61,12 +66,18 @@ pub trait SourceTransport: Send + Sync {
 pub(crate) struct NetworkTransport {
     permissions: Permissions,
     jar: Arc<reqwest::cookie::Jar>,
+    cache_partition: String,
 }
 impl NetworkTransport {
+    #[cfg(test)]
     pub fn new(permissions: Permissions) -> Self {
+        Self::new_scoped(permissions, "test-default".into())
+    }
+    pub fn new_scoped(permissions: Permissions, cache_partition: String) -> Self {
         Self {
             permissions,
             jar: Arc::new(reqwest::cookie::Jar::default()),
+            cache_partition,
         }
     }
 }
@@ -153,6 +164,17 @@ pub(crate) fn check_status(status: u16) -> Result<()> {
     }
 }
 impl SourceTransport for NetworkTransport {
+    fn page_cache_partition(&self, url: &str) -> Option<String> {
+        use sha2::{Digest, Sha256};
+        let url = Url::parse(url).ok()?;
+        let cookies = self.jar.cookies(&url);
+        let material = serde_json::to_vec(&(
+            &self.cache_partition,
+            cookies.as_ref().map(|value| value.as_bytes()),
+        ))
+        .ok()?;
+        Some(format!("{:x}", Sha256::digest(material)))
+    }
     fn request(
         &self,
         input: &HttpRequest,
@@ -431,6 +453,16 @@ mod tests {
             .add_cookie_str("session=private; Path=/; Secure", &url);
         assert!(first.jar.cookies(&url).is_some());
         assert!(second.jar.cookies(&url).is_none());
+        let before = second.page_cache_partition(url.as_str()).unwrap();
+        second
+            .jar
+            .add_cookie_str("session=private; Path=/; Secure", &url);
+        assert_ne!(before, second.page_cache_partition(url.as_str()).unwrap());
+        let other_profile = NetworkTransport::new_scoped(permissions(), "other-profile".into());
+        assert_ne!(
+            before,
+            other_profile.page_cache_partition(url.as_str()).unwrap()
+        );
     }
 }
 

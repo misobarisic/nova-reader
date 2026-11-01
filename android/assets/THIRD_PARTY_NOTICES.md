@@ -3,7 +3,7 @@ Copyright Nova contributors, licensed under GPL-3.0 (see LICENSE).
 Source: https://github.com/misobarisic/nova/tree/b69a1e5765ecc65ac3b00acdfe2f16e2f46a5dda
 
 Shared storage and UI components: nova-kit contributors, GPL-3.0.
-https://github.com/misobarisic/nova-kit/tree/63141dfc6abd39a247edde1f33ebaeb59dc7229a
+https://github.com/misobarisic/nova-kit/tree/138f29e33d4f7d8ae9204b6bd6118eb458740f70
 
 The complete Reader source and Cargo.lock identify all Rust dependencies:
 https://github.com/misobarisic/nova-reader
@@ -21,15 +21,16 @@ CDN permissions and verification limits are recorded in
 `examples/addons/mangafire/NOTICE.md`; the full license ships inside its addon ZIP.
 
 The AVIF decoder uses the complete published ferri-pdf-rav1d 1.1.2 source
-under `vendor/ferri-pdf-rav1d`, with only ARM/RISC-V nightly-feature predicates
+in Nova Kit at `vendor/ferri-pdf-rav1d`, with only ARM/RISC-V nightly-feature predicates
 gated by its existing assembly feature for stable portable builds. The original
 BSD-2-Clause license, source provenance and malformed-input fixes are retained;
-see its `COPYING` and appended `PATCHES.md`. Its full license is also included
+see Kit’s `COPYING` and appended `PATCHES.md`. A distribution copy lives at
+`assets/licenses/avif-decoder-BSD-2-Clause.txt`; its full license is also included
 in the embedded current-target catalogue.
 
 ## AVIF adapter and test fixture attribution
 
-The plane-access and CICP conversion dispatch in src/avif.rs are adapted from
+The shared `nova-image` plane-access and CICP conversion dispatch are adapted from
 avif-decode 3.0.0 (https://github.com/kornelski/avif-decode).
 The independent tests/fixtures/tiny.avif is its 16x16 8-bit 4:4:4 fixture,
 encoded using avifenc rather than Reader's ravif encoder.

@@ -96,6 +96,7 @@ struct Reader {
     // pixel limit can produce a texture narrower than that request.
     decoded_widths: BTreeMap<usize, u32>,
     decoded_windows: BTreeMap<usize, reader_engine::DisplayWindowPlan>,
+    native_dimensions: BTreeMap<usize, reader_engine::PageDimensions>,
     target_width: u32,
     viewport_width: f32,
     viewport_height: f32,
@@ -268,6 +269,7 @@ struct EncodedPages {
     pages: BTreeMap<usize, Arc<Vec<u8>>>,
     order: std::collections::VecDeque<usize>,
     bytes: usize,
+    contexts: BTreeMap<usize, String>,
 }
 impl EncodedPages {
     fn read(
@@ -276,11 +278,28 @@ impl EncodedPages {
         index: usize,
         fetch: impl FnOnce() -> Result<Vec<u8>>,
     ) -> Result<Arc<Vec<u8>>> {
+        self.read_scoped(generation, index, "", fetch)
+    }
+    fn read_scoped(
+        &mut self,
+        generation: u64,
+        index: usize,
+        context: &str,
+        fetch: impl FnOnce() -> Result<Vec<u8>>,
+    ) -> Result<Arc<Vec<u8>>> {
         if self.generation != generation {
             self.pages.clear();
             self.order.clear();
             self.bytes = 0;
             self.generation = generation;
+            self.contexts.clear();
+        }
+        if self.contexts.get(&index).is_some_and(|old| old != context) {
+            if let Some(old) = self.pages.remove(&index) {
+                self.bytes -= old.len();
+            }
+            self.order.retain(|i| *i != index);
+            self.contexts.remove(&index);
         }
         if let Some(bytes) = self.pages.get(&index) {
             self.order.retain(|i| *i != index);
@@ -295,11 +314,13 @@ impl EncodedPages {
             if let Some(old) = self.pages.remove(&old) {
                 self.bytes -= old.len();
             }
+            self.contexts.remove(&old);
         }
         if bytes.len() <= 32 * 1024 * 1024 {
             self.bytes += bytes.len();
             self.pages.insert(index, bytes.clone());
             self.order.push_back(index);
+            self.contexts.insert(index, context.into());
         }
         Ok(bytes)
     }
@@ -386,6 +407,31 @@ struct ImageTask {
     generation: u64,
     index: usize,
 }
+struct ImageCompletion(mpsc::SyncSender<()>);
+impl Drop for ImageCompletion {
+    fn drop(&mut self) {
+        let _ = self.0.try_send(());
+    }
+}
+fn wait_image_completion<T>(
+    pending: &Arc<Mutex<Option<T>>>,
+    ack: &mpsc::Receiver<()>,
+    current: impl Fn() -> bool,
+) -> bool {
+    loop {
+        match ack.recv_timeout(std::time::Duration::from_millis(50)) {
+            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => return true,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if !current() {
+                    // A cancelled generation can release queued pixel buffers even
+                    // while its UI callback is waiting behind another event.
+                    pending.lock().unwrap_or_else(|e| e.into_inner()).take();
+                    return false;
+                }
+            }
+        }
+    }
+}
 fn update_entry_membership(
     state: &mut reader_domain::ReaderState,
     series: &reader_domain::SeriesId,
@@ -429,6 +475,8 @@ fn update_entry_membership(
 struct Controller {
     services: Services,
     artwork: crate::artwork::ArtworkLoader,
+    chapter_cache: Arc<crate::chapter_cache::ChapterCache>,
+    image_worker_live: AtomicBool,
     view: Mutex<View>,
     generation: AtomicU64,
     cancel: Mutex<CancelToken>,
@@ -442,6 +490,7 @@ impl Controller {
     }
     fn invalidate(&self) -> (u64, CancelToken) {
         self.artwork.invalidate();
+        self.chapter_cache.deactivate();
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
         let mut current = self.cancel.lock().unwrap_or_else(|e| e.into_inner());
         current.cancel();
@@ -455,6 +504,53 @@ impl Controller {
         }
         *current = CancelToken::default();
         (generation, current.clone())
+    }
+    fn chapter_cache_maintenance(self: &Arc<Self>, ui: &AppWindow, clear: bool) {
+        if self
+            .chapter_cache
+            .maintenance_busy
+            .swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
+        if clear {
+            self.chapter_cache.invalidate_writes();
+        }
+        let settings = ui.global::<crate::ImageStorageSettings>();
+        settings.set_chapter_cache_busy(true);
+        settings.set_chapter_cache_status("".into());
+        let cache = self.chapter_cache.clone();
+        let weak = ui.as_weak();
+        std::thread::spawn(move || {
+            let removed = clear.then(|| cache.clear());
+            let (bytes, files) = cache.usage();
+            let failed = cache.clone();
+            if weak
+                .upgrade_in_event_loop(move |ui| {
+                    cache.maintenance_busy.store(false, Ordering::Release);
+                    let settings = ui.global::<crate::ImageStorageSettings>();
+                    settings.set_chapter_cache_busy(false);
+                    settings.set_chapter_cache_info(
+                        format!(
+                            "{}: {files} {} · {:.1} MiB",
+                            text::tr("Viewed chapter cache"),
+                            text::tr("files"),
+                            bytes as f64 / (1024. * 1024.)
+                        )
+                        .into(),
+                    );
+                    if let Some((_, count)) = removed {
+                        settings.set_chapter_cache_status(
+                            format!("{}: {count}", text::tr("Temporary chapter files removed"))
+                                .into(),
+                        );
+                    }
+                })
+                .is_err()
+            {
+                failed.maintenance_busy.store(false, Ordering::Release);
+            }
+        });
     }
     fn flush(&self) {
         if let Some(progress) = self.view().pending.take()
@@ -1538,6 +1634,7 @@ impl Controller {
                         decoded_bytes: BTreeMap::new(),
                         decoded_widths: BTreeMap::new(),
                         decoded_windows: BTreeMap::new(),
+                        native_dimensions: BTreeMap::new(),
                         target_width: 0,
                         viewport_width: 0.,
                         viewport_height: 0.,
@@ -1581,6 +1678,7 @@ impl Controller {
                         decoded_bytes: BTreeMap::new(),
                         decoded_widths: BTreeMap::new(),
                         decoded_windows: BTreeMap::new(),
+                        native_dimensions: BTreeMap::new(),
                         target_width: 0,
                         viewport_width: 0.,
                         viewport_height: 0.,
@@ -1796,6 +1894,9 @@ impl Controller {
     fn request_images(&self, ui: &AppWindow, index: usize) {
         let generation = self.generation.load(Ordering::Acquire);
         let mut view = self.view();
+        if view.section != 6 {
+            return;
+        }
         let chapter_ids = view
             .chapters
             .iter()
@@ -1804,6 +1905,9 @@ impl Controller {
         let Some(reader) = &mut view.reader else {
             return;
         };
+        if reader.source.is_some() {
+            self.chapter_cache.activate(generation, &reader.chapter);
+        }
         if reader.viewport_width <= 0. {
             reader.viewport_width = ui.get_reader_width();
         }
@@ -1879,10 +1983,49 @@ impl Controller {
         ui: slint::Weak<AppWindow>,
     ) {
         let mut encoded = EncodedPages::default();
-        for task in receiver {
+        let mut decoded = reader_engine::DisplayDecoder::default();
+        let mut epoch = u64::MAX;
+        loop {
+            let task = match receiver.recv_timeout(std::time::Duration::from_millis(250)) {
+                Ok(task) => task,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    let Some(owner) = app.upgrade() else {
+                        break;
+                    };
+                    let generation = owner.generation.load(Ordering::Acquire);
+                    if !owner.image_worker_live.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let reading = {
+                        let view = owner.view();
+                        view.section == 6
+                            && view.reader.as_ref().is_some_and(|reader| {
+                                reader
+                                    .source
+                                    .as_ref()
+                                    .is_none_or(|source| source.availability().is_available())
+                            })
+                    };
+                    if generation != epoch || !reading {
+                        decoded.clear();
+                        encoded = EncodedPages::default();
+                        epoch = generation;
+                    }
+                    continue;
+                }
+            };
+            if task.generation != epoch {
+                decoded.clear();
+                encoded = EncodedPages::default();
+                epoch = task.generation;
+            }
             let Some(app) = app.upgrade() else {
                 break;
             };
+            if !app.image_worker_live.load(Ordering::Acquire) {
+                break;
+            }
             if app.generation.load(Ordering::Acquire) != task.generation {
                 continue;
             }
@@ -1899,10 +2042,10 @@ impl Controller {
                     r.pages
                         .get(task.index)
                         .cloned()
-                        .map(|p| (p, r.source.clone()))
+                        .map(|p| (p, r.source.clone(), r.chapter.clone()))
                 })
             };
-            let Some((input, source)) = input else {
+            let Some((input, source, chapter)) = input else {
                 continue;
             };
             let cancel = CancelToken::default();
@@ -1912,9 +2055,57 @@ impl Controller {
                 cancel.cancel();
             }
             let result: Result<_> = (|| {
-                let bytes = encoded.read(task.generation, task.index, || {
-                    input.read(source.as_ref(), &cancel)
-                })?;
+                let mut pending_write = None;
+                let mut cache_request = None;
+                let bytes = match &input {
+                    PageInput::Local { .. } => encoded.read(task.generation, task.index, || {
+                        input.read(source.as_ref(), &cancel)
+                    })?,
+                    PageInput::Remote(page) => {
+                        let source = source
+                            .as_ref()
+                            .ok_or_else(|| text::tr("Source unavailable"))?;
+                        let weak = Arc::downgrade(&app);
+                        let request = app.chapter_cache.prepare(
+                            &chapter,
+                            page,
+                            source,
+                            cancel.clone(),
+                            Arc::new(move || {
+                                weak.upgrade().is_some_and(|owner| {
+                                    owner.generation.load(Ordering::Acquire) == task.generation
+                                })
+                            }),
+                        )?;
+                        let mut fetched = false;
+                        let mut reused = false;
+                        let mut load = || {
+                            fetched = true;
+                            let read = app.chapter_cache.read(&request)?;
+                            reused = read.from_cache;
+                            pending_write = read.pending;
+                            Ok(read.bytes)
+                        };
+                        let mut bytes = if let Some(key) = request.memory_key() {
+                            encoded.read_scoped(task.generation, task.index, &key, &mut load)?
+                        } else {
+                            Arc::new(load()?)
+                        };
+                        if !fetched {
+                            reused = true;
+                        }
+                        if !fetched && request.validate_scope().is_err() {
+                            let read = app.chapter_cache.read(&request)?;
+                            reused = read.from_cache;
+                            pending_write = read.pending;
+                            bytes = Arc::new(read.bytes);
+                        }
+                        request.validate_active()?;
+                        app.chapter_cache.touch(&request);
+                        cache_request = Some((request, reused));
+                        bytes
+                    }
+                };
                 cancel.check().map_err(error)?;
                 let dimensions =
                     reader_engine::inspect_image(&bytes, reader_engine::DecodeLimits::default())
@@ -1937,18 +2128,53 @@ impl Controller {
                         dimensions,
                     )?
                 };
-                let image = reader_engine::decode_display_window(
-                    &bytes,
-                    reader_engine::DecodeLimits::default(),
+                let native_bytes = u64::from(dimensions.width) * u64::from(dimensions.height) * 4;
+                let copy_budget = (reader_engine::DecodeLimits::default()
+                    .max_decoded_bytes
+                    .saturating_sub(native_bytes)
+                    / 2) as usize;
+                let window = decoded
+                    .decode_window(
+                        &bytes,
+                        reader_engine::DecodeLimits::default(),
+                        display_width,
+                        start,
+                        end,
+                        budget.min(copy_budget),
+                    )
+                    .map_err(error)?;
+                cancel.check().map_err(error)?;
+                let prepared = prepare_display_tiles(
+                    window.image.as_raw(),
+                    window.image.width(),
+                    window.image.height(),
+                    window.plan.first_row,
+                    window.plan.full_height,
+                );
+                let plan = window.plan;
+                drop(window);
+                let write = pending_write.map(|pending| (pending, bytes));
+                Ok((
+                    dimensions,
+                    plan,
+                    prepared,
                     display_width,
-                    start,
-                    end,
-                    budget,
-                )
-                .map_err(error)?;
-                Ok((dimensions, image, display_width))
+                    write,
+                    cache_request,
+                ))
             })();
+            let pending = Arc::new(Mutex::new(Some(result)));
+            let handed = pending.clone();
+            let (finished, ack) = mpsc::sync_channel(1);
+            let completion = ImageCompletion(finished);
+            let waiting = Arc::downgrade(&app);
+            let availability = source.as_ref().map(Source::availability);
             let _ = ui.upgrade_in_event_loop(move |ui| {
+                let _completion = completion;
+                let Some(result) = handed.lock().unwrap_or_else(|e| e.into_inner()).take() else {
+                    return;
+                };
+
                 if app.generation.load(Ordering::Acquire) != task.generation {
                     return;
                 }
@@ -1966,17 +2192,22 @@ impl Controller {
                 }
                 let mut loaded = false;
                 match result {
-                    Ok((dimensions, window, display_width)) => {
-                        let image = &window.image;
+                    Ok((dimensions, plan, prepared, display_width, write, cache_request)) => {
+                        if cache_request.as_ref().is_some_and(|(request, reused)| {
+                            request.validate_for_publication(*reused).is_err()
+                        }) {
+                            let current = reader.anchor.page_index;
+                            drop(view);
+                            app.request_images(&ui, current);
+                            return;
+                        }
                         let actual_ratio = dimensions.height as f32 / dimensions.width as f32;
                         let (start, end) = reader.span_with_ratio(task.index, actual_ratio);
                         let current_budget = reader
                             .window_request(task.index, dimensions)
                             .map(|r| r.2)
                             .unwrap_or(0);
-                        if !window.plan.covers(start, end)
-                            || window.plan.byte_len() > current_budget
-                        {
+                        if !plan.covers(start, end) || plan.byte_len() > current_budget {
                             let current = reader.anchor.page_index;
                             drop(view);
                             app.request_images(&ui, current);
@@ -1993,7 +2224,7 @@ impl Controller {
                                 .collect::<Vec<_>>();
                             victims.sort_by_key(|i| std::cmp::Reverse(i.abs_diff(task.index)));
                             for victim in victims {
-                                if used.saturating_add(image.as_raw().len()) <= READER_MODEL_BYTES {
+                                if used.saturating_add(plan.byte_len()) <= READER_MODEL_BYTES {
                                     break;
                                 }
                                 used = used.saturating_sub(
@@ -2011,7 +2242,7 @@ impl Controller {
                                 }
                             }
                         }
-                        if used.saturating_add(image.as_raw().len()) > READER_MODEL_BYTES {
+                        if used.saturating_add(plan.byte_len()) > READER_MODEL_BYTES {
                             reader.budget_blocked.insert(task.index);
                             return;
                         }
@@ -2023,21 +2254,14 @@ impl Controller {
                         row.image = slint::Image::default();
                         model.set_row_data(task.index, row.clone());
                         reader.decoded_bytes.remove(&task.index);
-                        reader
-                            .decoded_bytes
-                            .insert(task.index, image.as_raw().len());
+                        reader.decoded_bytes.insert(task.index, plan.byte_len());
                         reader.decoded_widths.insert(task.index, display_width);
-                        reader.decoded_windows.insert(task.index, window.plan);
+                        reader.decoded_windows.insert(task.index, plan);
+                        reader.native_dimensions.insert(task.index, dimensions);
                         reader.budget_blocked.clear();
                         reader.ratios[task.index] =
                             dimensions.height as f32 / dimensions.width as f32;
-                        row.tiles = ModelRc::new(VecModel::from(display_window_tiles(
-                            image.as_raw(),
-                            image.width(),
-                            image.height(),
-                            window.plan.first_row,
-                            window.plan.full_height,
-                        )));
+                        row.tiles = ModelRc::new(VecModel::from(mount_display_tiles(prepared)));
                         row.loaded = true;
                         row.error = "".into();
                         reader.retained.insert(task.index);
@@ -2052,6 +2276,9 @@ impl Controller {
                             position += ratio;
                         }
                         ui.set_total_ratio(position);
+                        if let Some((pending, bytes)) = write {
+                            app.chapter_cache.enqueue(pending, bytes);
+                        }
                     }
                     Err(error) => {
                         if cancel.is_cancelled() {
@@ -2101,6 +2328,17 @@ impl Controller {
                     }
                 }
             });
+            if !wait_image_completion(&pending, &ack, || {
+                waiting.upgrade().is_some_and(|owner| {
+                    owner.image_worker_live.load(Ordering::Acquire)
+                        && owner.generation.load(Ordering::Acquire) == task.generation
+                }) && availability
+                    .as_ref()
+                    .is_none_or(|guard| guard.is_available())
+            }) {
+                decoded.clear();
+                encoded = EncodedPages::default();
+            }
         }
     }
     fn step_page(&self, ui: &AppWindow, step: i32) {
@@ -2523,6 +2761,28 @@ impl Controller {
 fn display_tiles(pixels: &[u8], width: u32, height: u32) -> Vec<TileRow> {
     display_window_tiles(pixels, width, height, 0, height)
 }
+struct PreparedTile {
+    pixels: slint::SharedPixelBuffer<slint::Rgba8Pixel>,
+    offset: f32,
+    fraction: f32,
+    left: f32,
+    right: f32,
+    bottom: f32,
+}
+fn mount_display_tiles(tiles: Vec<PreparedTile>) -> Vec<TileRow> {
+    tiles
+        .into_iter()
+        .map(|tile| TileRow {
+            image: slint::Image::from_rgba8(tile.pixels),
+            offset: tile.offset,
+            fraction: tile.fraction,
+            left: tile.left,
+            right: tile.right,
+            bottom: tile.bottom,
+        })
+        .collect()
+}
+#[cfg(test)]
 fn display_window_tiles(
     pixels: &[u8],
     width: u32,
@@ -2530,6 +2790,21 @@ fn display_window_tiles(
     first_row: u32,
     full_height: u32,
 ) -> Vec<TileRow> {
+    mount_display_tiles(prepare_display_tiles(
+        pixels,
+        width,
+        height,
+        first_row,
+        full_height,
+    ))
+}
+fn prepare_display_tiles(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    first_row: u32,
+    full_height: u32,
+) -> Vec<PreparedTile> {
     let stride = width as usize * 4;
     let tile_height = 2048usize;
     let mut tiles = Vec::new();
@@ -2544,8 +2819,8 @@ fn display_window_tiles(
                 buffer.make_mut_bytes()[target..target + columns as usize * 4]
                     .copy_from_slice(&pixels[source..source + columns as usize * 4]);
             }
-            tiles.push(TileRow {
-                image: slint::Image::from_rgba8(buffer),
+            tiles.push(PreparedTile {
+                pixels: buffer,
                 offset: (first_row + top) as f32 / full_height as f32,
                 fraction: rows as f32 / full_height as f32,
                 bottom: (first_row + top + rows) as f32 / full_height as f32,
@@ -2677,10 +2952,169 @@ fn capture_reader(ui: &AppWindow) -> Result<ReaderScreencap> {
         pixels: image.as_bytes().to_vec(),
     })
 }
+#[derive(Clone)]
+struct FrozenExportName {
+    chapter: ChapterId,
+    page: usize,
+    source_y: Option<u32>,
+}
+fn export_source_row(page_y: f64, page_height: f64, viewport_y: f64, native_height: u32) -> u32 {
+    let fraction = ((viewport_y - page_y) / page_height).clamp(0., 1.);
+    (fraction * f64::from(native_height))
+        .round()
+        .min(f64::from(native_height.saturating_sub(1))) as u32
+}
+fn export_name_position(
+    app: &Controller,
+    ui: &AppWindow,
+    index: i32,
+    screen: bool,
+) -> Result<FrozenExportName> {
+    let view = app.view();
+    let reader = view
+        .reader
+        .as_ref()
+        .ok_or_else(|| text::tr("Chapter image is unavailable"))?;
+    let index = usize::try_from(index).map_err(error)?;
+    if !screen {
+        if index >= reader.pages.len() {
+            return Err(text::tr("Chapter image is unavailable"));
+        }
+        return Ok(FrozenExportName {
+            chapter: reader.chapter.clone(),
+            page: index + 1,
+            source_y: None,
+        });
+    }
+    let viewport = ui.get_reader_capture_viewport();
+    let model = ui.get_pages();
+    for page in 0..model.row_count() {
+        if ui.get_reading_mode() != 0 && page != ui.get_current_page() as usize {
+            continue;
+        }
+        let Some(row) = model.row_data(page).filter(|row| row.loaded) else {
+            continue;
+        };
+        let rect = chapter_capture_rect(
+            &viewport,
+            f64::from(ui.get_reader_width()),
+            ui.get_reading_mode(),
+            &row,
+        );
+        if rect.y >= f64::from(viewport.y + viewport.height)
+            || rect.y + rect.height <= f64::from(viewport.y)
+            || rect.x >= f64::from(viewport.x + viewport.width)
+            || rect.x + rect.width <= f64::from(viewport.x)
+        {
+            continue;
+        }
+        let height = reader
+            .native_dimensions
+            .get(&page)
+            .map(|dimensions| dimensions.height)
+            .ok_or_else(|| text::tr("Chapter image dimensions are unavailable"))?;
+        let source_y = export_source_row(rect.y, rect.height, f64::from(viewport.y), height);
+        return Ok(FrozenExportName {
+            chapter: reader.chapter.clone(),
+            page: page + 1,
+            source_y: Some(source_y),
+        });
+    }
+    Err(text::tr("Reader screencap is unavailable"))
+}
+
 fn wire_reader_context(app: &Arc<Controller>, ui: &AppWindow) {
     use std::{cell::RefCell, rc::Rc};
     let screencap = Rc::new(RefCell::new(None));
     let exporting = Arc::new(AtomicBool::new(false));
+    type PendingConflict = Option<(crate::reader_export::ExportCurrent, ReplyOnDrop)>;
+    let conflict = Arc::new(Mutex::new(PendingConflict::None));
+    let timer = Rc::new(slint::Timer::default());
+    struct ReplyOnDrop(Option<crate::reader_export::ConflictReply>);
+    impl Drop for ReplyOnDrop {
+        fn drop(&mut self) {
+            if let Some(reply) = self.0.take() {
+                reply(crate::reader_export::ConflictChoice::Cancel);
+            }
+        }
+    }
+    let resolver: crate::reader_export::ConflictResolver = {
+        let weak = ui.as_weak();
+        let conflict = Arc::downgrade(&conflict);
+        let owner = Arc::downgrade(app);
+        Arc::new(move |name, current, reply| {
+            let conflict = conflict.clone();
+            let owner = owner.clone();
+            let pending_reply = ReplyOnDrop(Some(reply));
+            let _ = weak.upgrade_in_event_loop(move |ui| {
+                let Some(conflict) = conflict.upgrade() else {
+                    return;
+                };
+                if owner
+                    .upgrade()
+                    .is_none_or(|app| !app.image_worker_live.load(Ordering::Acquire))
+                {
+                    return;
+                };
+                if ui.get_section() != 6 || !current() {
+                    return;
+                }
+                let old = conflict
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .replace((current, pending_reply));
+                drop(old);
+                ui.set_export_conflict_name(name.into());
+                ui.set_export_conflict_open(true);
+            });
+        })
+    };
+    ui.on_export_conflict_choice({
+        let weak = ui.as_weak();
+        let conflict = conflict.clone();
+        move |choice| {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_export_conflict_open(false);
+            }
+            let pending = conflict.lock().unwrap_or_else(|e| e.into_inner()).take();
+            if let Some((current, mut reply)) = pending {
+                let choice = if current() { choice } else { 2 };
+                reply.0.take().expect("one export conflict reply")(match choice {
+                    0 => crate::reader_export::ConflictChoice::Overwrite,
+                    1 => crate::reader_export::ConflictChoice::AddNumber,
+                    _ => crate::reader_export::ConflictChoice::Cancel,
+                });
+            }
+        }
+    });
+    timer.start(
+        slint::TimerMode::Repeated,
+        std::time::Duration::from_millis(100),
+        {
+            let weak = ui.as_weak();
+            let owner = Arc::downgrade(app);
+            let conflict = conflict.clone();
+            move || {
+                let Some(ui) = weak.upgrade() else {
+                    return;
+                };
+                let mut pending = conflict.lock().unwrap_or_else(|e| e.into_inner());
+                let stale = pending.as_ref().is_some_and(|(current, _)| {
+                    !current()
+                        || owner
+                            .upgrade()
+                            .is_none_or(|app| !app.image_worker_live.load(Ordering::Acquire))
+                        || ui.get_section() != 6
+                });
+                if stale {
+                    let reply = pending.take();
+                    drop(pending);
+                    ui.set_export_conflict_open(false);
+                    drop(reply);
+                }
+            }
+        },
+    );
     ui.on_reader_context_opening({
         let app = app.clone();
         let weak = ui.as_weak();
@@ -2695,7 +3129,9 @@ fn wire_reader_context(app: &Arc<Controller>, ui: &AppWindow) {
                 } else {
                     capture_reader(&ui).map(FrozenScreencap::Device)
                 };
-                *screencap.borrow_mut() = Some((app.generation.load(Ordering::Acquire), capture));
+                let naming = export_name_position(&app, &ui, index, true);
+                *screencap.borrow_mut() =
+                    Some((app.generation.load(Ordering::Acquire), capture, naming));
             }
         }
     });
@@ -2709,6 +3145,7 @@ fn wire_reader_context(app: &Arc<Controller>, ui: &AppWindow) {
         let app = app.clone();
         let weak = ui.as_weak();
         move |index, action| {
+            let _timer = &timer;
             let Some(ui) = weak.upgrade() else { return };
             let (screen, clipboard) = match action.as_str() {
                 "save-image" => (false, false),
@@ -2725,11 +3162,14 @@ fn wire_reader_context(app: &Arc<Controller>, ui: &AppWindow) {
             ui.set_reader_context_status(text::tr("Preparing image…").into());
             let snapshot = screencap.borrow_mut().take();
             let preferences = crate::capture_settings::preferences(&ui);
-            // History/Updates can open a chapter without mounting its detail
-            // page first. Use the active reader's series, never stale hero UI.
-            let series_title = reader_series_title(&app.view())
-                .unwrap_or("Series")
-                .to_owned();
+            let naming = if screen {
+                None
+            } else {
+                Some(export_name_position(&app, &ui, index, false))
+            };
+            let domain = app.services.domain.clone();
+            let resolver = resolver.clone();
+            let owner = Arc::downgrade(&app);
             let generation = app.generation.load(Ordering::Acquire);
             let cancel = app.cancel.lock().unwrap_or_else(|e| e.into_inner()).clone();
             let input = {
@@ -2769,11 +3209,13 @@ fn wire_reader_context(app: &Arc<Controller>, ui: &AppWindow) {
                 }
             };
             std::thread::spawn(move || {
+                let mut final_naming = naming;
                 let image = (|| {
                     cancel.check().map_err(error)?;
                     if screen {
-                        let (captured_generation, capture) =
+                        let (captured_generation, capture, naming) =
                             snapshot.ok_or_else(|| text::tr("Reader screencap is unavailable"))?;
+                        final_naming = Some(naming);
                         if captured_generation != generation {
                             return Err(text::tr("Image action cancelled"));
                         }
@@ -2821,13 +3263,65 @@ fn wire_reader_context(app: &Arc<Controller>, ui: &AppWindow) {
                 })();
                 match image {
                     Ok(image) if !cancel.is_cancelled() => {
-                        crate::reader_export::deliver_with_context(
-                            image,
-                            clipboard,
-                            &series_title,
-                            &preferences,
-                            done,
-                        )
+                        let current: crate::reader_export::ExportCurrent = Arc::new(move || {
+                            !cancel.is_cancelled()
+                                && owner.upgrade().is_some_and(|app| {
+                                    app.image_worker_live.load(Ordering::Acquire)
+                                        && app.generation.load(Ordering::Acquire) == generation
+                                })
+                        });
+                        let named = (|| {
+                            if clipboard {
+                                return Ok(crate::reader_export::SaveContext::new(
+                                    image.name.clone(),
+                                    "",
+                                    &preferences,
+                                    resolver,
+                                    current,
+                                ));
+                            }
+                            let name = final_naming
+                                .ok_or_else(|| text::tr("Chapter image is unavailable"))??;
+                            let state = domain.snapshot().map_err(error)?;
+                            let title = state
+                                .series
+                                .iter()
+                                .find(|series| series.id == name.chapter.series)
+                                .map(|series| series.title.as_str())
+                                .unwrap_or("Series");
+                            let chapter = state
+                                .chapters
+                                .iter()
+                                .find(|chapter| chapter.id == name.chapter);
+                            let label = chapter
+                                .and_then(|chapter| chapter.number.as_deref())
+                                .or_else(|| chapter.map(|chapter| chapter.label.as_str()))
+                                .unwrap_or("Unknown");
+                            let extension = std::path::Path::new(&image.name)
+                                .extension()
+                                .and_then(|ext| ext.to_str())
+                                .ok_or_else(|| text::tr("Unsupported image export format"))?;
+                            let filename = crate::export_names::filename(
+                                title,
+                                label,
+                                name.page,
+                                name.source_y,
+                                extension,
+                            );
+                            Ok(crate::reader_export::SaveContext::new(
+                                filename,
+                                title,
+                                &preferences,
+                                resolver,
+                                current,
+                            ))
+                        })();
+                        match named {
+                            Ok(context) => crate::reader_export::deliver_with_context(
+                                image, clipboard, context, done,
+                            ),
+                            Err(message) => done(Err(message)),
+                        }
                     }
                     Ok(_) => done(Err(text::tr("Image action cancelled"))),
                     Err(message) => done(Err(message)),
@@ -2868,6 +3362,10 @@ pub fn run(services: Services) -> Result<()> {
     let app = Arc::new(Controller {
         services,
         artwork,
+        chapter_cache: Arc::new(crate::chapter_cache::ChapterCache::new(
+            crate::paths::chapter_cache_dir()?,
+        )),
+        image_worker_live: AtomicBool::new(true),
         view: Mutex::new(View {
             source_browser: crate::source_browser::SourceBrowser::load(),
             ..View::default()
@@ -2879,6 +3377,13 @@ pub fn run(services: Services) -> Result<()> {
         active_image: Mutex::new(None),
     });
     let _ = LIFECYCLE.set(Arc::downgrade(&app));
+    let weak = ui.as_weak();
+    app.chapter_cache.on_gc(Arc::new(move || {
+        let _ = weak.upgrade_in_event_loop(|ui| {
+            ui.global::<crate::ImageStorageSettings>()
+                .invoke_chapter_cache_refresh()
+        });
+    }));
     wire_reader_context(&app, &ui);
     let worker = Arc::downgrade(&app);
     let weak = ui.as_weak();
@@ -2914,6 +3419,30 @@ pub fn run(services: Services) -> Result<()> {
         }
         ui.set_series_poster(slint::Image::default());
     });
+    {
+        let owner = app.clone();
+        let weak = ui.as_weak();
+        ui.global::<crate::ImageStorageSettings>()
+            .on_chapter_cache_refresh(move || {
+                if let Some(ui) = weak.upgrade() {
+                    owner.chapter_cache_maintenance(&ui, false);
+                }
+            });
+        let owner = app.clone();
+        let weak = ui.as_weak();
+        ui.global::<crate::ImageStorageSettings>()
+            .on_chapter_cache_clear(move || {
+                if let Some(ui) = weak.upgrade() {
+                    owner.chapter_cache_maintenance(&ui, true);
+                }
+            });
+        let owner = app.clone();
+        ui.global::<crate::ImageStorageSettings>()
+            .on_policy_changed(move || {
+                owner.artwork.apply_policy();
+                owner.chapter_cache.wake();
+            });
+    }
     wire!(on_library_sort_changed, |app, ui| app.render(&ui));
     wire!(on_chapter_order_changed, |app, ui, descending| {
         let series = app.view().series.as_ref().map(|series| series.id.clone());
@@ -3409,6 +3938,8 @@ pub fn run(services: Services) -> Result<()> {
         }
     });
     let result = ui.run().map_err(error);
+    app.image_worker_live.store(false, Ordering::Release);
+    app.invalidate();
     crate::reader_export::shutdown();
     app.flush();
     app.invalidate();
@@ -3418,6 +3949,70 @@ pub fn run(services: Services) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn export_capture_source_rows_stay_native_across_density_zoom_and_capture_resolution() {
+        for density in [1., 1.25, 1.5, 2.75, 3.] {
+            for zoom in [0.75, 1., 1.4, 2.] {
+                let scale = 392. / 720. * density * zoom;
+                let page_height = (25000. * scale) as f32;
+                let viewport_y = 24. * density;
+                let page_y = (viewport_y - 12480. * scale) as f32;
+                assert_eq!(
+                    export_source_row(f64::from(page_y), f64::from(page_height), viewport_y, 25000),
+                    12480
+                );
+            }
+        }
+        assert_eq!(export_source_row(20., 100., 0., 25000), 0);
+        assert_eq!(export_source_row(-200., 100., 0., 25000), 24999);
+    }
+    #[test]
+    fn image_handoff_cancellation_releases_pending_pixels_without_waiting_for_ui() {
+        struct Pixels(Arc<AtomicU64>);
+        impl Drop for Pixels {
+            fn drop(&mut self) {
+                self.0.store(0, Ordering::Release);
+            }
+        }
+        let bytes = Arc::new(AtomicU64::new(32 * 1024 * 1024));
+        let pending = Arc::new(Mutex::new(Some(Pixels(bytes.clone()))));
+        let (sent, ack) = mpsc::sync_channel(1);
+        let late_ui = ImageCompletion(sent);
+        assert!(!wait_image_completion(&pending, &ack, || false));
+        assert_eq!(bytes.load(Ordering::Acquire), 0);
+        assert!(pending.lock().unwrap().is_none());
+        drop(late_ui); // An abandoned UI callback still acknowledges on Drop.
+        assert!(
+            ack.recv_timeout(std::time::Duration::from_millis(50))
+                .is_ok()
+        );
+    }
+    #[test]
+    fn encoded_ram_hits_are_partitioned_by_live_source_context() {
+        let mut cache = EncodedPages::default();
+        let mut calls = 0;
+        let first = cache
+            .read_scoped(1, 0, "scope-a", || {
+                calls += 1;
+                Ok(vec![1])
+            })
+            .unwrap();
+        let again = cache
+            .read_scoped(1, 0, "scope-a", || {
+                panic!("same authorized context should reuse")
+            })
+            .unwrap();
+        assert!(Arc::ptr_eq(&first, &again));
+        let changed = cache
+            .read_scoped(1, 0, "scope-b", || {
+                calls += 1;
+                Ok(vec![2])
+            })
+            .unwrap();
+        assert_eq!(calls, 2);
+        assert_eq!(changed.as_slice(), [2]);
+        assert!(!Arc::ptr_eq(&first, &changed));
+    }
     fn tall_reader() -> Reader {
         Reader {
             chapter: ChapterId::new(reader_domain::SeriesId::new("fixture", "sharp"), "chapter"),
@@ -3438,6 +4033,7 @@ mod tests {
             decoded_bytes: BTreeMap::new(),
             decoded_widths: BTreeMap::new(),
             decoded_windows: BTreeMap::new(),
+            native_dimensions: BTreeMap::new(),
             target_width: 1280,
             viewport_width: 390.,
             viewport_height: 844.,
@@ -3878,6 +4474,7 @@ mod tests {
             decoded_bytes: BTreeMap::new(),
             decoded_widths: BTreeMap::new(),
             decoded_windows: BTreeMap::new(),
+            native_dimensions: BTreeMap::new(),
             target_width: 0,
             viewport_width: 500.,
             viewport_height: 500.,
@@ -3896,6 +4493,10 @@ mod tests {
                 dir.path().join("cache").join("posters"),
             ),
             services,
+            chapter_cache: Arc::new(crate::chapter_cache::ChapterCache::new(
+                dir.path().join("cache/viewed-chapters"),
+            )),
+            image_worker_live: AtomicBool::new(true),
             view: Mutex::new(View {
                 reader: Some(reader),
                 section: 6,

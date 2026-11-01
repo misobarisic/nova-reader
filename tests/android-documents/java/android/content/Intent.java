@@ -12,6 +12,7 @@ public class Intent {
     public static final int FLAG_GRANT_READ_URI_PERMISSION=1;
     public static final int FLAG_GRANT_WRITE_URI_PERMISSION=2;
     public static final int FLAG_GRANT_PERSISTABLE_URI_PERMISSION=64;
+    public static final int FLAG_GRANT_PREFIX_URI_PERMISSION=128;
     public static final int FLAG_ACTIVITY_NEW_TASK=0x10000000;
     public final String action;
     public String type;

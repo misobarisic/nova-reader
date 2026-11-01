@@ -12,7 +12,7 @@ use jni::{
 use std::{
     path::PathBuf,
     sync::{
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicI64, Ordering},
     },
 };
@@ -30,6 +30,31 @@ enum Callback {
 struct Pending {
     id: i64,
     callback: Callback,
+    image_conflict: Option<ImageConflictResolver>,
+    image_current: Option<ImageExportCurrent>,
+}
+
+#[derive(Clone, Copy, Debug)]
+#[repr(i32)]
+pub enum ImageConflictPolicy {
+    Ask = 0,
+    Overwrite = 1,
+    DoNothing = 2,
+}
+#[derive(Clone, Copy, Debug)]
+#[repr(i32)]
+pub enum ImageConflictChoice {
+    Overwrite = 0,
+    AddNumber = 1,
+    Cancel = 2,
+}
+pub type ImageConflictReply = Box<dyn FnOnce(ImageConflictChoice) + Send>;
+pub type ImageConflictResolver = Arc<dyn Fn(String, ImageConflictReply) + Send + Sync>;
+pub type ImageExportCurrent = Arc<dyn Fn() -> bool + Send + Sync>;
+pub struct ImageSaveOptions {
+    pub policy: ImageConflictPolicy,
+    pub resolver: ImageConflictResolver,
+    pub current: ImageExportCurrent,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -101,12 +126,26 @@ fn with_context<T>(
         // library discovery on a later Java UI/copy thread.
         env.register_native_methods(
             &class,
-            &[NativeMethod {
-                name: "nativeDocumentResult".into(),
-                sig: "(JLjava/lang/String;Ljava/lang/String;Ljava/lang/String;)V".into(),
-                fn_ptr: Java_dev_misob_nova_reader_ReaderActivity_nativeDocumentResult
-                    as *mut std::ffi::c_void,
-            }],
+            &[
+                NativeMethod {
+                    name: "nativeDocumentResult".into(),
+                    sig: "(JLjava/lang/String;Ljava/lang/String;Ljava/lang/String;)V".into(),
+                    fn_ptr: Java_dev_misob_nova_reader_ReaderActivity_nativeDocumentResult
+                        as *mut std::ffi::c_void,
+                },
+                NativeMethod {
+                    name: "nativeImageConflict".into(),
+                    sig: "(JLjava/lang/String;)V".into(),
+                    fn_ptr: Java_dev_misob_nova_reader_ReaderActivity_nativeImageConflict
+                        as *mut std::ffi::c_void,
+                },
+                NativeMethod {
+                    name: "nativeImageSaveCurrent".into(),
+                    sig: "(J)Z".into(),
+                    fn_ptr: Java_dev_misob_nova_reader_ReaderActivity_nativeImageSaveCurrent
+                        as *mut std::ffi::c_void,
+                },
+            ],
         )?;
         call(env, application, class)
     });
@@ -130,7 +169,12 @@ fn reserve(callback: Callback) -> Result<i64, (Callback, &'static str)> {
         return Err((callback, "Restart the app to open another document"));
     }
     NEXT_ID.store(id + 1, Ordering::Relaxed);
-    *pending = Some(Pending { id, callback });
+    *pending = Some(Pending {
+        id,
+        callback,
+        image_conflict: None,
+        image_current: None,
+    });
     Ok(id)
 }
 fn invoke(callback: Callback, result: Result<PathBuf, String>) {
@@ -250,8 +294,9 @@ pub fn export_image(
     image_action(5, staged, suggested_name, mime, None, callback);
 }
 /// Save an image under Pictures/Nova Reader[/series] using MediaStore on API 29+.
-/// Earlier Android versions ask for a destination through SAF. The caller owns
-/// staging cleanup after the callback; a series folder is one safe UTF-8 component.
+/// Earlier Android versions request a persistent SAF folder grant. This
+/// compatibility entry point cancels collisions; interactive callers use
+/// publish_image_with_policy. The caller owns staging cleanup after the callback.
 pub fn publish_image(
     staged: PathBuf,
     suggested_name: &str,
@@ -260,6 +305,78 @@ pub fn publish_image(
     callback: impl FnOnce(Result<(), String>) + Send + 'static,
 ) {
     image_action(7, staged, suggested_name, mime, series_folder, callback);
+}
+/// Save with an explicit collision policy. The request and staging remain
+/// reserved while the resolver asynchronously chooses overwrite/number/cancel.
+pub fn publish_image_with_policy(
+    staged: PathBuf,
+    suggested_name: &str,
+    mime: &str,
+    series_folder: Option<&str>,
+    options: ImageSaveOptions,
+    callback: impl FnOnce(Result<(), String>) + Send + 'static,
+) {
+    let id = match reserve(Callback::Export(Box::new(callback))) {
+        Ok(id) => id,
+        Err((callback, message)) => {
+            invoke(callback, Err(message.into()));
+            return;
+        }
+    };
+    if let Some(pending) = PENDING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_mut()
+        .filter(|pending| pending.id == id)
+    {
+        pending.image_conflict = Some(options.resolver);
+        pending.image_current = Some(options.current);
+    }
+    let result = with_context(|env, _, class| {
+        let path = env.new_string(staged.to_string_lossy())?;
+        let name = env.new_string(suggested_name)?;
+        let mime = env.new_string(mime)?;
+        let folder = env.new_string(series_folder.unwrap_or_default())?;
+        env.call_static_method(
+            class,
+            "publishImageWithPolicy",
+            "(JLjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I)V",
+            &[
+                JValue::Long(id),
+                JValue::Object(&path),
+                JValue::Object(&name),
+                JValue::Object(&mime),
+                JValue::Object(&folder),
+                JValue::Int(options.policy as i32),
+            ],
+        )?;
+        Ok(())
+    });
+    if let Err(error) = result {
+        finish(id, Err(error));
+    }
+}
+fn resolve_image_conflict(id: i64, choice: ImageConflictChoice) {
+    if PENDING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .is_none_or(|pending| pending.id != id)
+    {
+        return;
+    }
+    let result = with_context(|env, _, class| {
+        env.call_static_method(
+            class,
+            "resolveImage",
+            "(JI)V",
+            &[JValue::Long(id), JValue::Int(choice as i32)],
+        )?;
+        Ok(())
+    });
+    if let Err(error) = result {
+        finish(id, Err(error));
+    }
 }
 /// Copy an encoded image to Android's clipboard as a grant-readable content URI.
 /// Java retains an independent bounded cache copy; the caller owns staging cleanup.
@@ -360,6 +477,64 @@ pub fn cancel_pending() {
             Ok(())
         });
         finish(id, Err("Document selection cancelled".into()));
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_misob_nova_reader_ReaderActivity_nativeImageSaveCurrent(
+    _env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    id: jlong,
+) -> jni::sys::jboolean {
+    let current = {
+        let pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(pending) = pending.as_ref().filter(|pending| pending.id == id) else {
+            return 0;
+        };
+        pending.image_current.clone()
+    };
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        current.is_none_or(|current| current())
+    }))
+    .unwrap_or(false)
+    .into()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_misob_nova_reader_ReaderActivity_nativeImageConflict(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    id: jlong,
+    name: JString<'_>,
+) {
+    let resolver = PENDING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .filter(|pending| pending.id == id)
+        .and_then(|pending| pending.image_conflict.clone());
+    let decoded = env.get_string(&name).map(String::from);
+    let name = match decoded {
+        Ok(name) => name,
+        Err(_) => {
+            let _ = take_java_exception(&mut env);
+            resolve_image_conflict(id, ImageConflictChoice::Cancel);
+            return;
+        }
+    };
+    if let Some(resolver) = resolver {
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            resolver(
+                name,
+                Box::new(move |choice| resolve_image_conflict(id, choice)),
+            )
+        }))
+        .is_err()
+        {
+            resolve_image_conflict(id, ImageConflictChoice::Cancel);
+        }
+    } else {
+        resolve_image_conflict(id, ImageConflictChoice::Cancel);
     }
 }
 

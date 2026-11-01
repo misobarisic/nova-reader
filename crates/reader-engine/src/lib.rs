@@ -3,9 +3,10 @@ use image::ImageDecoder;
 mod avif;
 mod display;
 pub use display::{
-    DISPLAY_WINDOW_BYTES, DisplayWindow, DisplayWindowPlan, decode_display_image,
+    DISPLAY_WINDOW_BYTES, DisplayDecoder, DisplayWindow, DisplayWindowPlan, decode_display_image,
     decode_display_window, plan_display_window,
 };
+pub use nova_image::{DecodeLimits, PageDimensions};
 use reader_domain::{ReadingMode, ResumeAnchor};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -25,30 +26,6 @@ pub enum Error {
     Avif(String),
 }
 pub type Result<T> = std::result::Result<T, Error>;
-#[derive(Clone, Copy, Debug)]
-pub struct DecodeLimits {
-    pub max_encoded_bytes: usize,
-    pub max_width: u32,
-    pub max_height: u32,
-    pub max_pixels: u64,
-    pub max_decoded_bytes: u64,
-}
-impl Default for DecodeLimits {
-    fn default() -> Self {
-        Self {
-            max_encoded_bytes: 32 * 1024 * 1024,
-            max_width: 16384,
-            max_height: 65536,
-            max_pixels: 32_000_000,
-            max_decoded_bytes: 128 * 1024 * 1024,
-        }
-    }
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PageDimensions {
-    pub width: u32,
-    pub height: u32,
-}
 fn reader(bytes: &[u8], limits: DecodeLimits) -> Result<image::ImageReader<Cursor<&[u8]>>> {
     if bytes.len() > limits.max_encoded_bytes {
         return Err(Error::Limit);

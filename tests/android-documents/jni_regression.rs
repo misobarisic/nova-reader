@@ -36,6 +36,365 @@ fn fixture_data(env: &mut JNIEnv<'_>, method: &str) -> Vec<u8> {
 fn fixture_run(env: &mut JNIEnv<'_>, method: &str) {
     env.call_static_method(FIXTURE, method, "()V", &[]).unwrap();
 }
+fn saved_image_text(env: &mut JNIEnv<'_>, name: &str) -> String {
+    let name = env.new_string(name).unwrap();
+    let text = env
+        .call_static_method(
+            FIXTURE,
+            "savedText",
+            "(Ljava/lang/String;)Ljava/lang/String;",
+            &[JValue::Object(&name)],
+        )
+        .unwrap()
+        .l()
+        .unwrap();
+    env.get_string(&JString::from(text)).unwrap().into()
+}
+struct ImageSave {
+    prompts: std::sync::mpsc::Receiver<(String, ImageConflictReply)>,
+    done: std::sync::mpsc::Receiver<Result<(), String>>,
+}
+fn collision_save(
+    path: &std::path::Path,
+    name: &str,
+    policy: ImageConflictPolicy,
+    current: Arc<std::sync::atomic::AtomicBool>,
+) -> ImageSave {
+    let (prompt_send, prompts) = std::sync::mpsc::channel();
+    let (done_send, done) = std::sync::mpsc::channel();
+    publish_image_with_policy(
+        path.to_owned(),
+        name,
+        "image/png",
+        None,
+        ImageSaveOptions {
+            policy,
+            resolver: Arc::new(move |name, reply| {
+                let _ = prompt_send.send((name, reply));
+            }),
+            current: Arc::new(move || current.load(Ordering::SeqCst)),
+        },
+        move |result| {
+            let _ = done_send.send(result);
+        },
+    );
+    ImageSave { prompts, done }
+}
+fn current_image() -> Arc<std::sync::atomic::AtomicBool> {
+    Arc::new(std::sync::atomic::AtomicBool::new(true))
+}
+fn collision_pump(env: &mut JNIEnv<'_>, choose_tree: bool) {
+    fixture_run(env, "drain");
+    if choose_tree {
+        fixture_run(env, "imageTreeResult");
+    }
+    fixture_run(env, "awaitCopies");
+}
+fn image_collisions_require_a_choice_and_preserve_existing_bytes(env: &mut JNIEnv<'_>) {
+    let staged = cache_dir().unwrap().join("collision.image");
+    for api in [26, 35] {
+        env.call_static_method(FIXTURE, "setApi", "(I)V", &[JValue::Int(api)])
+            .unwrap();
+        fixture_run(env, "resetMedia");
+        fixture_run(env, "resetTree");
+        std::fs::write(&staged, b"old encoded image").unwrap();
+        let first = collision_save(
+            &staged,
+            "photo.png",
+            ImageConflictPolicy::Ask,
+            current_image(),
+        );
+        collision_pump(env, api < 29);
+        first
+            .done
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        assert!(first.prompts.try_recv().is_err());
+        assert_eq!(saved_image_text(env, "photo.png"), "old encoded image");
+        std::fs::write(&staged, b"new encoded image").unwrap();
+
+        let ask = collision_save(
+            &staged,
+            "photo.png",
+            ImageConflictPolicy::Ask,
+            current_image(),
+        );
+        collision_pump(env, false);
+        let (name, reply) = ask
+            .prompts
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(name, "photo.png");
+        assert!(ask.done.try_recv().is_err());
+        assert_eq!(saved_image_text(env, "photo.png"), "old encoded image");
+        let (send, receive) = std::sync::mpsc::channel();
+        copy_image(staged.clone(), "image/png", move |result| {
+            let _ = send.send(result);
+        });
+        assert!(
+            receive.recv().unwrap().is_err(),
+            "a collision keeps the sole staging request reserved"
+        );
+        reply(ImageConflictChoice::Cancel);
+        assert_eq!(
+            ask.done.recv().unwrap().unwrap_err(),
+            "Image action cancelled"
+        );
+        assert_eq!(saved_image_text(env, "photo.png"), "old encoded image");
+
+        let skip = collision_save(
+            &staged,
+            "photo.png",
+            ImageConflictPolicy::DoNothing,
+            current_image(),
+        );
+        collision_pump(env, false);
+        assert_eq!(
+            skip.done.recv().unwrap().unwrap_err(),
+            "Image already exists; nothing saved."
+        );
+        assert!(skip.prompts.try_recv().is_err());
+        assert_eq!(saved_image_text(env, "photo.png"), "old encoded image");
+        let overwrite = collision_save(
+            &staged,
+            "photo.png",
+            ImageConflictPolicy::Overwrite,
+            current_image(),
+        );
+        collision_pump(env, false);
+        overwrite.done.recv().unwrap().unwrap();
+        assert!(overwrite.prompts.try_recv().is_err());
+        assert_eq!(saved_image_text(env, "photo.png"), "new encoded image");
+        assert_eq!(
+            fixture_updates(env, if api < 29 { "treeFiles" } else { "mediaRows" }),
+            1
+        );
+        if api >= 29 {
+            assert!(fixture_bool(env, "ownershipQueried"));
+        }
+
+        for number in 2..=3 {
+            std::fs::write(&staged, format!("numbered image {number}")).unwrap();
+            let numbered = collision_save(
+                &staged,
+                "photo.png",
+                ImageConflictPolicy::Ask,
+                current_image(),
+            );
+            collision_pump(env, false);
+            numbered.prompts.recv().unwrap().1(ImageConflictChoice::AddNumber);
+            fixture_run(env, "awaitCopies");
+            numbered.done.recv().unwrap().unwrap();
+            assert_eq!(
+                saved_image_text(env, &format!("photo ({number}).png")),
+                format!("numbered image {number}")
+            );
+            assert_eq!(saved_image_text(env, "photo.png"), "new encoded image");
+        }
+        for phase in 1..=if api < 29 { 2 } else { 3 } {
+            std::fs::write(&staged, b"replacement that fails").unwrap();
+            env.call_static_method(FIXTURE, "failOverwrite", "(I)V", &[JValue::Int(phase)])
+                .unwrap();
+            let failed = collision_save(
+                &staged,
+                "photo.png",
+                ImageConflictPolicy::Overwrite,
+                current_image(),
+            );
+            collision_pump(env, false);
+            assert!(failed.done.recv().unwrap().is_err());
+            assert_eq!(saved_image_text(env, "photo.png"), "new encoded image");
+            assert_eq!(fixture_updates(env, "imageBackups"), 0);
+        }
+        fixture_run(env, "cancelMediaDuringWrite");
+        let cancelled = collision_save(
+            &staged,
+            "photo.png",
+            ImageConflictPolicy::Overwrite,
+            current_image(),
+        );
+        collision_pump(env, false);
+        assert!(cancelled.done.recv().unwrap().is_err());
+        assert_eq!(saved_image_text(env, "photo.png"), "new encoded image");
+        assert_eq!(fixture_updates(env, "imageBackups"), 0);
+
+        let current = current_image();
+        let stale = collision_save(
+            &staged,
+            "photo.png",
+            ImageConflictPolicy::Ask,
+            current.clone(),
+        );
+        collision_pump(env, false);
+        let reply = stale.prompts.recv().unwrap().1;
+        current.store(false, Ordering::SeqCst);
+        reply(ImageConflictChoice::Overwrite);
+        fixture_run(env, "awaitCopies");
+        assert!(stale.done.recv().unwrap().is_err());
+        assert_eq!(saved_image_text(env, "photo.png"), "new encoded image");
+        std::fs::write(&staged, b"rotation replacement").unwrap();
+        let recreated = collision_save(
+            &staged,
+            "photo.png",
+            ImageConflictPolicy::Ask,
+            current_image(),
+        );
+        collision_pump(env, false);
+        let reply = recreated.prompts.recv().unwrap().1;
+        fixture_run(env, "recreate");
+        reply(ImageConflictChoice::Overwrite);
+        fixture_run(env, "awaitCopies");
+        recreated.done.recv().unwrap().unwrap();
+        assert_eq!(saved_image_text(env, "photo.png"), "rotation replacement");
+
+        let late = collision_save(
+            &staged,
+            "photo.png",
+            ImageConflictPolicy::Ask,
+            current_image(),
+        );
+        collision_pump(env, false);
+        let late_reply = late.prompts.recv().unwrap().1;
+        cancel_pending();
+        assert!(late.done.recv().unwrap().is_err());
+        late_reply(ImageConflictChoice::Overwrite);
+        fixture_run(env, "awaitCopies");
+        assert_eq!(saved_image_text(env, "photo.png"), "rotation replacement");
+        if api >= 29 {
+            let replaced = collision_save(
+                &staged,
+                "photo.png",
+                ImageConflictPolicy::Ask,
+                current_image(),
+            );
+            collision_pump(env, false);
+            let reply = replaced.prompts.recv().unwrap().1;
+            fixture_run(env, "replaceSelectedMedia");
+            reply(ImageConflictChoice::Overwrite);
+            fixture_run(env, "awaitCopies");
+            assert!(replaced.done.recv().unwrap().is_err());
+            assert_eq!(saved_image_text(env, "photo.png"), "unselected replacement");
+            assert_eq!(saved_image_text(env, "moved.png"), "rotation replacement");
+        }
+    }
+    // A foreign row must never be overwritten, even if its name blocks a fresh
+    // insertion. Detect and remove a provider's silent auto-numbering instead.
+    fixture_run(env, "resetMedia");
+    let arguments = [
+        "photo.png",
+        "Pictures/Nova Reader/",
+        "other.application",
+        "foreign bytes",
+    ]
+    .map(|value| env.new_string(value).unwrap());
+    env.call_static_method(
+        FIXTURE,
+        "seedMedia",
+        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+        &arguments
+            .iter()
+            .map(|value| JValue::Object(value))
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let foreign = collision_save(
+        &staged,
+        "photo.png",
+        ImageConflictPolicy::Overwrite,
+        current_image(),
+    );
+    collision_pump(env, false);
+    assert!(
+        foreign
+            .done
+            .recv()
+            .unwrap()
+            .unwrap_err()
+            .contains("changed the requested filename")
+    );
+    assert_eq!(saved_image_text(env, "photo.png"), "foreign bytes");
+    assert_eq!(fixture_updates(env, "mediaRows"), 1);
+    fixture_run(env, "resetMedia");
+    let current = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let expired = collision_save(&staged, "photo.png", ImageConflictPolicy::Ask, current);
+    collision_pump(env, false);
+    assert!(expired.done.recv().unwrap().is_err());
+    assert!(expired.prompts.try_recv().is_err());
+    assert_eq!(fixture_updates(env, "mediaRows"), 0);
+    for filename in [
+        format!("{}.png", "t".repeat(154)),
+        format!("{}.png", "é".repeat(77)),
+    ] {
+        fixture_run(env, "resetMedia");
+        let first = collision_save(
+            &staged,
+            &filename,
+            ImageConflictPolicy::Ask,
+            current_image(),
+        );
+        collision_pump(env, false);
+        first.done.recv().unwrap().unwrap();
+        assert_eq!(
+            fixture_text(env, "mediaName"),
+            filename,
+            "the deterministic name must not be silently shortened"
+        );
+        let numbered = collision_save(
+            &staged,
+            &filename,
+            ImageConflictPolicy::Ask,
+            current_image(),
+        );
+        collision_pump(env, false);
+        let (shown, reply) = numbered.prompts.recv().unwrap();
+        assert_eq!(shown, filename);
+        reply(ImageConflictChoice::AddNumber);
+        fixture_run(env, "awaitCopies");
+        numbered.done.recv().unwrap().unwrap();
+        let actual = fixture_text(env, "mediaName");
+        assert!(actual.len() <= 160);
+        assert!(actual.ends_with(" (2).png"));
+    }
+    fixture_run(env, "resetMedia");
+    env.set_static_field(
+        "android/content/ContentResolver",
+        ("android/content/ContentResolver", "failQuery", "Z"),
+        JValue::Bool(1),
+    )
+    .unwrap();
+    let failed = collision_save(
+        &staged,
+        "photo.png",
+        ImageConflictPolicy::Ask,
+        current_image(),
+    );
+    collision_pump(env, false);
+    assert!(
+        failed
+            .done
+            .recv()
+            .unwrap()
+            .unwrap_err()
+            .contains("fixture query failure")
+    );
+    assert!(!env.exception_check().unwrap());
+    env.set_static_field(
+        "android/content/ContentResolver",
+        ("android/content/ContentResolver", "failQuery", "Z"),
+        JValue::Bool(0),
+    )
+    .unwrap();
+    let retried = collision_save(
+        &staged,
+        "photo.png",
+        ImageConflictPolicy::Ask,
+        current_image(),
+    );
+    collision_pump(env, false);
+    retried.done.recv().unwrap().unwrap();
+    std::fs::remove_file(staged).unwrap();
+}
 
 fn browser_links_use_application_and_recover_from_launch_exceptions(
     env: &mut JNIEnv<'_>,
@@ -314,6 +673,9 @@ fn avif_save_and_clipboard_preserve_encoded_bytes(env: &mut JNIEnv<'_>) {
         env.call_static_method(FIXTURE, "setApi", "(I)V", &[JValue::Int(api)])
             .unwrap();
         fixture_run(env, "resetMedia");
+        if api < 29 {
+            fixture_run(env, "resetTree");
+        }
         std::fs::write(&staged, encoded).unwrap();
         let (send, receive) = std::sync::mpsc::channel();
         publish_image(
@@ -327,9 +689,11 @@ fn avif_save_and_clipboard_preserve_encoded_bytes(env: &mut JNIEnv<'_>) {
         );
         fixture_run(env, "drain");
         if api < 29 {
-            assert_eq!(fixture_text(env, "mime"), "image/avif");
-            assert_eq!(fixture_text(env, "title"), "capture.avif");
-            fixture_run(env, "exportResult");
+            assert_eq!(
+                fixture_text(env, "action"),
+                "android.intent.action.OPEN_DOCUMENT_TREE"
+            );
+            fixture_run(env, "imageTreeResult");
         }
         fixture_run(env, "awaitCopies");
         receive
@@ -464,7 +828,7 @@ fn media_store_publishes_complete_images_and_rolls_back_failures(env: &mut JNIEn
     assert_eq!(fixture_updates(env, "mediaDeletes"), 1);
 
     fixture_run(env, "resetMedia");
-    let long_folder = "界".repeat(27); // 81 UTF-8 bytes.
+    let long_folder = "界".repeat(33); // 99 UTF-8 bytes, above the shared 96-byte folder limit.
     for folder in [
         "..",
         "../escape",
@@ -494,9 +858,34 @@ fn media_store_publishes_complete_images_and_rolls_back_failures(env: &mut JNIEn
         assert_eq!(fixture_updates(env, "mediaRows"), 0);
     }
 
-    // API 26-28 keeps the platform picker, with no legacy storage permission.
+    fixture_run(env, "resetMedia");
+    let boundary_folder = "界".repeat(32); // 96 UTF-8 bytes, accepted on both platforms.
+    let (send, receive) = std::sync::mpsc::channel();
+    publish_image(
+        staged.clone(),
+        "page.png",
+        "image/png",
+        Some(&boundary_folder),
+        move |result| {
+            let _ = send.send(result);
+        },
+    );
+    fixture_run(env, "drain");
+    fixture_run(env, "awaitCopies");
+    receive
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        fixture_text(env, "mediaPath"),
+        format!("Pictures/Nova Reader/{boundary_folder}/")
+    );
+
+    fixture_run(env, "resetMedia");
+    // API 26-28 grants a scoped folder once, without broad storage permission.
     env.call_static_method(FIXTURE, "setApi", "(I)V", &[JValue::Int(28)])
         .unwrap();
+    fixture_run(env, "resetTree");
     let (send, receive) = std::sync::mpsc::channel();
     publish_image(
         staged.clone(),
@@ -510,12 +899,10 @@ fn media_store_publishes_complete_images_and_rolls_back_failures(env: &mut JNIEn
     fixture_run(env, "drain");
     assert_eq!(
         fixture_text(env, "action"),
-        "android.intent.action.CREATE_DOCUMENT"
+        "android.intent.action.OPEN_DOCUMENT_TREE"
     );
-    assert_eq!(fixture_text(env, "title"), "legacy.png");
-    assert_eq!(fixture_text(env, "mime"), "image/png");
     assert_eq!(fixture_updates(env, "mediaRows"), 0);
-    fixture_run(env, "exportResult");
+    fixture_run(env, "imageTreeResult");
     fixture_run(env, "awaitCopies");
     receive
         .recv_timeout(std::time::Duration::from_secs(2))
@@ -704,6 +1091,7 @@ fn application_context_launches_and_callbacks_resolve() {
     image_export_and_clipboard_have_real_readable_bytes(&mut env);
     media_store_publishes_complete_images_and_rolls_back_failures(&mut env);
     avif_save_and_clipboard_preserve_encoded_bytes(&mut env);
+    image_collisions_require_a_choice_and_preserve_existing_bytes(&mut env);
 
     // The bridge receives a real Application, not an Activity. Each launch
     // queues to Java main, and the explicitly registered native callback runs.

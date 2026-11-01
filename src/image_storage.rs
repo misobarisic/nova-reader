@@ -1,9 +1,14 @@
-//! Device compression policy for newly persisted artwork and chapter pages.
+//! Device cache budgets and future-write compression for artwork/chapter pages.
 use crate::{AppWindow, ImageStorageSettings};
+use nova_cache::config::{CacheSettings, DISK_CACHE_LIMITS, IMAGE_RESOLUTION_PRESETS};
 use nova_reader_ui::backend_text as text;
 use serde::{Deserialize, Serialize};
-use slint::ComponentHandle;
-use std::{cell::RefCell, rc::Rc};
+use slint::{ComponentHandle, ModelRc, VecModel};
+use std::{
+    cell::RefCell,
+    rc::Rc,
+    sync::{LazyLock, RwLock},
+};
 
 const KEY: &str = "reader:image-storage";
 
@@ -53,11 +58,83 @@ impl Default for ImageCompression {
     }
 }
 
+/// Reader uses Nova's disk/memory choices while isolating artwork from chapter
+/// eviction. Resolution applies only to future processed posters, never pages.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CachePolicyPreferences {
+    pub disk_enabled: bool,
+    pub chapter_disk_limit_mb: Option<u32>,
+    pub artwork_disk_limit_mb: Option<u32>,
+    pub decoded_memory_mb: u32,
+    pub poster_max_side: Option<u32>,
+}
+impl Default for CachePolicyPreferences {
+    fn default() -> Self {
+        let nova = CacheSettings::default();
+        Self {
+            disk_enabled: nova.cache_images,
+            chapter_disk_limit_mb: nova.image_disk_cache_limit_mb,
+            artwork_disk_limit_mb: nova.image_disk_cache_limit_mb,
+            decoded_memory_mb: nova.lru_cache_mb,
+            // Reader previously kept full encoded artwork and a separate
+            // 460x690 display bound. Preserve that behavior until explicit edits.
+            poster_max_side: None,
+        }
+    }
+}
+impl CachePolicyPreferences {
+    fn valid(&self) -> bool {
+        DISK_CACHE_LIMITS.contains(&self.chapter_disk_limit_mb)
+            && DISK_CACHE_LIMITS.contains(&self.artwork_disk_limit_mb)
+            && (32..=512).contains(&self.decoded_memory_mb)
+            && self.decoded_memory_mb.is_multiple_of(16)
+            && self
+                .poster_max_side
+                .is_none_or(|side| IMAGE_RESOLUTION_PRESETS.contains(&side))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CacheKind {
+    Chapters,
+    Artwork,
+}
+
+// First access is cold initialization only. Init and successful commits replace
+// this snapshot before waking workers; a hit never reads Nova KV or SQLite.
+static CURRENT: LazyLock<RwLock<ImageStoragePreferences>> = LazyLock::new(|| RwLock::new(load()));
+
+pub fn settings_snapshot() -> ImageStoragePreferences {
+    *CURRENT.read().unwrap_or_else(|error| error.into_inner())
+}
+pub fn policy_snapshot() -> CachePolicyPreferences {
+    settings_snapshot().policy
+}
+pub fn cache_policy(kind: CacheKind) -> nova_cache::gc::DiskPolicy {
+    let settings = policy_snapshot();
+    let limit = match kind {
+        CacheKind::Chapters => settings.chapter_disk_limit_mb,
+        CacheKind::Artwork => settings.artwork_disk_limit_mb,
+    };
+    nova_cache::gc::DiskPolicy {
+        enabled: settings.disk_enabled,
+        limit_bytes: limit.map(|mb| u64::from(mb) * 1024 * 1024),
+    }
+}
+pub fn memory_limit_bytes() -> usize {
+    policy_snapshot().decoded_memory_mb as usize * 1024 * 1024
+}
+fn publish(preferences: ImageStoragePreferences) {
+    *CURRENT.write().unwrap_or_else(|error| error.into_inner()) = preferences;
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ImageStoragePreferences {
     pub cache: ImageCompression,
     pub downloads: ImageCompression,
+    pub policy: CachePolicyPreferences,
 }
 
 impl Default for ImageStoragePreferences {
@@ -68,13 +145,16 @@ impl Default for ImageStoragePreferences {
                 enabled: false,
                 ..ImageCompression::default()
             },
+            policy: CachePolicyPreferences::default(),
         }
     }
 }
 
 impl ImageStoragePreferences {
     fn valid(&self) -> bool {
-        (1..=100).contains(&self.cache.quality) && (1..=100).contains(&self.downloads.quality)
+        (1..=100).contains(&self.cache.quality)
+            && (1..=100).contains(&self.downloads.quality)
+            && self.policy.valid()
     }
 
     fn apply(&self, ui: &AppWindow) {
@@ -85,9 +165,90 @@ impl ImageStoragePreferences {
         settings.set_downloads_enabled(self.downloads.enabled);
         settings.set_downloads_format(self.downloads.format.into());
         settings.set_downloads_quality(f32::from(self.downloads.quality));
+        settings.set_disk_enabled(self.policy.disk_enabled);
+        settings.set_disk_limit_names(ModelRc::new(VecModel::from(
+            DISK_CACHE_LIMITS
+                .iter()
+                .map(|limit| match limit {
+                    None => text::tr("Unlimited").into(),
+                    Some(mb) if *mb >= 1024 => format!("{} GiB", mb / 1024).into(),
+                    Some(mb) => format!("{mb} MiB").into(),
+                })
+                .collect::<Vec<slint::SharedString>>(),
+        )));
+        settings.set_chapter_disk_limit_index(
+            DISK_CACHE_LIMITS
+                .iter()
+                .position(|limit| *limit == self.policy.chapter_disk_limit_mb)
+                .unwrap_or(3) as i32,
+        );
+        settings.set_artwork_disk_limit_index(
+            DISK_CACHE_LIMITS
+                .iter()
+                .position(|limit| *limit == self.policy.artwork_disk_limit_mb)
+                .unwrap_or(3) as i32,
+        );
+        settings.set_memory_budget(f64::from(self.policy.decoded_memory_mb) as f32);
+        let mut resolutions = vec![text::tr("Original").into()];
+        resolutions.extend(
+            IMAGE_RESOLUTION_PRESETS
+                .iter()
+                .map(|side| format!("{side} px").into()),
+        );
+        settings.set_poster_resolution_names(ModelRc::new(VecModel::from(resolutions)));
+        settings.set_poster_resolution_index(
+            self.policy
+                .poster_max_side
+                .and_then(|side| {
+                    IMAGE_RESOLUTION_PRESETS
+                        .iter()
+                        .position(|preset| *preset == side)
+                        .map(|i| i + 1)
+                })
+                .unwrap_or(0) as i32,
+        );
     }
 
     fn change(&mut self, key: &str, value: i32) -> bool {
+        match key {
+            "disk_enabled" if value == 0 || value == 1 => {
+                self.policy.disk_enabled = value == 1;
+                return true;
+            }
+            "chapter_disk_limit_index" | "artwork_disk_limit_index" => {
+                let Some(limit) = usize::try_from(value)
+                    .ok()
+                    .and_then(|i| DISK_CACHE_LIMITS.get(i))
+                    .copied()
+                else {
+                    return false;
+                };
+                if key == "chapter_disk_limit_index" {
+                    self.policy.chapter_disk_limit_mb = limit;
+                } else {
+                    self.policy.artwork_disk_limit_mb = limit;
+                }
+                return true;
+            }
+            "memory_budget" if (32..=512).contains(&value) && value % 16 == 0 => {
+                self.policy.decoded_memory_mb = value as u32;
+                return true;
+            }
+            "poster_resolution_index" => {
+                self.policy.poster_max_side = match value {
+                    0 => None,
+                    value if value > 0 => {
+                        match IMAGE_RESOLUTION_PRESETS.get((value - 1) as usize) {
+                            Some(side) => Some(*side),
+                            None => return false,
+                        }
+                    }
+                    _ => return false,
+                };
+                return true;
+            }
+            _ => {}
+        }
         let (compression, field) = if let Some(field) = key.strip_prefix("cache_") {
             (&mut self.cache, field)
         } else if let Some(field) = key.strip_prefix("downloads_") {
@@ -117,7 +278,7 @@ fn read() -> Result<ImageStoragePreferences, String> {
     if preferences.valid() {
         Ok(preferences)
     } else {
-        Err("image quality must be between 1 and 100".into())
+        Err("invalid image storage quality or cache policy".into())
     }
 }
 
@@ -140,9 +301,14 @@ fn save(
 ) {
     match write(&next) {
         Ok(()) => {
+            let changed = next != *state.borrow();
+            publish(next);
             next.apply(ui);
             *state.borrow_mut() = next;
             ui.set_status("".into());
+            if changed {
+                ui.global::<ImageStorageSettings>().invoke_policy_changed();
+            }
         }
         Err(error) => {
             state.borrow().apply(ui);
@@ -168,6 +334,7 @@ pub fn init(ui: &AppWindow) -> Result<(), String> {
             ImageStoragePreferences::default()
         }
     };
+    publish(preferences);
     preferences.apply(ui);
     let state = Rc::new(RefCell::new(preferences));
     let weak = ui.as_weak();
@@ -195,6 +362,11 @@ mod tests {
         let ui = AppWindow::new().unwrap();
         let previous = ImageStoragePreferences::default();
         let state = RefCell::new(previous);
+        let wakes = Rc::new(std::cell::Cell::new(0));
+        ui.global::<ImageStorageSettings>().on_policy_changed({
+            let wakes = wakes.clone();
+            move || wakes.set(wakes.get() + 1)
+        });
         let next = ImageStoragePreferences {
             cache: ImageCompression {
                 enabled: false,
@@ -205,6 +377,11 @@ mod tests {
                 enabled: true,
                 format: ImageStorageFormat::Jpeg,
                 quality: 60,
+            },
+            policy: CachePolicyPreferences {
+                disk_enabled: false,
+                chapter_disk_limit_mb: Some(256),
+                ..CachePolicyPreferences::default()
             },
         };
         next.apply(&ui);
@@ -217,6 +394,10 @@ mod tests {
         assert_eq!(settings.get_downloads_format(), 1);
         assert_eq!(settings.get_downloads_quality(), 85.);
         assert_eq!(*state.borrow(), previous);
+        assert!(settings.get_disk_enabled());
+        assert_eq!(settings.get_chapter_disk_limit_index(), 3);
+        assert_eq!(settings.get_memory_budget(), 128.);
+        assert_eq!(wakes.get(), 0, "failed persistence must not wake GC");
         assert!(!ui.get_status().is_empty());
     }
 }

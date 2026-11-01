@@ -1681,6 +1681,7 @@ dependencies = [
 [[package]]
 name = "ferri-pdf-rav1d"
 version = "1.1.2"
+source = "git+https://github.com/misobarisic/nova-kit?rev=138f29e33d4f7d8ae9204b6bd6118eb458740f70#138f29e33d4f7d8ae9204b6bd6118eb458740f70"
 dependencies = [
  "assert_matches",
  "atomig",
@@ -3662,6 +3663,33 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0676bb32a98c1a483ce53e500a81ad9c3d5b3f7c920c28c24e9cb0980d0b5bc8"
 
 [[package]]
+name = "nova-cache"
+version = "0.1.0"
+source = "git+https://github.com/misobarisic/nova-kit?rev=138f29e33d4f7d8ae9204b6bd6118eb458740f70#138f29e33d4f7d8ae9204b6bd6118eb458740f70"
+dependencies = [
+ "image",
+ "libc",
+ "nova-image",
+ "serde",
+ "serde_json",
+ "slint",
+ "webp",
+]
+
+[[package]]
+name = "nova-image"
+version = "0.1.0"
+source = "git+https://github.com/misobarisic/nova-kit?rev=138f29e33d4f7d8ae9204b6bd6118eb458740f70#138f29e33d4f7d8ae9204b6bd6118eb458740f70"
+dependencies = [
+ "avif-parse",
+ "ferri-pdf-rav1d",
+ "image",
+ "ravif",
+ "thiserror 2.0.21",
+ "yuv",
+]
+
+[[package]]
 name = "nova-reader"
 version = "0.1.16"
 dependencies = [
@@ -3672,9 +3700,10 @@ dependencies = [
  "image",
  "jni 0.21.1",
  "ndk-context",
+ "nova-cache",
+ "nova-image",
  "nova-reader-ui",
  "nova-storage",
- "ravif",
  "reader-catalogue",
  "reader-domain",
  "reader-downloads",
@@ -3710,7 +3739,7 @@ dependencies = [
 [[package]]
 name = "nova-storage"
 version = "0.1.0"
-source = "git+https://github.com/misobarisic/nova-kit?rev=63141dfc6abd39a247edde1f33ebaeb59dc7229a#63141dfc6abd39a247edde1f33ebaeb59dc7229a"
+source = "git+https://github.com/misobarisic/nova-kit?rev=138f29e33d4f7d8ae9204b6bd6118eb458740f70#138f29e33d4f7d8ae9204b6bd6118eb458740f70"
 dependencies = [
  "redb",
  "serde",
@@ -3721,7 +3750,7 @@ dependencies = [
 [[package]]
 name = "nova-ui-base"
 version = "0.1.0"
-source = "git+https://github.com/misobarisic/nova-kit?rev=63141dfc6abd39a247edde1f33ebaeb59dc7229a#63141dfc6abd39a247edde1f33ebaeb59dc7229a"
+source = "git+https://github.com/misobarisic/nova-kit?rev=138f29e33d4f7d8ae9204b6bd6118eb458740f70#138f29e33d4f7d8ae9204b6bd6118eb458740f70"
 
 [[package]]
 name = "num-bigint"
@@ -4998,12 +5027,10 @@ dependencies = [
 name = "reader-engine"
 version = "0.1.0"
 dependencies = [
- "avif-parse",
- "ferri-pdf-rav1d",
  "image",
+ "nova-image",
  "reader-domain",
  "thiserror 2.0.21",
- "yuv",
 ]
 
 [[package]]
@@ -6989,6 +7016,7 @@ version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c071456adef4aca59bf6a583c46b90ff5eb0b4f758fc347cea81290288f37ce1"
 dependencies = [
+ "image",
  "libwebp-sys",
 ]
 

@@ -4,8 +4,9 @@ NOVA READER APPLICATION AND SHARED CRATES
 Nova Reader and its reader-domain, reader-sources, reader-engine,
 reader-downloads, reader-catalogue and UI crates are GPL-3.0-or-later.
 Application/build/UI foundations derive from Nova revision
-b69a1e5765ecc65ac3b00acdfe2f16e2f46a5dda. nova-storage and nova-ui-base are
-consumed from nova-kit revision 63141dfc6abd39a247edde1f33ebaeb59dc7229a.
+b69a1e5765ecc65ac3b00acdfe2f16e2f46a5dda. nova-storage, nova-ui-base,
+nova-cache and nova-image are
+consumed from nova-kit revision 138f29e33d4f7d8ae9204b6bd6118eb458740f70.
 The generated Cargo catalog lists runtime crates for the actual target and
 features; the complete project license and third-party notices follow.
 
@@ -17,8 +18,8 @@ The full assets/fonts/LICENSE.txt follows. Launcher and UI artwork derives from
 Nova under the existing project attribution.
 
 AVIF ADAPTER AND LOCAL CODEC SOURCE
-reader-engine/src/avif.rs adapts avif-decode 3.0.0 plane/CICP handling under
-BSD-3-Clause; its full notice follows. vendor/ferri-pdf-rav1d is the published
+Kit nova-image/src/avif.rs adapts avif-decode 3.0.0 plane/CICP handling under
+BSD-3-Clause; its full notice follows. Kit vendor/ferri-pdf-rav1d is the published
 ferri-pdf-rav1d 1.1.2 archive, SHA-256
 bb4072634f94938773523af4005a080ff3e2b3a0328eaa9bd222eb52d85e2cd3,
 with the two stable scalar feature-predicate adaptations recorded in PATCHES.md.

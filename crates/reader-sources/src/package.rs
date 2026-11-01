@@ -445,10 +445,18 @@ impl SourceRegistry {
         }
         let (m, script) = validate(&bytes)?;
         let active = inner.active.get(id).unwrap().clone();
+        let cache_partition =
+            serde_json::to_string(&(inner.root.to_string_lossy(), &self.profile, id))
+                .expect("source profile identity serializes");
         let transport = inner
             .sessions
             .entry((self.profile.clone(), id.into()))
-            .or_insert_with(|| Arc::new(NetworkTransport::new(m.permissions.clone())))
+            .or_insert_with(|| {
+                Arc::new(NetworkTransport::new_scoped(
+                    m.permissions.clone(),
+                    cache_partition,
+                ))
+            })
             .clone();
         let key = (self.profile.clone(), id.to_owned());
         if !inner.settings.contains_key(&key) {

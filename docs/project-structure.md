@@ -12,11 +12,14 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `src/services.rs` | Shared UI/test services: install, validated source/date conversion, library, downloads and local import |
 | `src/cli.rs`, `src/paths.rs` | Commands, bounded file input, independent data and platform cache directories |
 | `src/android_documents.rs`, `android/java/dev/misob/nova/reader/ReaderActivity.java` | Application-context JNI, current-activity SAF and reader status-bar visibility/lifecycle on Java main |
-| `src/artwork.rs` | Shared 128 MiB decoded-poster LRU, synchronous cross-page cache hits, source-availability revocation, UI handle retention, bounded worker and disk-cache maintenance |
+| `src/artwork.rs` | Kit decoded-poster LRU and encoded variants, synchronous cross-page hits, source permits, UI handles, bounded worker and legacy artwork migration |
+| `src/chapter_cache.rs` | Kit-backed disposable viewed pages, authorization scopes, chapter-group eviction/active leases and bounded background encoding |
 | `src/reader_export.rs` | Original-image validation, screencap encoding, bounded platform save/clipboard delivery and persistent desktop clipboard ownership; `src/app.rs` captures the clean pre-menu viewport with an 8-million-pixel limit and fetches source page bytes |
+| `src/export_names.rs` | Portable UTF-8 series folders and bounded title/chapter/page/vertical-position filenames, including duplicate numbering |
+| `crates/ui/save-conflict-sheet.slint` | Retained modal Overwrite/Add number/Cancel sheet; `app.slint` owns name/open/choice properties and callbacks |
 | `src/chapter_capture.rs` | Bounded source-resolution compositor for visible chapter areas; captures original pixels rather than enlarging a device snapshot |
-| `src/capture_settings.rs`, `crates/ui/capture-settings.slint` | Validated device capture preferences and retained More → Settings → Screenshots controls for format, quality, Device/Chapter screencap resolution and per-series folders |
-| `src/image_storage.rs`, `crates/ui/image-storage-settings.slint` | Independent JPEG/WebP/AVIF compression preferences for newly persisted cache/download images; Nova format/quality controls live in Cache settings |
+| `src/capture_settings.rs`, `crates/ui/capture-settings.slint` | Validated device capture preferences and retained More → Settings → Screenshots controls for format, quality, Device/Chapter screencap resolution, per-series folders and duplicate policy |
+| `src/image_storage.rs`, `crates/ui/image-storage-settings.slint` | Durable cache policy and independent JPEG/WebP/AVIF compression; shared Kit cache controls with chapter-first maintenance and separate artwork settings |
 | `src/reading_preferences.rs` | Fallible Nova KV persistence for adult-source visibility and chapter order keyed by full source-local series identity |
 | `src/reader_modes.rs`, `docs/reader-modes.md` | Pinned TachiyomiJ2K genre/source classification, Automatic/manual selection, and per-series persisted mode overrides |
 | `src/timeline.rs`, `src/source_filters.rs`, `src/source_browser.rs` | Local date groups/provider date parsing, bounded typed filter values and persistent source pins/last-used grouping |
@@ -27,6 +30,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `crates/ui/app.slint` | Shared pages/reader models, safe-area layout, platform/width shell selection, detail origin and translated text |
 | `crates/ui/media-models.slint` | Shared series/chapter/timeline/source/extension/filter row models |
 | `crates/ui/library-cards.slint`, `crates/ui/display-settings.slint` | Nova poster/list painting and left-anchored progress fill, per-entry context gestures, viewport admission, grid/list switch and persisted display choices |
+| `../nova-kit/crates/cache`, `../nova-kit/crates/ui-base/slint/cache-settings-controls.slint` | Actual Nova cache/settings implementations and NumericSetting/cache controls shared by Nova and Reader; app persistence/search/sync adapters remain local |
 | `crates/ui/library-search.slint` | Retained Nova search reveal, deferred focus, live filtering and viewport-aware field exposure |
 | `crates/ui/entry-menu.slint` | Per-title Kit action sheet/anchored desktop menu, stable-identity category editing and library/refresh actions |
 | `crates/ui/detail-hero.slint`, `crates/ui/title-artwork.slint`, `crates/ui/chapter-row.slint` | Nova detail artwork/title/metadata/actions, retained synopsis state, chapter-ready Continue gating, compact chapter rows and accessible action popup |
@@ -43,9 +47,10 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `assets/icons/navigation` | Embedded SVG navigation and reader controls, independent of system font glyph coverage |
 | `crates/reader-domain` | Source-local identities, schema-1 state, library/categories, progress/history/bookmarks, backup/restore |
 | `crates/reader-sources` | Reader v2 ZIP validation, durable registry, typed profile settings, QuickJS host, HTML/URL capabilities and checked source HTTP |
-| `crates/reader-engine` | Dimension probing, bounded PNG/JPEG/WebP/8-bit still AVIF decode, display geometry, resume anchors and decoded cache utility |
-| `crates/reader-engine/src/display.rs`, `crates/reader-engine/src/avif.rs` | Width-preserving visible-row display admission/resampling; pure-Rust AVIF still-image adapter with attribution in `AVIF-NOTICE.txt` |
-| `vendor/ferri-pdf-rav1d` | Published 1.1.2 decoder with two assembly-gated feature predicates for stable ARMv7; original licenses/hardening and exact source provenance retained in `PATCHES.md`; excluded from workspace membership |
+| `crates/reader-engine` | Dimension probing, bounded PNG/JPEG/WebP decode and shared Kit AVIF delegation, display geometry, resume anchors and decoded cache utility |
+| `crates/reader-engine/src/display.rs`, `crates/reader-engine/src/avif.rs` | Width-preserving visible-row display admission/resampling and one-original worker reuse; thin boundary to Kit `nova-image` AVIF with independent Reader fixture/display/admission regressions |
+| `crates/reader-engine/examples/tall_scroll.rs`, `docs/tall-scroll-performance.md` | Deterministic 720×25,000 CPU scroll profile and actual Mihon stable/main rendering comparison |
+| Kit `crates/image`, `vendor/ferri-pdf-rav1d` | Shared bounded AVIF codec and published 1.1.2 portable decoder; Reader retains only thin adapters, fixture attribution and distribution licenses |
 | `crates/reader-downloads` | Durable queue, checksummed page bundles, recovery, quota, source-free offline lookup, local folder/CBZ import, bundle removal and manifest-only status hints |
 | `crates/reader-catalogue` | Bounded Keiyoushi protobuf discovery, exact port mappings, signed native catalogue verification and availability states |
 | `examples/addons/manhwa18cc` | Thin Manhwa18 configuration, reusable YiiMadara helper, Apache license/provenance and synthetic parser fixtures |
@@ -71,7 +76,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `tools/package-addon.py` | Deterministic manifest-declared reader addon ZIP builder |
 | `.github/scripts`, `.github/workflows` | Nova's copied platform packagers and PR/main-check versus tag-build split, required Reader identity/license/signing integration |
 | `.github/scripts/test_package_nova_parity.py` | Immutable Nova-source parity for all three packaging scripts, masking only documented metadata/license adaptations and exact AppImage tool pins |
-| `.github/scripts/test_package_linux.py`, `crates/reader-engine/tests/avif_portability.rs` | Dated AppImage tool/checksum regressions and portable decoder feature-gating/runtime-dispatch regression |
+| `.github/scripts/test_package_linux.py`, Kit `crates/image/tests/avif_portability.rs` | Dated AppImage tool/checksum regressions and portable decoder feature-gating/runtime-dispatch regression |
 | `android` | Android resources, platform document bridge and intentionally public local debug signing key |
 
 ## State and work boundaries
@@ -94,14 +99,31 @@ preferences and survive theme reset. Source pins/last-used source live under
 are independent of portable library backup data.
 Screenshots format/quality/resolution/folder preferences live separately under
 `reader:captures`; changing them preserves original chapter data and metadata.
+The duplicate dropdown stores Ask (default), Overwrite or Do nothing. Ask opens
+a nonblocking Overwrite/Add number/Cancel sheet, guarded by the current reader
+generation. Clipboard actions bypass naming and duplicate handling. Desktop
+saves stage in the destination directory and publish without clobbering unless
+overwrite was selected; numbered retries remain race safe. Android API 29+
+queries app-owned MediaStore images by exact name and relative path. API 26–28
+requests and persists a read/write document-tree grant once, then uses scoped
+Nova Reader/series children. Provider overwrites retain a bounded original backup
+for rollback; a failed recovery reports an error and retains one private recovery
+file rather than accepting further overwrites.
+Saved names start with the series title, then padded chapter/page numbers.
+Screencaps append the first visible loaded page's original-pixel Y offset.
+Filename components are limited to 160 UTF-8 bytes (including duplicate suffix),
+series folders to 96 bytes, preserving chapter/page/position suffixes.
 Device-resolution screencaps retain the clean pre-menu window snapshot. Chapter
 resolution freezes the reader viewport, scroll/pan, displayed page rectangles
 and source inputs before opening the menu, then composites visible source pixels
 on a worker. The clicked page defines the native pixel scale. Both resolution
 modes keep the eight-million-pixel export limit and apply to save and clipboard.
 `reader:image-storage` stores independent cache/download compression switches,
-formats and quality for new writes. Preference changes do not rewrite existing
-cache files or downloaded chapter bundles.
+formats and quality for new writes, plus a backward-compatible cache policy:
+disk caching, separate chapter/artwork limits, decoded artwork memory and future
+poster resolution. Preference changes do not rewrite existing cache files or
+downloaded chapter bundles. Successful writes publish a thread-safe policy
+snapshot before waking workers; hot cache hits never read the database.
 Adult-source visibility lives under `reader:show-adult`, defaulting to hidden.
 `reader:chapter-order:<serialized SeriesId>` stores descending/ascending chapter
 order separately for each full source-local series identity, defaulting to
@@ -121,10 +143,12 @@ Fetched series posters belong to `cache_dir()/posters`, never the data directory
 Desktop uses the platform cache base plus `nova-reader`; Android uses
 `Context.getCacheDir()`. `NOVA_READER_CACHE_DIR` overrides the cache root for tests
 or deliberate configuration, independently of `NOVA_READER_DATA_DIR`. Disk files
-use hashes of source/series/URL identity. The worker admits 32 requests, rejects
+use source/series/URL identity plus opaque authorization scope for encoded reuse. The worker admits 32 requests, rejects
 encoded covers above 8 MiB and limits source decode to 8 million pixels/72 MiB
-with display images at most 460×690. One 128 MiB decoded-pixel LRU and a
-32 MiB disk/256-file cache retain admitted artwork.
+with display images at most 460×690. Nova Kit owns the decoded-pixel LRU
+(128 MiB by default), encoded variant container and incremental disk GC.
+The old 32 MiB/256-file artwork quota is replaced by an independent 1 GiB
+default disk budget, using Nova's shared limit presets.
 UI images share the LRU pixel buffers; visible/selected artwork and up to 48
 additional recently used cards retain UI handles. Model hydration and request
 cache hits reuse pixels immediately across Browse, Library, Updates, History
@@ -134,8 +158,24 @@ archives. The single worker permits one decoded completion awaiting UI
 acknowledgement; queued requests carry metadata, not image buffers. Active decode
 allocations are separate from the retained-pixel budget.
 The transport's existing 32 MiB response cap precedes the artwork admission cap.
-Viewport changes cancel obsolete work; cache clear runs on the worker and clears
-only owned poster files and CPU/UI artwork. Downloads/imports remain data.
+Viewport changes cancel obsolete work. Chapter usage/clear is the primary Cache
+page action; the artwork footer has separate usage/clear. Worker maintenance
+uses Kit’s batched usage index and grouped eviction. Both actions affect owned
+temporary files only; explicit downloads/imports and library data remain data.
+The memory setting controls the artwork LRU; reader display-window/model
+budgets remain separately bounded as described below.
+
+Online pages belong to `cache_dir()/viewed-chapters`. The shared Kit container,
+atomic writes, batched usage index and grouped GC retain them across reader
+sessions. Its independent disk budget defaults to 1 GiB, with active-chapter
+leases protecting pages while reading; chapter pressure cannot evict posters.
+Keys include full chapter/page identity and an opaque source/profile/settings,
+request and cookie scope. Every RAM/disk hit revalidates source permissions;
+unknown custom transports opt out of reusable page caching. Background encoding
+preserves dimensions, retains original bytes when unsupported/over budget, and
+has a 32 MiB active-plus-pending encoded-byte limit. Namespace epochs prevent
+cleared or cancelled work from repopulating files. Explicit downloads keep their
+own manifests and are never removed by disposable-cache maintenance.
 
 `addons/` contains registry state, immutable content-addressed packages and its
 writer lock. Package version history rejects changed bytes at the same identity
@@ -170,10 +210,14 @@ with up to 2,048 prefetched rows on either side when the budget permits. Refresh
 starts before the window boundary, with up to 512 rows of advance coverage; the
 threshold contracts when the byte budget leaves less margin. Individual
 textures contain at most 2,048 × 2,048 pixels. Physical width targets use 128px buckets
-capped at the 16,384px decoder width ceiling; source pixels are never upscaled. The underlying CPU decoder still decodes the complete
-admitted original before extracting/resampling a row window; window movement
-can require another full decode. This is bounded display retention, not
-streaming original-image decode or a total process-memory bound. Decoder/native
+capped at the 16,384px decoder width ceiling; source pixels are never upscaled.
+The worker's `DisplayDecoder` retains one admitted original while extracting
+successive row windows from the same encoded response. Source response identity
+uses the encoded `Arc`, so replacement responses and changed source/authentication
+scopes cannot reuse old pixels. A different response releases that original
+before decoding; a full native-size display transfers ownership instead of
+retaining duplicate original pixels. This remains full CPU decoding, rather than
+region/streaming decoding or a total process-memory bound. Decoder/native
 conversion and original-RGBA-plus-window-output phases are admitted separately
 within 128 MiB each. The worker also keeps a 32 MiB generation-scoped, memory-only
 encoded-page cache; a miss can temporarily add another 32 MiB fetched response.
@@ -195,17 +239,23 @@ Source examples are intended for independent future publication in nova-addons.
 
 - Nova design reuse and destination behavior: [UI design](ui-design.md).
 - Delete a downloaded chapter: `src/app.rs` (`delete-download`), `crates/reader-downloads/src/lib.rs` (`remove`), chapter actions and More → Downloads. Local imports are protected.
+- Viewed chapter cache, grouped eviction and pins: `src/chapter_cache.rs`, `src/app.rs`, Kit `nova-cache::gc`/`blob`.
+- Cache quotas, disk master switch and worker snapshots: `src/image_storage.rs`, `crates/ui/image-storage-settings.slint`, `tests/image_storage.rs`.
+- Shared Nova settings controls: Kit `slint/cache-settings-controls.slint`; Nova keeps SettingsRow/search/sync/keyboard wrappers.
 - Cover cache placement, immediate reuse and source revocation: `src/paths.rs`, `src/artwork.rs`, More → Settings → Cache.
+- Shared cache implementation/settings: Kit `crates/cache` and `crates/ui-base/slint/cache-settings-controls.slint`; Reader `src/chapter_cache.rs`, `src/image_storage.rs` and `tests/image_storage.rs`.
 - Library search, retained details and per-title actions: `crates/ui/library-search.slint`, `crates/ui/entry-menu.slint`, `src/app.rs`, `tests/library_navigation.rs`, `tests/entry_menu.rs`.
 - Automatic source paging and Retry: `src/app.rs` (`browse`/`complete_browse`), `crates/ui/app.slint`, `tests/source_paging.rs`.
 - Automatic/manual reader mode and per-series overrides: `src/reader_modes.rs`, `docs/reader-modes.md`, `tests/reader_modes.rs`.
 - Adult visibility and per-series chapter order: `src/reading_preferences.rs`, `tests/reading_preferences.rs`.
 - AVIF image admission/encoding: `crates/reader-engine/src/avif.rs`, `src/reader_export.rs`, `src/image_storage.rs`.
-- Stable ARMv7 AVIF build fix and provenance: `vendor/ferri-pdf-rav1d/PATCHES.md`; AppImage download pins: `docs/packaging.md`.
+- Stable ARMv7 AVIF build fix and provenance: Kit `vendor/ferri-pdf-rav1d/PATCHES.md`; AppImage download pins: `docs/packaging.md`.
 - Tall-page row windows and display admission: `crates/reader-engine/src/display.rs`, `src/app.rs` (`request_images`).
+- Tall-page CPU performance and Mihon comparison: `docs/tall-scroll-performance.md`, `crates/reader-engine/examples/tall_scroll.rs`.
 - Reader tile seams and physical-pixel edges: `crates/ui/app.slint`, `tests/reader_pixel_edges.rs`.
 - Series/chapter layouts, timeline/source groups and reader controls: `crates/ui/library-cards.slint`, `crates/ui/detail-hero.slint`, `crates/ui/timeline.slint`, `crates/ui/source-list.slint`, `tests/reader_design.rs`.
 - Left-anchored library reading progress: `crates/ui/library-cards.slint`, `tests/library_progress.rs`.
+- Image filenames and duplicate handling: `src/export_names.rs`, `src/reader_export.rs`, `src/android_documents.rs`, `crates/ui/save-conflict-sheet.slint`.
 - Reader image/screencap actions and export settings: `crates/ui/reader-context-menu.slint`, `src/reader_export.rs`, `src/chapter_capture.rs`, `src/capture_settings.rs`, More → Settings → Screenshots.
 - New cache/download image compression: `src/image_storage.rs`, `crates/ui/image-storage-settings.slint`, More → Settings → Cache.
 - Appearance controls, palette and device persistence: `crates/ui/theme-settings.slint`, `crates/ui/src/appearance.rs`, `src/appearance.rs`.

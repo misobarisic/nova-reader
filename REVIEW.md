@@ -453,3 +453,81 @@ checks, busy-detail error/Continue behavior, and phone/desktop progress geometry
 All 33 packaging regressions passed without skips. The Android API 35 Java/JNI
 browser bridge harness and Clippy passed; the actual Linux About/source/license
 viewer was rendered locally. Physical Android acceptance remains unverified.
+
+### Shared cache, AVIF and tall-page integration
+
+Final integration review is performed by Codex, following the user's request
+to stop further Astra reviews. Nova's actual cache implementation, settings
+controls and compatibility tests now live in Kit. Nova retains transport,
+profile/sync and UI bridge adapters; Reader retains source authorization,
+bounded admission and event-loop model ownership. Kit is pinned by full commit
+in both consumers. Kit's Linux Nix and native Windows CI passed, including the
+shared AVIF implementation.
+
+Reader online pages use disposable platform-cache storage, separate from data
+and explicit downloads. Chapter groups have a separate 1 GiB default budget,
+active leases and bounded admission; artwork has its own 1 GiB default and
+128 MiB decoded-pixel budget. Source/profile/settings/request/cookie scopes
+guard memory, disk and queued publication. Clear generations, guarded atomic
+writes and bounded background reservations prevent stale work repopulating
+files. Large or unsupported cache transforms preserve original image bytes and
+dimensions. Preference changes do not re-encode existing Reader cache files.
+
+The 720×25,000 profile exposed repeated full decoding and event-loop pixel
+copies. A worker-scoped original is now reused across windows, pixel buffers
+are prepared off the UI thread, and one pending UI completion bounds handoff
+memory. Idle invalidation releases retained source pixels. Optimized host CPU
+window time improved from 111.42 ms to 1.69 ms at native width; GPU and Android
+frame times were not measured. See `docs/tall-scroll-performance.md` for exact
+Mihon source references, reproducible measurements and remaining resampling cost.
+
+Kit's `nova-image` owns the unchanged Reader AVIF decoder and bit-identical
+encoder; the complete 176-file stable scalar decoder moved with its licenses.
+Reader uses thin wrappers. Nova adds AVIF cache/source-logo and screenshot
+support with independent quality 85, retaining existing JPEG/WebP settings and
+format indices. Shared host codec tests, 698 isolated corrupt inputs and an
+actual stable ARMv7 codec build passed. Kit's Nix shell copies Nova's locked
+inputs; all three host derivations evaluated and Linux CI builds/tests passed.
+
+
+### Saved-image names and duplicate handling
+
+Exports use portable series-title/chapter/page names. Chapter and page numbers
+have four-digit minimum padding; screencaps append the first visible loaded
+page's native-pixel Y coordinate, frozen with the pre-menu viewport. The shared
+name builder preserves position suffixes within 160 UTF-8 filename bytes and
+96 UTF-8 folder bytes, including Unicode truncation and Windows reserved names.
+Optional folders organize exports alphabetically by series. Clipboard delivery
+retains its existing image behavior and bypasses file conflicts.
+
+The persisted Screenshots dropdown offers Ask (default), Overwrite and Do
+nothing. Ask opens a retained Nova Kit modal with Overwrite, Add number and
+Cancel. Closing it, changing reader generations, cancelling Android activity
+work or leaving the app cancels the pending choice. Only one encoded export is
+retained while awaiting a reply. Desktop saves stage and fsync in the destination
+directory, publish without replacing existing files and retry numbered names
+without clobbering; explicit overwrite uses atomic file replacement.
+
+Android API 29+ resolves only app-owned exact-name/path MediaStore entries and
+rejects unexpected provider renaming. API 26–28 obtains a persisted, scoped
+folder grant. Existing Android images are backed up before provider overwrite;
+write, close and commit failures restore their bytes and visibility in the host
+fixtures. Permanently failing provider recovery reports the failure and retains
+one bounded private backup, blocking subsequent overwrites. It cannot promise
+filesystem atomicity for external document providers.
+
+The final Java/JNI harness compiles against the real Android API 35 jar and
+includes the actual Android Rust export adapter body. Collision choices,
+rollback, stale replies, activity replacement, exact Unicode names, 96-byte
+folder acceptance and over-limit rejection pass, together with JNI Clippy.
+These are host checks; physical Android acceptance remains unverified.
+
+Final Reader validation passed formatting, required workspace Clippy with
+warnings denied, workspace check and all workspace tests/doc tests (173 passed;
+five intentional child-process/X11/expensive-profile test entries ignored).
+All 33 packaging regressions ran without skips. Neutral, Manhwa18cc and MangaFire
+addon fixture suites passed. Nova's workspace Clippy/check, configuration/media,
+serial software-OpenGL screenshot, headless settings and persistence/sync checks
+passed before its shared-cache/AVIF commit was pushed.
+The desktop distribution feature set (`--no-default-features --features desktop`)
+also passed its locked check and target-specific license generation.

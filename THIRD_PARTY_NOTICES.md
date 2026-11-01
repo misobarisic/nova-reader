@@ -7,11 +7,10 @@ application artwork, navigation/PageHeader/More presentation patterns, and reade
 remove video-specific responsibilities and establish a separate application.
 Nova and this project's code are GPL-3.0-or-later; the full GPL text is in LICENSE.
 
-Shared storage and UI utilities are consumed from
+Shared storage, caching, codecs and UI utilities are consumed from
 [nova-kit](https://github.com/misobarisic/nova-kit), pinned in Cargo.toml/Cargo.lock
-to `63141dfc6abd39a247edde1f33ebaeb59dc7229a`, the inherited Nova pin. The plan
-also inspected kit revision `2e038b6280466130f6b58d7b3846fd2a68cc198f`; Reader
-has not silently switched to it. Kit retains its own GPL-3.0-or-later notices.
+to `138f29e33d4f7d8ae9204b6bd6118eb458740f70`, the shared cache and codec revision.
+Kit retains its own GPL-3.0-or-later notices.
 Generic addon extraction and the Nova compatibility gate remain pending.
 
 The Manhwa18.cc/YiiMadara JavaScript port derives from Keiyoushi
@@ -54,15 +53,16 @@ current-target catalogue. Navigation and menu artwork is reused from Nova
 under the project's existing license and attribution.
 
 The AVIF decoder uses the complete published ferri-pdf-rav1d 1.1.2 source
-under `vendor/ferri-pdf-rav1d`, with only ARM/RISC-V nightly-feature predicates
+in Nova Kit at `vendor/ferri-pdf-rav1d`, with only ARM/RISC-V nightly-feature predicates
 gated by its existing assembly feature for stable portable builds. The original
 BSD-2-Clause license, source provenance and malformed-input fixes are retained;
-see its `COPYING` and appended `PATCHES.md`. Its full license is also included
+see Kit’s `COPYING` and appended `PATCHES.md`. A distribution copy lives at
+`assets/licenses/avif-decoder-BSD-2-Clause.txt`; its full license is also included
 in the embedded current-target catalogue.
 
 ## AVIF adapter and test fixture attribution
 
-The plane-access and CICP conversion dispatch in src/avif.rs are adapted from
+The shared `nova-image` plane-access and CICP conversion dispatch are adapted from
 avif-decode 3.0.0 (https://github.com/kornelski/avif-decode).
 The independent tests/fixtures/tiny.avif is its 16x16 8-bit 4:4:4 fixture,
 encoded using avifenc rather than Reader's ravif encoder.

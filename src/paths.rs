@@ -19,7 +19,8 @@ pub fn data_dir() -> Result<PathBuf, String> {
 }
 
 /// Nova's platform cache convention, under Reader's independent app identity.
-/// Temporary artwork is disposable; chapters and metadata stay in data_dir.
+/// Viewed pages and artwork are disposable; explicit downloads and metadata
+/// stay in data_dir and are never removed by cache maintenance.
 pub fn cache_dir() -> Result<PathBuf, String> {
     if let Some(path) = std::env::var_os("NOVA_READER_CACHE_DIR") {
         return Ok(PathBuf::from(path));
@@ -30,4 +31,8 @@ pub fn cache_dir() -> Result<PathBuf, String> {
     directories::BaseDirs::new()
         .map(|dirs| dirs.cache_dir().join("nova-reader"))
         .ok_or_else(|| "Application cache directory is unavailable".into())
+}
+
+pub fn chapter_cache_dir() -> Result<PathBuf, String> {
+    Ok(cache_dir()?.join("viewed-chapters"))
 }

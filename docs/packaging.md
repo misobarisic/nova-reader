@@ -198,11 +198,11 @@ Neither test downloads mutable upstream tools during CI.
 
 Version 0.1.14's 32-bit ARM build failed with E0554: the decoder requested
 nightly ARM feature detection even though Reader disables its assembly feature.
-The published `ferri-pdf-rav1d` 1.1.2 source is retained under `vendor/`, with
+The published `ferri-pdf-rav1d` 1.1.2 source now lives in Nova Kit's `vendor/`, with
 only its ARM/RISC-V nightly-feature predicates gated by `feature = "asm"`.
 The existing scalar implementation and malformed-input fixes are unchanged.
-The root Cargo patch selects this source; workspace exclusion keeps upstream
-tests and defaults outside Reader's workspace. Full source/archive provenance,
+The shared `nova-image` crate selects it through a direct path dependency;
+workspace exclusion keeps upstream tests and defaults outside Kit's workspace. Full source/archive provenance,
 licenses and the exact adjustment are in the vendor's `PATCHES.md`.
 
 This codec-only cross-check reproduces the relevant ARMv7 feature selection

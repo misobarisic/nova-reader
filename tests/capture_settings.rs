@@ -1,7 +1,9 @@
 use i_slint_backend_testing::{AccessibleRole, ElementHandle};
 use nova_reader::{
     AppWindow, CaptureSettings,
-    capture_settings::{self, CaptureFormat, CapturePreferences, CaptureResolution},
+    capture_settings::{
+        self, CaptureFormat, CapturePreferences, CaptureResolution, ConflictPolicy,
+    },
 };
 use slint::ComponentHandle;
 use std::process::Command;
@@ -48,6 +50,7 @@ fn capture_preferences_persist_recover_and_drive_accessible_controls() {
                 for (key, value) in [
                     ("format", 4),
                     ("resolution", 1),
+                    ("conflict", 1),
                     ("jpeg_quality", 73),
                     ("webp_quality", 64),
                     ("avif_quality", 61),
@@ -58,6 +61,7 @@ fn capture_preferences_persist_recover_and_drive_accessible_controls() {
                 for (key, value) in [
                     ("format", 5),
                     ("resolution", 2),
+                    ("conflict", 3),
                     ("resolution", -1),
                     ("jpeg_quality", 0),
                     ("webp_quality", 101),
@@ -80,6 +84,7 @@ fn capture_preferences_persist_recover_and_drive_accessible_controls() {
                 CapturePreferences {
                     format: CaptureFormat::Avif,
                     resolution: CaptureResolution::Chapter,
+                    conflict: ConflictPolicy::Overwrite,
                     jpeg_quality: 73,
                     webp_quality: 64,
                     avif_quality: 61,
@@ -97,6 +102,7 @@ fn capture_preferences_persist_recover_and_drive_accessible_controls() {
                 let preferences = capture_settings::preferences(&recovered);
                 assert_eq!(preferences.format, CaptureFormat::WebpLossy);
                 assert_eq!(preferences.resolution, CaptureResolution::Device);
+                assert_eq!(preferences.conflict, ConflictPolicy::Ask);
                 assert_eq!(preferences.jpeg_quality, 73);
                 assert_eq!(preferences.webp_quality, 64);
                 assert_eq!(preferences.avif_quality, 85);
@@ -106,6 +112,7 @@ fn capture_preferences_persist_recover_and_drive_accessible_controls() {
                 for (key, value) in [
                     ("format", 0),
                     ("resolution", 0),
+                    ("conflict", 0),
                     ("jpeg_quality", 85),
                     ("webp_quality", 85),
                     ("avif_quality", 85),
@@ -122,6 +129,14 @@ fn capture_preferences_persist_recover_and_drive_accessible_controls() {
                         .next()
                         .is_some()
                 );
+                for (label, policy) in [
+                    ("Overwrite", ConflictPolicy::Overwrite),
+                    ("Do nothing", ConflictPolicy::DoNothing),
+                    ("Ask", ConflictPolicy::Ask),
+                ] {
+                    select_option(&ui, "File conflicts", label);
+                    assert_eq!(capture_settings::preferences(&ui).conflict, policy);
+                }
                 select_option(&ui, "Screencap resolution", "Chapter resolution");
                 assert_eq!(
                     capture_settings::preferences(&ui).resolution,
@@ -190,6 +205,13 @@ fn capture_preferences_persist_recover_and_drive_accessible_controls() {
                             })
                             .unwrap();
                     assert!(selector.size().width <= width && selector.size().width > 0.);
+                    let conflicts = ElementHandle::find_by_accessible_label(&ui, "File conflicts")
+                        .find(|element| element.accessible_role() == Some(AccessibleRole::Combobox))
+                        .unwrap();
+                    assert!(conflicts.absolute_position().x >= 0.);
+                    assert!(
+                        conflicts.absolute_position().x + conflicts.size().width <= width + 0.5
+                    );
                     let resolution =
                         ElementHandle::find_by_accessible_label(&ui, "Screencap resolution")
                             .find(|element| {
@@ -218,6 +240,7 @@ fn capture_preferences_persist_recover_and_drive_accessible_controls() {
                     "broken JSON",
                     r#"{"format":5}"#,
                     r#"{"resolution":2}"#,
+                    r#"{"conflict":3}"#,
                     r#"{"jpeg_quality":0}"#,
                     r#"{"avif_quality":0}"#,
                     r#"{"unexpected":true}"#,
@@ -303,4 +326,143 @@ fn capture_format_and_resolution_indices_roundtrip_compatibly() {
         );
     }
     assert!(serde_json::from_str::<CaptureResolution>("2").is_err());
+}
+
+#[test]
+fn save_conflict_sheet_keeps_choices_modal_accessible_and_inside_small_viewports() {
+    use slint::platform::{Key, PointerEventButton, WindowEvent};
+    use std::{
+        cell::{Cell, RefCell},
+        rc::Rc,
+    };
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().unwrap();
+    let choices = Rc::new(RefCell::new(Vec::new()));
+    ui.on_export_conflict_choice({
+        let choices = choices.clone();
+        move |choice| choices.borrow_mut().push(choice)
+    });
+    let steps = Rc::new(Cell::new(0));
+    ui.on_page_step({
+        let steps = steps.clone();
+        move |_| steps.set(steps.get() + 1)
+    });
+    let navigations = Rc::new(Cell::new(0));
+    ui.on_navigate({
+        let navigations = navigations.clone();
+        move |_| navigations.set(navigations.get() + 1)
+    });
+    ui.set_section(6);
+    ui.set_reader_context_busy(true);
+    ui.show().unwrap();
+    let key = |text: Key| {
+        ui.window()
+            .dispatch_event(WindowEvent::KeyPressed { text: text.into() });
+        ui.window()
+            .dispatch_event(WindowEvent::KeyReleased { text: text.into() });
+        settle();
+    };
+    let button = |label: &str| {
+        ElementHandle::find_by_accessible_label(&ui, label)
+            .find(|element| element.accessible_role() == Some(AccessibleRole::Button))
+            .unwrap_or_else(|| panic!("missing conflict action {label}"))
+    };
+    let filename = format!(
+        "{} - Chapter 12 - Page 4.jpg",
+        "A long series title ".repeat(12)
+    );
+    for (width, height) in [(320., 240.), (390., 844.), (768., 240.), (1120., 780.)] {
+        ui.window().set_size(slint::LogicalSize::new(width, height));
+        ui.set_export_conflict_name(filename.clone().into());
+        ui.set_export_conflict_open(true);
+        settle();
+        assert!(
+            choices.borrow().is_empty(),
+            "opening a conflict must not choose overwrite"
+        );
+        let dialog = ElementHandle::find_by_accessible_label(
+            &ui,
+            &format!("File already exists: {filename}"),
+        )
+        .find(|element| element.accessible_role() == Some(AccessibleRole::Groupbox))
+        .unwrap();
+        assert!(dialog.size().width > 0.);
+        for label in ["Overwrite", "Add number", "Cancel"] {
+            let action = button(label);
+            let position = action.absolute_position();
+            let size = action.size();
+            assert!(
+                position.x >= 0. && position.y >= 0.,
+                "{label} must stay on screen"
+            );
+            assert!(position.x + size.width <= width + 0.5, "{label} width");
+            assert!(position.y + size.height <= height + 0.5, "{label} height");
+        }
+        key(Key::RightArrow);
+        assert_eq!(steps.get(), 0, "dialog must block chapter navigation");
+        button("Add number").invoke_accessible_default_action();
+        settle();
+        assert!(!ui.get_export_conflict_open());
+        assert_eq!(choices.borrow_mut().pop(), Some(1));
+        ui.set_export_conflict_open(true);
+        settle();
+        button("Overwrite").invoke_accessible_default_action();
+        settle();
+        assert_eq!(choices.borrow_mut().pop(), Some(0));
+        ui.set_export_conflict_open(true);
+        settle();
+        key(Key::Return);
+        assert_eq!(
+            choices.borrow_mut().pop(),
+            Some(2),
+            "initial keyboard action is safely Cancel"
+        );
+        ui.set_export_conflict_open(true);
+        settle();
+        key(Key::UpArrow);
+        key(Key::Return);
+        assert_eq!(choices.borrow_mut().pop(), Some(1));
+        ui.set_export_conflict_open(true);
+        settle();
+        key(Key::Escape);
+        assert_eq!(choices.borrow_mut().pop(), Some(2));
+        ui.set_export_conflict_open(true);
+        settle();
+        ui.invoke_go_back();
+        settle();
+        assert_eq!(choices.borrow_mut().pop(), Some(2));
+        assert_eq!(
+            navigations.get(),
+            0,
+            "back dismisses the pending choice first"
+        );
+        ui.set_export_conflict_open(true);
+        settle();
+        let closed_cancel = button("Cancel");
+        let position = slint::LogicalPosition::new(4., 4.);
+        ui.window().dispatch_event(WindowEvent::PointerPressed {
+            position,
+            button: PointerEventButton::Left,
+        });
+        ui.window().dispatch_event(WindowEvent::PointerReleased {
+            position,
+            button: PointerEventButton::Left,
+        });
+        settle();
+        assert_eq!(choices.borrow_mut().pop(), Some(2), "outside tap cancels");
+        closed_cancel.invoke_accessible_default_action();
+        assert!(
+            choices.borrow().is_empty(),
+            "closed sheet actions cannot fire twice"
+        );
+    }
+    ui.set_export_conflict_open(true);
+    settle();
+    ui.set_section(5);
+    settle();
+    assert_eq!(
+        choices.borrow_mut().pop(),
+        Some(2),
+        "leaving the reader resolves pending work as Cancel"
+    );
 }

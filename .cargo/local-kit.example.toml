@@ -2,3 +2,5 @@
 [patch."https://github.com/misobarisic/nova-kit"]
 nova-storage = { path = "../nova-kit/crates/storage" }
 nova-ui-base = { path = "../nova-kit/crates/ui-base" }
+nova-cache = { path = "../nova-kit/crates/cache" }
+nova-image = { path = "../nova-kit/crates/image" }

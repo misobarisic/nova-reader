@@ -1,7 +1,8 @@
 # Nova design reuse
 
 The reference is Nova revision `b69a1e5765ecc65ac3b00acdfe2f16e2f46a5dda`,
-using the same pinned Nova Kit revision `63141dfc6abd39a247edde1f33ebaeb59dc7229a`.
+with shared cache, codecs and controls from Nova Kit revision
+`138f29e33d4f7d8ae9204b6bd6118eb458740f70`.
 Reader adapts destinations and reader content, rather than defining a second
 navigation or settings design system.
 
@@ -158,14 +159,20 @@ for new cache images and new downloads. Their `ImageStorageSettings` global and
 `reader:image-storage` preferences govern future writes; existing files are
 preserved when a preference changes. Screenshot export format remains separate.
 
-Image cache maintenance uses Nova's platform-directory/worker pattern. Series
-posters are under the platform cache root on both desktop and Android; clearing
-More → Settings → Cache preserves library data and downloaded/imported chapters.
-Reading page images remain in memory unless explicitly downloaded/imported.
+Image cache maintenance consumes Nova's actual implementation moved to Kit:
+processed variants, decoded LRU, batched usage index and incremental GC. Cache
+settings reuse the extracted Nova controls and choices. Online chapter pages
+and posters occupy separate namespaces under the platform cache root on both
+desktop and Android, each with a default 1 GiB disk budget. Chapter controls and
+maintenance appear first. Older chapter groups are evicted while the active
+chapter is protected; chapter activity cannot evict artwork. Clearing either
+cache preserves library data and downloaded/imported chapters.
 Poster cache hits publish immediately across collection/detail routes. One
-128 MiB shared decoded-pixel LRU backs UI images, with visible artwork plus up to
+configurable decoded-pixel LRU (128 MiB default) backs UI images, with visible artwork plus up to
 48 extra recently used UI cards retained; source access revocation invalidates
-cached hits. Worker decode memory is additional to that retained-pixel budget.
+cached hits. Poster resolution defaults to Original, and chapter cache encoding
+always preserves native dimensions. Preference edits affect future writes.
+Worker decode memory is additional to that retained-pixel budget.
 
 Screenshots and cache/download compression also offer AVIF. The reader accepts
 8-bit still AVIF through its pure-Rust codec path; animated/multiframe, high-bit

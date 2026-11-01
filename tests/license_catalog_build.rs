@@ -143,7 +143,7 @@ fn generator_renders_only_the_current_target_and_actual_features() {
         for path in [
             "THIRD_PARTY_NOTICES.md",
             "assets/fonts/LICENSE.txt",
-            "vendor/ferri-pdf-rav1d/COPYING",
+            "assets/licenses/avif-decoder-BSD-2-Clause.txt",
         ] {
             assert!(watches.contains(&format!("cargo:rerun-if-changed={path}")));
         }
@@ -201,7 +201,7 @@ fn generator_reuses_the_exact_nova_frame_recipe_and_retains_all_local_notices() 
         "LICENSE",
         "THIRD_PARTY_NOTICES.md",
         "assets/fonts/LICENSE.txt",
-        "vendor/ferri-pdf-rav1d/COPYING",
+        "assets/licenses/avif-decoder-BSD-2-Clause.txt",
         "crates/reader-engine/AVIF-NOTICE.txt",
     ] {
         let notice = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(path)).unwrap();

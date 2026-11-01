@@ -47,6 +47,42 @@ public class DocumentBridgeFixture {
     public static void exportResult() {
         current.onActivityResult(Activity.launchedRequest,Activity.RESULT_OK,new Intent("fixture").setData(Uri.parse("content://fixture/export")));
     }
+    public static void resetTree() { ContentResolver.resetTree(); }
+    public static void imageTreeResult() {
+        if (!ContentResolver.documents.containsKey("root")) ContentResolver.resetTree();
+        current.onActivityResult(Activity.launchedRequest,Activity.RESULT_OK,new Intent("fixture").setData(Uri.parse("content://fixture/tree/root")).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_WRITE_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION));
+    }
+    public static String savedText(String name) {
+        for (java.util.Map.Entry<String,android.content.ContentValues> entry:ContentResolver.mediaRows.entrySet()) {
+            if (name.equals(entry.getValue().get("_display_name"))) return new String(ContentResolver.data.get(entry.getKey()),StandardCharsets.UTF_8);
+        }
+        for (java.util.Map.Entry<String,android.content.ContentValues> entry:ContentResolver.documents.entrySet()) {
+            if (name.equals(entry.getValue().get("_display_name"))) return new String(ContentResolver.data.get("content://fixture/tree/root/document/"+entry.getKey()),StandardCharsets.UTF_8);
+        }
+        return null;
+    }
+    public static int treeFiles() {
+        int count=0;for (android.content.ContentValues row:ContentResolver.documents.values()) if (!android.provider.DocumentsContract.Document.MIME_TYPE_DIR.equals(row.get("mime_type"))) count++;return count;
+    }
+    public static boolean ownershipQueried() { return ContentResolver.ownershipQueried; }
+    public static int imageBackups() {
+        File[] files=current.getCacheDir().listFiles(file -> file.getName().startsWith("reader-image-old-") && file.getName().endsWith(".bak"));return files.length;
+    }
+    public static void failOverwrite(int phase) {
+        ContentResolver.failWriteOnce=phase==1;ContentResolver.failCloseOnce=phase==2;ContentResolver.failPublishOnce=phase==3;
+    }
+    public static void seedMedia(String name,String path,String owner,String contents) {
+        ContentResolver resolver=new android.app.Application().getContentResolver();
+        android.content.ContentValues values=new android.content.ContentValues();values.put("_display_name",name);values.put("relative_path",path);values.put("mime_type","image/png");values.put("is_pending",1);
+        Uri uri=resolver.insert(MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY),values);
+        android.content.ContentValues row=ContentResolver.mediaRows.get(uri.toString());row.put("owner_package_name",owner);row.put("is_pending",0);row.put("_size",(long)contents.length());ContentResolver.data.put(uri.toString(),contents.getBytes(StandardCharsets.UTF_8));
+    }
+    public static void replaceSelectedMedia() {
+        for (android.content.ContentValues row:ContentResolver.mediaRows.values()) {
+            if ("photo.png".equals(row.get("_display_name"))) {row.put("_display_name","moved.png");break;}
+        }
+        seedMedia("photo.png","Pictures/Nova Reader/","dev.misob.nova.reader","unselected replacement");
+    }
     public static void awaitCopies() throws Exception {
         Field field=ReaderActivity.class.getDeclaredField("COPIES");field.setAccessible(true);
         ((ExecutorService)field.get(null)).submit(() -> {}).get(5,TimeUnit.SECONDS);

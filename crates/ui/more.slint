@@ -278,7 +278,7 @@ export component MorePage inherits Rectangle {
                             picked => { root.navigate(12); }
                         } }
                         SettingsCard { MenuLink {
-                            interactive: root.child-active; title: @tr("Cache"); subtitle: @tr("Temporary artwork and storage usage"); icon-kind: 3;
+                            interactive: root.child-active; title: @tr("Cache"); subtitle: @tr("Chapter pages, artwork and storage limits"); icon-kind: 3;
                             picked => { root.navigate(17); root.image-cache-refresh(); }
                         } }
                     }
@@ -349,13 +349,13 @@ export component MorePage inherits Rectangle {
                     if root.detail-section == 18: CaptureSettingsPage { interactive: root.detail-active; }
                     if root.detail-section == 17: VerticalLayout {
                         spacing: 16px;
-                        ImageStorageSettingsPage { interactive: root.detail-active; }
+                        ImageStorageSettingsPage { interactive: root.detail-active; busy: root.image-cache-busy; }
                         SettingsCard { VerticalLayout {
                             padding: 16px; spacing: 12px;
-                            Text { text: @tr("Image cache"); font-size: 18px; font-weight: 600; color: Theme.current.text_bright; }
+                            Text { text: @tr("Artwork cache"); font-size: 18px; font-weight: 600; color: Theme.current.text_bright; }
                             Text { text: root.image-cache-info; color: Theme.current.text_settings; wrap: word-wrap; min-width: 0px; }
                             Text { text: @tr("Covers are temporary and can be downloaded again. Downloaded chapters, imports and library data stay intact when you clear this cache."); color: Theme.current.text_secondary; wrap: word-wrap; min-width: 0px; }
-                            ActionButton { text: @tr("Clear image cache"); enabled: root.detail-active && !root.image-cache-busy; clicked => { root.image-cache-clear(); } }
+                            ActionButton { text: @tr("Clear artwork cache"); enabled: root.detail-active && !root.image-cache-busy; clicked => { root.image-cache-clear(); } }
                             if root.image-cache-status != "": Text { text: root.image-cache-status; color: Theme.current.text_settings; wrap: word-wrap; min-width: 0px; }
                         } }
                     }

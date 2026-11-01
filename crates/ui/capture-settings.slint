@@ -8,6 +8,7 @@ import { SettingsRow } from "settings-row.slint";
 export global CaptureSettings {
     in-out property <int> format-index: 0;
     in-out property <int> resolution-index: 0;
+    in-out property <int> conflict-policy: 0;
     in-out property <float> jpeg-quality: 85;
     in-out property <float> webp-quality: 85;
     in-out property <float> avif-quality: 85;
@@ -100,6 +101,19 @@ export component CaptureSettingsPage inherits VerticalLayout {
                 labels: [@tr("Reader"), @tr("Series folders")];
                 current-index: CaptureSettings.series-folders ? 1 : 0;
                 picked(i) => { CaptureSettings.settings-changed("series_folders", i); }
+            }
+        }
+        SettingsRow {
+            row-title: @tr("File conflicts");
+            row-desc: @tr("Choose what happens when a capture file already exists.");
+            accessible-label: @tr("File conflicts");
+            ReaderSelect {
+                width: Math.min(252px, Math.max(0px, root.width - 32px));
+                enabled: root.interactive;
+                placeholder-text: @tr("File conflicts");
+                model: [@tr("Ask"), @tr("Overwrite"), @tr("Do nothing")];
+                current-index <=> CaptureSettings.conflict-policy;
+                selected(_) => { CaptureSettings.settings-changed("conflict", self.current-index); }
             }
         }
         if CaptureSettings.format-index == 1: SettingsRow {

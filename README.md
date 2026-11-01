@@ -12,11 +12,12 @@ bar, shared Nova Kit controls, and More/settings cards. Local imports are under
 **More → Local chapters**; categories and backups are under **More → Settings**.
 **More → Settings → Theme** offers Nova's accents, background styles, card/button
 styling and transparent bottom bar. **Display** controls poster/list layouts and
-grid columns; **Look and feel** controls animations. **Cache** shows usage and
-clears temporary poster images without deleting downloaded chapters. It also controls
-JPEG/WebP/AVIF compression of newly cached artwork and new offline downloads;
+grid columns; **Look and feel** controls animations. **Cache** controls separate
+chapter-page and artwork caches, disk limits, decoded artwork memory and poster
+resolution. Clearing either cache preserves explicit downloads and library data.
+It also controls JPEG/WebP/AVIF compression of newly cached images and new offline downloads;
 existing files stay unchanged. **Screenshots** controls capture format (including
-AVIF), quality, screencap resolution and optional series folders. Screencaps can
+AVIF), quality, screencap resolution, optional series folders and duplicate handling. Screencaps can
 use device pixels or the original chapter image's pixel scale for the visible area.
 These device preferences are saved separately from library backups.
 Browse groups sources by last used, pins and language; Extensions manages installed
@@ -27,9 +28,18 @@ Right-click or hold an image to save/copy its original or the visible screencap.
 Chapter artwork fills the hidden status-bar area; showing the OSD restores the
 bar and keeps controls clear of cutouts. Delete remote chapter downloads from
 the chapter actions or Downloads; reading progress stays intact.
-Saved images go to Pictures/Nova Reader; Android 26–28 uses a destination picker.
-Series posters use the platform cache directory on desktop and Android, separately
-from library data and explicit downloads. `NOVA_READER_CACHE_DIR` can override it.
+Saved images go to Pictures/Nova Reader; Android 26–28 asks for a folder once.
+Names sort by title, chapter and page, for example
+`The Café Terrace and Its Goddesses - Ch. 0001 - P. 0017.jpg`.
+Screencaps append a vertical source-pixel offset such as ` - Y012480`.
+Names stay within 160 UTF-8 bytes; optional series folders stay within 96.
+**If a file exists** defaults to **Ask**, offering Overwrite, Add number or Cancel.
+Settings can instead automatically Overwrite or Do nothing.
+Series posters and pages viewed online use the platform cache directory on desktop
+and Android, separately from library data and explicit downloads. Chapter eviction
+groups older pages by chapter and protects the active chapter; its separate budget
+keeps reading activity from flushing posters. Both disk budgets default to 1 GiB.
+`NOVA_READER_CACHE_DIR` can override the cache root.
 See [UI design reuse](docs/ui-design.md) for the source/component mapping.
 
 ## Run a neutral reading flow
@@ -140,9 +150,8 @@ and target-device verification. See [project structure](docs/project-structure.m
 
 Nova Reader is GPL-3.0-or-later; see [LICENSE](LICENSE) and
 [third-party notices](THIRD_PARTY_NOTICES.md). The foundation derives from Nova
-`b69a1e5765ecc65ac3b00acdfe2f16e2f46a5dda`. Shared storage/UI remain pinned to
-nova-kit `63141dfc6abd39a247edde1f33ebaeb59dc7229a`; this is the inherited Nova
-pin, not the newer kit revision listed in the plan. Generic addon runtime
+`b69a1e5765ecc65ac3b00acdfe2f16e2f46a5dda`. Shared storage, cache, codecs and UI
+come from nova-kit `138f29e33d4f7d8ae9204b6bd6118eb458740f70`. Generic addon runtime
 extraction into kit and Nova consumer compatibility are still pending.
 Slint carries its own license alternatives; dependency license texts are
 generated for the actual build target/features and embedded into About using

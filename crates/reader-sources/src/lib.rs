@@ -46,6 +46,53 @@ impl SourceAvailability {
     }
 }
 
+/// A cheap retained proof of the current request policy. Registry revocation,
+/// live source settings and transport session changes remain visible to clones.
+/// It deliberately retains neither the source archive nor executable script.
+#[derive(Clone)]
+pub struct PageAccess {
+    manifest: Arc<Manifest>,
+    settings: Arc<std::sync::Mutex<Value>>,
+    transport: Arc<dyn SourceTransport>,
+    active: Arc<std::sync::atomic::AtomicBool>,
+}
+impl PageAccess {
+    pub fn validate_page_request(
+        &self,
+        url: &str,
+        headers: &BTreeMap<String, String>,
+    ) -> Result<()> {
+        if !self.active.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(SourceError::Unavailable);
+        }
+        if let Some(path) = url.strip_prefix(&format!("addon://{}/", self.manifest.id)) {
+            return if self.manifest.assets.iter().any(|asset| asset == path) {
+                Ok(())
+            } else {
+                Err(SourceError::NotFound)
+            };
+        }
+        network::checked_url(url, &self.manifest.permissions)?;
+        network::validate_headers(headers, &self.manifest.permissions)
+    }
+    /// Unknown transports opt out of reuse; all material stays opaque.
+    pub fn page_cache_scope(
+        &self,
+        url: &str,
+        headers: &BTreeMap<String, String>,
+    ) -> Result<Option<String>> {
+        use sha2::{Digest, Sha256};
+        self.validate_page_request(url, headers)?;
+        let Some(partition) = self.transport.page_cache_partition(url) else {
+            return Ok(None);
+        };
+        let settings = self.settings.lock().unwrap_or_else(|e| e.into_inner());
+        let material = serde_json::to_vec(&(&*self.manifest, &*settings, url, headers, partition))
+            .map_err(|e| SourceError::Script(e.to_string()))?;
+        Ok(Some(format!("{:x}", Sha256::digest(material))))
+    }
+}
+
 #[derive(Clone)]
 pub struct Source {
     pub(crate) manifest: Manifest,
@@ -80,15 +127,11 @@ impl Source {
         headers: &BTreeMap<String, String>,
         cancel: &CancelToken,
     ) -> Result<Vec<u8>> {
-        if !self.active.load(std::sync::atomic::Ordering::Acquire) {
-            return Err(SourceError::Unavailable);
-        }
+        self.validate_page_request(url, headers)?;
         if let Some(path) = url.strip_prefix(&format!("addon://{}/", self.manifest.id)) {
             cancel.check()?;
             return package::asset(&self.archive, &self.manifest, path);
         }
-        network::checked_url(url, &self.manifest.permissions)?;
-        network::validate_headers(headers, &self.manifest.permissions)?;
         let response = self.transport.request(
             &HttpRequest {
                 url: url.into(),
@@ -107,6 +150,31 @@ impl Source {
         }
         network::check_status(response.status)?;
         Ok(response.body)
+    }
+    /// A lightweight memory-only request capability without executable/ZIP data.
+    pub fn page_access(&self) -> PageAccess {
+        PageAccess {
+            manifest: Arc::new(self.manifest.clone()),
+            settings: self.settings.clone(),
+            transport: self.transport.clone(),
+            active: self.active.clone(),
+        }
+    }
+    /// Recheck the current source capability before serving a RAM/disk hit.
+    pub fn validate_page_request(
+        &self,
+        url: &str,
+        headers: &BTreeMap<String, String>,
+    ) -> Result<()> {
+        self.page_access().validate_page_request(url, headers)
+    }
+    /// Opaque authorization/profile/settings scope; no credential leaves here.
+    pub fn page_cache_scope(
+        &self,
+        url: &str,
+        headers: &BTreeMap<String, String>,
+    ) -> Result<Option<String>> {
+        self.page_access().page_cache_scope(url, headers)
     }
     /// Explicit fixture/custom transport injection; the production registry always uses checked HTTP.
     pub fn with_transport(mut self, transport: Arc<dyn SourceTransport>) -> Self {
@@ -201,4 +269,101 @@ pub struct Page {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PageList {
     pub pages: Vec<Page>,
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    struct ScopedTransport;
+    impl SourceTransport for ScopedTransport {
+        fn page_cache_partition(&self, _url: &str) -> Option<String> {
+            Some("test-public-profile".into())
+        }
+        fn request(&self, _: &HttpRequest, _: usize, _: &CancelToken) -> Result<HttpResponse> {
+            panic!("permission/cache-scope proof must not fetch")
+        }
+    }
+    #[test]
+    fn page_cache_proofs_validate_permissions_settings_headers_and_revocation_without_http() {
+        let mut manifest: Manifest = serde_json::from_str(include_str!(
+            "../../../examples/addons/neutral-fixture/manifest.json"
+        ))
+        .unwrap();
+        manifest.permissions.domains = vec!["example.com".into()];
+        let source = Source {
+            manifest,
+            settings: Arc::new(std::sync::Mutex::new(serde_json::json!({}))),
+            script: Arc::new(String::new()),
+            archive: Arc::new(vec![]),
+            transport: Arc::new(ScopedTransport),
+            active: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        };
+        let url = "https://example.com/page.png";
+        let headers = BTreeMap::new();
+        let archive_references = Arc::strong_count(&source.archive);
+        let retained = source.page_access();
+        assert_eq!(
+            Arc::strong_count(&source.archive),
+            archive_references,
+            "lightweight request proofs cannot retain the ZIP"
+        );
+        let first = source.page_cache_scope(url, &headers).unwrap().unwrap();
+        assert_eq!(
+            retained.page_cache_scope(url, &headers).unwrap().as_ref(),
+            Some(&first)
+        );
+        assert_eq!(
+            first,
+            source.page_cache_scope(url, &headers).unwrap().unwrap()
+        );
+        source.settings.lock().unwrap()["credential"] = "changed".into();
+        assert_ne!(
+            retained.page_cache_scope(url, &headers).unwrap().as_ref(),
+            Some(&first)
+        );
+        assert_ne!(
+            first,
+            source.page_cache_scope(url, &headers).unwrap().unwrap()
+        );
+        assert!(
+            source
+                .validate_page_request("https://denied.example/page.png", &headers)
+                .is_err()
+        );
+        assert!(
+            source
+                .validate_page_request(url, &BTreeMap::from([("Cookie".into(), "secret".into())]))
+                .is_err()
+        );
+        assert_ne!(
+            source.page_cache_scope(url, &headers).unwrap(),
+            source
+                .page_cache_scope(
+                    url,
+                    &BTreeMap::from([("Authorization".into(), "Bearer different".into())])
+                )
+                .unwrap()
+        );
+        assert!(
+            source
+                .validate_page_request("addon://neutral-fixture/pages/tall.png", &headers)
+                .is_ok()
+        );
+        assert!(
+            source
+                .validate_page_request("addon://neutral-fixture/../private", &headers)
+                .is_err()
+        );
+        source
+            .active
+            .store(false, std::sync::atomic::Ordering::Release);
+        assert!(matches!(
+            source.page_cache_scope(url, &headers),
+            Err(SourceError::Unavailable)
+        ));
+        assert!(matches!(
+            retained.page_cache_scope(url, &headers),
+            Err(SourceError::Unavailable)
+        ));
+    }
 }
