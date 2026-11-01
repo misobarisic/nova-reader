@@ -316,7 +316,21 @@ pub fn prepare(
     projection: bool,
     seed: bool,
 ) -> nova_sync::Result<bool> {
-    let current = fields(&documents(store)?);
+    let documents = documents(store)?;
+    let current = fields(&documents);
+    // A document created by projection or serde defaults is not evidence of a
+    // user edit. Bootstrap only persisted legacy choices that differ from the
+    // canonical defaults; fresh-device defaults must never gain LWW authority.
+    let mut legacy = Fields::new();
+    if seed && !projection {
+        let defaults = fields(&templates());
+        for (storage, value) in &documents {
+            if store.extra_value(storage)?.is_some() {
+                flatten(storage, "", value, &mut legacy);
+            }
+        }
+        legacy.retain(|key, value| defaults.get(key) != Some(value));
+    }
     let baseline = read_map(store, BASELINE)?;
     let overrides = read_map(store, OVERRIDES)?;
     let account = shared(store);
@@ -326,7 +340,7 @@ pub fn prepare(
             continue;
         }
         if !projection
-            && ((seed && !account.contains_key(key))
+            && ((seed && legacy.contains_key(key) && store.record(&domain(), key).is_none())
                 || (!seed
                     && baseline.get(key) != Some(value)
                     && (baseline.contains_key(key) || !account.contains_key(key))))
@@ -724,6 +738,10 @@ mod tests {
             assert!(!prepare(&mut store, 1, false, false).unwrap());
             return;
         }
+        let mut legacy_appearance =
+            serde_json::to_value(crate::appearance::Preferences::default()).unwrap();
+        legacy_appearance["accent_color"] = Value::from(1);
+        store.queue_extra("reader:appearance", Some(legacy_appearance.to_string()));
         assert!(prepare(&mut store, 1, false, true).unwrap());
         store.save().unwrap();
         i_slint_backend_testing::init_integration_test_with_mock_time();
@@ -856,6 +874,160 @@ mod tests {
         store.queue_extra(BASELINE, None);
         assert!(!prepare(&mut store, 1, false, true).unwrap());
         store.save().unwrap();
+    }
+    #[test]
+    fn fresh_pairing_defaults_have_no_authority_but_explicit_resets_do() {
+        const CHILD: &str = "READER_SETTINGS_BOOTSTRAP_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            assert!(std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "sync_settings::tests::fresh_pairing_defaults_have_no_authority_but_explicit_resets_do", "--nocapture"])
+                .env(CHILD,"1").env("READER_SETTINGS_BOOTSTRAP_DIR",directory.path()).status().unwrap().success());
+            return;
+        }
+        nova_storage::init_at(std::path::Path::new(
+            &std::env::var("READER_SETTINGS_BOOTSTRAP_DIR").unwrap(),
+        ));
+        nova_sync::configure_protocol(nova_sync::ProtocolConfig::reader()).unwrap();
+        fn isolated_owner() -> nova_sync::Store {
+            let mut owner = nova_sync::Store::default();
+            for key in templates().keys() {
+                owner.queue_extra(key, None);
+            }
+            owner.queue_extra(BASELINE, None);
+            owner.queue_extra(OVERRIDES, None);
+            owner
+        }
+        let mut host = isolated_owner();
+        let mut choices = templates();
+        choices.get_mut("reader:appearance").unwrap()["accent_color"] = Value::from(3);
+        choices.get_mut("reader:appearance").unwrap()["background_style"] = Value::from(2);
+        choices.insert("reader:show-adult".into(), Value::Bool(true));
+        choices.get_mut("reader:reader-settings").unwrap()["paged"]["side_padding"] =
+            Value::from(12);
+        choices.get_mut("reader:reader-settings").unwrap()["default_mode"] =
+            serde_json::json!({"Manual":"RightToLeft"});
+        queue_documents(&mut host, &choices).unwrap();
+        assert!(prepare(&mut host, 1, false, true).unwrap());
+        assert_eq!(
+            host.records(&domain()).len(),
+            5,
+            "only persisted nondefault legacy fields seed records"
+        );
+        let original = host
+            .records(&domain())
+            .into_iter()
+            .map(|(key, _)| {
+                let record = host.record(&domain(), &key).unwrap().clone();
+                (key, record)
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut fresh = isolated_owner();
+        // Reproduce a later-starting peer without sleeps: even a clock ahead
+        // of the host cannot make virtual defaults into account writes.
+        fresh.set("test-clock", "ahead", Some("1".into()), u64::MAX, 2);
+        assert!(fresh.clock().newer_than(host.clock()));
+        let before_seed = fresh.clock();
+        assert!(!prepare(&mut fresh, 2, false, true).unwrap());
+        assert_eq!(fresh.clock(), before_seed);
+        assert!(fresh.records(&domain()).is_empty());
+        assert_eq!(read_map(&fresh, BASELINE).unwrap(), fields(&templates()));
+        assert!(
+            rows(&fresh)
+                .unwrap()
+                .into_iter()
+                .filter(|row| row.can_override)
+                .all(|row| !row.has_shared && row.shared_value == "Not received yet")
+        );
+        // Persisting an entire default document is equally insufficient proof
+        // of user intent; neither defaults nor tombstones get reseeded.
+        let mut default_documents = isolated_owner();
+        queue_documents(&mut default_documents, &templates()).unwrap();
+        assert!(!prepare(&mut default_documents, 3, false, true).unwrap());
+        assert!(default_documents.records(&domain()).is_empty());
+        let mut retired = isolated_owner();
+        queue_documents(&mut retired, &choices).unwrap();
+        retired.set(&domain(), "reader:appearance/accent_color", None, 0, 3);
+        let tombstone = retired
+            .record(&domain(), "reader:appearance/accent_color")
+            .unwrap()
+            .clone();
+        prepare(&mut retired, 3, false, true).unwrap();
+        assert_eq!(
+            retired.record(&domain(), "reader:appearance/accent_color"),
+            Some(&tombstone)
+        );
+        for out in fresh.outbound(&host.digest()) {
+            host.apply(&out.domain, &out.key, out.record);
+        }
+        for (key, record) in &original {
+            assert_eq!(host.record(&domain(), key), Some(record));
+        }
+        for out in host.outbound(&fresh.digest()) {
+            fresh.apply(&out.domain, &out.key, out.record);
+        }
+        apply_remote(&mut fresh).unwrap();
+        assert_eq!(fields(&documents(&fresh).unwrap()), fields(&choices));
+        assert!(
+            !prepare(&mut fresh, 2, false, false).unwrap(),
+            "projection must not echo"
+        );
+        // Existing account records remain authoritative on every later seed.
+        let original_background = fresh
+            .record(&domain(), "reader:appearance/background_style")
+            .unwrap()
+            .clone();
+        assert!(!prepare(&mut fresh, 2, false, true).unwrap());
+        assert_eq!(
+            fresh.record(&domain(), "reader:appearance/background_style"),
+            Some(&original_background)
+        );
+        let previous = documents(&fresh).unwrap()["reader:appearance"].clone();
+        let mut reset = previous.clone();
+        reset["background_style"] = Value::from(0);
+        let merged = merge_editor(&mut fresh, "reader:appearance", &previous, &reset).unwrap();
+        assert_eq!(merged["accent_color"], Value::from(3));
+        assert!(
+            prepare(&mut fresh, 2, false, false).unwrap(),
+            "explicit reset to default is a real edit"
+        );
+        assert_eq!(
+            fresh
+                .record(&domain(), "reader:appearance/background_style")
+                .unwrap()
+                .value
+                .as_deref(),
+            Some("0")
+        );
+        assert!(
+            fresh
+                .record(&domain(), "reader:appearance/background_style")
+                .unwrap()
+                .version
+                .newer_than(&original_background.version)
+        );
+        for out in fresh.outbound(&host.digest()) {
+            host.apply(&out.domain, &out.key, out.record);
+        }
+        apply_remote(&mut host).unwrap();
+        let host_values = fields(&documents(&host).unwrap());
+        assert_eq!(
+            host_values["reader:appearance/background_style"],
+            Value::from(0)
+        );
+        assert_eq!(
+            host_values["reader:appearance/accent_color"],
+            Value::from(3)
+        );
+        assert_eq!(host_values["reader:show-adult"], Value::Bool(true));
+        assert_eq!(
+            host_values["reader:reader-settings/paged/side_padding"],
+            Value::from(12)
+        );
+        assert_eq!(
+            host_values["reader:reader-settings/default_mode"],
+            serde_json::json!({"Manual":"RightToLeft"})
+        );
     }
     #[test]
     fn stale_editors_publish_only_their_changed_fields() {
