@@ -2,7 +2,7 @@ export { ReaderSettingsSync, SettingSyncInfo } from "settings-sync.slint";
 import { SettingSyncBadge } from "settings-sync.slint";
 import { ControlTouchArea } from "@NovaUiBase/control-input.slint";
 import { Spinner } from "std-widgets.slint";
-import { Theme, Anim, SettingsStyle, ControlInput } from "@NovaUiShared";
+import { Theme, Anim, SettingsStyle, ControlInput, SliderGesture } from "@NovaUiShared";
 import { ScrollView } from "@NovaUiBase/scrollview.slint";
 import { ReaderField as LineEdit, ReaderSelect as ComboBox, ReaderToggle as CheckBox } from "controls.slint";
 import { PageHeader } from "page-header.slint";
@@ -45,9 +45,13 @@ import { MorePage } from "more.slint";
 import { LicenseSource } from "about-models.slint";
 export { LicenseSource } from "about-models.slint";
 export { Appearance } from "appearance.slint";
+export { ImageLimitSettings } from "image-limit-settings.slint";
+export { DownloadCleanupSettings } from "download-cleanup-settings.slint";
 export { CaptureSettings } from "capture-settings.slint";
 import { CaptureSettings } from "capture-settings.slint";
 export { ImageStorageSettings } from "image-storage-settings.slint";
+export { SourceCompressionSettings } from "source-compression-settings.slint";
+import { SourceSettingsPage } from "source-settings.slint";
 export { Theme, Anim } from "@NovaUiShared";
 import "../../assets/fonts/Roboto-Regular.ttf";
 import "../../assets/fonts/Roboto-Bold.ttf";
@@ -100,6 +104,18 @@ export component AppWindow inherits Window {
     in property <string> caption: @tr("A home for your next chapter.");
     in property <string> status;
     in property <bool> busy;
+    in property <bool> reader-opening;
+    in property <string> reader-open-error;
+    in-out property <int> reader-return-section: 5;
+    callback reader-retry-open;
+    private property <bool> reader-initial-content: root.pages.length > 0 &&
+        (root.pages[root.current-page].loaded || root.pages[root.current-page].preview || root.pages[root.current-page].error != "");
+    private property <bool> reader-entry-revealed: true;
+    private property <float> reader-entry-fade: root.reader-entry-revealed ? 1 : 0;
+    out property <float> reader-entry-opacity: Anim.enabled && Anim.transitions ? root.reader-entry-fade : 1;
+    animate reader-entry-fade { duration: root.reader-entry-revealed ? 160ms : 0ms; easing: ease-out; }
+    public function begin-reader-entry() { root.reader-entry-revealed = false; }
+    changed reader-initial-content => { if root.reader-initial-content { root.reader-entry-revealed = true; } }
     in property <bool> addon-zip-import-busy;
     // Nova detail.slint defers its entrance by 40ms so the initial opacity
     // is painted before the shared transition fade starts.
@@ -520,10 +536,11 @@ export component AppWindow inherits Window {
         if root.section == 0 && root.library-search-open { root.close-library-search(); return; }
         if ((root.section == 5 && root.detail-origin == 3) || root.section == 8) && root.source-catalog-open { root.return-to-catalogue(); return; }
         if root.section == 3 && root.source-catalog-open { root.source-catalog-open = false; root.navigate(3); return; }
-        root.navigate(root.section == 6 ? 5 : root.section == 8 ? 3 : root.section == 11 || root.section == 12 || root.section == 14 || root.section == 15 || root.section == 16 || root.section == 17 || root.section == 18 || root.section == 19 || root.section == 20 ? 10 : root.section >= 9 || root.section == 7 ? 4 : root.section == 5 ? root.detail-origin : 0);
+        root.navigate(root.section == 6 ? (root.reader-opening ? root.reader-return-section : 5) : root.section == 8 ? 3 : root.section == 11 || root.section == 12 || root.section == 14 || root.section == 15 || root.section == 16 || root.section == 17 || root.section == 18 || root.section == 19 || root.section == 20 || root.section == 21 || root.section == 22 ? 10 : root.section >= 9 || root.section == 7 ? 4 : root.section == 5 ? root.detail-origin : 0);
     }
 
     changed section => {
+        SliderGesture.active = false; SliderGesture.hovered = false;
         root.cancel-reader-zoom();
         if root.capture-editor-visible { root.capture-editor-action("cancel"); }
         if root.section == 5 { root.begin-detail-entry(); }
@@ -582,7 +599,7 @@ export component AppWindow inherits Window {
                     page-content := Rectangle {
                         min-width: 0px;
                         opacity: root.section == 5 ? root.detail-opacity : 1;
-                        if root.section != 6 && root.section != 4 && root.section != 7 && root.section < 9: page-scroll := ScrollView {
+                        if root.section != 6 && root.section != 4 && root.section != 7 && root.section != 8 && root.section < 9: page-scroll := ScrollView {
                             private property <int> control-focus-request: SettingsStyle.focus-request;
                             changed control-focus-request => {
                                 if SettingsStyle.keyboard-mode {
@@ -898,24 +915,16 @@ export component AppWindow inherits Window {
                                         ActionButton { text: @tr("Retry"); enabled: !root.busy; clicked => { root.load-more(); } }
                                     }
                                 }
-                                if root.section == 8: VerticalLayout {
-                                    spacing: 16px;
-                                    if root.source-catalog-settings.length > 0: Text { text: @tr("Catalogues"); color: Theme.current.text_bright; font-size: 18px; font-weight: 600; }
-                                    for catalogue in root.source-catalog-settings: CheckBox {
-                                        text: catalogue.name; checked: catalogue.checked;
-                                        toggled => { root.catalog-enabled-changed(catalogue.key, self.checked); }
-                                    }
-                                    for setting in root.settings: VerticalLayout {
-                                        spacing: 8px;
-                                        Text { min-width: 0px; text: setting.name; color: Theme.current.text_bright; wrap: word-wrap; }
-                                        if setting.kind == "bool": CheckBox { checked: setting.checked; toggled => { root.setting-changed(setting.key, self.checked ? "true" : "false"); } }
-                                        if setting.kind == "text" || setting.kind == "secret": LineEdit { min-width: 0px; text: setting.value; input-type: setting.kind == "secret" ? InputType.password : InputType.text; placeholder-text: setting.kind == "secret" ? @tr("Enter a new secret to replace it") : ""; accepted => { root.setting-changed(setting.key, self.text); } }
-                                        if setting.kind == "select": ComboBox { min-width: 0px; model: setting.options; current-index: setting.selected; selected(value) => { root.setting-changed(setting.key, value); } }
-                                    }
-                                    if root.settings.length == 0 && root.source-catalog-settings.length == 0: Text { min-width: 0px; text: @tr("This source has no configurable settings."); color: Theme.current.text_secondary; wrap: word-wrap; }
-                                    Text { min-width: 0px; text: @tr("Text fields save when you press Enter. Secrets are stored only in this profile and are excluded from backups."); color: Theme.current.text_secondary; wrap: word-wrap; }
-                                }
+
                             }
+                        }
+                        if root.section == 8: SourceSettingsPage {
+                            heading: root.heading; caption: root.caption; status: root.status;
+                            narrow: root.mobile-ui; busy: root.busy;
+                            catalogues: root.source-catalog-settings; settings: root.settings;
+                            back => { root.go-back(); }
+                            catalogue-changed(key, enabled) => { root.catalog-enabled-changed(key, enabled); }
+                            setting-changed(key, value) => { root.setting-changed(key, value); }
                         }
                         if root.section == 7: Rectangle {
                             VerticalLayout {
@@ -937,7 +946,7 @@ export component AppWindow inherits Window {
                             }
                         }
                         if root.section == 6: Rectangle {
-                            background: root.reader-background;
+                            background: root.reader-initial-content ? root.reader-background : #000000;
                             pager := ReaderPagerMotion {
                                 enabled: root.reading-mode != 0 && root.zoom <= 1 && !zoom-gesture.blocking && !root.capture-editor-visible && !root.reader-context-visible;
                                 mode: root.reading-mode; page: root.current-page;
@@ -955,6 +964,7 @@ export component AppWindow inherits Window {
                               began => { root.cancel-reader-zoom(); pager.cancel(); }
                               transform(factor,from-x,from-y,to-x,to-y) => { root.reader-transform(factor,from-x,from-y,to-x,to-y); }
                               reader := Flickable {
+                                opacity: root.reader-entry-opacity;
                                 private property <length> physical-pixel: 1phx;
                                 changed physical-pixel => {root.reader-reflow(root.reader-width / 1px,self.height / 1px);}
                                 x: 0px; y: 0px;
@@ -1062,13 +1072,26 @@ export component AppWindow inherits Window {
                                             }
                                         }
                                     }
-                                    if !page.loaded && !page.preview: Text { text: page.error == "" ? @tr("Loading page…") : page.error; color: Theme.current.text_secondary; wrap: word-wrap; horizontal-alignment: center; vertical-alignment: center; }
+                                    if !page.loaded && !page.preview && page.error != "": Text { text: page.error; color: Theme.current.text_secondary; wrap: word-wrap; horizontal-alignment: center; vertical-alignment: center; }
                                 }
                               }
                             }
                             if ReaderSettings.custom-brightness && ReaderSettings.brightness < 100: Rectangle {
                                 width: 100%; height: 100%; background: #000000;
                                 opacity: 1 - ReaderSettings.brightness / 100;
+                            }
+                            if (root.reader-opening || !root.reader-entry-revealed) && !root.reader-osd: BackButton {
+                                x: 12px + root.safe-area-insets.left; y: 12px + root.safe-area-insets.top;
+                                clicked => { root.go-back(); }
+                            }
+                            if root.reader-open-error != "": Rectangle {
+                                width: min(440px, parent.width - 36px); height: open-error.preferred-height + 92px;
+                                x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                                border-radius: Theme.card_corner_radius; background: Theme.current.popup;
+                                VerticalLayout { padding: 16px; spacing: 12px;
+                                    open-error := Text { text: root.reader-open-error; wrap: word-wrap; color: Theme.current.text_bright; min-width: 0px; }
+                                    ActionButton { text: @tr("Retry opening chapter"); height: 48px; clicked => { root.reader-retry-open(); } }
+                                }
                             }
                             if root.reader-continuation-error != "": Rectangle {
                                 x: 12px; y: parent.height - root.safe-area-insets.bottom - self.height - (root.reader-osd ? 190px : 16px);
@@ -1079,12 +1102,12 @@ export component AppWindow inherits Window {
                                 }
                             }
                             if root.reader-flash-active: Rectangle { width: 100%; height: 100%; background: #ffffff; }
-                            if ReaderSettings.show-page-number && !root.reader-osd && !root.reader-context-capturing: Rectangle {
+                            if ReaderSettings.show-page-number && root.pages.length > 0 && root.reader-entry-revealed && !root.reader-osd && !root.reader-context-capturing: Rectangle {
                                 x: parent.width - self.width - 12px; y: parent.height - root.safe-area-insets.bottom - 40px;
                                 width: 76px; height: 28px; border-radius: 10px; background: #000000a0;
                                 Text { width: 100%; height: 100%; text: root.reader-local-page + " / " + root.reader-page-count; color: #ffffff; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
                             }
-                            if root.reader-osd: ReaderOsd {
+                            if root.reader-osd && !root.reader-opening: ReaderOsd {
                                 width: 100%; height: 100%; compact: root.mobile-ui;
                                 title: root.series-title; chapter-title: root.reader-chapter-title;
                                 page: root.reader-local-page; page-count: root.reader-page-count;

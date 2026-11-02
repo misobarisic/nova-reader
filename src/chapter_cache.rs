@@ -38,7 +38,7 @@ fn chapter_group(chapter: &ChapterId) -> String {
     )
 }
 fn inspect(bytes: &[u8]) -> Result<(u32, u32)> {
-    let dimensions = reader_engine::inspect_image(bytes, reader_engine::DecodeLimits::default())
+    let dimensions = reader_engine::inspect_image(bytes, reader_engine::current_limits())
         .map_err(|e| e.to_string())?;
     Ok((dimensions.width, dimensions.height))
 }
@@ -334,47 +334,53 @@ impl ChapterCache {
         request: &Request,
         on_chunk: &mut dyn FnMut(&[u8]),
     ) -> Result<Read> {
-        request.validate_active()?;
-        let enabled = self.usable && (self.policy)().enabled;
-        if enabled
-            && request.validate_scope().is_ok()
-            && let Some(key) = request.key.as_deref()
-            && let Some(bytes) = self.cache.get(key, inspect).ok().flatten()
-            && request.validate_scope().is_ok()
-        {
-            return Ok(Read {
+        reader_engine::with_current_limits(|| {
+            request.validate_active()?;
+            let enabled = self.usable && (self.policy)().enabled;
+            if enabled
+                && request.validate_scope().is_ok()
+                && let Some(key) = request.key.as_deref()
+                && let Some(bytes) = self.cache.get(key, inspect).ok().flatten()
+                && request.validate_scope().is_ok()
+            {
+                return Ok(Read {
+                    bytes,
+                    pending: None,
+                    from_cache: true,
+                });
+            }
+            let bytes = request
+                .source
+                .fetch_page_with_chunks_limited(
+                    &request.page.url,
+                    &request.page.headers,
+                    &request.cancel,
+                    reader_engine::current_limits().max_encoded_bytes,
+                    on_chunk,
+                )
+                .map_err(|e| e.to_string())?;
+            request.validate_active()?;
+            inspect(&bytes)?;
+            let pending = if enabled && request.key.is_some() && request.validate_scope().is_ok() {
+                self.reserve(bytes.len()).map(|reservation| PendingWrite {
+                    request: request.clone(),
+                    compression: image_storage::effective_for_source(
+                        &request.source.descriptor().id,
+                    )
+                    .cache,
+                    _reservation: reservation,
+                })
+            } else {
+                None
+            };
+            // A response may legitimately update its cookie jar. The original
+            // fetched bytes may display, but never publish under the old scope.
+            request.validate_active()?;
+            Ok(Read {
                 bytes,
-                pending: None,
-                from_cache: true,
-            });
-        }
-        let bytes = request
-            .source
-            .fetch_page_with_chunks(
-                &request.page.url,
-                &request.page.headers,
-                &request.cancel,
-                on_chunk,
-            )
-            .map_err(|e| e.to_string())?;
-        request.validate_active()?;
-        inspect(&bytes)?;
-        let pending = if enabled && request.key.is_some() && request.validate_scope().is_ok() {
-            self.reserve(bytes.len()).map(|reservation| PendingWrite {
-                request: request.clone(),
-                compression: image_storage::settings_snapshot().cache,
-                _reservation: reservation,
+                pending,
+                from_cache: false,
             })
-        } else {
-            None
-        };
-        // A response may legitimately update its cookie jar. The original
-        // fetched bytes may display, but never publish under the old scope.
-        request.validate_active()?;
-        Ok(Read {
-            bytes,
-            pending,
-            from_cache: false,
         })
     }
     pub fn touch(&self, request: &Request) {
@@ -477,7 +483,7 @@ impl Drop for ChapterCache {
     }
 }
 fn compress(bytes: &[u8], compression: ImageCompression) -> Result<Vec<u8>> {
-    let dimensions = reader_engine::inspect_image(bytes, reader_engine::DecodeLimits::default())
+    let dimensions = reader_engine::inspect_image(bytes, reader_engine::current_limits())
         .map_err(|e| e.to_string())?;
     if u64::from(dimensions.width) * u64::from(dimensions.height) > 8_000_000
         || (compression.format == ImageStorageFormat::Webp
@@ -489,9 +495,10 @@ fn compress(bytes: &[u8], compression: ImageCompression) -> Result<Vec<u8>> {
         bytes,
         compression,
         reader_engine::DecodeLimits {
-            max_pixels: 8_000_000,
-            max_decoded_bytes: 64 * 1024 * 1024,
-            ..reader_engine::DecodeLimits::default()
+            max_pixels: 8_000_000u64.min(reader_engine::current_limits().max_pixels),
+            max_decoded_bytes: (64u64 * 1024 * 1024)
+                .min(reader_engine::current_limits().max_decoded_bytes),
+            ..reader_engine::current_limits()
         },
     )
 }

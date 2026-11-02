@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     io::Read,
-    net::{IpAddr, ToSocketAddrs},
+    net::{IpAddr, SocketAddr, ToSocketAddrs},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -121,9 +121,69 @@ pub(crate) struct NetworkTransport {
 struct CookieSession {
     jar: Arc<reqwest::cookie::Jar>,
     generation: u64,
+    clients: Mutex<Vec<PooledClient>>,
 }
-/// Reqwest reads cookies when sending, after the request builder is created.
-/// Freeze that exact header per hop so concurrent jar changes and response
+const MAX_SESSION_CLIENTS: usize = 8;
+struct PooledClient {
+    host: String,
+    addresses: Vec<SocketAddr>,
+    client: Arc<reqwest::blocking::Client>,
+}
+impl CookieSession {
+    /// Validate DNS on every hop before looking up a pool. A changed address
+    /// set gets a fresh client, so a retained socket cannot bypass rebinding
+    /// checks. Pools belong to this exact source/profile session, never globals.
+    fn client(
+        &self,
+        host: &str,
+        addresses: &[SocketAddr],
+    ) -> Result<Arc<reqwest::blocking::Client>> {
+        if addresses.is_empty()
+            || addresses
+                .iter()
+                .any(|a| a.port() != 443 || !is_public_ip(a.ip()))
+        {
+            return Err(network("DNS resolved to non-public address"));
+        }
+        let host = host.to_ascii_lowercase();
+        let route_addresses = addresses;
+        let mut addresses = addresses.to_vec();
+        addresses.sort_unstable();
+        addresses.dedup();
+        let mut clients = self.clients.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(index) = clients
+            .iter()
+            .position(|c| c.host == host && c.addresses == addresses)
+        {
+            let entry = clients.remove(index);
+            let client = entry.client.clone();
+            clients.push(entry);
+            return Ok(client);
+        }
+        // Cookie headers are frozen and applied per request below. Clients are
+        // deliberately stateless: no default credentials or cookie provider.
+        let builder = reqwest::blocking::Client::builder()
+            .user_agent("Mozilla/5.0 (compatible; NovaReader/0.1)")
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_secs(5))
+            .pool_idle_timeout(Duration::from_secs(30))
+            .pool_max_idle_per_host(4)
+            .resolve_to_addrs(&host, route_addresses);
+        #[cfg(target_os = "android")]
+        let builder = builder.tls_backend_preconfigured(android_tls_config()?);
+        let client = Arc::new(builder.build().map_err(|_| network("HTTP client failed"))?);
+        if clients.len() == MAX_SESSION_CLIENTS {
+            clients.remove(0);
+        }
+        clients.push(PooledClient {
+            host,
+            addresses,
+            client: client.clone(),
+        });
+        Ok(client)
+    }
+}
+/// Freeze the outgoing header per hop so concurrent jar changes and response
 /// deletions cannot hide a cookie-authenticated hop from the redirect guard.
 struct HopCookies {
     jar: Arc<dyn CookieStore>,
@@ -455,29 +515,26 @@ impl NetworkTransport {
             if addresses.is_empty() || addresses.iter().any(|a| !is_public_ip(a.ip())) {
                 return Err(network("DNS resolved to non-public address"));
             }
+            let hop_cookies = HopCookies::new(session.jar.clone(), &url);
+            // Keep inherited proxy configuration; direct sockets use the exact
+            // freshly validated DNS set, with bounded per-session reuse.
+            let client = session.client(host, &addresses)?;
             let remaining = deadline
                 .checked_sub(started.elapsed())
                 .ok_or_else(|| network("request deadline exceeded"))?;
-            let hop_cookies = Arc::new(HopCookies::new(session.jar.clone(), &url));
-            // Keep inherited proxy configuration; direct sockets use this validated DNS snapshot.
-            let builder = reqwest::blocking::Client::builder()
-                .user_agent("Mozilla/5.0 (compatible; NovaReader/0.1)")
-                .redirect(reqwest::redirect::Policy::none())
-                .timeout(remaining)
-                .connect_timeout(remaining.min(Duration::from_secs(5)))
-                .cookie_provider(hop_cookies.clone())
-                .resolve_to_addrs(host, &addresses);
-            #[cfg(target_os = "android")]
-            let builder = builder.tls_backend_preconfigured(android_tls_config()?);
-            let client = builder.build().map_err(|_| network("HTTP client failed"))?;
-            let mut request = client.request(
-                if method == "POST" {
-                    reqwest::Method::POST
-                } else {
-                    reqwest::Method::GET
-                },
-                url.clone(),
-            );
+            let mut request = client
+                .request(
+                    if method == "POST" {
+                        reqwest::Method::POST
+                    } else {
+                        reqwest::Method::GET
+                    },
+                    url.clone(),
+                )
+                .timeout(remaining);
+            if let Some(cookie) = hop_cookies.cookies(&hop_cookies.url) {
+                request = request.header(reqwest::header::COOKIE, cookie);
+            }
             for (k, v) in &input.headers {
                 request = request.header(k, v);
             }
@@ -487,6 +544,10 @@ impl NetworkTransport {
             let mut response = request
                 .send()
                 .map_err(|_| network("HTTP transfer failed"))?;
+            // Set-Cookie stays in Rust, including on redirects; it never enters
+            // the response header allowlist exposed to JavaScript.
+            let set_cookie = response.headers().get_all(reqwest::header::SET_COOKIE);
+            hop_cookies.set_cookies(&mut set_cookie.iter(), &hop_cookies.url);
             cancel.check()?;
             if response.status().is_redirection() {
                 if hop == 5 {
@@ -689,6 +750,76 @@ mod tests {
         assert_ne!(
             before,
             other_profile.page_cache_partition(url.as_str()).unwrap()
+        );
+    }
+    #[test]
+    fn connection_pools_reuse_only_validated_dns_and_the_same_session() {
+        let transport = NetworkTransport::new(permissions());
+        let session = transport.session.lock().unwrap().clone();
+        let first: SocketAddr = "1.1.1.1:443".parse().unwrap();
+        let second: SocketAddr = "8.8.8.8:443".parse().unwrap();
+        let client = session.client("example.com", &[first, second]).unwrap();
+        assert!(Arc::ptr_eq(
+            &client,
+            &session
+                .client("example.com", &[second, first, first])
+                .unwrap()
+        ));
+        assert!(!Arc::ptr_eq(
+            &client,
+            &session.client("example.com", &[first]).unwrap()
+        ));
+        assert!(!Arc::ptr_eq(
+            &client,
+            &session.client("cdn.example.com", &[first, second]).unwrap()
+        ));
+        for addresses in [
+            vec![],
+            vec!["127.0.0.1:443".parse().unwrap()],
+            vec![first, "10.0.0.1:443".parse().unwrap()],
+            vec!["1.1.1.1:80".parse().unwrap()],
+        ] {
+            assert!(session.client("example.com", &addresses).is_err());
+        }
+        let other = NetworkTransport::new_scoped(permissions(), "other-profile".into());
+        let other = other.session.lock().unwrap().clone();
+        assert!(!Arc::ptr_eq(
+            &client,
+            &other.client("example.com", &[first, second]).unwrap()
+        ));
+        // A retained transport snapshot shares exactly the old session; reset
+        // gives subsequent operations fresh pools as well as a new cookie jar.
+        transport.reset_session();
+        let next = transport.session.lock().unwrap().clone();
+        assert!(!Arc::ptr_eq(
+            &client,
+            &next.client("example.com", &[first, second]).unwrap()
+        ));
+        assert!(Arc::ptr_eq(
+            &client,
+            &session.client("example.com", &[first, second]).unwrap()
+        ));
+        session.jar.add_cookie_str(
+            "session=secret; Path=/; Secure",
+            &Url::parse("https://example.com/").unwrap(),
+        );
+        let built = client.get("https://example.com/").build().unwrap();
+        assert!(
+            !built.headers().contains_key(reqwest::header::COOKIE),
+            "pooled clients never retain request credentials"
+        );
+        for index in 0..MAX_SESSION_CLIENTS {
+            session
+                .client(&format!("cdn{index}.example.com"), &[first])
+                .unwrap();
+        }
+        assert_eq!(session.clients.lock().unwrap().len(), MAX_SESSION_CLIENTS);
+        assert!(
+            !Arc::ptr_eq(
+                &client,
+                &session.client("example.com", &[first, second]).unwrap()
+            ),
+            "least recently used client is evicted"
         );
     }
     fn cookie_permissions() -> Permissions {

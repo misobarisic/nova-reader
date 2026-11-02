@@ -415,13 +415,20 @@ pub fn snapshot() -> ReaderSettings {
 }
 /// Call once on chapter open. Subsequent calls use the cached per-series value.
 pub fn load_series(series: &SeriesId) -> Result<SeriesOverrides, String> {
-    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(value) = cache.series.get(series) {
-        return Ok(value.clone());
+    if let Some(value) = CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .series
+        .get(series)
+        .cloned()
+    {
+        return Ok(value);
     }
+    // Storage reads cannot hold up UI preference snapshots. A concurrent edit
+    // that has already published its value wins over this first-load result.
     let value = read(&series_key(series), SeriesOverrides::validate)?;
-    cache.series.insert(series.clone(), value.clone());
-    Ok(value)
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    Ok(cache.series.entry(series.clone()).or_insert(value).clone())
 }
 pub fn series_snapshot(series: &SeriesId) -> SeriesOverrides {
     CACHE

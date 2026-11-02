@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use slint::{Image, Model, Rgba8Pixel, SharedPixelBuffer};
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
     fs,
     io::Read,
     path::{Path, PathBuf},
@@ -21,6 +21,8 @@ use std::{
 };
 
 const MAX_REQUESTS: usize = 32;
+const FETCH_WORKERS: usize = 4;
+const CACHE_QUEUE_BYTES: usize = 16 * 1024 * 1024;
 const ENCODED_LIMIT: usize = 8 * 1024 * 1024;
 // Nova's decoded LRU default and retained-card allowance (media/src/cache.rs).
 const DECODED_CACHE_LIMIT: usize = 128 * 1024 * 1024;
@@ -32,6 +34,23 @@ const COVER_LIMITS: DecodeLimits = DecodeLimits {
     max_pixels: 8_000_000,
     max_decoded_bytes: 72 * 1024 * 1024,
 };
+
+// Posters retain their independent, tighter admission while respecting a lower
+// device-wide image policy.
+fn cover_limits() -> DecodeLimits {
+    let current = reader_engine::current_limits();
+    DecodeLimits {
+        max_encoded_bytes: current
+            .max_encoded_bytes
+            .min(COVER_LIMITS.max_encoded_bytes),
+        max_width: current.max_width.min(COVER_LIMITS.max_width),
+        max_height: current.max_height.min(COVER_LIMITS.max_height),
+        max_pixels: current.max_pixels.min(COVER_LIMITS.max_pixels),
+        max_decoded_bytes: current
+            .max_decoded_bytes
+            .min(COVER_LIMITS.max_decoded_bytes),
+    }
+}
 
 type Pixels = SharedPixelBuffer<Rgba8Pixel>;
 static NEXT_LOADER: AtomicU64 = AtomicU64::new(1);
@@ -75,6 +94,8 @@ struct Shared {
     worker_available: AtomicBool,
     shutdown: AtomicBool,
     decoded: Mutex<DecodedCache>,
+    decode: Mutex<()>,
+    cache_writes: Mutex<CacheWrites>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -153,7 +174,7 @@ struct Task {
     cancel: CancelToken,
 }
 
-/// A single worker owns all filesystem, network and image decoding work.
+/// Bounded concurrent fetches, one display decoder and one optional cache worker.
 pub struct ArtworkLoader {
     sender: SyncSender<Task>,
     shared: Arc<Shared>,
@@ -172,111 +193,20 @@ impl ArtworkLoader {
             .unwrap_or_else(|e| e.into_inner())
             .set_budget(crate::image_storage::memory_limit_bytes());
         let encoded = nova_cache::blob::Cache::new(cache_dir, ENCODED_LIMIT as u64);
-        let worker_encoded = encoded.clone();
         let id = NEXT_LOADER.fetch_add(1, Ordering::Relaxed);
-        let worker_shared = shared.clone();
-        let worker_ui = ui.clone();
-        // Failure to start this optional worker leaves the UI's title fallback intact.
-        let started = std::thread::Builder::new()
-            .name("reader-artwork".into())
-            .spawn(move || {
-                let mut maintenance_status = None::<String>;
-                if crate::image_storage::policy_snapshot().disk_enabled {
-                    migrate_legacy(&worker_encoded);
-                }
-                // The real Nova GC owns its timer, index and incremental policy.
-                // Its joining Drop remains on this worker, never on the UI.
-                let _gc = nova_cache::gc::start(
-                    worker_encoded.directory().to_owned(),
-                    Arc::new(ArtworkBackend {
-                        services: services.clone(),
-                        shared: worker_shared.clone(),
-                    }),
-                )
-                .ok();
-                loop {
-                    if let Some(command) = worker_shared.take_maintenance() {
-                        if command.clear {
-                            clear_cache(&worker_encoded, &worker_shared.decoded);
-                            maintenance_status = Some(text::tr("Image cache cleared."));
-                            // Old queued tasks are discarded by the generation guard.
-                            // Do not unblock requests if a newer clear is pending.
-                            let pending = worker_shared
-                                .maintenance
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner());
-                            if !pending.clear {
-                                worker_shared.clearing.store(false, Ordering::Release);
-                            }
-                        }
-                        let usage = cache_usage(&worker_encoded);
-                        let shared = worker_shared.clone();
-                        let status = maintenance_status.clone();
-                        let _ = worker_ui.upgrade_in_event_loop(move |ui| {
-                            if shared
-                                .maintenance
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .revision
-                                != command.revision
-                            {
-                                return;
-                            }
-                            ui.set_image_cache_info(
-                                text::image_cache_usage(usage.0, usage.1).into(),
-                            );
-                            if let Some(status) = status {
-                                ui.set_image_cache_status(status.into());
-                            }
-                            ui.set_image_cache_busy(false);
-                        });
-                        continue;
-                    }
-                    let task = match receiver.recv_timeout(Duration::from_millis(100)) {
-                        Ok(task) => task,
-                        Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                    };
-                    if !worker_shared.current(&task) {
-                        continue;
-                    }
-                    let (result, deferred) =
-                        match load(&services, &worker_encoded, &worker_shared, &task) {
-                            Ok((loaded, deferred)) => (Ok(loaded), deferred),
-                            Err(error) => (Err(error), None),
-                        };
-                    if !worker_shared.current(&task) {
-                        continue;
-                    }
-                    // The original stays on this one worker, never in the UI
-                    // closure, decoded LRU or retained Slint image handles.
-                    let write_task = task.clone();
-                    let shared = worker_shared.clone();
-                    let (acknowledge, receipt) = mpsc::sync_channel(1);
-                    // Keep pending entries until publication so queued event-loop
-                    // closures count toward the same 32-request memory bound.
-                    let _ = worker_ui.upgrade_in_event_loop(move |ui| {
-                        // One decoded completion at a time keeps transient pixel
-                        // ownership bounded independently of the request queue.
-                        let _receipt = Completion(acknowledge);
-                        if !shared.current(&task) {
-                            return;
-                        }
-                        shared.finish(&task, result.is_err());
-                        let Ok(loaded) = result else { return };
-                        admit(&ui, id, &shared, &task.key, loaded);
-                    });
-                    // Display the decoded pixels before optional recompression
-                    // or disk work; large originals must not delay first paint.
-                    after_publication(receipt, &worker_shared, &write_task, || {
-                        if let Some(deferred) = deferred {
-                            deferred.write(&worker_encoded, &worker_shared, &write_task);
-                        }
-                    });
-                }
+        start_cache_worker(
+            services.clone(),
+            encoded.clone(),
+            shared.clone(),
+            ui.clone(),
+        );
+        let load_shared = shared.clone();
+        let load_encoded = encoded.clone();
+        start_fetch_workers(receiver, ui.clone(), id, shared.clone(), move |task| {
+            reader_engine::with_current_limits(|| {
+                load(&services, &load_encoded, &load_shared, task)
             })
-            .is_ok();
-        shared.worker_available.store(started, Ordering::Release);
+        });
         Self {
             sender,
             shared,
@@ -289,6 +219,23 @@ impl ArtworkLoader {
     /// Cancel before replacing rows, changing profiles, or changing source access.
     pub fn invalidate(&self) {
         self.shared.invalidate();
+    }
+
+    /// Drop transient poster admissions and retry failures after a device policy edit.
+    /// Encoded disk files remain disposable and are validated on their next read.
+    pub fn apply_image_limits(&self) {
+        self.invalidate();
+        let mut cache = self
+            .shared
+            .decoded
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let keys = cache.keys();
+        cache.clear();
+        drop(cache);
+        if let Some(ui) = self.ui.upgrade() {
+            forget_images(&ui, self.id, &keys);
+        }
     }
 
     /// Cancel obsolete queued, active, and not-yet-published requests while
@@ -439,6 +386,194 @@ impl Drop for ArtworkLoader {
             });
         }
     }
+}
+
+// Encoded originals never enter UI closures. Bound queued cache data separately
+// from four in-flight (8 MiB each) responses and the two bounded codec stages.
+#[derive(Default)]
+struct CacheWrites {
+    pending: VecDeque<(Task, DeferredCacheWrite)>,
+    bytes: usize,
+}
+impl CacheWrites {
+    fn push(&mut self, task: Task, write: DeferredCacheWrite) {
+        if self.pending.len() >= MAX_REQUESTS
+            || write.bytes.len() > CACHE_QUEUE_BYTES.saturating_sub(self.bytes)
+        {
+            return; // Disposable cache work must never delay a visible poster.
+        }
+        self.bytes += write.bytes.len();
+        self.pending.push_back((task, write));
+    }
+    fn pop(&mut self) -> Option<(Task, DeferredCacheWrite)> {
+        let job = self.pending.pop_front()?;
+        self.bytes -= job.1.bytes.len();
+        Some(job)
+    }
+}
+
+fn start_fetch_workers(
+    receiver: mpsc::Receiver<Task>,
+    ui: slint::Weak<AppWindow>,
+    id: u64,
+    shared: Arc<Shared>,
+    load: impl Fn(&Task) -> LoadResult + Send + Sync + 'static,
+) -> Vec<std::thread::JoinHandle<()>> {
+    let mut workers = Vec::new();
+    let receiver = Arc::new(Mutex::new(receiver));
+    let load = Arc::new(load);
+    for index in 0..FETCH_WORKERS {
+        let receiver = receiver.clone();
+        let shared = shared.clone();
+        let ui = ui.clone();
+        let load = load.clone();
+        let worker = std::thread::Builder::new()
+            .name(format!("reader-artwork-fetch-{index}"))
+            .spawn(move || {
+                while !shared.shutdown.load(Ordering::Acquire) {
+                    // Only dequeue under this lock; network and decode run outside it.
+                    let task = receiver
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .recv_timeout(Duration::from_millis(100));
+                    let task = match task {
+                        Ok(task) => task,
+                        Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    };
+                    if !shared.current(&task) {
+                        continue;
+                    }
+                    let (result, deferred) = match load(&task) {
+                        Ok((loaded, deferred)) => (Ok(loaded), deferred),
+                        Err(error) => (Err(error), None),
+                    };
+                    if !shared.current(&task) {
+                        continue;
+                    }
+                    let write_task = task.clone();
+                    let publish_shared = shared.clone();
+                    let (acknowledge, receipt) = mpsc::sync_channel(1);
+                    let _ = ui.upgrade_in_event_loop(move |ui| {
+                        // At most one small decoded completion per fetch worker.
+                        let _receipt = Completion(acknowledge);
+                        if !publish_shared.current(&task) {
+                            return;
+                        }
+                        publish_shared.finish(&task, result.is_err());
+                        if let Ok(loaded) = result {
+                            admit(&ui, id, &publish_shared, &task.key, loaded);
+                        }
+                    });
+                    after_publication(receipt, &shared, &write_task, || {
+                        if shared.worker_available.load(Ordering::Acquire)
+                            && let Some(deferred) = deferred
+                        {
+                            shared
+                                .cache_writes
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .push(write_task.clone(), deferred);
+                        }
+                    });
+                }
+            });
+        if let Ok(worker) = worker {
+            workers.push(worker);
+        }
+    }
+    workers
+}
+
+fn start_cache_worker(
+    services: Services,
+    encoded: nova_cache::blob::Cache,
+    shared: Arc<Shared>,
+    ui: slint::Weak<AppWindow>,
+) {
+    let worker_shared = shared.clone();
+    let started = std::thread::Builder::new()
+        .name("reader-artwork-cache".into())
+        .spawn(move || {
+            if crate::image_storage::policy_snapshot().disk_enabled {
+                migrate_legacy(&encoded);
+            }
+            // Joining the GC stays on this worker, never the event loop.
+            let _gc = nova_cache::gc::start(
+                encoded.directory().to_owned(),
+                Arc::new(ArtworkBackend {
+                    services,
+                    shared: worker_shared.clone(),
+                }),
+            )
+            .ok();
+            let mut maintenance_status = None::<String>;
+            while !worker_shared.shutdown.load(Ordering::Acquire) {
+                if let Some(command) = worker_shared.take_maintenance() {
+                    if command.clear {
+                        {
+                            let mut writes = worker_shared
+                                .cache_writes
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
+                            writes.pending.clear();
+                            writes.bytes = 0;
+                        }
+                        clear_cache(&encoded, &worker_shared.decoded);
+                        maintenance_status = Some(text::tr("Image cache cleared."));
+                        let pending = worker_shared
+                            .maintenance
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        if !pending.clear {
+                            worker_shared.clearing.store(false, Ordering::Release);
+                        }
+                    }
+                    let usage = cache_usage(&encoded);
+                    let shared = worker_shared.clone();
+                    let status = maintenance_status.clone();
+                    let _ = ui.upgrade_in_event_loop(move |ui| {
+                        if shared
+                            .maintenance
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .revision
+                            != command.revision
+                        {
+                            return;
+                        }
+                        ui.set_image_cache_info(text::image_cache_usage(usage.0, usage.1).into());
+                        if let Some(status) = status {
+                            ui.set_image_cache_status(status.into());
+                        }
+                        ui.set_image_cache_busy(false);
+                    });
+                    continue;
+                }
+                // Start optional recompression after visible requests finish. A new
+                // request can still fetch/decode while an older encoder is running.
+                let waiting = !worker_shared
+                    .requests
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .pending
+                    .is_empty();
+                if !waiting {
+                    let job = worker_shared
+                        .cache_writes
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .pop();
+                    if let Some((task, write)) = job {
+                        write.write(&encoded, &worker_shared, &task);
+                        continue;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        })
+        .is_ok();
+    shared.worker_available.store(started, Ordering::Release);
 }
 
 struct Completion(SyncSender<()>);
@@ -624,7 +759,7 @@ fn trim_ui(ui: &AppWindow, id: u64, shared: &Shared) {
 }
 
 fn decode(bytes: &[u8]) -> Result<Pixels, String> {
-    let image = decode_display_image(bytes, COVER_LIMITS, 460, 690).map_err(|e| e.to_string())?;
+    let image = decode_display_image(bytes, cover_limits(), 460, 690).map_err(|e| e.to_string())?;
     Ok(Pixels::clone_from_slice(
         image.as_raw(),
         image.width(),
@@ -893,12 +1028,18 @@ fn load_source(
             ));
         }
     }
-    let settings = crate::image_storage::settings_snapshot();
+    let settings = crate::image_storage::effective_for_source(&source.descriptor().id);
     let epoch = encoded.generation();
-    if settings.policy.disk_enabled
-        && let Some(encoded_key) = &encoded_key
-        && let Some(pixels) = read_cached_pixels(encoded, encoded_key)
-    {
+    let cached = if settings.policy.disk_enabled {
+        let _decode = shared.decode.lock().unwrap_or_else(|e| e.into_inner());
+        task.cancel.check().map_err(|e| e.to_string())?;
+        encoded_key
+            .as_ref()
+            .and_then(|key| read_cached_pixels(encoded, key))
+    } else {
+        None
+    };
+    if let Some(pixels) = cached {
         task.cancel.check().map_err(|e| e.to_string())?;
         return Ok((
             Loaded {
@@ -911,10 +1052,19 @@ fn load_source(
         ));
     }
     let bytes = source
-        .fetch_page(&task.url, &BTreeMap::new(), &task.cancel)
+        .fetch_page_limited(
+            &task.url,
+            &BTreeMap::new(),
+            &task.cancel,
+            cover_limits().max_encoded_bytes,
+        )
         .map_err(|e| e.to_string())?;
     task.cancel.check().map_err(|e| e.to_string())?;
-    let pixels = decode(&bytes)?;
+    let pixels = {
+        let _decode = shared.decode.lock().unwrap_or_else(|e| e.into_inner());
+        task.cancel.check().map_err(|e| e.to_string())?;
+        decode(&bytes)?
+    };
     task.cancel.check().map_err(|e| e.to_string())?;
     if !proof.current() {
         return Err("Artwork authorization context changed".into());
@@ -960,7 +1110,7 @@ fn read_cached_pixels(cache: &nova_cache::blob::Cache, key: &str) -> Option<Pixe
 
 fn inspect(bytes: &[u8]) -> Result<(u32, u32), String> {
     let dimensions =
-        reader_engine::inspect_image(bytes, COVER_LIMITS).map_err(|e| e.to_string())?;
+        reader_engine::inspect_image(bytes, cover_limits()).map_err(|e| e.to_string())?;
     Ok((dimensions.width, dimensions.height))
 }
 
@@ -998,7 +1148,8 @@ fn transform_new_image(
     // source look like a lossless input.
     compression.lossless_inputs &= nova_image::is_lossless_input(bytes);
     let resized = if let Some(max_side) = max_side {
-        let image = reader_engine::decode_image(bytes, COVER_LIMITS).map_err(|e| e.to_string())?;
+        let image =
+            reader_engine::decode_image(bytes, cover_limits()).map_err(|e| e.to_string())?;
         if image.width().max(image.height()) > max_side {
             let image =
                 nova_cache::fit_rgba(image, Some(max_side)).ok_or("Invalid artwork resolution")?;
@@ -1025,7 +1176,7 @@ fn transform_new_image(
         match crate::reader_export::reencode_storage_image(
             resized.as_deref().unwrap_or(bytes),
             compression,
-            COVER_LIMITS,
+            cover_limits(),
         ) {
             Ok(bytes) => Ok(Some(bytes)),
             Err(_) => Ok(resized),
@@ -1232,6 +1383,247 @@ mod tests {
             cover_url: Some(url.into()),
             canonical_url: None,
         }
+    }
+
+    #[test]
+    fn poster_pool_paints_fast_cards_without_waiting_for_slow_fetch_or_cache_encoder() {
+        const CHILD: &str = "NOVA_POSTER_POOL_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "artwork::tests::poster_pool_paints_fast_cards_without_waiting_for_slow_fetch_or_cache_encoder", "--nocapture"])
+                .env(CHILD, "1").output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            eprint!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        use slint::{ModelRc, VecModel};
+        use std::{cell::Cell, rc::Rc, sync::atomic::AtomicUsize, time::Instant};
+        struct Latency {
+            active: AtomicUsize,
+            peak: AtomicUsize,
+            release: AtomicBool,
+            slow_started: AtomicBool,
+        }
+        impl reader_sources::SourceTransport for Latency {
+            fn page_cache_partition(&self, _: &str) -> Option<String> {
+                Some("latency-fixture".into())
+            }
+            fn request(
+                &self,
+                request: &reader_sources::HttpRequest,
+                cap: usize,
+                cancel: &CancelToken,
+            ) -> reader_sources::Result<reader_sources::HttpResponse> {
+                assert_eq!(cap, ENCODED_LIMIT);
+                let active = self.active.fetch_add(1, Ordering::AcqRel) + 1;
+                self.peak.fetch_max(active, Ordering::AcqRel);
+                struct Active<'a>(&'a AtomicUsize);
+                impl Drop for Active<'_> {
+                    fn drop(&mut self) {
+                        self.0.fetch_sub(1, Ordering::AcqRel);
+                    }
+                }
+                let _active = Active(&self.active);
+                if request.url.ends_with("slow.png") {
+                    self.slow_started.store(true, Ordering::Release);
+                    while !self.release.load(Ordering::Acquire) {
+                        cancel.check()?;
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                } else {
+                    std::thread::sleep(Duration::from_millis(40));
+                }
+                reader_sources::SourceTransport::request(&NeutralPosters, request, cap, cancel)
+            }
+        }
+        i_slint_backend_testing::init_integration_test_with_system_time();
+        let directory = tempfile::tempdir().unwrap();
+        let transport = Arc::new(Latency {
+            active: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+            release: AtomicBool::new(false),
+            slow_started: AtomicBool::new(false),
+        });
+        let (_registry, source) =
+            poster_source(&directory.path().join("sources"), transport.clone());
+        let items: Vec<_> = (0..9)
+            .map(|i| {
+                series(
+                    "poster-fixture",
+                    &i.to_string(),
+                    &format!(
+                        "https://example.test/{}.png",
+                        if i == 0 {
+                            "slow".to_owned()
+                        } else {
+                            i.to_string()
+                        }
+                    ),
+                )
+            })
+            .collect();
+        let cache =
+            nova_cache::blob::Cache::new(directory.path().join("posters"), ENCODED_LIMIT as u64);
+        let shared = Arc::new(Shared::default());
+        let serial = {
+            let source = source.clone();
+            let shared = shared.clone();
+            let cache = cache.clone();
+            let items = items.clone();
+            std::thread::spawn(move || {
+                let start = Instant::now();
+                for item in &items[1..] {
+                    let task = Task {
+                        key: key(item),
+                        source_id: item.id.source_id.clone(),
+                        url: item.cover_url.clone().unwrap(),
+                        generation: 0,
+                        cancel: CancelToken::default(),
+                    };
+                    load_source(source.clone(), &cache, &shared, &task).unwrap();
+                }
+                start.elapsed()
+            })
+            .join()
+            .unwrap()
+        };
+        transport.peak.store(0, Ordering::Release);
+        let ui = AppWindow::new().unwrap();
+        ui.set_items(ModelRc::new(VecModel::from(
+            items
+                .iter()
+                .map(|item| crate::ItemRow {
+                    artwork_key: key(item).into(),
+                    ..Default::default()
+                })
+                .collect::<Vec<_>>(),
+        )));
+        let (sender, receiver) = mpsc::sync_channel(MAX_REQUESTS);
+        let loader = ArtworkLoader {
+            sender,
+            shared: shared.clone(),
+            ui: ui.as_weak(),
+            id: NEXT_LOADER.fetch_add(1, Ordering::Relaxed),
+            encoded: cache.clone(),
+        };
+        // Deliberately leave optional cache writes unconsumed, as if an encoder
+        // were busy with an older page. Visible work must still finish.
+        shared.worker_available.store(true, Ordering::Release);
+        let load_shared = shared.clone();
+        let workers = start_fetch_workers(
+            receiver,
+            ui.as_weak(),
+            loader.id,
+            shared.clone(),
+            move |task| load_source(source.clone(), &cache, &load_shared, task),
+        );
+        for item in &items {
+            loader.request(item);
+        }
+        let started = Instant::now();
+        let fast_ready = Rc::new(Cell::new(None));
+        let completed = Rc::new(Cell::new(false));
+        let timer = slint::Timer::default();
+        timer.start(slint::TimerMode::Repeated, Duration::from_millis(5), {
+            let weak = ui.as_weak();
+            let transport = transport.clone();
+            let fast_ready = fast_ready.clone();
+            let completed = completed.clone();
+            move || {
+                let ui = weak.upgrade().unwrap();
+                let rows = ui.get_items();
+                if fast_ready.get().is_none()
+                    && rows.iter().skip(1).all(|row| row.poster.size().width > 0)
+                {
+                    assert!(transport.slow_started.load(Ordering::Acquire));
+                    assert_eq!(
+                        rows.row_data(0).unwrap().poster.size().width,
+                        0,
+                        "fast cards paint while the first response is blocked"
+                    );
+                    fast_ready.set(Some(started.elapsed()));
+                    transport.release.store(true, Ordering::Release);
+                }
+                if rows.iter().all(|row| row.poster.size().width > 0) {
+                    completed.set(true);
+                    slint::quit_event_loop().unwrap();
+                } else if started.elapsed() > Duration::from_secs(5) {
+                    transport.release.store(true, Ordering::Release);
+                    slint::quit_event_loop().unwrap();
+                }
+            }
+        });
+        slint::run_event_loop().unwrap();
+        assert!(completed.get(), "poster pipeline stalled");
+        assert!(
+            transport.peak.load(Ordering::Acquire) > 1,
+            "network requests must overlap"
+        );
+        assert!(transport.peak.load(Ordering::Acquire) <= FETCH_WORKERS);
+        assert!(
+            !shared.cache_writes.lock().unwrap().pending.is_empty(),
+            "unprocessed optional cache writes cannot block the grid"
+        );
+        eprintln!(
+            "8 neutral posters with40ms transport: serial {serial:?}, concurrent fast-card paint {:?}, peak requests {}",
+            fast_ready.get().unwrap(),
+            transport.peak.load(Ordering::Acquire)
+        );
+        drop(loader);
+        for worker in workers {
+            worker.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn optional_cache_queue_is_bounded_by_bytes_and_count() {
+        let directory = tempfile::tempdir().unwrap();
+        let (_registry, source) = poster_source(directory.path(), Arc::new(NeutralPosters));
+        let job = |bytes| {
+            (
+                Task {
+                    key: "cover".into(),
+                    source_id: "poster-fixture".into(),
+                    url: "https://example.test/cover.png".into(),
+                    generation: 0,
+                    cancel: CancelToken::default(),
+                },
+                DeferredCacheWrite {
+                    key: "cover".into(),
+                    epoch: 0,
+                    bytes: vec![0; bytes],
+                    compression: Default::default(),
+                    max_side: None,
+                    access: source.availability(),
+                    proof: RequestProof::new(&source, "https://example.test/cover.png").unwrap(),
+                },
+            )
+        };
+        let mut queue = CacheWrites::default();
+        for _ in 0..3 {
+            let (task, write) = job(ENCODED_LIMIT);
+            queue.push(task, write);
+        }
+        assert_eq!(queue.pending.len(), 2);
+        assert_eq!(queue.bytes, CACHE_QUEUE_BYTES);
+        queue.pop();
+        assert_eq!(queue.bytes, ENCODED_LIMIT);
+        let mut queue = CacheWrites::default();
+        for _ in 0..MAX_REQUESTS + 1 {
+            let (task, write) = job(1);
+            queue.push(task, write);
+        }
+        assert_eq!(queue.pending.len(), MAX_REQUESTS);
+        assert_eq!(queue.bytes, MAX_REQUESTS);
     }
 
     #[test]

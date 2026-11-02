@@ -395,9 +395,9 @@ mod tests {
     fn tight_native_capture_releases_retention_instead_of_reducing_resolution() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tall.png");
-        // Decoder native output plus RGBA fits the original128MiB budget,
-        // but cannot also reserve16MiB for optional session source retention.
-        image::RgbaImage::from_pixel(1000, 15500, image::Rgba([70, 80, 90, 255]))
+        // One decoded RGBA allocation and the crop fit the 128 MiB budget,
+        // but cannot also reserve 16 MiB for optional session source retention.
+        image::RgbaImage::from_pixel(1000, 30000, image::Rgba([70, 80, 90, 255]))
             .save(&path)
             .unwrap();
         let capture = capture(
@@ -407,7 +407,7 @@ mod tests {
             },
             None,
             1000.,
-            15500.,
+            30000.,
         );
         let (image, _) =
             reader_capture_editor::render_capture(&capture, &CancelToken::default(), None).unwrap();

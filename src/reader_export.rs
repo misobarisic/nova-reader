@@ -17,7 +17,7 @@ pub struct ExportImage {
 impl ExportImage {
     /// Preserve the original encoded page rather than saving its display tiles.
     pub fn original(bytes: Vec<u8>, name: &str) -> Result<Self, String> {
-        reader_engine::inspect_image(&bytes, reader_engine::DecodeLimits::default())
+        reader_engine::inspect_image(&bytes, reader_engine::current_limits())
             .map_err(|error| format!("Cannot export page image: {error}"))?;
         let (mime, extension) = if reader_engine::is_jpeg_xl(&bytes) {
             ("image/jxl", "jxl")
@@ -97,46 +97,50 @@ impl ExportImage {
         pixels: &[u8],
         preferences: &CapturePreferences,
     ) -> Result<Self, String> {
-        validate_screencap(width, height, pixels.len())?;
-        let quality = match preferences.format {
-            CaptureFormat::Jpeg => preferences.jpeg_quality,
-            CaptureFormat::Avif => preferences.avif_quality,
-            CaptureFormat::JxlLossless | CaptureFormat::JxlLossy => preferences.jxl_quality,
-            _ => preferences.webp_quality,
-        };
-        let bytes = encode_rgba(
-            width,
-            height,
-            pixels,
-            preferences.format,
-            quality,
-            reader_engine::DecodeLimits::default(),
-        )?;
-        if preferences.format == CaptureFormat::Avif {
-            reader_engine::inspect_image(&bytes, reader_engine::DecodeLimits::default())
-                .map_err(|error| format!("AVIF screenshot exceeds decode admission: {error}"))?;
-        }
-        if matches!(
-            preferences.format,
-            CaptureFormat::JxlLossless | CaptureFormat::JxlLossy
-        ) {
-            // Clipboard decoding and later Reader imports use the same bounds.
-            reader_engine::decode_image(&bytes, reader_engine::DecodeLimits::default())
-                .map_err(|error| format!("JPEG XL screencap exceeds decode admission: {error}"))?;
-        }
-        let (mime, extension) = match preferences.format {
-            CaptureFormat::Png => ("image/png", "png"),
-            CaptureFormat::Jpeg => ("image/jpeg", "jpg"),
-            CaptureFormat::WebpLossless | CaptureFormat::WebpLossy => ("image/webp", "webp"),
-            CaptureFormat::Avif => ("image/avif", "avif"),
-            CaptureFormat::JxlLossless | CaptureFormat::JxlLossy => ("image/jxl", "jxl"),
-        };
-        Ok(Self {
-            bytes,
-            mime: mime.into(),
-            name: format!("screencap.{extension}"),
-            #[cfg(not(target_os = "android"))]
-            clipboard_rgba: None,
+        reader_engine::with_current_limits(|| {
+            validate_screencap(width, height, pixels.len())?;
+            let quality = match preferences.format {
+                CaptureFormat::Jpeg => preferences.jpeg_quality,
+                CaptureFormat::Avif => preferences.avif_quality,
+                CaptureFormat::JxlLossless | CaptureFormat::JxlLossy => preferences.jxl_quality,
+                _ => preferences.webp_quality,
+            };
+            let bytes = encode_rgba(
+                width,
+                height,
+                pixels,
+                preferences.format,
+                quality,
+                reader_engine::current_limits(),
+            )?;
+            if preferences.format == CaptureFormat::Avif {
+                reader_engine::inspect_image(&bytes, reader_engine::current_limits()).map_err(
+                    |error| format!("AVIF screenshot exceeds decode admission: {error}"),
+                )?;
+            }
+            if matches!(
+                preferences.format,
+                CaptureFormat::JxlLossless | CaptureFormat::JxlLossy
+            ) {
+                // Clipboard decoding and later Reader imports use the same bounds.
+                reader_engine::decode_image(&bytes, reader_engine::current_limits()).map_err(
+                    |error| format!("JPEG XL screencap exceeds decode admission: {error}"),
+                )?;
+            }
+            let (mime, extension) = match preferences.format {
+                CaptureFormat::Png => ("image/png", "png"),
+                CaptureFormat::Jpeg => ("image/jpeg", "jpg"),
+                CaptureFormat::WebpLossless | CaptureFormat::WebpLossy => ("image/webp", "webp"),
+                CaptureFormat::Avif => ("image/avif", "avif"),
+                CaptureFormat::JxlLossless | CaptureFormat::JxlLossy => ("image/jxl", "jxl"),
+            };
+            Ok(Self {
+                bytes,
+                mime: mime.into(),
+                name: format!("screencap.{extension}"),
+                #[cfg(not(target_os = "android"))]
+                clipboard_rgba: None,
+            })
         })
     }
 }
@@ -163,7 +167,7 @@ fn clipboard_pixels(image: &mut ExportImage) -> Result<image::RgbaImage, String>
         reader_engine::DecodeLimits {
             // Locally generated PNGs can exceed a source page's encoded limit.
             max_encoded_bytes: 128 * 1024 * 1024,
-            ..reader_engine::DecodeLimits::default()
+            ..reader_engine::current_limits()
         },
     )
     .map_err(|error| format!("Cannot decode clipboard image: {error}"))

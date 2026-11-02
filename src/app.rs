@@ -32,6 +32,8 @@ mod reader_capture_sources;
 mod reader_continuity;
 #[path = "reader_controls.rs"]
 mod reader_controls;
+#[path = "reader_open.rs"]
+mod reader_open;
 #[cfg(test)]
 #[path = "reader_preview.rs"]
 mod reader_preview;
@@ -85,26 +87,27 @@ enum PageInput {
 impl PageInput {
     fn read(&self, source: Option<&Source>, cancel: &CancelToken) -> Result<Vec<u8>> {
         cancel.check().map_err(error)?;
+        let cap = reader_engine::current_limits().max_encoded_bytes;
         let bytes = match self {
             Self::Local { path, .. } => {
                 use std::io::Read;
                 let file = std::fs::File::open(path).map_err(error)?;
-                if file.metadata().map_err(error)?.len() > 32 * 1024 * 1024 {
+                if file.metadata().map_err(error)?.len() > cap as u64 {
                     return Err(text::tr("Image exceeds byte limit"));
                 }
                 let mut bytes = Vec::new();
-                file.take(32 * 1024 * 1024 + 1)
+                file.take(cap as u64 + 1)
                     .read_to_end(&mut bytes)
                     .map_err(error)?;
                 bytes
             }
             Self::Remote(page) => source
                 .ok_or_else(|| text::tr("Source unavailable"))?
-                .fetch_page(&page.url, &page.headers, cancel)
+                .fetch_page_limited(&page.url, &page.headers, cancel, cap)
                 .map_err(error)?,
         };
         cancel.check().map_err(error)?;
-        if bytes.len() > 32 * 1024 * 1024 {
+        if bytes.len() > cap {
             return Err(text::tr("Image exceeds byte limit"));
         }
         Ok(bytes)
@@ -325,7 +328,7 @@ impl Reader {
             .map(|presentation| presentation.source)
             .unwrap_or(dimensions);
         let source_bytes = u64::from(source.width) * u64::from(source.height) * 4;
-        let copy_budget = (reader_engine::DecodeLimits::default()
+        let copy_budget = (reader_engine::current_limits()
             .max_decoded_bytes
             .saturating_sub(source_bytes)
             / 2) as usize;
@@ -547,6 +550,7 @@ struct View {
     series: Option<Series>,
     chapters: Vec<Chapter>,
     reader: Option<Reader>,
+    reader_open: Option<ChapterId>,
     catalogue: String,
     query: String,
     page: usize,
@@ -669,6 +673,12 @@ struct Controller {
 }
 impl Controller {
     fn refresh_synced(self: &Arc<Self>, ui: &AppWindow) {
+        let settings_package = { self.view().settings_package.clone() };
+        if ui.get_section() == 8
+            && let Some(package) = settings_package
+        {
+            crate::source_compression::select(ui, &package);
+        }
         self.render(ui);
         self.refresh_download_states(ui);
         if self.view().section != 3 || ui.get_source_catalog_open() {
@@ -1425,7 +1435,8 @@ impl Controller {
                     {
                         let mut view = app.view();
                         view.section = 8;
-                        view.settings_package = Some(package);
+                        view.settings_package = Some(package.clone());
+                        crate::source_compression::select(ui, &package);
                     }
                     let rows = schema
                         .into_iter()
@@ -1585,6 +1596,14 @@ impl Controller {
         }
     }
     fn navigate(self: &Arc<Self>, ui: &AppWindow, section: i32) {
+        if section == 22 {
+            crate::image_limits_ui::refresh(ui);
+        }
+        if section == 21
+            && let Ok(state) = self.services.domain.snapshot()
+        {
+            crate::download_cleanup::refresh(ui, &state);
+        }
         if section == 3 {
             ui.set_source_catalog_open(false);
         }
@@ -1595,7 +1614,12 @@ impl Controller {
         if section != 6 {
             ui.set_pages(ModelRc::default());
             ui.set_total_ratio(0.0);
-            self.view().reader = None;
+            {
+                let mut view = self.view();
+                view.reader = None;
+                view.reader_open = None;
+            }
+            ui.set_reader_opening(false);
         }
         {
             let mut view = self.view();
@@ -1886,218 +1910,6 @@ impl Controller {
             },
         );
     }
-    fn open_chapter(self: &Arc<Self>, ui: &AppWindow, chapter: ChapterId) {
-        ui.set_reader_osd(false);
-        ui.set_reader_continuation_error("".into());
-        let origin = self.view().section;
-        if origin != 5 && origin != 6 {
-            ui.set_detail_origin(origin);
-        }
-        self.task(
-            ui,
-            move |app, cancel| {
-                let state = app.services.domain.snapshot().map_err(error)?;
-                let progress = state
-                    .progress
-                    .iter()
-                    .find(|p| p.chapter == chapter)
-                    .cloned();
-                let completed = progress.as_ref().is_some_and(|p| p.completed);
-                if let Err(error) = crate::reader_settings::load_series(&chapter.series) {
-                    eprintln!("Nova Reader: reader settings unavailable: {error}");
-                }
-                let mode_choice = reader_modes::load(
-                    &chapter.series,
-                    reader_modes::legacy_mode(&state, &chapter.series),
-                )
-                .map_err(error)?;
-                let automatic_mode =
-                    reader_modes::automatic_for_state(&state, &chapter.series, None);
-                let mode = mode_choice.resolve(automatic_mode);
-                let anchor = progress.map(|p| p.anchor).unwrap_or_default();
-                if let Ok(offline) = app.services.downloads.offline(&chapter) {
-                    let pages = offline
-                        .pages
-                        .into_iter()
-                        .zip(app.services.downloads.job(&chapter).map_err(error)?.pages)
-                        .map(|(path, page)| PageInput::Local {
-                            path,
-                            id: page.resource.id,
-                        })
-                        .collect::<Vec<_>>();
-                    let ratios = pages
-                        .iter()
-                        .map(|p| match p {
-                            PageInput::Local { path, .. } => std::fs::read(path)
-                                .ok()
-                                .and_then(|bytes| {
-                                    reader_engine::inspect_image(
-                                        &bytes,
-                                        reader_engine::DecodeLimits::default(),
-                                    )
-                                    .ok()
-                                })
-                                .map(|d| d.height as f32 / d.width as f32)
-                                .unwrap_or(1.5),
-                            _ => 1.5,
-                        })
-                        .collect();
-                    Ok(Reader {
-                        chapter,
-                        source: None,
-                        pages,
-                        ratios,
-                        requested: BTreeSet::new(),
-                        retained: BTreeSet::new(),
-                        desired: BTreeSet::new(),
-                        failed: BTreeSet::new(),
-                        budget_blocked: BTreeSet::new(),
-                        desired_anchor: usize::MAX,
-                        decoded_bytes: BTreeMap::new(),
-                        decoded_widths: BTreeMap::new(),
-                        decoded_windows: BTreeMap::new(),
-                        decoded_responses: BTreeMap::new(),
-                        native_dimensions: BTreeMap::new(),
-                        progressive_job: None,
-                        presentations: BTreeMap::new(),
-                        display_options: reader_engine::DisplayOptions::default(),
-                        gap_pixels: 0.,
-                        chapter_boundaries: true,
-                        preload_epoch: 0,
-                        segments: Vec::new(),
-                        preloading: None,
-                        continuity_error: None,
-                        bookmarked_chapters: BTreeSet::new(),
-                        target_width: 0,
-                        viewport_width: 0.,
-                        viewport_height: 0.,
-                        anchor,
-                        mode,
-                        mode_choice,
-                        automatic_mode,
-                        mode_switching: false,
-                        completed,
-                    })
-                } else {
-                    let (source, pages) = app.services.pages(&chapter, cancel)?;
-                    let automatic_mode = reader_modes::automatic_for_state(
-                        &state,
-                        &chapter.series,
-                        Some(&source.descriptor().name),
-                    );
-                    let mode = mode_choice.resolve(automatic_mode);
-
-                    let ratios = pages
-                        .iter()
-                        .map(|p| {
-                            p.width
-                                .zip(p.height)
-                                .filter(|(w, h)| *w > 0 && *h > 0)
-                                .map(|(w, h)| h as f32 / w as f32)
-                                .unwrap_or(1.5)
-                        })
-                        .collect();
-                    Ok(Reader {
-                        chapter,
-                        source: Some(source),
-                        pages: pages.into_iter().map(PageInput::Remote).collect(),
-                        ratios,
-                        requested: BTreeSet::new(),
-                        retained: BTreeSet::new(),
-                        desired: BTreeSet::new(),
-                        failed: BTreeSet::new(),
-                        budget_blocked: BTreeSet::new(),
-                        desired_anchor: usize::MAX,
-                        decoded_bytes: BTreeMap::new(),
-                        decoded_widths: BTreeMap::new(),
-                        decoded_windows: BTreeMap::new(),
-                        decoded_responses: BTreeMap::new(),
-                        native_dimensions: BTreeMap::new(),
-                        progressive_job: None,
-                        presentations: BTreeMap::new(),
-                        display_options: reader_engine::DisplayOptions::default(),
-                        gap_pixels: 0.,
-                        chapter_boundaries: true,
-                        preload_epoch: 0,
-                        segments: Vec::new(),
-                        preloading: None,
-                        continuity_error: None,
-                        bookmarked_chapters: BTreeSet::new(),
-                        target_width: 0,
-                        viewport_width: 0.,
-                        viewport_height: 0.,
-                        anchor,
-                        mode,
-                        mode_choice,
-                        automatic_mode,
-                        mode_switching: false,
-                        completed,
-                    })
-                }
-            },
-            |app, ui, mut reader| {
-                let ids = (0..reader.pages.len())
-                    .map(|i| reader.page_id(i))
-                    .collect::<Vec<_>>();
-                reader.anchor =
-                    reader_engine::resolve_anchor(&reader.anchor, &ids).unwrap_or_default();
-                let state = app.services.domain.snapshot().unwrap_or_default();
-                reader.mode_choice = match reader_modes::load(
-                    &reader.chapter.series,
-                    reader_modes::legacy_mode(&state, &reader.chapter.series),
-                ) {
-                    Ok(choice) => choice,
-                    Err(message) => {
-                        ui.set_status(message.into());
-                        return;
-                    }
-                };
-                reader.mode = reader.mode_choice.resolve(reader.automatic_mode);
-                // A manual selection while chapter metadata was loading must
-                // win, and old-visible-reader image tasks need a fresh epoch.
-                app.flush();
-                app.invalidate();
-
-                let mut view = app.view();
-                view.series = state
-                    .series
-                    .iter()
-                    .find(|s| s.id == reader.chapter.series)
-                    .cloned();
-                view.chapters = state
-                    .chapters
-                    .iter()
-                    .filter(|c| c.id.series == reader.chapter.series)
-                    .cloned()
-                    .collect();
-                view.chapters.sort_by_key(|c| c.source_order);
-                let index = reader.anchor.page_index;
-                let mode = reader.mode;
-                let choice = reader.mode_choice;
-                reader.initialise_segments(
-                    view.chapters
-                        .iter()
-                        .find(|c| c.id == reader.chapter)
-                        .map(|c| c.title.clone())
-                        .unwrap_or_else(|| text::tr("Chapter")),
-                );
-                reader.bookmarked_chapters =
-                    state.bookmarks.iter().map(|b| b.chapter.clone()).collect();
-                view.reader = Some(reader);
-                view.section = 6;
-                drop(view);
-                app.mount_pages(ui);
-                ui.set_reader_mode_choice(choice.selection());
-                ui.set_reading_mode(mode_index(mode));
-                ui.set_current_page(index as i32);
-                app.restore_position(ui);
-                app.render(ui);
-                app.apply_reader_preferences(ui);
-                app.reflow(ui, ui.get_reader_width(), ui.get_reader_viewport_height());
-                app.step_page(ui, 0);
-            },
-        );
-    }
     fn mount_pages(&self, ui: &AppWindow) {
         let view = self.view();
         let Some(reader) = &view.reader else {
@@ -2231,7 +2043,9 @@ impl Controller {
             index += 1;
         }
         let fraction = (remaining / reader.ratios[index]).clamp(0.0, 1.0);
-        if let Some(previous) = reader.activate_page(index) {
+        let departing = reader.activate_page(index);
+        let changed_chapter = departing.is_some();
+        if let Some(previous) = departing {
             let _ = self.progress_checkpoint.enqueue(previous);
         }
         reader.anchor = ResumeAnchor::new(reader.page_id(index), index, f64::from(fraction))
@@ -2243,6 +2057,12 @@ impl Controller {
         let progress = reader.progress_record();
         view.pending = Some(progress);
         drop(view);
+        if changed_chapter {
+            ui.invoke_cancel_reader_zoom();
+            ui.set_zoom(1.);
+            ui.set_scroll_x(0.);
+            self.restore_position(ui);
+        }
         ui.set_current_page(index as i32);
         self.publish_reader_controls(ui);
         self.request_images(ui, index);
@@ -2395,7 +2215,13 @@ impl Controller {
         let mut encoded = EncodedPages::default();
         let mut decoded = reader_engine::DisplayDecoder::default();
         let mut epoch = u64::MAX;
+        let mut limits_epoch = reader_engine::limits_revision();
         loop {
+            if limits_epoch != reader_engine::limits_revision() {
+                decoded.clear();
+                encoded = EncodedPages::default();
+                limits_epoch = reader_engine::limits_revision();
+            }
             let task = match receiver.recv_timeout(std::time::Duration::from_millis(250)) {
                 Ok(task) => task,
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -2467,7 +2293,9 @@ impl Controller {
                 cancel.cancel();
             }
             let mut progressive = None;
-            let result: Result<_> = (|| {
+            let mut limits_revision = reader_engine::limits_revision();
+            let result: Result<_> = reader_engine::with_current_limits(|| {
+                limits_revision = reader_engine::current_limits_revision();
                 let mut pending_write = None;
                 let mut cache_request = None;
                 let before_scope = reader_capture_sources::scope(&input, source.as_ref())?;
@@ -2575,7 +2403,7 @@ impl Controller {
                         fresh_original,
                     );
                 let source_dimensions =
-                    reader_engine::inspect_image(&bytes, reader_engine::DecodeLimits::default())
+                    reader_engine::inspect_image(&bytes, reader_engine::current_limits())
                         .map_err(error)?;
                 let options = {
                     let view = app.view();
@@ -2585,7 +2413,7 @@ impl Controller {
                         .display_options
                 };
                 let presentation = decoded
-                    .presentation(&bytes, reader_engine::DecodeLimits::default(), options)
+                    .presentation(&bytes, reader_engine::current_limits(), options)
                     .map_err(error)?;
                 let dimensions = presentation.effective;
                 {
@@ -2617,14 +2445,14 @@ impl Controller {
                 };
                 let native_bytes =
                     u64::from(source_dimensions.width) * u64::from(source_dimensions.height) * 4;
-                let copy_budget = (reader_engine::DecodeLimits::default()
+                let copy_budget = (reader_engine::current_limits()
                     .max_decoded_bytes
                     .saturating_sub(native_bytes)
                     / 2) as usize;
                 let window = decoded
                     .decode_window_with_options(
                         &bytes,
-                        reader_engine::DecodeLimits::default(),
+                        reader_engine::current_limits(),
                         display_width,
                         start,
                         end,
@@ -2665,7 +2493,7 @@ impl Controller {
                     options,
                     presentation,
                 ))
-            })();
+            });
             let preview_cleanup = progressive
                 .as_ref()
                 .map(reader_progressive::Stream::cleanup);
@@ -2686,7 +2514,9 @@ impl Controller {
                     return;
                 };
 
-                if app.generation.load(Ordering::Acquire) != task.generation {
+                if app.generation.load(Ordering::Acquire) != task.generation
+                    || reader_engine::limits_revision() != limits_revision
+                {
                     return;
                 }
                 let model = ui.get_pages();
@@ -2940,7 +2770,9 @@ impl Controller {
             reader.failed.remove(&index);
             reader.budget_blocked.remove(&index);
         }
-        if let Some(previous) = reader.activate_page(index) {
+        let departing = reader.activate_page(index);
+        let changed_chapter = departing.is_some();
+        if let Some(previous) = departing {
             let _ = self.progress_checkpoint.enqueue(previous);
         }
         reader.anchor =
@@ -2949,6 +2781,12 @@ impl Controller {
         let progress = reader.progress_record();
         view.pending = Some(progress);
         drop(view);
+        if changed_chapter {
+            ui.invoke_cancel_reader_zoom();
+            ui.set_zoom(1.);
+            ui.set_scroll_x(0.);
+            self.restore_position(ui);
+        }
         ui.set_current_page(index as i32);
         if ui.get_reading_mode() != 0 {
             ui.set_scroll_x(0.);
@@ -3239,11 +3077,31 @@ impl Controller {
                     Ok(())
                 })
                 .map_err(error),
-            "read" => self
-                .services
-                .domain
-                .update_manual_progress(|state| toggle_chapter_read(state, chapter, now()))
-                .map_err(error),
+            "read" => {
+                let mut newly_read = false;
+                let result = self
+                    .services
+                    .domain
+                    .update_manual_progress(|state| {
+                        newly_read = !state
+                            .progress
+                            .iter()
+                            .any(|p| p.chapter == chapter && p.completed);
+                        toggle_chapter_read(state, chapter.clone(), now())
+                    })
+                    .map_err(error);
+                if result.is_ok() && newly_read {
+                    let services = self.services.clone();
+                    std::thread::spawn(move || {
+                        crate::download_cleanup::after_read(
+                            &services.domain,
+                            &services.downloads,
+                            &[chapter],
+                        )
+                    });
+                }
+                result
+            }
             _ => return,
         };
         if let Err(e) = result {
@@ -3428,7 +3286,7 @@ impl Controller {
 }
 /// Explicit completion is separate from reading activity. Only real reader
 /// checkpoints call ReaderState::set_progress, which also records History.
-fn toggle_chapter_read(
+pub(crate) fn toggle_chapter_read(
     state: &mut reader_domain::ReaderState,
     chapter: ChapterId,
     at: i64,
@@ -4397,7 +4255,9 @@ pub fn run(services: Services) -> Result<()> {
     });
     crate::appearance::init(&ui)?;
     crate::capture_settings::init(&ui)?;
+    crate::download_cleanup::init(&ui, services.domain.clone());
     crate::image_storage::init(&ui)?;
+    crate::source_compression::init(&ui, services.clone());
     crate::reading_preferences::init(&ui)?;
     if let Err(error) = crate::reader_settings::init() {
         ui.set_status(
@@ -4415,8 +4275,9 @@ pub fn run(services: Services) -> Result<()> {
         crate::paths::cache_dir()?.join("posters"),
     );
     let app = Arc::new(Controller {
-        progress_checkpoint: crate::progress_checkpoint::ProgressWriter::new(
+        progress_checkpoint: crate::progress_checkpoint::ProgressWriter::new_with_cleanup(
             services.domain.clone(),
+            services.downloads.clone(),
         )
         .map_err(error)?,
         services,
@@ -4436,6 +4297,12 @@ pub fn run(services: Services) -> Result<()> {
         download_serial: Mutex::new(()),
         active_image: Mutex::new(None),
         metadata_refresh: Arc::default(),
+    });
+    let limits_app = Arc::downgrade(&app);
+    crate::image_limits_ui::init(&ui, move || {
+        if let Some(app) = limits_app.upgrade() {
+            app.artwork.apply_image_limits();
+        }
     });
     let _ = LIFECYCLE.set(Arc::downgrade(&app));
     let barrier = Arc::downgrade(&app);
@@ -4469,6 +4336,7 @@ pub fn run(services: Services) -> Result<()> {
     }));
     wire_reader_context(&app, &ui);
     reader_controls::wire(&app, &ui);
+    reader_open::wire(&app, &ui);
     {
         let app = app.clone();
         let weak = ui.as_weak();

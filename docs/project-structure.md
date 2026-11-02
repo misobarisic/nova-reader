@@ -9,6 +9,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `build.rs`, `about.toml` | Nova’s copied current-target license/source catalogue generation, zstd-22 embedding recipe and final Android cdylib 16 KiB ELF alignment |
 | `src/main.rs`, `src/lib.rs` | Desktop entry, Android entry/lifecycle, CLI routing |
 | `src/app.rs` | Worker orchestration, navigation, source/settings selection, visible-page loading, display tiles, lifecycle progress flush |
+| `src/reader_open.rs`, `tests/reader_entry.rs` | Immediate chapter route from detail/History, cancellable worker-only resume/metadata/offline preparation, in-reader retry, and first-content motion policy |
 | `src/reader_progressive.rs` | Current-page JPEG XL streaming feed, provisional source geometry/tiles, bounded preview mailbox, EOF validation and nonce-guarded cleanup; final loading/progress/cache remain owned by the ordinary image worker |
 | `src/services.rs` | Shared UI/test services: install, validated source/date conversion, library, downloads and local import |
 | `src/downloads.rs`, `crates/ui/downloads.slint`, `crates/ui/download-controls.slint` | Completed chapters grouped by series, responsive Downloaded/Queue panes, metadata-only status projection, shared bounded poster cache, stable-ID selection/actions and durable queue reordering |
@@ -16,7 +17,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `src/android_documents.rs`, `android/java/dev/misob/nova/reader/ReaderActivity.java` | Application-context JNI, current-activity SAF and reader status-bar visibility/lifecycle on Java main |
 | `src/android_downloads.rs`, `src/download_background.rs`, `android/java/dev/misob/nova/reader/ReaderBackgroundService.java` | Nova's copied download foreground service and JNI adapter; Reader queue leases, independent notification progress, wake lock, resumed-only permission prompt and error-safe native calls |
 | `src/addon_icons.rs`, `crates/ui/addon-icon.slint` | Verified bundled addon PNGs decoded on workers, retained UI-thread image handles shared by language variants, Sources/Extensions decoration and Kit fallback |
-| `src/artwork.rs` | Kit decoded-poster LRU and encoded variants, synchronous cross-page hits, source permits, UI handles, bounded worker, poster publication before optional cache encoding, and legacy artwork migration |
+| `src/artwork.rs` | Kit decoded-poster LRU and encoded variants, synchronous cross-page hits, source permits, UI handles, four bounded fetchers, serialized display decoding, independent bounded cache encoding, and legacy artwork migration |
 | `src/chapter_cache.rs` | Kit-backed disposable viewed pages, authorization scopes, chapter-group eviction/active leases and bounded background encoding |
 | `src/reader_settings.rs`, `src/reader_settings_ui.rs` | Durable global reader defaults, source-local series layout/orientation overrides, cached effective snapshots and fallible UI rollback |
 | `src/reader_controls.rs`, `src/reader_navigation.rs` | Nova-style OSD actions, source-anchored 0.5×–8× zoom/seek, motion-setting-aware double-tap animation, zoomed tap-zone bypass, Mihon tap maps, mode inheritance and Android/desktop preference projection |
@@ -30,8 +31,12 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `crates/reader-capture`, `src/chapter_capture.rs` | Leaf bounded source compositor and source-coordinate selection/revision tickets; app re-export supports Chapter or frozen Device scale |
 | `src/reader_capture_editor.rs`, `crates/ui/capture-editor.slint` | Source-anchored draggable crop borders/handles, dimmed initial context, continuous outward extension, bounded worker previews, Preview/Adjust/Save/Copy, stale-result guards and selected-position naming |
 | `src/reader_capture_sources.rs` | Generation/profile-scoped original-source reuse for captures, weak viewer provenance, bounded shared session bytes and cancellation/permission revalidation; compressed display variants are excluded |
+| `src/download_cleanup.rs`, `crates/ui/download-cleanup-settings.slint`, `tests/download_cleanup_settings.rs` | Device-local opt-in read-completion retention, stable category exclusions, post-commit manual/checkpoint cleanup and native settings previews |
 | `src/capture_settings.rs`, `crates/ui/capture-settings.slint` | Capture format/quality, Device/Chapter resolution, folders, duplicates and optional immediate simple save/copy context actions |
+| `src/image_limits.rs`, `src/image_limits_ui.rs`, `crates/ui/image-limit-settings.slint` | Device-local encoded bytes, dimensions, pixels and decoded-memory admission, durable validation/reset and operation snapshots with stale-publication guards |
 | `src/image_storage.rs`, `crates/ui/image-storage-settings.slint` | Durable cache policy, unified codecs and independent input-aware lossless WebP/JXL cache/download compression; shared Kit cache controls with chapter-first maintenance and separate artwork settings |
+| `crates/ui/source-settings.slint` | Addon settings page with slider-owned Flickable gestures, keyboard focus reveal and existing catalogue/custom-field callbacks |
+| `src/source_compression.rs`, `crates/ui/source-compression-settings.slint`, `tests/source_compression.rs` | Host-owned per-addon global/explicit cache and download compression, worker snapshots and addon sync projection; budgets remain device-wide |
 | `src/source_catalogs.rs` | Host-owned per-addon catalogue switches under `reader:disabled-catalogs:<JSON package ID>`; filters Browse while preserving direct/history/offline access |
 | `src/reading_preferences.rs` | Fallible Nova KV persistence for adult-source visibility and chapter order keyed by full source-local series identity |
 | `src/reader_modes.rs`, `docs/reader-modes.md` | Pinned TachiyomiJ2K classification, Default/global inheritance, explicit Automatic/manual/gapped selection, and durable per-series mode overrides |
@@ -128,6 +133,15 @@ preferences and survive theme reset. Source pins/last-used source live under
 are independent of portable library backup data.
 Screenshots format/quality/resolution/folder preferences live separately under
 `reader:captures`; changing them preserves original chapter data and metadata.
+
+`reader:download-cleanup` stores a device-local, default-off retention switch and
+stable excluded category IDs. More → Settings → Downloads uses Nova’s cleanup
+row and category pill selection pattern. A local unread-to-read transition from
+manual actions or durable reader checkpoints can remove only complete, inactive
+remote bundles, under the download transfer lock. Any excluded membership keeps
+the chapter; local imports are always kept. Enabling the switch, restarting and
+incoming sync never sweep historical downloads. Deleted category IDs are pruned
+on the next deliberate policy edit. Cleanup never changes progress or History.
 The duplicate dropdown stores Ask (default), Overwrite or Do nothing. Ask opens
 a nonblocking Overwrite/Add number/Cancel sheet, guarded by the current reader
 generation. Clipboard actions bypass naming and duplicate handling. Desktop PNG
@@ -166,6 +180,25 @@ Viewer references are weak and generation-scoped; disk display/compression
 variants never acquire original-source provenance. Every reuse revalidates the
 source/profile scope and cancellation. Tight-memory captures drop retention and
 retry with the original working allowance rather than reducing image quality.
+`reader:image-limits` stores device-local encoded MiB, width/height, megapixels
+and decoded MiB caps. Startup installs the validated policy before workers;
+saves publish only after persistence. Decode defaults remain unchanged, while
+local imports, source transfers, progressive previews, captures and reader
+workers use operation snapshots. A policy revision discards stale reader
+results; poster edits invalidate transient admissions and retry failed posters.
+Poster fetches retain their independent 8 MiB ceiling. Encoded/display/capture
+aggregate memory and cache quotas remain separate from image admission.
+
+`reader:source-compression:<JSON package ID>` stores optional addon compression overrides.
+Absence follows current global cache/download compression; explicit overrides include
+independent enabled switches, formats, quality and input-aware lossless options.
+Addon sync carries them outside the JavaScript settings schema. Explicit override
+sync requires Reader 0.1.29 or newer on receiving peers: Reader 0.1.28 rejects
+the entire addon descriptor when its new `compression` field is present. Global
+inheritance omits that field and preserves the legacy wire shape; newer Reader
+versions also accept older descriptors without it. Workers resolve policies by
+stable package ID; existing cache files and downloads stay unchanged.
+
 `reader:image-storage` stores independent cache/download compression switches,
 formats, quality and separate `lossless_inputs` policies for new writes, plus backward-compatible cache budgets:
 disk caching, separate chapter/artwork limits, decoded artwork memory and future
@@ -206,10 +239,19 @@ additional recently used cards retain UI handles. Model hydration and request
 cache hits reuse pixels immediately across Browse, Library, Updates, History
 and details, without disk access or decode. Read-only source-availability proofs
 revoke hits when a source is disabled, removed or updated, without retaining addon
-archives. The single worker permits one decoded completion awaiting UI
-acknowledgement; queued requests carry metadata, not image buffers. Active decode
-allocations are separate from the retained-pixel budget.
-The transport's existing 32 MiB response cap precedes the artwork admission cap.
+archives. Four workers overlap cover requests, each capped at 8 MiB by the
+native source transport. Its per-session HTTP pools retain at most eight clients
+keyed by validated host/public DNS address set and reuse
+connections only after fresh DNS validation; changed address sets and session
+resets use fresh pools, with cookies frozen per request in Rust. One display decoder keeps full-size decode allocations
+serialized, and each fetch worker may retain one small decoded completion until
+UI acknowledgment. A separate cache worker performs optional encoding and
+maintenance; its pending originals are bounded to 16 MiB/32 jobs, plus one active
+8 MiB original. New cache encodes wait for visible requests to drain, and an
+already active encoder never holds the display decoder lock. Its codec allocation
+is separate from the one display decoder and retained-pixel LRU. Full queues drop
+optional cache writes rather than delaying the grid. Cancellation, source/profile
+proofs and generation checks still guard publication and disk writes.
 Viewport changes cancel obsolete work. Chapter usage/clear is the primary Cache
 page action; the artwork footer has separate usage/clear. Worker maintenance
 uses Kit’s batched usage index and grouped eviction. Both actions affect owned
@@ -304,7 +346,8 @@ geometry writes and scroll restoration. Refresh starts before the window boundar
 with up to 512 rows of advance coverage; the
 threshold contracts when the byte budget leaves less margin. Individual
 textures contain at most 2,048 × 2,048 pixels. Physical width targets use 128px buckets
-capped at the 16,384px decoder width ceiling; source pixels are never upscaled
+capped at 16,384 physical output pixels independently of configurable image-input
+limits; source pixels are never upscaled
 in CPU buffers, while raster tiles fill the full phone viewport at zoom 1.
 The worker's `DisplayDecoder` retains one admitted original while extracting
 successive row windows from the same encoded response. Source response identity
@@ -316,8 +359,11 @@ long pages reach their final window, preserving that one-original cache across
 scrolling; queued tasks recheck the same rule before fetching. This remains full CPU decoding, rather than
 region/streaming decoding or a total process-memory bound. Decoder/native
 conversion and original-RGBA-plus-window-output phases are admitted separately
-within 128 MiB each. The worker also keeps a 32 MiB generation-scoped, memory-only
-encoded-page cache; a miss can temporarily add another 32 MiB fetched response.
+within the device decoder allowance (128 MiB by default). Eight-bit RGB/gray
+images decode into the final RGBA allocation and expand backward in place,
+avoiding a second full-size conversion buffer. The worker also keeps a 32 MiB generation-scoped, memory-only
+encoded-page cache; a miss can temporarily add a fetched response up to the
+configured per-image byte limit. Larger responses are not retained in that cache.
 Replacement model references are released before constructing new Slint buffers;
 the reserve covers a previous image still held by the renderer during replacement.
 Prefetch does not mark a chapter read. Resume stores logical page ID/index and
@@ -343,9 +389,11 @@ generate all installable ZIPs; Reader does not depend on a sibling checkout.
 - Saved chapter groups, bulk selection and live queue: `src/downloads.rs`, `crates/ui/downloads.slint`, `tests/downloads.rs`; durable dispatch/reordering: `DownloadStore::run_next` / `move_before` and `Services::run_next_download`.
 - Background download service, notifications and interruption cleanup: `src/android_downloads.rs`, `src/download_background.rs`, `crates/reader-downloads/src/lib.rs`, `tools/test-android-background.py`.
 - Viewed chapter cache, grouped eviction and pins: `src/chapter_cache.rs`, `src/app.rs`, Kit `nova-cache::gc`/`blob`.
+- Image admission, device persistence/reset and live policy regressions: `src/image_limits.rs`, `tests/image_limits_backend.rs`; source streaming bounds: `crates/reader-sources/tests/streaming.rs`.
 - Cache quotas, disk master switch and worker snapshots: `src/image_storage.rs`, `crates/ui/image-storage-settings.slint`, `tests/image_storage.rs`.
 - Shared Nova settings controls: Kit `slint/cache-settings-controls.slint`; Nova keeps SettingsRow/search/sync/keyboard wrappers.
-- Cover cache placement, immediate reuse and source revocation: `src/paths.rs`, `src/artwork.rs`, More → Settings → Cache.
+- Immediate chapter entry, worker preparation and first-content fade: `src/reader_open.rs`, `tests/reader_entry.rs`, `crates/ui/app.slint`.
+- Cover cache placement, concurrent fetches and source revocation: `src/paths.rs`, `src/artwork.rs`, More → Settings → Cache.
 - Real site addons, their tests and tagged release downloads: [nova-addons](https://github.com/misobarisic/nova-addons). Reader keeps only `examples/addons/neutral-fixture`.
 - Progressive JPEG XL reader previews and strict final handoff: `src/reader_progressive.rs`, `src/app.rs::image_worker`, `src/chapter_cache.rs::read_with_chunks`; neutral streamed-EOF regressions live with the progressive module.
 - Addon icons and source filters: `src/addon_icons.rs`, `crates/ui/addon-icon.slint`, `src/source_filters.rs`, `crates/reader-sources/src/package.rs`; optional `manifest.icon` must name a declared PNG asset. Multiple/include/exclude groups use existing Nova setting rows with typed JSON output.
@@ -367,7 +415,10 @@ generate all installable ZIPs; Reader does not depend on a sibling checkout.
 - Series/chapter layouts, timeline/source groups and reader controls: `crates/ui/library-cards.slint`, `crates/ui/detail-hero.slint`, `crates/ui/timeline.slint`, `crates/ui/source-list.slint`, `tests/reader_design.rs`.
 - Left-anchored library reading progress: `crates/ui/library-cards.slint`, `tests/library_progress.rs`.
 - Image filenames and duplicate handling: `src/export_names.rs`, `src/reader_export.rs`, `src/android_documents.rs`, `crates/ui/save-conflict-sheet.slint`.
+- Download retention/excluded categories: `src/download_cleanup.rs`, `crates/ui/download-cleanup-settings.slint`, More → Settings → Downloads; native preview/accessibility tests in `tests/download_cleanup_settings.rs`.
 - Reader image/screencap actions and export settings: `crates/ui/reader-context-menu.slint`, `crates/ui/capture-editor.slint`, `src/reader_capture_editor.rs`, `src/reader_export.rs`, `crates/reader-capture`, `src/capture_settings.rs`, More → Settings → Screenshots.
+- Addon settings scrolling, catalogue and custom fields: `crates/ui/source-settings.slint`; `tests/settings_slider_gestures.rs`.
+- Per-addon compression inheritance and switches: `src/source_compression.rs`, `crates/ui/source-compression-settings.slint`, source/extension Settings.
 - New cache/download image compression and independent input-aware lossless policies: `src/image_storage.rs`, `crates/ui/image-storage-settings.slint`, More → Settings → Cache.
 - Appearance controls, palette and device persistence: `crates/ui/theme-settings.slint`, `crates/ui/src/appearance.rs`, `src/appearance.rs`.
 - Android picker context, callbacks and host JVM regression: [Android documents](android-documents.md).

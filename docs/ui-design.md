@@ -108,9 +108,10 @@ the detail viewport and synopsis; returning from its reader restores the retaine
 scroll offset and expanded/collapsed synopsis.
 
 New poster pixels reach their visible card or hero before optional disk-cache
-recompression and writes. The single artwork worker waits for that UI publication
-acknowledgment, then processes at most one original of at most 8 MiB; encoded
-originals never enter UI closures, image handles or the decoded LRU. Deferred
+recompression and writes. Four bounded fetchers overlap network waits; full-size
+display decodes remain serialized. Separate optional cache encoding never blocks
+the next poster. Its original queue is bounded to 16 MiB/32 jobs plus one active
+8 MiB original; encoded originals never enter UI closures, handles or the LRU. Deferred
 writes recheck navigation cancellation, source access, request scope and the
 cache generation, so clearing or revoking artwork cannot publish stale files.
 
@@ -151,6 +152,17 @@ loading and exposes Retry for that same page. Adult-source visibility and each
 series’ chapter order persist through Nova KV; failed writes keep the saved
 choice rather than publishing an unsaved change.
 
+Chapter taps from detail, History and other chapter actions switch immediately
+to the black reader canvas. Ordered checkpoint barriers, settings reads, source
+requests, offline verification and aspect probing stay on the preparation worker.
+Back cancels pending preparation; stale completions cannot reopen a departed
+reader. Preparation errors expose an in-reader Retry action. The first actual
+page pixels (including a progressive preview) fade in over 160ms, respecting the
+master animation and page-transition switches. Later page loads do not restart
+chapter entry; empty pages have no loading text.
+Each chapter opening starts at 1× zoom, including adjacent-chapter transitions
+and reopening a chapter; page movement within the same chapter retains zoom.
+
 Chapter controls are hidden on entry. A tap/click reveals their overlay without
 resizing the reading viewport; a drag remains a scroll gesture. The
 normal-zoom paged reader follows gallery drags in its reading direction, with
@@ -159,6 +171,7 @@ own page; short or cross-axis drags do not change pages. The page's contained
 size scales with zoom and keeps physical-pixel detail on dense displays. Desktop
 Ctrl+mouse wheel and native two-finger pinch on Android zoom from 0.5×
 to 8×, preserving the source point beneath the cursor or moving finger midpoint.
+Each reader opening and chapter change starts at 1× with reset pan; zoom is not retained between chapters.
 The 1100px fitted-width limit applies before magnification. Once zoomed above
 1.01×, single taps anywhere only toggle the OSD; navigation tap regions and
 their inversions are bypassed. Double tap retains its fit/2× toggle with a 200ms
@@ -309,3 +322,23 @@ publication. A 200 ms throttle and one queued mailbox constrain each frame to
 budgets. EOF/container validation and dropping the incremental native decoder
 precede final display allocation; only strict final decode publishes loaded pages.
 Cancellation/error cleanup uses a job nonce and preserves genuine final pixels.
+
+More → Settings → Image limits exposes per-image encoded size (MiB), width,
+height, megapixels and decoder memory (MiB). Drafts apply together after
+validation; Restore defaults reinstates the original 32 MiB / 16,384 × 65,536 /
+32 MP / 128 MiB policy. These are device-local admission settings, separate
+from cache quotas, retained display tiles and capture output budgets. Each
+operation uses one policy snapshot; edits take effect on subsequent work.
+Settings leaf headers and their content begin at the top of the scroll viewport,
+including short pages, rather than centering vertically.
+
+Addon Settings adds compression inheritance above the addon's own fields.
+Use global compression settings is on by default. Turning it off seeds an
+explicit copy of the current cache/download choices, with separate compression
+switches, formats, quality and lossless options. Disabled compression keeps
+new source bytes unchanged; dependent controls disable with its switch.
+Settings affect future writes; existing cache files and downloaded pages stay
+intact. All language variants resolve the same installed package identity.
+The page retains native catalogue/custom-field callbacks, password input and
+accessible field labels. Its top-aligned Flickable yields horizontal quality
+gestures to Kit sliders and reveals focused controls during keyboard navigation.

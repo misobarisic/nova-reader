@@ -119,6 +119,25 @@ static CURRENT: LazyLock<RwLock<ImageStoragePreferences>> = LazyLock::new(|| RwL
 pub fn settings_snapshot() -> ImageStoragePreferences {
     *CURRENT.read().unwrap_or_else(|error| error.into_inner())
 }
+/// Resolve a stable addon package's future-write compression, retaining the
+/// device-wide cache budgets. Existing encoded files remain valid.
+pub fn effective_for_source(source: &str) -> ImageStoragePreferences {
+    let mut preferences = settings_snapshot();
+    if let Some(compression) = crate::source_compression::snapshot(source) {
+        preferences.cache = compression.cache;
+        preferences.downloads = compression.downloads;
+    }
+    preferences
+}
+
+/// Transfers read the latest durable device preference once per chapter. This
+/// also covers headless jobs; hot poster/page-cache reads keep their snapshot.
+pub fn download_compression(source: &str) -> ImageCompression {
+    crate::source_compression::snapshot(source)
+        .map(|overrides| overrides.downloads)
+        .unwrap_or_else(|| load().downloads)
+}
+
 pub fn policy_snapshot() -> CachePolicyPreferences {
     settings_snapshot().policy
 }
@@ -241,7 +260,7 @@ impl ImageStoragePreferences {
         );
     }
 
-    fn change(&mut self, key: &str, value: i32) -> bool {
+    pub(crate) fn change(&mut self, key: &str, value: i32) -> bool {
         match key {
             "disk_enabled" if value == 0 || value == 1 => {
                 self.policy.disk_enabled = value == 1;

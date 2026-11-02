@@ -19,7 +19,10 @@ mod cli;
 #[cfg(not(target_os = "android"))]
 mod desktop_dialogs;
 mod download_background;
+pub mod download_cleanup;
 pub mod export_names;
+pub mod image_limits;
+mod image_limits_ui;
 pub mod image_storage;
 mod metadata_refresh;
 mod paths;
@@ -35,6 +38,7 @@ pub mod reading_preferences;
 pub mod services;
 mod source_browser;
 mod source_catalogs;
+pub mod source_compression;
 mod source_filters;
 pub mod sync;
 pub mod sync_addons;

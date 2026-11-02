@@ -101,8 +101,20 @@ wall deadline. Scripts cannot import modules or access filesystem/process APIs.
 Inputs, output JSON and aggregate metadata HTTP bodies are bounded to 2 MiB;
 12 HTTP requests and 5 redirects are permitted. Host-side HTML expansion is also
 bounded. Images stay out of JavaScript; `fetch_page(url,headers,cancel)` streams
-with cancellation checks into a separate 32 MiB encoded-byte limit. Manifest-listed
+with cancellation checks into a separate encoded-byte limit (32 MiB by default). Manifest-listed
 assets can be read using `addon://<source-id>/<asset-path>` (neutral fixtures).
+
+HTTP connections use a source/profile-session-scoped pool of at most eight
+clients, keyed by validated host and public DNS address set. Every hop still
+validates fresh public DNS results; a changed address set uses a new client.
+Rust freezes cookies for each request and processes Set-Cookie itself,
+while pooled clients retain no credentials. Session resets discard the pools.
+
+Native callers supply the device image policy with `Source::fetch_page_limited`
+and `Source::fetch_page_with_chunks_limited` (covers retain a separate 8 MiB cap).
+The ordinary convenience methods retain their 32 MiB baseline. All variants
+preserve permission, cancellation, session and `resolvePage` policy; JavaScript
+receives no new API or permission and its metadata response limits are unchanged.
 
 Native callers may use `Source::fetch_page_with_chunks` to observe successful
 page body bytes during transfer. Its synchronous observer receives ordered slices

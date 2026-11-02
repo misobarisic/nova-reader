@@ -23,6 +23,7 @@ pub(crate) struct ProgressWriter {
 }
 
 impl ProgressWriter {
+    #[cfg(test)]
     pub(crate) fn new(domain: DomainStore) -> std::io::Result<Self> {
         Self::spawn(move |batch| {
             domain
@@ -33,6 +34,33 @@ impl ProgressWriter {
                     Ok(())
                 })
                 .map_err(|error| error.to_string())
+        })
+    }
+
+    pub(crate) fn new_with_cleanup(
+        domain: DomainStore,
+        downloads: reader_downloads::DownloadStore,
+    ) -> std::io::Result<Self> {
+        Self::spawn(move |batch| {
+            let mut newly_read = Vec::new();
+            domain
+                .update_checkpoint(|state| {
+                    for progress in batch {
+                        if progress.completed
+                            && !state
+                                .progress
+                                .iter()
+                                .any(|old| old.chapter == progress.chapter && old.completed)
+                        {
+                            newly_read.push(progress.chapter.clone());
+                        }
+                        state.set_progress(progress.clone());
+                    }
+                    Ok(())
+                })
+                .map_err(|e| e.to_string())?;
+            crate::download_cleanup::after_read(&domain, &downloads, &newly_read);
+            Ok(())
         })
     }
 

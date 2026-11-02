@@ -128,7 +128,21 @@ impl Source {
         headers: &BTreeMap<String, String>,
         cancel: &CancelToken,
     ) -> Result<Vec<u8>> {
-        self.fetch_page_attempt(url, headers, cancel, true, &mut None)
+        self.fetch_page_limited(url, headers, cancel, 32 * 1024 * 1024)
+    }
+    /// Native callers supply their device image policy (or a stricter cover bound).
+    /// Permissions, session checks and refreshed URLs retain the ordinary policy.
+    pub fn fetch_page_limited(
+        &self,
+        url: &str,
+        headers: &BTreeMap<String, String>,
+        cancel: &CancelToken,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>> {
+        if max_bytes == 0 || max_bytes == usize::MAX {
+            return Err(SourceError::Network("invalid image byte limit".into()));
+        }
+        self.fetch_page_attempt(url, headers, cancel, max_bytes, true, &mut None)
     }
     /// Observe native page bytes as they arrive, while retaining the same
     /// authoritative full-byte result and policy as `fetch_page`. Chunks are
@@ -142,7 +156,21 @@ impl Source {
         cancel: &CancelToken,
         on_chunk: &mut dyn FnMut(&[u8]),
     ) -> Result<Vec<u8>> {
-        self.fetch_page_attempt(url, headers, cancel, true, &mut Some(on_chunk))
+        self.fetch_page_with_chunks_limited(url, headers, cancel, 32 * 1024 * 1024, on_chunk)
+    }
+    /// Native streaming equivalent with a caller-supplied device policy.
+    pub fn fetch_page_with_chunks_limited(
+        &self,
+        url: &str,
+        headers: &BTreeMap<String, String>,
+        cancel: &CancelToken,
+        max_bytes: usize,
+        on_chunk: &mut dyn FnMut(&[u8]),
+    ) -> Result<Vec<u8>> {
+        if max_bytes == 0 || max_bytes == usize::MAX {
+            return Err(SourceError::Network("invalid image byte limit".into()));
+        }
+        self.fetch_page_attempt(url, headers, cancel, max_bytes, true, &mut Some(on_chunk))
     }
     fn observe_page_chunk(
         &self,
@@ -172,6 +200,7 @@ impl Source {
         url: &str,
         headers: &BTreeMap<String, String>,
         cancel: &CancelToken,
+        max_bytes: usize,
         refresh: bool,
         on_chunk: &mut Option<PageChunkObserver<'_>>,
     ) -> Result<Vec<u8>> {
@@ -186,6 +215,9 @@ impl Source {
         self.check_page_work(cancel, session_revision)?;
         if let Some(path) = url.strip_prefix(&format!("addon://{}/", self.manifest.id)) {
             let body = package::asset(&self.archive, &self.manifest, path)?;
+            if body.len() > max_bytes {
+                return Err(SourceError::Network("image byte limit".into()));
+            }
             if let Some(observer) = on_chunk.as_mut() {
                 self.observe_page_chunk(&body, cancel, session_revision, observer)?;
             }
@@ -199,18 +231,18 @@ impl Source {
         };
         let response = if let Some(observer) = on_chunk.as_mut() {
             let mut observed = 0usize;
-            transport.request_with_chunks(&request, 32 * 1024 * 1024, cancel, &mut |chunk| {
-                if chunk.len() > (32 * 1024 * 1024usize).saturating_sub(observed) {
+            transport.request_with_chunks(&request, max_bytes, cancel, &mut |chunk| {
+                if chunk.len() > max_bytes.saturating_sub(observed) {
                     return Err(SourceError::Network("image byte limit".into()));
                 }
                 observed += chunk.len();
                 self.observe_page_chunk(chunk, cancel, session_revision, observer)
             })?
         } else {
-            transport.request(&request, 32 * 1024 * 1024, cancel)?
+            transport.request(&request, max_bytes, cancel)?
         };
         self.check_page_work(cancel, session_revision)?;
-        if response.body.len() > 32 * 1024 * 1024 {
+        if response.body.len() > max_bytes {
             return Err(SourceError::Network("image byte limit".into()));
         }
         if refresh
@@ -231,7 +263,14 @@ impl Source {
                 ));
             }
             let page = &pages.pages[0];
-            return self.fetch_page_attempt(&page.url, &page.headers, cancel, false, on_chunk);
+            return self.fetch_page_attempt(
+                &page.url,
+                &page.headers,
+                cancel,
+                max_bytes,
+                false,
+                on_chunk,
+            );
         }
         network::check_status(response.status)?;
         Ok(response.body)

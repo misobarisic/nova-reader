@@ -149,10 +149,11 @@ fn prepare(
             })?;
         check(cancel, ticket)?;
         let limits = reader_engine::DecodeLimits {
-            max_decoded_bytes: CAPTURE_MEMORY
+            max_decoded_bytes: (CAPTURE_MEMORY
                 - encoded_bytes as u64
-                - capture.originals.reservation(),
-            ..Default::default()
+                - capture.originals.reservation())
+            .min(reader_engine::current_limits().max_decoded_bytes),
+            ..reader_engine::current_limits()
         };
         let (effective, split) = if capture.options.crop_borders
             || capture.options.split_wide
@@ -233,7 +234,7 @@ fn refresh(
     let state = state.clone();
     let cancel = app.cancel.lock().unwrap_or_else(|e| e.into_inner()).clone();
     std::thread::spawn(move || {
-        let result = {
+        let result = reader_engine::with_current_limits(|| {
             let _render = RENDER.lock().unwrap_or_else(|e| e.into_inner());
             let originals = capture.originals.clone();
             let initial_capture = capture.clone();
@@ -267,7 +268,7 @@ fn refresh(
                 render_prepared(&capture, &cancel, Some(&ticket), encoded)
             };
             with_memory_fallback(&originals, render)
-        };
+        });
         if !ticket.current() {
             return;
         }
@@ -408,13 +409,15 @@ pub(super) fn render_capture(
     cancel: &CancelToken,
     ticket: Option<&Ticket>,
 ) -> Result<(ReaderScreencap, FrozenExportName)> {
-    let _render = RENDER.lock().unwrap_or_else(|e| e.into_inner());
-    let mut capture = capture.clone();
-    let mut selection = capture_selection(&capture)?;
-    with_memory_fallback(&capture.originals.clone(), || {
-        let encoded = prepare(&mut capture, &mut selection, None, cancel, ticket)?;
-        // Native export remains independent of preview's downsampled artwork.
-        render_prepared(&capture, cancel, ticket, encoded)
+    reader_engine::with_current_limits(|| {
+        let _render = RENDER.lock().unwrap_or_else(|e| e.into_inner());
+        let mut capture = capture.clone();
+        let mut selection = capture_selection(&capture)?;
+        with_memory_fallback(&capture.originals.clone(), || {
+            let encoded = prepare(&mut capture, &mut selection, None, cancel, ticket)?;
+            // Native export remains independent of preview's downsampled artwork.
+            render_prepared(&capture, cancel, ticket, encoded)
+        })
     })
 }
 fn with_memory_fallback<T>(

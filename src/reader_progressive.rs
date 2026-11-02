@@ -35,6 +35,7 @@ struct Mailbox {
     app: Weak<Controller>,
     ui: slint::Weak<AppWindow>,
     generation: u64,
+    limits_revision: u64,
     index: usize,
     job: u64,
     page_id: String,
@@ -44,7 +45,10 @@ struct Mailbox {
 }
 impl Mailbox {
     fn current(&self) -> bool {
-        if self.cancel.is_cancelled() || self.request.validate_active().is_err() {
+        if self.cancel.is_cancelled()
+            || self.request.validate_active().is_err()
+            || reader_engine::limits_revision() != self.limits_revision
+        {
             return false;
         }
         self.app.upgrade().is_some_and(|owner| {
@@ -244,6 +248,7 @@ impl Stream {
                 app: Arc::downgrade(app),
                 ui,
                 generation: task.generation,
+                limits_revision: reader_engine::current_limits_revision(),
                 index: task.index,
                 job: NEXT_JOB.fetch_add(1, Ordering::Relaxed),
                 page_id: reader.row_page_id(task.index),
@@ -282,14 +287,12 @@ impl Stream {
                 max_height: 8192,
                 max_bytes: FRAME_BYTES,
             };
-            let created = nova_image::ProgressiveJxlDecoder::new(
-                reader_engine::DecodeLimits::default(),
-                options,
-            )
-            .and_then(|mut decoder| {
-                decoder.feed(prefix)?;
-                Ok(decoder)
-            });
+            let created =
+                nova_image::ProgressiveJxlDecoder::new(reader_engine::current_limits(), options)
+                    .and_then(|mut decoder| {
+                        decoder.feed(prefix)?;
+                        Ok(decoder)
+                    });
             match created {
                 Ok(decoder) => self.decoder = Decoder::Active(Box::new(decoder)),
                 Err(nova_image::Error::JxlUnsupported(_) | nova_image::Error::Limit) => {

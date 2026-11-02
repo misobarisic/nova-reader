@@ -172,3 +172,95 @@ fn reader_settings_slider_owns_diagonal_touch_and_mouse_drags_then_scroll_resume
         }
     }
 }
+
+#[test]
+fn source_compression_slider_owns_diagonal_drags_and_releases_scroll() {
+    use nova_reader::SourceCompressionSettings;
+    i_slint_backend_testing::init_no_event_loop();
+    for width in [390., 1120.] {
+        for scenario in ["touch", "mouse", "cancel"] {
+            let ui = AppWindow::new().unwrap();
+            ui.global::<Anim>().set_enabled(false);
+            ui.set_section(8);
+            ui.set_heading("Source settings".into());
+            ui.set_touch_menus(scenario != "mouse");
+            let settings = ui.global::<SourceCompressionSettings>();
+            settings.set_use_global(false);
+            let edits = Rc::new(Cell::new(0));
+            settings.on_settings_changed({
+                let edits = edits.clone();
+                move |key, _| {
+                    if key == "cache_quality" {
+                        edits.set(edits.get() + 1);
+                    }
+                }
+            });
+            ui.show().unwrap();
+            ui.window().set_size(LogicalSize::new(width, 844.));
+            advance(300);
+            let content = element(&ui, "SourceSettingsPage::source-settings-content");
+            let slider = ElementHandle::find_by_accessible_label(&ui, "Cache quality")
+                .find(|e| e.accessible_role() == Some(AccessibleRole::Slider))
+                .unwrap();
+            let p = slider.absolute_position();
+            let size = slider.size();
+            let start = LogicalPosition::new(p.x + size.width * 0.15, p.y + size.height / 2.);
+            let original_y = content.absolute_position().y;
+            if scenario == "mouse" {
+                ui.window()
+                    .dispatch_event(WindowEvent::PointerMoved { position: start });
+                ui.window().dispatch_event(WindowEvent::PointerPressed {
+                    position: start,
+                    button: PointerEventButton::Left,
+                });
+            } else {
+                touch(&ui, start.x, start.y, TouchPhase::Started);
+            }
+            advance(100);
+            for step in 1..=10 {
+                let position = LogicalPosition::new(
+                    start.x + size.width * 0.07 * step as f32,
+                    start.y - step as f32 * 3.,
+                );
+                if scenario == "mouse" {
+                    ui.window()
+                        .dispatch_event(WindowEvent::PointerMoved { position });
+                } else {
+                    touch(&ui, position.x, position.y, TouchPhase::Moved);
+                }
+                advance(20);
+                assert!(
+                    (content.absolute_position().y - original_y).abs() < 0.5,
+                    "source slider pans document: {width} {scenario}"
+                );
+            }
+            assert!(edits.get() > 0);
+            let end = LogicalPosition::new(start.x + size.width, start.y - 50.);
+            if scenario == "mouse" {
+                ui.window().dispatch_event(WindowEvent::PointerReleased {
+                    position: end,
+                    button: PointerEventButton::Left,
+                });
+            } else {
+                touch(
+                    &ui,
+                    end.x,
+                    end.y,
+                    if scenario == "cancel" {
+                        TouchPhase::Cancelled
+                    } else {
+                        TouchPhase::Ended
+                    },
+                );
+            }
+            advance(300);
+            ui.set_touch_menus(true);
+            let before = content.absolute_position().y;
+            vertical_swipe(&ui, content.absolute_position().x + 8., 680.);
+            assert!(
+                content.absolute_position().y < before - 10.,
+                "source scrolling must resume: {width} {scenario}"
+            );
+        }
+    }
+}

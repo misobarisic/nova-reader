@@ -1,0 +1,48 @@
+// Nova's Downloads cleanup row and category-picker pill grid, with stable IDs.
+import { Theme } from "@NovaUiShared";
+import { SettingsCard, SectionHeader, ToggleSwitch, PillButton } from "@NovaUiBase/settings-controls.slint";
+import { SettingsRow } from "settings-row.slint";
+import { EntryCategoryRow } from "entry-menu.slint";
+
+export global DownloadCleanupSettings {
+    in-out property <bool> enabled: false;
+    in-out property <[EntryCategoryRow]> categories;
+    callback changed(string);
+}
+export component DownloadCleanupSettingsPage inherits VerticalLayout {
+    in property <bool> interactive: true;
+    spacing: 18px; alignment: start;
+    SectionHeader { label: @tr("Cleanup policy"); }
+    SettingsCard { SettingsRow {
+        row-title: @tr("Auto-delete read chapters");
+        row-desc: @tr("Delete a downloaded chapter when you finish reading it or mark it read. Local imports are always kept. Applies to future read actions on this device.");
+        ToggleSwitch {
+            name: @tr("Auto-delete read chapters");
+            enabled: root.interactive;
+            checked: DownloadCleanupSettings.enabled;
+            toggled => { DownloadCleanupSettings.changed(""); }
+            accessible-action-default => { if self.enabled { DownloadCleanupSettings.changed(""); } }
+        }
+    } }
+    SectionHeader { label: @tr("Excluded categories"); }
+    Text { text: @tr("Keep downloads for titles in any selected category."); color: Theme.current.text_settings; wrap: word-wrap; }
+    if DownloadCleanupSettings.categories.length == 0: Text {
+        text: @tr("Create categories in Settings → Categories, then select them here.");
+        color: Theme.current.text_secondary; wrap: word-wrap;
+    }
+    GridLayout {
+        spacing: 8px;
+        for category[index] in DownloadCleanupSettings.categories: Rectangle {
+            row: floor(index / (root.width < 430px ? 2 : 3));
+            col: mod(index, root.width < 430px ? 2 : 3);
+            min-width: 0px; height: 48px;
+            PillButton { width: parent.width; height: parent.height; compact: true; wrap_label: true;
+            label: category.label; primary: category.checked; enabled: root.interactive;
+            accessible-role: checkbox; accessible-label: category.label;
+            accessible-checkable: true; accessible-checked: category.checked;
+            clicked => { DownloadCleanupSettings.changed(category.id); }
+            accessible-action-default => { if self.enabled { DownloadCleanupSettings.changed(category.id); } }
+            }
+        }
+    }
+}

@@ -17,6 +17,57 @@ use std::{
     ops::Range,
 };
 
+// Device policy is supplied by the application; Default remains the codec baseline.
+static CURRENT_LIMITS: std::sync::LazyLock<std::sync::RwLock<(DecodeLimits, u64)>> =
+    std::sync::LazyLock::new(|| std::sync::RwLock::new((DecodeLimits::default(), 0)));
+thread_local! {
+    static OPERATION_LIMITS: std::cell::Cell<Option<(DecodeLimits, u64)>> = const { std::cell::Cell::new(None) };
+}
+fn limits_snapshot() -> (DecodeLimits, u64) {
+    OPERATION_LIMITS
+        .with(|local| local.get())
+        .unwrap_or_else(|| {
+            *CURRENT_LIMITS
+                .read()
+                .unwrap_or_else(|error| error.into_inner())
+        })
+}
+/// A consistent policy snapshot for a complete synchronous worker operation.
+pub fn current_limits() -> DecodeLimits {
+    limits_snapshot().0
+}
+/// Revision used by this operation, for guarding asynchronous publication.
+pub fn current_limits_revision() -> u64 {
+    limits_snapshot().1
+}
+/// Latest device policy revision, even inside an older operation snapshot.
+pub fn limits_revision() -> u64 {
+    CURRENT_LIMITS
+        .read()
+        .unwrap_or_else(|error| error.into_inner())
+        .1
+}
+pub fn set_limits(limits: DecodeLimits) {
+    let mut current = CURRENT_LIMITS
+        .write()
+        .unwrap_or_else(|error| error.into_inner());
+    if current.0 != limits {
+        *current = (limits, current.1.wrapping_add(1));
+    }
+}
+/// Nested operations inherit their caller's snapshot, including fetch/compression.
+pub fn with_current_limits<T>(operation: impl FnOnce() -> T) -> T {
+    struct Reset(Option<(DecodeLimits, u64)>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            OPERATION_LIMITS.with(|local| local.set(self.0));
+        }
+    }
+    let snapshot = limits_snapshot();
+    let _reset = Reset(OPERATION_LIMITS.with(|local| local.replace(Some(snapshot))));
+    operation()
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("image exceeds supported limits")]
@@ -95,6 +146,41 @@ pub fn decode_image(bytes: &[u8], limits: DecodeLimits) -> Result<image::RgbaIma
     let dimensions = inspect_image(bytes, limits)?;
     let decoder = reader(bytes, limits)?.into_decoder()?;
     let rgba_bytes = u64::from(dimensions.width) * u64::from(dimensions.height) * 4;
+    let color = decoder.color_type();
+    if matches!(
+        color,
+        image::ColorType::L8
+            | image::ColorType::La8
+            | image::ColorType::Rgb8
+            | image::ColorType::Rgba8
+    ) {
+        // Decode into the native prefix of the final RGBA allocation, then
+        // expand backwards. JPEG's RGB→RGBA conversion does not need a second
+        // full-size image: 4096×6144 now needs96MiB rather than168MiB.
+        let native = usize::try_from(decoder.total_bytes()).map_err(|_| Error::Limit)?;
+        let count = usize::try_from(rgba_bytes).map_err(|_| Error::Limit)?;
+        if native > count {
+            return Err(Error::Limit);
+        }
+        let mut pixels = Vec::new();
+        pixels.try_reserve_exact(count).map_err(|_| Error::Limit)?;
+        pixels.resize(count, 0);
+        decoder.read_image(&mut pixels[..native])?;
+        if color != image::ColorType::Rgba8 {
+            let channels = usize::from(color.channel_count());
+            for index in (0..count / 4).rev() {
+                let at = index * channels;
+                let rgba = match color {
+                    image::ColorType::Rgb8 => [pixels[at], pixels[at + 1], pixels[at + 2], 255],
+                    image::ColorType::La8 => [pixels[at], pixels[at], pixels[at], pixels[at + 1]],
+                    _ => [pixels[at], pixels[at], pixels[at], 255],
+                };
+                pixels[index * 4..index * 4 + 4].copy_from_slice(&rgba);
+            }
+        }
+        return image::RgbaImage::from_raw(dimensions.width, dimensions.height, pixels)
+            .ok_or(Error::Limit);
+    }
     // Reserve both the decoder's native output and RGBA conversion at once.
     if decoder
         .total_bytes()

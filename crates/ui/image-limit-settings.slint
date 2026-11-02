@@ -1,0 +1,92 @@
+// Device-local admission limits, separate from retained artwork/cache budgets.
+import { Theme } from "@NovaUiShared";
+import { SettingsCard } from "@NovaUiBase/settings-controls.slint";
+import { SettingsRow } from "settings-row.slint";
+import { ReaderField, ActionButton } from "controls.slint";
+
+export global ImageLimitSettings {
+    in-out property <string> encoded-mib: "32";
+    in-out property <string> width-pixels: "16384";
+    in-out property <string> height-pixels: "65536";
+    in-out property <string> megapixels: "32";
+    in-out property <string> decoded-mib: "128";
+    in-out property <string> message;
+    in-out property <bool> error: false;
+    callback save(string, string, string, string, string);
+    callback reset();
+    public function apply() {
+        ImageLimitSettings.save(ImageLimitSettings.encoded-mib, ImageLimitSettings.width-pixels,
+            ImageLimitSettings.height-pixels, ImageLimitSettings.megapixels, ImageLimitSettings.decoded-mib);
+    }
+}
+
+export component ImageLimitSettingsPage inherits VerticalLayout {
+    in property <bool> interactive: true;
+    spacing: 16px; alignment: start;
+    Text {
+        text: @tr("Limits for each chapter image, including local imports. Larger limits allow larger images and use more memory. All five limits must be met. These settings apply on this device.");
+        color: Theme.current.text_settings; wrap: word-wrap; min-width: 0px;
+    }
+    SettingsCard {
+        SettingsRow {
+            row-title: @tr("File size (MiB)");
+            row-desc: @tr("Maximum encoded size of one image file. Default: 32 MiB.");
+            ReaderField {
+                width: 128px; height: 48px; enabled: root.interactive;
+                input-type: number; placeholder-text: @tr("File size in MiB");
+                text <=> ImageLimitSettings.encoded-mib;
+                accepted(_) => { ImageLimitSettings.apply(); }
+            }
+        }
+        SettingsRow {
+            row-title: @tr("Width (pixels)");
+            row-desc: @tr("Maximum image width. Default: 16,384 pixels.");
+            ReaderField {
+                width: 128px; height: 48px; enabled: root.interactive;
+                input-type: number; placeholder-text: @tr("Width in pixels");
+                text <=> ImageLimitSettings.width-pixels;
+                accepted(_) => { ImageLimitSettings.apply(); }
+            }
+        }
+        SettingsRow {
+            row-title: @tr("Height (pixels)");
+            row-desc: @tr("Maximum image height. Default: 65,536 pixels.");
+            ReaderField {
+                width: 128px; height: 48px; enabled: root.interactive;
+                input-type: number; placeholder-text: @tr("Height in pixels");
+                text <=> ImageLimitSettings.height-pixels;
+                accepted(_) => { ImageLimitSettings.apply(); }
+            }
+        }
+        SettingsRow {
+            row-title: @tr("Megapixels");
+            row-desc: @tr("Maximum width × height, in millions of pixels. Default: 32 MP.");
+            ReaderField {
+                width: 128px; height: 48px; enabled: root.interactive;
+                input-type: number; placeholder-text: @tr("Megapixel limit");
+                text <=> ImageLimitSettings.megapixels;
+                accepted(_) => { ImageLimitSettings.apply(); }
+            }
+        }
+        SettingsRow {
+            row-title: @tr("Decoder memory (MiB)");
+            row-desc: @tr("Per-image decoded pixel and working-buffer allowance. This is separate from the artwork cache budget and is not a cap on total app memory. Default: 128 MiB.");
+            ReaderField {
+                width: 128px; height: 48px; enabled: root.interactive;
+                input-type: number; placeholder-text: @tr("Decoder memory in MiB");
+                text <=> ImageLimitSettings.decoded-mib;
+                accepted(_) => { ImageLimitSettings.apply(); }
+            }
+        }
+    }
+    if ImageLimitSettings.message != "": Text {
+        text: ImageLimitSettings.message;
+        color: Theme.current.text_bright; wrap: word-wrap; min-width: 0px;
+        accessible-role: text; accessible-label: ImageLimitSettings.message;
+    }
+    HorizontalLayout {
+        spacing: 8px;
+        ActionButton { text: @tr("Restore defaults"); height: 48px; enabled: root.interactive; clicked => { ImageLimitSettings.reset(); } }
+        ActionButton { text: @tr("Apply limits"); height: 48px; accent: true; enabled: root.interactive; clicked => { ImageLimitSettings.apply(); } }
+    }
+}

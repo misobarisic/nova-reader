@@ -1,7 +1,7 @@
 //! Durable ordered chapter bundles. Networking remains in the source adapter;
 //! this crate receives bytes through a callback and never opens a URL itself.
 use reader_domain::ChapterId;
-use reader_engine::{DecodeLimits, decode_image};
+use reader_engine::decode_image;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
@@ -92,7 +92,6 @@ struct Inner {
     root: PathBuf,
     quota: u64,
     active: BTreeMap<String, String>,
-    limits: DecodeLimits,
     _lock: File,
     next_order: u64,
 }
@@ -469,7 +468,6 @@ impl DownloadStore {
                 root,
                 quota,
                 active: BTreeMap::new(),
-                limits: DecodeLimits::default(),
                 _lock: lock,
                 next_order: 1,
             })),
@@ -735,6 +733,26 @@ impl DownloadStore {
         File::open(&inner.root)?.sync_all()?;
         Ok(())
     }
+    /// Retention policy may remove only finished remote bundles. Admission,
+    /// status validation and deletion share the transfer lock.
+    pub fn remove_completed_remote(&self, chapter: &ChapterId) -> Result<bool> {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if chapter.series.source_id == "local" || inner.active.contains_key(&chapter_key(chapter)) {
+            return Ok(false);
+        }
+        let path = inner.root.join(chapter_key(chapter));
+        if !path.exists() {
+            return Ok(false);
+        }
+        let job = checked_job(&inner.root, chapter)?;
+        if job.status != JobStatus::Complete {
+            return Ok(false);
+        }
+        fs::remove_dir_all(path)?;
+        #[cfg(unix)]
+        File::open(&inner.root)?.sync_all()?;
+        Ok(true)
+    }
     /// Fetch happens outside the lock. Pause/cancel are observed before publish;
     /// callbacks must bound their own streaming buffers and honor HTTP policy.
     pub fn run(
@@ -742,12 +760,14 @@ impl DownloadStore {
         chapter: &ChapterId,
         mut fetch: impl FnMut(&PageResource) -> std::result::Result<Vec<u8>, String>,
     ) -> Result<()> {
-        {
-            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            let job = load(&inner.root, chapter)?;
-            admit_job(&mut inner, job)?;
-        }
-        self.run_claimed(chapter, &mut fetch)
+        reader_engine::with_current_limits(|| {
+            {
+                let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+                let job = load(&inner.root, chapter)?;
+                admit_job(&mut inner, job)?;
+            }
+            self.run_claimed(chapter, &mut fetch)
+        })
     }
     /// Claim the first admissible queued chapter in persisted order. Selection,
     /// active admission and the Running publication share the reorder lock, so
@@ -758,19 +778,21 @@ impl DownloadStore {
         &self,
         mut fetch: impl FnMut(&ChapterId, &PageResource) -> std::result::Result<Vec<u8>, String>,
     ) -> Result<Option<ChapterId>> {
-        let chapter = {
-            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(job) = metadata_jobs(&inner.root)?.into_iter().find(|job| {
-                job.status == JobStatus::Queued && admission_available(&inner, &job.chapter)
-            }) else {
-                return Ok(None);
+        reader_engine::with_current_limits(|| {
+            let chapter = {
+                let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+                let Some(job) = metadata_jobs(&inner.root)?.into_iter().find(|job| {
+                    job.status == JobStatus::Queued && admission_available(&inner, &job.chapter)
+                }) else {
+                    return Ok(None);
+                };
+                let chapter = job.chapter.clone();
+                admit_job(&mut inner, job)?;
+                chapter
             };
-            let chapter = job.chapter.clone();
-            admit_job(&mut inner, job)?;
-            chapter
-        };
-        self.run_claimed(&chapter, &mut |page| fetch(&chapter, page))?;
-        Ok(Some(chapter))
+            self.run_claimed(&chapter, &mut |page| fetch(&chapter, page))?;
+            Ok(Some(chapter))
+        })
     }
     fn run_claimed(
         &self,
@@ -824,7 +846,7 @@ impl DownloadStore {
             }
             // Decode validation rejects truncated streams, not merely forged
             // headers. The engine checks dimensions before allocation.
-            decode_image(&bytes, inner.limits)?;
+            decode_image(&bytes, reader_engine::current_limits())?;
             let path = inner
                 .root
                 .join(chapter_key(chapter))
@@ -911,98 +933,105 @@ impl DownloadStore {
         Ok(())
     }
     pub fn import_folder(&self, chapter: ChapterId, folder: impl AsRef<Path>) -> Result<()> {
-        let mut files = Vec::new();
-        for entry in fs::read_dir(folder)? {
-            let entry = entry?;
-            if entry.file_type()?.is_file() && supported(&entry.path()) {
-                files.push(entry.path());
+        reader_engine::with_current_limits(|| {
+            let mut files = Vec::new();
+            for entry in fs::read_dir(folder)? {
+                let entry = entry?;
+                if entry.file_type()?.is_file() && supported(&entry.path()) {
+                    files.push(entry.path());
+                }
             }
-        }
-        files.sort_by(|a, b| natural_cmp(&a.to_string_lossy(), &b.to_string_lossy()));
-        if files.len() > 10000 {
-            return Err(Error::Invalid("too many local pages".into()));
-        }
-        let pages = files
-            .iter()
-            .enumerate()
-            .map(|(i, _)| PageResource {
-                id: format!("local-{i}"),
-                url: String::new(),
-                headers: BTreeMap::new(),
-            })
-            .collect();
-        self.enqueue(chapter.clone(), pages)?;
-        self.run(&chapter, |resource| {
-            let index = resource
-                .id
-                .strip_prefix("local-")
-                .unwrap()
-                .parse::<usize>()
-                .unwrap();
-            bounded_read(&files[index], DecodeLimits::default().max_encoded_bytes)
+            files.sort_by(|a, b| natural_cmp(&a.to_string_lossy(), &b.to_string_lossy()));
+            if files.len() > 10000 {
+                return Err(Error::Invalid("too many local pages".into()));
+            }
+            let pages = files
+                .iter()
+                .enumerate()
+                .map(|(i, _)| PageResource {
+                    id: format!("local-{i}"),
+                    url: String::new(),
+                    headers: BTreeMap::new(),
+                })
+                .collect();
+            self.enqueue(chapter.clone(), pages)?;
+            self.run(&chapter, |resource| {
+                let index = resource
+                    .id
+                    .strip_prefix("local-")
+                    .unwrap()
+                    .parse::<usize>()
+                    .unwrap();
+                bounded_read(
+                    &files[index],
+                    reader_engine::current_limits().max_encoded_bytes,
+                )
                 .map_err(|e| e.to_string())
+            })
         })
     }
     pub fn import_cbz(&self, chapter: ChapterId, path: impl AsRef<Path>) -> Result<()> {
-        let mut archive = zip::ZipArchive::new(File::open(path)?)?;
-        if archive.len() > 10000 {
-            return Err(Error::Invalid("too many archive entries".into()));
-        }
-        let mut entries = Vec::new();
-        let cap = DecodeLimits::default().max_encoded_bytes;
-        let mut total = 0u64;
-        for index in 0..archive.len() {
-            let entry = archive.by_index(index)?;
-            let name = entry
-                .enclosed_name()
-                .ok_or_else(|| Error::Invalid("unsafe archive path".into()))?
-                .to_owned();
-            if entry.is_dir() {
-                continue;
+        reader_engine::with_current_limits(|| {
+            let mut archive = zip::ZipArchive::new(File::open(path)?)?;
+            if archive.len() > 10000 {
+                return Err(Error::Invalid("too many archive entries".into()));
             }
-            if entry.unix_mode().is_some_and(|m| m & 0o170000 == 0o120000) {
-                return Err(Error::Invalid("archive symlink".into()));
-            }
-            if supported(&name) {
-                if entry.size() > cap as u64 {
-                    return Err(Error::Invalid("oversized archive page".into()));
+            let mut entries = Vec::new();
+            let cap = reader_engine::current_limits().max_encoded_bytes;
+            let mut total = 0u64;
+            for index in 0..archive.len() {
+                let entry = archive.by_index(index)?;
+                let name = entry
+                    .enclosed_name()
+                    .ok_or_else(|| Error::Invalid("unsafe archive path".into()))?
+                    .to_owned();
+                if entry.is_dir() {
+                    continue;
                 }
-                total = total.checked_add(entry.size()).ok_or(Error::Quota)?;
-                entries.push((name, index));
+                if entry.unix_mode().is_some_and(|m| m & 0o170000 == 0o120000) {
+                    return Err(Error::Invalid("archive symlink".into()));
+                }
+                if supported(&name) {
+                    if entry.size() > cap as u64 {
+                        return Err(Error::Invalid("oversized archive page".into()));
+                    }
+                    total = total.checked_add(entry.size()).ok_or(Error::Quota)?;
+                    entries.push((name, index));
+                }
             }
-        }
-        if total > self.inner.lock().unwrap_or_else(|e| e.into_inner()).quota {
-            return Err(Error::Quota);
-        }
-        entries.sort_by(|a, b| natural_cmp(&a.0.to_string_lossy(), &b.0.to_string_lossy()));
-        let pages = entries
-            .iter()
-            .enumerate()
-            .map(|(i, _)| PageResource {
-                id: format!("archive-{i}"),
-                url: String::new(),
-                headers: BTreeMap::new(),
+            if total > self.inner.lock().unwrap_or_else(|e| e.into_inner()).quota {
+                return Err(Error::Quota);
+            }
+            entries.sort_by(|a, b| natural_cmp(&a.0.to_string_lossy(), &b.0.to_string_lossy()));
+            let pages = entries
+                .iter()
+                .enumerate()
+                .map(|(i, _)| PageResource {
+                    id: format!("archive-{i}"),
+                    url: String::new(),
+                    headers: BTreeMap::new(),
+                })
+                .collect();
+            self.enqueue(chapter.clone(), pages)?;
+            self.run(&chapter, |resource| {
+                let index = resource
+                    .id
+                    .strip_prefix("archive-")
+                    .unwrap()
+                    .parse::<usize>()
+                    .unwrap();
+                let mut bytes = Vec::new();
+                archive
+                    .by_index(entries[index].1)
+                    .map_err(|e| e.to_string())?
+                    .take(cap as u64 + 1)
+                    .read_to_end(&mut bytes)
+                    .map_err(|e| e.to_string())?;
+                if bytes.len() > cap {
+                    return Err("oversized archive page".into());
+                }
+                Ok(bytes)
             })
-            .collect();
-        self.enqueue(chapter.clone(), pages)?;
-        self.run(&chapter, |resource| {
-            let index = resource
-                .id
-                .strip_prefix("archive-")
-                .unwrap()
-                .parse::<usize>()
-                .unwrap();
-            let mut bytes = Vec::new();
-            archive
-                .by_index(entries[index].1)
-                .map_err(|e| e.to_string())?
-                .take(cap as u64 + 1)
-                .read_to_end(&mut bytes)
-                .map_err(|e| e.to_string())?;
-            if bytes.len() > cap {
-                return Err("oversized archive page".into());
-            }
-            Ok(bytes)
         })
     }
 }
@@ -1085,6 +1114,29 @@ mod tests {
             .unwrap();
         data.into_inner()
     }
+    #[test]
+    fn retention_removes_only_complete_inactive_remote_bundles() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DownloadStore::open(directory.path(), 1_000_000).unwrap();
+        let chapter = chapter();
+        store.enqueue(chapter.clone(), pages()).unwrap();
+        assert!(!store.remove_completed_remote(&chapter).unwrap());
+        store
+            .run(&chapter, |_| {
+                assert!(!store.remove_completed_remote(&chapter).unwrap());
+                Ok(png())
+            })
+            .unwrap();
+        assert!(store.remove_completed_remote(&chapter).unwrap());
+        assert!(store.job(&chapter).is_err());
+        assert!(!store.remove_completed_remote(&chapter).unwrap());
+        let local = ChapterId::new(SeriesId::new("local", "only-copy"), "chapter");
+        store.enqueue(local.clone(), pages()).unwrap();
+        store.run(&local, |_| Ok(png())).unwrap();
+        assert!(!store.remove_completed_remote(&local).unwrap());
+        assert_eq!(store.offline(&local).unwrap().pages.len(), 3);
+    }
+
     #[test]
     fn interrupted_recovery_and_corruption() {
         let directory = tempfile::tempdir().unwrap();

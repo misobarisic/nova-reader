@@ -22,6 +22,8 @@ pub struct Descriptor {
     pub enabled: bool,
     pub disabled_catalogs: BTreeSet<String>,
     pub settings: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compression: Option<crate::source_compression::CompressionOverride>,
 }
 #[derive(Clone, Debug, Default)]
 pub struct Status {
@@ -59,6 +61,7 @@ impl Descriptor {
                     && !id.chars().any(char::is_control)
                     && (id == key || id.starts_with(&format!("{key}.")))
             })
+            && self.compression.is_none_or(|value| value.valid())
             && self.settings.as_object().is_some_and(|map| map.len() <= 64)
             && serde_json::to_vec(&self.settings).is_ok_and(|v| v.len() <= 64 * 1024)
     }
@@ -86,6 +89,7 @@ fn snapshot(services: &Services) -> Result<Vec<(String, String, u64)>, String> {
                 .archive(&source.id)
                 .map_err(|e| e.to_string())?;
             let row = Descriptor {
+                compression: crate::source_compression::snapshot(&source.id),
                 disabled_catalogs: crate::source_catalogs::disabled(&source.id),
                 settings: services
                     .sources
@@ -148,6 +152,11 @@ fn merge_intent(
             next.disabled_catalogs.remove(id);
         }
     }
+    next.compression = crate::source_compression::CompressionOverride::merge_intent(
+        before.compression,
+        actual.compression,
+        shared.compression,
+    );
     let prior = before
         .settings
         .as_object()
@@ -401,6 +410,7 @@ pub fn reconcile(services: &Services, cancel: Arc<AtomicBool>) -> Result<Status,
         {
             status.failed += 1;
         }
+        crate::source_compression::persist(&row.id, row.compression)?;
         let current = crate::source_catalogs::disabled(&row.id);
         for id in current.union(&row.disabled_catalogs) {
             crate::source_catalogs::set_enabled(&row.id, id, !row.disabled_catalogs.contains(id))?;
@@ -522,6 +532,7 @@ mod tests {
             version: "1.0.0".into(),
             sha256: "a".repeat(64),
             enabled: false,
+            compression: None,
             disabled_catalogs: BTreeSet::from(["fixture.old".into()]),
             settings: serde_json::json!({"a":"before","b":"before"}),
         };
@@ -562,6 +573,36 @@ mod tests {
     }
 
     #[test]
+    fn compression_intent_preserves_disjoint_remote_edits_and_inheritance() {
+        use crate::{image_storage::ImageCompression, source_compression::CompressionOverride};
+        let before = CompressionOverride {
+            cache: ImageCompression::default(),
+            downloads: ImageCompression::default(),
+        };
+        let mut actual = before;
+        actual.cache.enabled = false;
+        let mut shared = before;
+        shared.downloads.quality = 63;
+        let merged =
+            CompressionOverride::merge_intent(Some(before), Some(actual), Some(shared)).unwrap();
+        assert!(!merged.cache.enabled);
+        assert_eq!(merged.downloads.quality, 63);
+        assert_eq!(
+            CompressionOverride::merge_intent(Some(before), None, Some(shared)),
+            None
+        );
+        assert_eq!(
+            CompressionOverride::merge_intent(None, None, Some(shared)),
+            Some(shared)
+        );
+        // Existing descriptors from before compression inheritance remain valid.
+        let legacy = serde_json::json!({"id":"fixture","version":"1","sha256":"a".repeat(64),"enabled":false,"disabled_catalogs":[],"settings":{}});
+        let descriptor: Descriptor = serde_json::from_value(legacy).unwrap();
+        assert!(descriptor.compression.is_none());
+        assert!(descriptor.valid("fixture"));
+    }
+
+    #[test]
     fn cookie_permission_expansion_revokes_locally_without_publishing_an_account_disable() {
         let directory = tempfile::tempdir().unwrap();
         let registry = reader_sources::SourceRegistry::open(directory.path()).unwrap();
@@ -587,6 +628,7 @@ mod tests {
             version: "1.0.0".into(),
             sha256: registry.archive("fixture").unwrap().0,
             enabled: true,
+            compression: None,
             disabled_catalogs: BTreeSet::new(),
             settings: serde_json::json!({}),
         };
@@ -618,6 +660,7 @@ mod tests {
             version: "1.0.0".into(),
             sha256: "a".repeat(64),
             enabled: false,
+            compression: None,
             disabled_catalogs: BTreeSet::new(),
             settings: serde_json::json!({"label":"old"}),
         };
@@ -651,6 +694,7 @@ mod tests {
             version: "1.0.0".into(),
             sha256: format!("{:x}", Sha256::digest(&bytes)),
             enabled: true,
+            compression: None,
             disabled_catalogs: BTreeSet::new(),
             settings: serde_json::json!({}),
         };

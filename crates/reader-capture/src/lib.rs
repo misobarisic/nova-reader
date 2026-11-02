@@ -137,213 +137,220 @@ fn capture_with_budget<B: AsRef<[u8]>>(
     target_scale: Option<f64>,
     mut fetch: impl FnMut(usize) -> Result<B, String>,
 ) -> Result<Capture, String> {
-    if !viewport.valid() || pages.len() > 10_000 {
-        return Err(geometry_error());
-    }
-    let mut identities = BTreeSet::new();
-    let mut visible = Vec::new();
-    for page in pages {
-        if !page.rect.valid()
-            || !identities.insert(page.index)
-            || !(viewport.x - page.rect.x).is_finite()
-            || !(viewport.y - page.rect.y).is_finite()
-        {
+    reader_engine::with_current_limits(|| {
+        if !viewport.valid() || pages.len() > 10_000 {
             return Err(geometry_error());
         }
-        if page.rect.intersection(viewport).is_some() {
-            visible.push(page);
+        let mut identities = BTreeSet::new();
+        let mut visible = Vec::new();
+        for page in pages {
+            if !page.rect.valid()
+                || !identities.insert(page.index)
+                || !(viewport.x - page.rect.x).is_finite()
+                || !(viewport.y - page.rect.y).is_finite()
+            {
+                return Err(geometry_error());
+            }
+            if page.rect.intersection(viewport).is_some() {
+                visible.push(page);
+            }
         }
-    }
-    let reference = visible
-        .iter()
-        .find(|page| page.index == reference_index)
-        .ok_or_else(geometry_error)?;
-    let reference_bytes = fetch(reference_index)?;
-    let reference_encoded = reference_bytes.as_ref().len() as u64;
-    let limits = reader_engine::DecodeLimits {
-        max_decoded_bytes: memory_limit
-            .checked_sub(reference_encoded)
-            .ok_or_else(budget_error)?,
-        ..Default::default()
-    };
-    // Crop geometry depends on pixels. Admit this decode before output exists;
-    // later, admit its retained original plus output as a separate phase.
-    // Default keeps the legacy probe-first/reduced-decode admission unchanged.
-    let early_reference = if options.crop_borders || options.split_wide || options.rotate_wide {
-        let image = reader_engine::decode_image(reference_bytes.as_ref(), limits).map_err(|error| {
+        let reference = visible
+            .iter()
+            .find(|page| page.index == reference_index)
+            .ok_or_else(geometry_error)?;
+        let reference_bytes = fetch(reference_index)?;
+        let reference_encoded = reference_bytes.as_ref().len() as u64;
+        let limits = reader_engine::DecodeLimits {
+            max_decoded_bytes: memory_limit
+                .checked_sub(reference_encoded)
+                .ok_or_else(budget_error)?
+                .min(reader_engine::current_limits().max_decoded_bytes),
+            ..reader_engine::current_limits()
+        };
+        // Crop geometry depends on pixels. Admit this decode before output exists;
+        // later, admit its retained original plus output as a separate phase.
+        // Default keeps the legacy probe-first/reduced-decode admission unchanged.
+        let early_reference = if options.crop_borders || options.split_wide || options.rotate_wide {
+            let image = reader_engine::decode_image(reference_bytes.as_ref(), limits).map_err(|error| {
             format!(
                 "Original chapter image exceeds capture admission: {error}. Use Device resolution."
             )
         })?;
-        let presentation = reader_engine::page_presentation(&image, options)
-            .map_err(|error| format!("Cannot present original chapter image: {error}"))?;
-        Some((image, presentation))
-    } else {
-        None
-    };
-    let reference_presentation = early_reference
-        .as_ref()
-        .map(|(_, presentation)| *presentation);
-    let dimensions = if let Some(presentation) = reference_presentation {
-        presentation.effective
-    } else {
-        reader_engine::inspect_image(reference_bytes.as_ref(), limits)
-            .map_err(|error| format!("Cannot inspect original chapter image: {error}"))?
-    };
-    let scale = target_scale.unwrap_or(f64::from(dimensions.width) / reference.rect.width);
-    let left = ((viewport.x - reference.rect.x) * scale).floor();
-    let top = ((viewport.y - reference.rect.y) * scale).floor();
-    let right = ((viewport.right() - reference.rect.x) * scale).ceil();
-    let bottom = ((viewport.bottom() - reference.rect.y) * scale).ceil();
-    let width = right - left;
-    let height = bottom - top;
-    if !scale.is_finite()
-        || scale <= 0.
-        || !width.is_finite()
-        || !height.is_finite()
-        || width < 1.
-        || height < 1.
-        || width > 16384.
-        || height > 65536.
-    {
-        return Err(budget_error());
-    }
-    let (width, height) = (width as u32, height as u32);
-    // Anchor pixel centers to the reference source, rather than a fractional
-    // gutter or scroll offset. The framing expands by less than one native
-    // pixel at each edge, preserving exact reference strokes at native scale.
-    let raster = Raster {
-        width,
-        height,
-        scale,
-        reference_index,
-        reference_origin: (left, top),
-        viewport: Rect {
-            x: reference.rect.x + left / scale,
-            y: reference.rect.y + top / scale,
-            width: f64::from(width) / scale,
-            height: f64::from(height) / scale,
-        },
-    };
-    if !raster.viewport.valid() {
-        return Err(geometry_error());
-    }
-    let pixels = u64::from(width)
-        .checked_mul(u64::from(height))
-        .filter(|pixels| *pixels <= PIXEL_LIMIT)
-        .ok_or_else(budget_error)?;
-    let output_bytes = pixels.checked_mul(4).ok_or_else(budget_error)?;
-    let remaining = memory_limit
-        .checked_sub(output_bytes)
-        .and_then(|remaining| remaining.checked_sub(reference_encoded))
-        .ok_or_else(budget_error)?;
-    let limits = reader_engine::DecodeLimits {
-        max_decoded_bytes: remaining,
-        ..limits
-    };
-    // Admit the reference before allocating output. Decode now only when it
-    // paints first; otherwise defer decompression until its turn. Pixel-based
-    // presentation geometry may already have required an early decode.
-    let reference_first = visible
-        .first()
-        .is_some_and(|page| page.index == reference_index);
-    let reference_image = if let Some((image, _)) = early_reference {
-        if image.as_raw().len() as u64 > remaining {
+            let presentation = reader_engine::page_presentation(&image, options)
+                .map_err(|error| format!("Cannot present original chapter image: {error}"))?;
+            Some((image, presentation))
+        } else {
+            None
+        };
+        let reference_presentation = early_reference
+            .as_ref()
+            .map(|(_, presentation)| *presentation);
+        let dimensions = if let Some(presentation) = reference_presentation {
+            presentation.effective
+        } else {
+            reader_engine::inspect_image(reference_bytes.as_ref(), limits)
+                .map_err(|error| format!("Cannot inspect original chapter image: {error}"))?
+        };
+        let scale = target_scale.unwrap_or(f64::from(dimensions.width) / reference.rect.width);
+        let left = ((viewport.x - reference.rect.x) * scale).floor();
+        let top = ((viewport.y - reference.rect.y) * scale).floor();
+        let right = ((viewport.right() - reference.rect.x) * scale).ceil();
+        let bottom = ((viewport.bottom() - reference.rect.y) * scale).ceil();
+        let width = right - left;
+        let height = bottom - top;
+        if !scale.is_finite()
+            || scale <= 0.
+            || !width.is_finite()
+            || !height.is_finite()
+            || width < 1.
+            || height < 1.
+            || width > 16384.
+            || height > 65536.
+        {
             return Err(budget_error());
         }
-        reference_first.then_some(image)
-    } else if reference_first {
-        Some(reader_engine::decode_image(reference_bytes.as_ref(), limits).map_err(|error| {
+        let (width, height) = (width as u32, height as u32);
+        // Anchor pixel centers to the reference source, rather than a fractional
+        // gutter or scroll offset. The framing expands by less than one native
+        // pixel at each edge, preserving exact reference strokes at native scale.
+        let raster = Raster {
+            width,
+            height,
+            scale,
+            reference_index,
+            reference_origin: (left, top),
+            viewport: Rect {
+                x: reference.rect.x + left / scale,
+                y: reference.rect.y + top / scale,
+                width: f64::from(width) / scale,
+                height: f64::from(height) / scale,
+            },
+        };
+        if !raster.viewport.valid() {
+            return Err(geometry_error());
+        }
+        let pixels = u64::from(width)
+            .checked_mul(u64::from(height))
+            .filter(|pixels| *pixels <= PIXEL_LIMIT)
+            .ok_or_else(budget_error)?;
+        let output_bytes = pixels.checked_mul(4).ok_or_else(budget_error)?;
+        let remaining = memory_limit
+            .checked_sub(output_bytes)
+            .and_then(|remaining| remaining.checked_sub(reference_encoded))
+            .ok_or_else(budget_error)?;
+        let limits = reader_engine::DecodeLimits {
+            max_decoded_bytes: remaining.min(limits.max_decoded_bytes),
+            ..limits
+        };
+        // Admit the reference before allocating output. Decode now only when it
+        // paints first; otherwise defer decompression until its turn. Pixel-based
+        // presentation geometry may already have required an early decode.
+        let reference_first = visible
+            .first()
+            .is_some_and(|page| page.index == reference_index);
+        let reference_image = if let Some((image, _)) = early_reference {
+            if image.as_raw().len() as u64 > remaining {
+                return Err(budget_error());
+            }
+            reference_first.then_some(image)
+        } else if reference_first {
+            Some(reader_engine::decode_image(reference_bytes.as_ref(), limits).map_err(|error| {
             format!(
                 "Original chapter image exceeds capture admission: {error}. Use Device resolution."
             )
         })?)
-    } else {
-        // Preserve decode admission without decompressing this source twice.
-        reader_engine::inspect_image(reference_bytes.as_ref(), limits).map_err(|error| {
-            format!("Original chapter image exceeds capture admission: {error}")
-        })?;
-        None
-    };
-    let mut reference_image = reference_image;
-    let mut reference_bytes = Some(reference_bytes);
-    let mut output = Vec::new();
-    output
-        .try_reserve_exact(output_bytes as usize)
-        .map_err(|_| budget_error())?;
-    output.resize(output_bytes as usize, 0);
-    for pixel in output.as_chunks_mut::<4>().0 {
-        *pixel = background;
-    }
-    let mut source_start = None;
-    for page in visible {
-        let image = if page.index == reference_index {
-            let bytes = reference_bytes.take().ok_or_else(geometry_error)?;
-            if let Some(image) = reference_image.take() {
-                image
+        } else {
+            // Preserve decode admission without decompressing this source twice.
+            reader_engine::inspect_image(reference_bytes.as_ref(), limits).map_err(|error| {
+                format!("Original chapter image exceeds capture admission: {error}")
+            })?;
+            None
+        };
+        let mut reference_image = reference_image;
+        let mut reference_bytes = Some(reference_bytes);
+        let mut output = Vec::new();
+        output
+            .try_reserve_exact(output_bytes as usize)
+            .map_err(|_| budget_error())?;
+        output.resize(output_bytes as usize, 0);
+        for pixel in output.as_chunks_mut::<4>().0 {
+            *pixel = background;
+        }
+        let mut source_start = None;
+        for page in visible {
+            let image = if page.index == reference_index {
+                let bytes = reference_bytes.take().ok_or_else(geometry_error)?;
+                if let Some(image) = reference_image.take() {
+                    image
+                } else {
+                    reader_engine::decode_image(bytes.as_ref(), limits).map_err(|error| {
+                        format!(
+                            "Cannot decode original chapter image: {error}. Use Device resolution."
+                        )
+                    })?
+                }
             } else {
+                let bytes = fetch(page.index)?;
+                let live_reference = reference_bytes
+                    .as_ref()
+                    .map_or(0, |bytes| bytes.as_ref().len() as u64);
+                let limits = reader_engine::DecodeLimits {
+                    max_decoded_bytes: memory_limit
+                        .checked_sub(output_bytes)
+                        .and_then(|remaining| remaining.checked_sub(live_reference))
+                        .and_then(|remaining| remaining.checked_sub(bytes.as_ref().len() as u64))
+                        .ok_or_else(budget_error)?
+                        .min(reader_engine::current_limits().max_decoded_bytes),
+                    ..limits
+                };
                 reader_engine::decode_image(bytes.as_ref(), limits).map_err(|error| {
                     format!("Cannot decode original chapter image: {error}. Use Device resolution.")
                 })?
-            }
-        } else {
-            let bytes = fetch(page.index)?;
-            let live_reference = reference_bytes
-                .as_ref()
-                .map_or(0, |bytes| bytes.as_ref().len() as u64);
-            let limits = reader_engine::DecodeLimits {
-                max_decoded_bytes: memory_limit
-                    .checked_sub(output_bytes)
-                    .and_then(|remaining| remaining.checked_sub(live_reference))
-                    .and_then(|remaining| remaining.checked_sub(bytes.as_ref().len() as u64))
-                    .ok_or_else(budget_error)?,
-                ..limits
             };
-            reader_engine::decode_image(bytes.as_ref(), limits).map_err(|error| {
-                format!("Cannot decode original chapter image: {error}. Use Device resolution.")
-            })?
-        };
-        let presentation = if page.index == reference_index {
-            reference_presentation
-                .map(Ok)
-                .unwrap_or_else(|| reader_engine::page_presentation(&image, options))
-        } else {
-            reader_engine::page_presentation(&image, options)
+            let presentation = if page.index == reference_index {
+                reference_presentation
+                    .map(Ok)
+                    .unwrap_or_else(|| reader_engine::page_presentation(&image, options))
+            } else {
+                reader_engine::page_presentation(&image, options)
+            }
+            .map_err(|error| format!("Cannot present original chapter image: {error}"))?;
+            let geometry = paint_geometry(&raster, page, presentation)?;
+            if source_start.is_none()
+                && geometry.start_x < geometry.end_x
+                && geometry.start_y < geometry.end_y
+            {
+                // Name the actual first admitted output sample, including native
+                // floor/ceil framing. Resampled mixtures use the nearest original
+                // coordinate of that sample after presentation transforms.
+                let x = geometry.source_x(geometry.start_x, presentation.effective.width);
+                let y = geometry.source_y(geometry.start_y, presentation.effective.height);
+                let (_, source_y) = presentation.source_coordinate(x, y);
+                source_start = Some(SourceStart {
+                    index: page.index,
+                    y: source_y
+                        .round()
+                        .clamp(0., f64::from(presentation.source.height - 1))
+                        as u32,
+                });
+            }
+            paint(
+                &mut output,
+                &raster,
+                &geometry,
+                &image,
+                presentation,
+                options,
+            );
+            // No decoded page survives into the next iteration.
         }
-        .map_err(|error| format!("Cannot present original chapter image: {error}"))?;
-        let geometry = paint_geometry(&raster, page, presentation)?;
-        if source_start.is_none()
-            && geometry.start_x < geometry.end_x
-            && geometry.start_y < geometry.end_y
-        {
-            // Name the actual first admitted output sample, including native
-            // floor/ceil framing. Resampled mixtures use the nearest original
-            // coordinate of that sample after presentation transforms.
-            let x = geometry.source_x(geometry.start_x, presentation.effective.width);
-            let y = geometry.source_y(geometry.start_y, presentation.effective.height);
-            let (_, source_y) = presentation.source_coordinate(x, y);
-            source_start = Some(SourceStart {
-                index: page.index,
-                y: source_y
-                    .round()
-                    .clamp(0., f64::from(presentation.source.height - 1)) as u32,
-            });
-        }
-        paint(
-            &mut output,
-            &raster,
-            &geometry,
-            &image,
-            presentation,
-            options,
-        );
-        // No decoded page survives into the next iteration.
-    }
-    Ok(Capture {
-        width,
-        height,
-        pixels: output,
-        source_start,
+        Ok(Capture {
+            width,
+            height,
+            pixels: output,
+            source_start,
+        })
     })
 }
 
@@ -1191,7 +1198,7 @@ mod tests {
             ],
             [0; 4],
             options,
-            256 + originals
+            160 + originals
                 .iter()
                 .map(|bytes| bytes.len() as u64)
                 .max()

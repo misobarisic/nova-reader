@@ -23,7 +23,12 @@ fn fetch_download_page(
     compression: crate::image_storage::ImageCompression,
 ) -> Result<Vec<u8>> {
     let original = source
-        .fetch_page(&page.url, &page.headers, cancel)
+        .fetch_page_limited(
+            &page.url,
+            &page.headers,
+            cancel,
+            reader_engine::current_limits().max_encoded_bytes,
+        )
         .map_err(error)?;
     cancel.check().map_err(error)?;
     let bytes = if compression.enabled {
@@ -32,7 +37,7 @@ fn fetch_download_page(
         crate::reader_export::reencode_storage_image(
             &original,
             compression,
-            reader_engine::DecodeLimits::default(),
+            reader_engine::current_limits(),
         )
         .unwrap_or(original)
     } else {
@@ -94,6 +99,7 @@ impl Services {
         if let Some(current) = CURRENT.get() {
             return Ok(current.clone());
         }
+        crate::image_limits::install();
         let services = Self {
             domain,
             downloads: DownloadStore::open(path.join("chapters"), 8 * 1024 * 1024 * 1024)
@@ -285,7 +291,7 @@ impl Services {
         let source = self.source(&chapter.series.source_id)?;
         // Snapshot once per transfer. Verified pages are skipped by the store,
         // so changing compression never rewrites existing downloads.
-        let compression = crate::image_storage::load().downloads;
+        let compression = crate::image_storage::download_compression(&source.descriptor().id);
         self.downloads
             .run(chapter, |page| {
                 fetch_download_page(&source, page, cancel, compression)
@@ -297,14 +303,17 @@ impl Services {
     /// advance to another chapter rather than repeatedly selecting that job.
     pub fn run_next_download(&self, cancel: &CancelToken) -> Result<Option<ChapterId>> {
         cancel.check().map_err(error)?;
-        let compression = crate::image_storage::load().downloads;
+        let mut compression = None;
         let mut source = None;
         self.downloads
             .run_next(|chapter, page| {
                 if source.is_none() {
                     source = Some(self.source(&chapter.series.source_id)?);
+                    compression = Some(crate::image_storage::download_compression(
+                        &source.as_ref().unwrap().descriptor().id,
+                    ));
                 }
-                fetch_download_page(source.as_ref().unwrap(), page, cancel, compression)
+                fetch_download_page(source.as_ref().unwrap(), page, cancel, compression.unwrap())
             })
             .map_err(error)
     }

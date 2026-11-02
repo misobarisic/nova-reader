@@ -637,7 +637,15 @@ impl Controller {
 
     pub(super) fn reader_action(self: &Arc<Self>, ui: &AppWindow, action: &str) {
         match action {
-            "back" | "chapters" => self.navigate(ui, 5),
+            "back" => self.navigate(
+                ui,
+                if ui.get_reader_opening() {
+                    ui.get_reader_return_section()
+                } else {
+                    5
+                },
+            ),
+            "chapters" => self.navigate(ui, 5),
             "previous-chapter" => self.step_chapter(ui, -1),
             "next-chapter" => self.step_chapter(ui, 1),
             "previous-page" => self.step_page(ui, -1),

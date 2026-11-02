@@ -196,8 +196,7 @@ fn prepare_chapter(
                     .read(None, cancel)
                     .ok()
                     .and_then(|bytes| {
-                        reader_engine::inspect_image(&bytes, reader_engine::DecodeLimits::default())
-                            .ok()
+                        reader_engine::inspect_image(&bytes, reader_engine::current_limits()).ok()
                     })
                     .map_or(1.5, |dimensions| {
                         dimensions.height as f32 / dimensions.width as f32

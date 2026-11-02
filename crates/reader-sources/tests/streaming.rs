@@ -346,3 +346,135 @@ fn changed_session_revision_rejects_observation_and_final_completion() {
         assert_eq!(calls, 1);
     }
 }
+
+#[test]
+fn native_tighter_page_limit_reaches_transport_and_survives_refresh() {
+    struct Limited {
+        caps: Mutex<Vec<usize>>,
+        oversized: bool,
+    }
+    impl SourceTransport for Limited {
+        fn request(
+            &self,
+            request: &HttpRequest,
+            cap: usize,
+            _: &CancelToken,
+        ) -> Result<HttpResponse> {
+            self.caps.lock().unwrap().push(cap);
+            Ok(HttpResponse {
+                status: if request.url.ends_with("expired") {
+                    403
+                } else {
+                    200
+                },
+                url: request.url.clone(),
+                body: if self.oversized {
+                    vec![0; cap + 1]
+                } else {
+                    vec![1; 4]
+                },
+                ..Default::default()
+            })
+        }
+    }
+    let (_directory, registry, source) = source();
+    let transport = Arc::new(Limited {
+        caps: Mutex::default(),
+        oversized: false,
+    });
+    let source = source.with_transport(transport.clone());
+    let token = CancelToken::default();
+    assert_eq!(
+        source
+            .fetch_page_limited("https://example.com/expired", &BTreeMap::new(), &token, 16)
+            .unwrap(),
+        vec![1; 4]
+    );
+    assert_eq!(*transport.caps.lock().unwrap(), vec![16, 16]);
+    for cap in [0, usize::MAX] {
+        assert!(
+            source
+                .fetch_page_limited("https://example.com/page", &BTreeMap::new(), &token, cap)
+                .is_err()
+        );
+    }
+    assert!(
+        source
+            .fetch_page_limited("https://elsewhere.test/page", &BTreeMap::new(), &token, 16)
+            .is_err()
+    );
+    token.cancel();
+    assert!(
+        source
+            .fetch_page_limited("https://example.com/page", &BTreeMap::new(), &token, 16)
+            .is_err()
+    );
+    assert_eq!(transport.caps.lock().unwrap().len(), 2);
+    let oversized = source.clone().with_transport(Arc::new(Limited {
+        caps: Mutex::default(),
+        oversized: true,
+    }));
+    assert!(
+        oversized
+            .fetch_page_limited(
+                "https://example.com/page",
+                &BTreeMap::new(),
+                &CancelToken::default(),
+                16
+            )
+            .is_err()
+    );
+    registry.disable("streaming").unwrap();
+    assert!(
+        source
+            .fetch_page_limited(
+                "https://example.com/page",
+                &BTreeMap::new(),
+                &CancelToken::default(),
+                16
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn native_image_policy_can_exceed_baseline_for_full_and_streamed_fetches() {
+    let (_directory, _registry, source) = source();
+    let bytes = vec![9; 32 * 1024 * 1024 + 1];
+    let source = source.with_transport(Arc::new(LegacyTransport {
+        status: 200,
+        bytes: bytes.clone(),
+        seen: Mutex::new(vec![]),
+    }));
+    let token = CancelToken::default();
+    assert!(
+        source
+            .fetch_page("https://example.com/page", &BTreeMap::new(), &token)
+            .is_err()
+    );
+    assert_eq!(
+        source
+            .fetch_page_limited(
+                "https://example.com/page",
+                &BTreeMap::new(),
+                &token,
+                bytes.len()
+            )
+            .unwrap(),
+        bytes
+    );
+    let mut observed = 0;
+    assert_eq!(
+        source
+            .fetch_page_with_chunks_limited(
+                "https://example.com/page",
+                &BTreeMap::new(),
+                &token,
+                bytes.len(),
+                &mut |chunk| observed += chunk.len()
+            )
+            .unwrap(),
+        bytes
+    );
+    assert_eq!(observed, bytes.len());
+}
