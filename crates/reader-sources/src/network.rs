@@ -6,7 +6,7 @@ use std::{
     io::Read,
     net::{IpAddr, ToSocketAddrs},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
@@ -51,6 +51,22 @@ pub struct HttpResponse {
     pub body: Vec<u8>,
 }
 pub trait SourceTransport: Send + Sync {
+    /// Optional operation-local view of a mutable session. Production freezes
+    /// the current cookie generation alongside the invocation's settings.
+    fn snapshot(&self) -> Option<Arc<dyn SourceTransport>> {
+        None
+    }
+    /// Cookie mutation is opt-in for fixture/custom transports too.
+    fn set_cookie(
+        &self,
+        _origin: &str,
+        _name: &str,
+        _value: &str,
+        cancel: &CancelToken,
+    ) -> Result<()> {
+        cancel.check()?;
+        Err(network("cookie setting not supported by transport"))
+    }
     /// Return an opaque profile/session partition for durable page reuse.
     /// Stateful custom transports must opt in; None disables RAM/disk hits.
     fn page_cache_partition(&self, _url: &str) -> Option<String> {
@@ -65,8 +81,49 @@ pub trait SourceTransport: Send + Sync {
 }
 pub(crate) struct NetworkTransport {
     permissions: Permissions,
-    jar: Arc<reqwest::cookie::Jar>,
+    session: Mutex<Arc<CookieSession>>,
     cache_partition: String,
+}
+#[derive(Default)]
+struct CookieSession {
+    jar: Arc<reqwest::cookie::Jar>,
+    generation: u64,
+}
+/// Reqwest reads cookies when sending, after the request builder is created.
+/// Freeze that exact header per hop so concurrent jar changes and response
+/// deletions cannot hide a cookie-authenticated hop from the redirect guard.
+struct HopCookies {
+    jar: Arc<dyn CookieStore>,
+    url: Url,
+    outgoing: Option<reqwest::header::HeaderValue>,
+}
+impl HopCookies {
+    fn new(jar: Arc<dyn CookieStore>, url: &Url) -> Self {
+        let mut url = url.clone();
+        // Reqwest's CookieService reconstructs the URL from the HTTP URI,
+        // which omits fragments.
+        url.set_fragment(None);
+        Self {
+            outgoing: jar.cookies(&url),
+            jar,
+            url,
+        }
+    }
+    fn has_outgoing_cookies(&self) -> bool {
+        self.outgoing.is_some()
+    }
+}
+impl CookieStore for HopCookies {
+    fn cookies(&self, url: &Url) -> Option<reqwest::header::HeaderValue> {
+        (url == &self.url).then(|| self.outgoing.clone()).flatten()
+    }
+    fn set_cookies(
+        &self,
+        headers: &mut dyn Iterator<Item = &reqwest::header::HeaderValue>,
+        url: &Url,
+    ) {
+        self.jar.set_cookies(headers, url);
+    }
 }
 impl NetworkTransport {
     #[cfg(test)]
@@ -76,9 +133,16 @@ impl NetworkTransport {
     pub fn new_scoped(permissions: Permissions, cache_partition: String) -> Self {
         Self {
             permissions,
-            jar: Arc::new(reqwest::cookie::Jar::default()),
+            session: Mutex::new(Arc::new(CookieSession::default())),
             cache_partition,
         }
+    }
+    pub(crate) fn reset_session(&self) {
+        let mut current = self.session.lock().unwrap();
+        *current = Arc::new(CookieSession {
+            generation: current.generation + 1,
+            ..Default::default()
+        });
     }
 }
 fn network(s: impl Into<String>) -> SourceError {
@@ -107,6 +171,48 @@ pub(crate) fn checked_url(raw: &str, permissions: &Permissions) -> Result<Url> {
         && !is_public_ip(ip)
     {
         return Err(network("non-public address"));
+    }
+    Ok(url)
+}
+pub(crate) fn checked_cookie_origin(raw: &str, permissions: &Permissions) -> Result<Url> {
+    let url = checked_url(raw, permissions)?;
+    // Require a canonical origin: no path, credentials, query, fragment or
+    // nondefault port, and no URL normalization ambiguity in grants.
+    if raw != url.origin().ascii_serialization() {
+        return Err(network("cookie origin must be a canonical HTTPS origin"));
+    }
+    Ok(url)
+}
+pub(crate) fn valid_cookie_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+}
+pub(crate) fn validate_cookie(
+    origin: &str,
+    name: &str,
+    value: &str,
+    permissions: &Permissions,
+) -> Result<Url> {
+    let url = checked_cookie_origin(origin, permissions)?;
+    // RFC 6265 cookie-octet excludes whitespace, quotes, comma, semicolon,
+    // backslash, control characters and non-ASCII bytes. Rust owns attributes.
+    if !valid_cookie_name(name)
+        || value.len() > 4096
+        || !value
+            .bytes()
+            .all(|b| matches!(b, 0x21 | 0x23..=0x2b | 0x2d..=0x3a | 0x3c..=0x5b | 0x5d..=0x7e))
+    {
+        return Err(network("invalid cookie name or value"));
+    }
+    if !permissions
+        .cookies
+        .iter()
+        .any(|grant| grant.origin == origin && grant.names.iter().any(|allowed| allowed == name))
+    {
+        return Err(network("cookie denied by source permissions"));
     }
     Ok(url)
 }
@@ -164,13 +270,44 @@ pub(crate) fn check_status(status: u16) -> Result<()> {
         _ => Err(network(format!("HTTP {status}"))),
     }
 }
+fn check_redirect(current: &Url, next: &Url, sensitive: bool, has_cookies: bool) -> Result<()> {
+    if (sensitive || has_cookies) && current.origin() != next.origin() {
+        return Err(network("sensitive cross-origin redirect denied"));
+    }
+    Ok(())
+}
 impl SourceTransport for NetworkTransport {
+    fn snapshot(&self) -> Option<Arc<dyn SourceTransport>> {
+        Some(Arc::new(Self {
+            permissions: self.permissions.clone(),
+            session: Mutex::new(self.session.lock().unwrap().clone()),
+            cache_partition: self.cache_partition.clone(),
+        }))
+    }
+    fn set_cookie(
+        &self,
+        origin: &str,
+        name: &str,
+        value: &str,
+        cancel: &CancelToken,
+    ) -> Result<()> {
+        cancel.check()?;
+        let url = validate_cookie(origin, name, value, &self.permissions)?;
+        let session = self.session.lock().unwrap();
+        cancel.check()?;
+        session
+            .jar
+            .add_cookie_str(&format!("{name}={value}; Secure; HttpOnly; Path=/"), &url);
+        Ok(())
+    }
     fn page_cache_partition(&self, url: &str) -> Option<String> {
         use sha2::{Digest, Sha256};
         let url = Url::parse(url).ok()?;
-        let cookies = self.jar.cookies(&url);
+        let session = self.session.lock().unwrap();
+        let cookies = session.jar.cookies(&url);
         let material = serde_json::to_vec(&(
             &self.cache_partition,
+            session.generation,
             cookies.as_ref().map(|value| value.as_bytes()),
         ))
         .ok()?;
@@ -182,6 +319,7 @@ impl SourceTransport for NetworkTransport {
         max_bytes: usize,
         cancel: &CancelToken,
     ) -> Result<HttpResponse> {
+        let session = self.session.lock().unwrap().clone();
         cancel.check()?;
         validate_headers(&input.headers, &self.permissions)?;
         let method = if input.method.is_empty() {
@@ -237,13 +375,14 @@ impl SourceTransport for NetworkTransport {
             let remaining = deadline
                 .checked_sub(started.elapsed())
                 .ok_or_else(|| network("request deadline exceeded"))?;
+            let hop_cookies = Arc::new(HopCookies::new(session.jar.clone(), &url));
             // Keep inherited proxy configuration; direct sockets use this validated DNS snapshot.
             let builder = reqwest::blocking::Client::builder()
                 .user_agent("Mozilla/5.0 (compatible; NovaReader/0.1)")
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(remaining)
                 .connect_timeout(remaining.min(Duration::from_secs(5)))
-                .cookie_provider(self.jar.clone())
+                .cookie_provider(hop_cookies.clone())
                 .resolve_to_addrs(host, &addresses);
             #[cfg(target_os = "android")]
             let builder = builder.tls_backend_preconfigured(android_tls_config()?);
@@ -279,10 +418,12 @@ impl SourceTransport for NetworkTransport {
                     .join(location)
                     .map_err(|_| network("invalid redirect"))?;
                 checked_url(next.as_str(), &self.permissions)?;
-                if (sensitive || self.jar.cookies(&url).is_some()) && url.origin() != next.origin()
-                {
-                    return Err(network("sensitive cross-origin redirect denied"));
-                }
+                check_redirect(
+                    &url,
+                    &next,
+                    sensitive,
+                    hop_cookies.has_outgoing_cookies() || session.jar.cookies(&url).is_some(),
+                )?;
                 url = next;
                 continue;
             }
@@ -372,6 +513,7 @@ mod tests {
         Permissions {
             domains: vec!["example.com".into()],
             http_post: false,
+            cookies: vec![],
         }
     }
     #[test]
@@ -450,12 +592,18 @@ mod tests {
         let second = NetworkTransport::new(permissions());
         let url = Url::parse("https://example.com/").unwrap();
         first
+            .session
+            .lock()
+            .unwrap()
             .jar
             .add_cookie_str("session=private; Path=/; Secure", &url);
-        assert!(first.jar.cookies(&url).is_some());
-        assert!(second.jar.cookies(&url).is_none());
+        assert!(first.session.lock().unwrap().jar.cookies(&url).is_some());
+        assert!(second.session.lock().unwrap().jar.cookies(&url).is_none());
         let before = second.page_cache_partition(url.as_str()).unwrap();
         second
+            .session
+            .lock()
+            .unwrap()
             .jar
             .add_cookie_str("session=private; Path=/; Secure", &url);
         assert_ne!(before, second.page_cache_partition(url.as_str()).unwrap());
@@ -464,6 +612,196 @@ mod tests {
             before,
             other_profile.page_cache_partition(url.as_str()).unwrap()
         );
+    }
+    fn cookie_permissions() -> Permissions {
+        Permissions {
+            cookies: vec![crate::CookiePermission {
+                origin: "https://example.com".into(),
+                names: vec!["mature".into()],
+            }],
+            ..permissions()
+        }
+    }
+    #[test]
+    fn cookie_setting_is_host_only_secure_bounded_and_exactly_permissioned() {
+        let transport = NetworkTransport::new(cookie_permissions());
+        let token = CancelToken::default();
+        transport
+            .set_cookie("https://example.com", "mature", "1", &token)
+            .unwrap();
+        let session = transport.session.lock().unwrap();
+        let cookie = |url: &str| session.jar.cookies(&Url::parse(url).unwrap());
+        assert_eq!(cookie("https://example.com/any/path").unwrap(), "mature=1");
+        assert!(cookie("http://example.com/").is_none());
+        assert!(cookie("https://cdn.example.com/").is_none());
+        assert!(cookie("https://other.example/").is_none());
+        drop(session);
+        for (origin, name, value) in [
+            ("https://cdn.example.com", "mature", "1"),
+            ("https://example.com", "other", "1"),
+            ("https://example.com", "Mature", "1"),
+            ("https://example.com/", "mature", "1"),
+            ("https://example.com:443", "mature", "1"),
+            ("https://example.com/path", "mature", "1"),
+            ("https://example.com?x", "mature", "1"),
+            ("https://example.com#x", "mature", "1"),
+            ("http://example.com", "mature", "1"),
+            ("https://example.com", "mature", "x; Domain=example.com"),
+            ("https://example.com", "mature", "x\r\nCookie: other=1"),
+            ("https://example.com", "mature", "has space"),
+            ("https://example.com", "mature", "\"quoted\""),
+            ("https://example.com", "mature", "a,b"),
+            ("https://example.com", "mature", "a\\b"),
+            ("https://example.com", "mature", "é"),
+        ] {
+            assert!(
+                transport.set_cookie(origin, name, value, &token).is_err(),
+                "{origin} {name}"
+            );
+        }
+        assert!(
+            transport
+                .set_cookie("https://example.com", "mature", &"x".repeat(4097), &token)
+                .is_err()
+        );
+        transport
+            .set_cookie("https://example.com", "mature", "0", &token)
+            .unwrap();
+        token.cancel();
+        assert!(matches!(
+            transport.set_cookie("https://example.com", "mature", "1", &token),
+            Err(SourceError::Cancelled)
+        ));
+        assert_eq!(
+            transport
+                .session
+                .lock()
+                .unwrap()
+                .jar
+                .cookies(&Url::parse("https://example.com/").unwrap())
+                .unwrap(),
+            "mature=0"
+        );
+        assert!(
+            NetworkTransport::new(permissions())
+                .set_cookie(
+                    "https://example.com",
+                    "mature",
+                    "1",
+                    &CancelToken::default()
+                )
+                .is_err()
+        );
+    }
+    #[test]
+    fn stale_cookie_generation_cannot_change_current_partition_or_cookie() {
+        let transport = NetworkTransport::new(cookie_permissions());
+        let url = "https://example.com/page.png";
+        let token = CancelToken::default();
+        let initial = transport.page_cache_partition(url);
+        let old = transport.snapshot().unwrap();
+        transport.reset_session();
+        assert_ne!(initial, transport.page_cache_partition(url));
+        transport
+            .set_cookie("https://example.com", "mature", "0", &token)
+            .unwrap();
+        let current = transport.page_cache_partition(url);
+        old.set_cookie("https://example.com", "mature", "1", &token)
+            .unwrap();
+        assert_eq!(current, transport.page_cache_partition(url));
+        assert_ne!(current, old.page_cache_partition(url));
+        assert_eq!(
+            transport
+                .session
+                .lock()
+                .unwrap()
+                .jar
+                .cookies(&Url::parse(url).unwrap())
+                .unwrap(),
+            "mature=0"
+        );
+    }
+    #[test]
+    fn cookie_authenticated_redirects_stay_on_exact_origin() {
+        let start = Url::parse("https://example.com/list").unwrap();
+        let same = start.join("/next").unwrap();
+        let subdomain = Url::parse("https://cdn.example.com/next").unwrap();
+        let other = Url::parse("https://other.example/next").unwrap();
+        assert!(check_redirect(&start, &same, false, true).is_ok());
+        assert!(check_redirect(&start, &subdomain, false, true).is_err());
+        assert!(check_redirect(&start, &other, false, true).is_err());
+        assert!(check_redirect(&start, &subdomain, true, false).is_err());
+        assert!(check_redirect(&start, &subdomain, false, false).is_ok());
+    }
+    #[test]
+    fn hop_cookie_snapshot_survives_concurrent_insert_and_redirect_deletion() {
+        use std::sync::Barrier;
+        // Simulate reqwest's delayed CookieStore::cookies call and response
+        // Set-Cookie handling without making a network connection. Barriers
+        // force a shared-jar insert between freezing the hop and sending, then
+        // force response deletion before redirect admission.
+        for initially_authenticated in [false, true] {
+            let url = Url::parse("https://example.com/list").unwrap();
+            let next = Url::parse("https://cdn.example.com/next").unwrap();
+            let jar = Arc::new(reqwest::cookie::Jar::default());
+            if initially_authenticated {
+                jar.add_cookie_str("session=original; Secure; Path=/", &url);
+            }
+            let hop = Arc::new(HopCookies::new(jar.clone(), &url));
+            let inserted = Arc::new(Barrier::new(2));
+            let sent = Arc::new(Barrier::new(2));
+            let cleared = Arc::new(Barrier::new(2));
+            let worker = {
+                let (jar, hop, url) = (jar.clone(), hop.clone(), url.clone());
+                let (inserted, sent, cleared) = (inserted.clone(), sent.clone(), cleared.clone());
+                std::thread::spawn(move || {
+                    jar.add_cookie_str("session=concurrent; Secure; Path=/", &url);
+                    inserted.wait();
+                    sent.wait();
+                    let expired = reqwest::header::HeaderValue::from_static(
+                        "session=; Max-Age=0; Secure; Path=/",
+                    );
+                    hop.set_cookies(&mut std::iter::once(&expired), &url);
+                    cleared.wait();
+                })
+            };
+            inserted.wait();
+            assert_eq!(jar.cookies(&url).unwrap(), "session=concurrent");
+            let outgoing = hop.cookies(&url);
+            if initially_authenticated {
+                assert_eq!(outgoing.as_ref().unwrap(), "session=original");
+            } else {
+                assert!(
+                    outgoing.is_none(),
+                    "a late insert must not appear on the frozen hop"
+                );
+            }
+            assert_eq!(outgoing.is_some(), hop.has_outgoing_cookies());
+            assert!(hop.cookies(&next).is_none());
+            sent.wait();
+            cleared.wait();
+            worker.join().unwrap();
+            assert!(
+                jar.cookies(&url).is_none(),
+                "response cookies still update the real jar"
+            );
+            assert_eq!(
+                hop.cookies(&url),
+                outgoing,
+                "response deletion cannot rewrite what was sent"
+            );
+            assert_eq!(
+                check_redirect(
+                    &url,
+                    &next,
+                    false,
+                    hop.has_outgoing_cookies() || jar.cookies(&url).is_some()
+                )
+                .is_err(),
+                initially_authenticated,
+                "cross-origin admission must follow the actual outgoing Cookie header"
+            );
+        }
     }
 }
 

@@ -1,0 +1,33 @@
+{
+  "formatVersion": 2,
+  "contract": "nova-reader1",
+  "api": "^1.0",
+  "id": "mitaku",
+  "name": "Mitaku",
+  "version": "1.0.0",
+  "language": "all",
+  "nsfw": true,
+  "entry": "main.js",
+  "scripts": [],
+  "assets": [
+    "NOTICE.md",
+    "LICENSE",
+    "icon.png"
+  ],
+  "permissions": {
+    "domains": [
+      "mitaku.net"
+    ],
+    "httpPost": false
+  },
+  "capabilities": [
+    "capabilities",
+    "browse",
+    "search",
+    "filters",
+    "details",
+    "chapters",
+    "pages"
+  ],
+  "icon": "icon.png"
+}

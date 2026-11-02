@@ -22,6 +22,33 @@ def files_for(root):
         raise ValueError("invalid source ID")
     if not re.fullmatch(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?", manifest["version"]):
         raise ValueError("invalid semantic version")
+    permissions = manifest.get("permissions")
+    if not isinstance(permissions, dict) or set(permissions) - {"domains", "httpPost", "cookies"}:
+        raise ValueError("invalid source permissions")
+    domains = permissions.get("domains", [])
+    if not isinstance(domains, list) or len(domains) > 32 or any(not isinstance(d, str) or len(d) > 253 or not re.fullmatch(r"[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+", d) or re.fullmatch(r"\d+(?:\.\d+){3}", d) for d in domains):
+        raise ValueError("domains must be explicit DNS names")
+    if not isinstance(permissions.get("httpPost", False), bool):
+        raise ValueError("invalid HTTP POST permission")
+    cookies = permissions.get("cookies", [])
+    if not isinstance(cookies, list) or len(cookies) > 16:
+        raise ValueError("cookie permission limit")
+    origins, cookie_count = set(), 0
+    for cookie in cookies:
+        if not isinstance(cookie, dict) or set(cookie) != {"origin", "names"}:
+            raise ValueError("invalid cookie permission")
+        origin, names = cookie["origin"], cookie["names"]
+        if not isinstance(origin, str) or len(origin) > 8192 or not re.fullmatch(r"https://[a-z0-9-]+(?:\.[a-z0-9-]+)+", origin) or origin in origins:
+            raise ValueError("invalid cookie permission origin")
+        host = origin.removeprefix("https://")
+        if not any(host == d.lower() or host.endswith("." + d.lower()) for d in domains):
+            raise ValueError("cookie origin denied by source permissions")
+        origins.add(origin)
+        if not isinstance(names, list) or not names or any(not isinstance(n, str) or not re.fullmatch(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]{1,128}", n) for n in names) or len(names) != len(set(names)):
+            raise ValueError("invalid cookie names")
+        cookie_count += len(names)
+        if cookie_count > 32:
+            raise ValueError("cookie permission name limit")
     fields = manifest.get("configuration", [])
     if not isinstance(fields, list) or len(fields) > 64 or len(json.dumps(fields).encode()) > 65536:
         raise ValueError("source settings schema limit")

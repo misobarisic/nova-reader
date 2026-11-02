@@ -46,6 +46,33 @@ pub struct Permissions {
     pub domains: Vec<String>,
     #[serde(default)]
     pub http_post: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cookies: Vec<CookiePermission>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CookiePermission {
+    pub origin: String,
+    pub names: Vec<String>,
+}
+impl Permissions {
+    pub(crate) fn expands(&self, old: &Self) -> bool {
+        (self.http_post && !old.http_post)
+            || self.domains.iter().any(|d| {
+                !old.domains.iter().any(|old| {
+                    d.eq_ignore_ascii_case(old)
+                        || d.to_ascii_lowercase()
+                            .ends_with(&format!(".{}", old.to_ascii_lowercase()))
+                })
+            })
+            || self.cookies.iter().any(|cookie| {
+                cookie.names.iter().any(|name| {
+                    !old.cookies
+                        .iter()
+                        .any(|prior| prior.origin == cookie.origin && prior.names.contains(name))
+                })
+            })
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SourceDescriptor {
@@ -152,6 +179,27 @@ fn validate_manifest(m: &Manifest) -> Result<BTreeSet<String>> {
             || !domain.contains('.')
         {
             return Err(invalid("domains must be explicit DNS names"));
+        }
+    }
+    if m.permissions.cookies.len() > 16 {
+        return Err(invalid("cookie permission limit"));
+    }
+    let mut origins = BTreeSet::new();
+    let mut cookie_count = 0;
+    for cookie in &m.permissions.cookies {
+        crate::network::checked_cookie_origin(&cookie.origin, &m.permissions)
+            .map_err(|_| invalid("invalid cookie permission origin"))?;
+        cookie_count += cookie.names.len();
+        let mut names = BTreeSet::new();
+        if !origins.insert(&cookie.origin)
+            || cookie.names.is_empty()
+            || cookie_count > 32
+            || cookie
+                .names
+                .iter()
+                .any(|name| !crate::network::valid_cookie_name(name) || !names.insert(name))
+        {
+            return Err(invalid("invalid or excessive cookie names"));
         }
     }
     for cap in &m.capabilities {
@@ -397,15 +445,7 @@ impl SourceRegistry {
                     .join(format!("{}.zip", previous.digest)),
             )?;
             let (old, _) = validate(&old_bytes)?;
-            if (m.permissions.http_post && !old.permissions.http_post)
-                || m.permissions.domains.iter().any(|d| {
-                    !old.permissions.domains.iter().any(|old| {
-                        d.eq_ignore_ascii_case(old)
-                            || d.to_ascii_lowercase()
-                                .ends_with(&format!(".{}", old.to_ascii_lowercase()))
-                    })
-                })
-            {
+            if m.permissions.expands(&old.permissions) {
                 enabled = false;
             }
         }
@@ -574,7 +614,14 @@ impl SourceRegistry {
             &merged,
             &source.manifest.configuration,
         )?;
-        *current = merged;
+        if *current != merged {
+            // Freeze running invocations on their old jar; new settings must not
+            // inherit cookies set from an earlier settings snapshot.
+            if let Some(session) = inner.sessions.get(&(self.profile.clone(), id.to_owned())) {
+                session.reset_session();
+            }
+            *current = merged;
+        }
         Ok(())
     }
     pub fn source(&self, id: &str) -> Result<Source> {

@@ -4,7 +4,7 @@ mod package;
 mod runtime;
 mod settings;
 pub use network::{CancelToken, HttpRequest, HttpResponse, SourceTransport};
-pub use package::{Manifest, Permissions, SourceDescriptor, SourceRegistry};
+pub use package::{CookiePermission, Manifest, Permissions, SourceDescriptor, SourceRegistry};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 pub use settings::{SettingField, SettingKind};
@@ -83,10 +83,10 @@ impl PageAccess {
     ) -> Result<Option<String>> {
         use sha2::{Digest, Sha256};
         self.validate_page_request(url, headers)?;
+        let settings = self.settings.lock().unwrap_or_else(|e| e.into_inner());
         let Some(partition) = self.transport.page_cache_partition(url) else {
             return Ok(None);
         };
-        let settings = self.settings.lock().unwrap_or_else(|e| e.into_inner());
         let material = serde_json::to_vec(&(&*self.manifest, &*settings, url, headers, partition))
             .map_err(|e| SourceError::Script(e.to_string()))?;
         Ok(Some(format!("{:x}", Sha256::digest(material))))
@@ -141,7 +141,13 @@ impl Source {
             cancel.check()?;
             return package::asset(&self.archive, &self.manifest, path);
         }
-        let response = self.transport.request(
+        let transport = {
+            let _settings = self.settings.lock().unwrap();
+            self.transport
+                .snapshot()
+                .unwrap_or_else(|| self.transport.clone())
+        };
+        let response = transport.request(
             &HttpRequest {
                 url: url.into(),
                 headers: headers.clone(),
@@ -394,5 +400,109 @@ mod cache_tests {
             retained.page_cache_scope(url, &headers),
             Err(SourceError::Unavailable)
         ));
+    }
+    #[test]
+    fn delayed_invocation_cannot_restore_cookies_after_settings_toggle() {
+        use std::{
+            io::{Cursor, Write},
+            sync::{Mutex, mpsc},
+        };
+        struct Gate {
+            entered: mpsc::Sender<()>,
+            release: Mutex<mpsc::Receiver<()>>,
+        }
+        struct DelayedTransport {
+            native: Arc<dyn SourceTransport>,
+            gate: Arc<Gate>,
+        }
+        impl SourceTransport for DelayedTransport {
+            fn snapshot(&self) -> Option<Arc<dyn SourceTransport>> {
+                Some(Arc::new(Self {
+                    native: self.native.snapshot().unwrap(),
+                    gate: self.gate.clone(),
+                }))
+            }
+            fn set_cookie(
+                &self,
+                origin: &str,
+                name: &str,
+                value: &str,
+                token: &CancelToken,
+            ) -> Result<()> {
+                self.native.set_cookie(origin, name, value, token)
+            }
+            fn request(
+                &self,
+                input: &HttpRequest,
+                _: usize,
+                _: &CancelToken,
+            ) -> Result<HttpResponse> {
+                self.gate.entered.send(()).unwrap();
+                self.gate
+                    .release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+                Ok(HttpResponse {
+                    status: 200,
+                    url: input.url.clone(),
+                    ..Default::default()
+                })
+            }
+        }
+        let manifest = serde_json::json!({"formatVersion":2,"contract":"nova-reader1","api":"^1.0","id":"cookies","name":"Cookies","version":"1.0.0","language":"en","entry":"main.js","permissions":{"domains":["example.com"],"cookies":[{"origin":"https://example.com","names":["mature"]}]},"capabilities":["filters"],"configuration":[{"key":"mature","name":"Mature","kind":"bool","default":false}]});
+        let script = b"globalThis.novaProvider={handle(r){if(r.wait)nova.http.get('https://example.com');return JSON.parse(nova.cookies.set('https://example.com','mature',r.settings.mature?'1':'0'));}};";
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for (name, data) in [
+            ("manifest.json", serde_json::to_vec(&manifest).unwrap()),
+            ("main.js", script.to_vec()),
+        ] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(&data).unwrap();
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let registry = SourceRegistry::open(directory.path()).unwrap();
+        registry
+            .install_zip(&zip.finish().unwrap().into_inner())
+            .unwrap();
+        registry.set_enabled("cookies", true).unwrap();
+        registry
+            .set_settings("cookies", serde_json::json!({"mature":true}))
+            .unwrap();
+        let source = registry.source("cookies").unwrap();
+        let (entered, entered_rx) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel();
+        let delayed = source.clone().with_transport(Arc::new(DelayedTransport {
+            native: source.transport.clone(),
+            gate: Arc::new(Gate {
+                entered,
+                release: Mutex::new(release_rx),
+            }),
+        }));
+        let worker =
+            std::thread::spawn(move || delayed.call("filters", &serde_json::json!({"wait":true})));
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        registry
+            .set_settings("cookies", serde_json::json!({"mature":false}))
+            .unwrap();
+        source.call("filters", &serde_json::json!({})).unwrap();
+        let url = "https://example.com/page.png";
+        let headers = BTreeMap::new();
+        let current = source.page_cache_scope(url, &headers).unwrap();
+        release.send(()).unwrap();
+        assert_eq!(
+            worker.join().unwrap().unwrap(),
+            serde_json::json!({"ok":true})
+        );
+        assert_eq!(current, source.page_cache_scope(url, &headers).unwrap());
+        assert!(
+            !registry.settings("cookies").unwrap()["mature"]
+                .as_bool()
+                .unwrap()
+        );
     }
 }

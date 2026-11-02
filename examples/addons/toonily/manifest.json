@@ -1,0 +1,23 @@
+{
+  "formatVersion": 2,
+  "contract": "nova-reader1",
+  "api": "^1.0",
+  "id": "toonily",
+  "name": "Toonily (English)",
+  "version": "1.0.0",
+  "language": "en",
+  "nsfw": true,
+  "entry": "main.js",
+  "scripts": [],
+  "assets": ["NOTICE.md", "LICENSE", "icon.png"],
+  "icon": "icon.png",
+  "permissions": {
+    "domains": ["toonily.com", "static.tnlycdn.com", "data.tnlycdn.com"],
+    "httpPost": true,
+    "cookies": [{"origin": "https://toonily.com", "names": ["toonily-mature"]}]
+  },
+  "capabilities": ["capabilities", "browse", "search", "filters", "details", "chapters", "pages"],
+  "configuration": [
+    {"key": "showMature", "name": "Show mature content", "kind": "bool", "default": false}
+  ]
+}

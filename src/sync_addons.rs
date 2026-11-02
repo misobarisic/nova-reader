@@ -361,7 +361,8 @@ pub fn reconcile(services: &Services, cancel: Arc<AtomicBool>) -> Result<Status,
             continue;
         }
         // Never let a peer grant execution permission on this device. Existing
-        // grants survive a compatible update; registry clears expanded grants.
+        // grants survive a compatible update; registry clears expanded domain,
+        // HTTP POST and exact cookie origin/name grants.
         if !row.enabled {
             services
                 .sources
@@ -557,6 +558,55 @@ mod tests {
         assert!(
             merge_intent(&granted, &expanded, &shared).unwrap().enabled,
             "a permission-expanding update does not opt other devices out"
+        );
+    }
+
+    #[test]
+    fn cookie_permission_expansion_revokes_locally_without_publishing_an_account_disable() {
+        let directory = tempfile::tempdir().unwrap();
+        let registry = reader_sources::SourceRegistry::open(directory.path()).unwrap();
+        let make_package = |version: &str, names: Vec<&str>| {
+            let manifest = serde_json::json!({"formatVersion":2,"contract":"nova-reader1","api":"^1.0","id":"fixture","name":"Fixture","version":version,"language":"en","entry":"main.js","permissions":{"domains":["example.com"],"cookies":[{"origin":"https://example.com","names":names}]}});
+            let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+            for (name, bytes) in [
+                ("manifest.json", serde_json::to_vec(&manifest).unwrap()),
+                ("main.js", b"void 0;".to_vec()),
+            ] {
+                zip.start_file(name, zip::write::SimpleFileOptions::default())
+                    .unwrap();
+                zip.write_all(&bytes).unwrap();
+            }
+            zip.finish().unwrap().into_inner()
+        };
+        registry
+            .install_zip(&make_package("1.0.0", vec!["mature"]))
+            .unwrap();
+        registry.set_enabled("fixture", true).unwrap();
+        let before = Descriptor {
+            id: "fixture".into(),
+            version: "1.0.0".into(),
+            sha256: registry.archive("fixture").unwrap().0,
+            enabled: true,
+            disabled_catalogs: BTreeSet::new(),
+            settings: serde_json::json!({}),
+        };
+        let expanded = registry
+            .install_zip(&make_package("1.1.0", vec!["mature", "other"]))
+            .unwrap();
+        assert!(!expanded.enabled);
+        let mut actual = before.clone();
+        actual.version = expanded.version;
+        actual.sha256 = registry.archive("fixture").unwrap().0;
+        actual.enabled = expanded.enabled;
+        let outbound = merge_intent(&before, &actual, &before).unwrap();
+        assert!(
+            outbound.enabled,
+            "local permission denial must not disable another device's approved addon"
+        );
+        assert_eq!(outbound.version, "1.1.0");
+        assert!(
+            registry.source("fixture").is_err(),
+            "a remote desired grant cannot activate new cookie authority"
         );
     }
 

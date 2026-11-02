@@ -79,6 +79,22 @@ Host capabilities (all synchronous):
   use `{selector:"a",value:"href"}`. Empty selector means the matched element;
   value defaults to text, with `ownText`, `html` and attribute names supported.
 - `nova.url.resolve(relative, base)` resolves against the final response URL.
+- Reader 0.1.26 adds `nova.cookies.set(origin, name, value)`, returning a JSON
+  **string** `{ok:true}` or `{error:{code,message}}`. It requires an optional
+  manifest permission such as
+  `"cookies":[{"origin":"https://toonily.com","names":["toonily-mature"]}]`
+  inside `permissions`, plus the existing domain permission. Origins must be
+  canonical HTTPS default-port origins without a slash, explicit port, path,
+  query or fragment. Grants cover that exact origin and cookie name, including
+  case; subdomains do not inherit the cookie grant. At most 16 origins and 32
+  unique origin/name pairs may be declared; names are 1–128 ASCII token bytes.
+  Values are at most 4096 ASCII cookie-octet bytes (no whitespace, quotes,
+  commas, semicolons, backslashes or controls). Each invocation may set at most
+  32 cookies. Rust adds `Secure; HttpOnly; Path=/` and keeps cookies host-only.
+  Addons cannot read cookies or response `Set-Cookie`, supply cookie attributes,
+  or send a raw `Cookie` header. Cookies stay in the profile/source memory
+  session and are never persisted, exported or synced. Adding an origin/name
+  permission to an installed addon requires explicit local re-enabling.
 
 Each call creates a new 32 MiB QuickJS heap with a 512 KiB stack a 5-second script execution budget and a 20-second
 wall deadline. Scripts cannot import modules or access filesystem/process APIs.
@@ -151,6 +167,14 @@ on their next invocation; running operations retain their original snapshot.
 Configured secret values are redacted from script/source error text and never
 appear in descriptors. As executable addons can read their own settings, only
 install trusted sources. Callers still cancel work when switching profiles.
+
+Changed settings start a fresh in-memory network session immediately. An operation
+keeps its original settings and cookie generation, so delayed work cannot restore
+old cookies into the current session. Page-cache authorization includes current
+settings, session generation and applicable cookies, including on cache hits.
+Unchanged settings patches retain the session. A custom `SourceTransport` denies
+cookie setting by default; stateful custom transports may implement `snapshot`
+to freeze an operation's session as production does.
 
 
 Source filters support select, text, bool, multiselect and tristate. Multiple

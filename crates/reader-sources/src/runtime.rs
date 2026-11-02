@@ -18,7 +18,15 @@ pub(crate) fn invoke(
     request: &Value,
     cancel: &CancelToken,
 ) -> Result<Value> {
-    let settings = source.settings.lock().unwrap().clone();
+    let (settings, source) = {
+        let settings = source.settings.lock().unwrap();
+        let mut snapshot = source.clone();
+        snapshot.transport = source
+            .transport
+            .snapshot()
+            .unwrap_or_else(|| source.transport.clone());
+        (settings.clone(), snapshot)
+    };
     let secrets = source
         .manifest
         .configuration
@@ -29,7 +37,7 @@ pub(crate) fn invoke(
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    invoke_with_settings(source, op, request, cancel, settings)
+    invoke_with_settings(&source, op, request, cancel, settings)
         .map_err(|error| redact(error, &secrets))
 }
 fn redact(error: SourceError, secrets: &[String]) -> SourceError {
@@ -127,7 +135,10 @@ fn invoke_with_settings(
                 bytes.fetch_add(response.body.len(), Ordering::Relaxed);
                 let body = String::from_utf8(response.body)
                     .map_err(|_| SourceError::ParseChanged("metadata is not UTF-8".into()))?;
-                Ok(json!({"status":response.status,"url":response.url,"body":body,"headers":response.headers}).to_string())
+                let headers: BTreeMap<_, _> = response.headers.into_iter()
+                    .filter(|(name, _)| ["content-type", "etag", "last-modified", "retry-after"].contains(&name.to_ascii_lowercase().as_str()))
+                    .collect();
+                Ok(json!({"status":response.status,"url":response.url,"body":body,"headers":headers}).to_string())
             })();
             match operation {
                 Ok(value) => value,
@@ -140,6 +151,35 @@ fn invoke_with_settings(
         }).map_err(script)?;
         http.set("request", http_request).map_err(script)?;
         nova.set("http", http).map_err(script)?;
+        let cookies = Object::new(ctx.clone()).map_err(script)?;
+        let host = source.transport.clone();
+        let permissions = source.manifest.permissions.clone();
+        let token = cancel.clone();
+        let active = source.active.clone();
+        let failure_ref = failure.clone();
+        let cookie_calls = AtomicUsize::new(0);
+        cookies.set("set", Function::new(ctx.clone(), move |origin: String, name: String, value: String| -> String {
+            let operation = (|| {
+                token.check()?;
+                if !active.load(Ordering::Acquire) { return Err(SourceError::Cancelled); }
+                if started.elapsed() > deadline { return Err(SourceError::Script("operation deadline".into())); }
+                if cookie_calls.fetch_add(1, Ordering::Relaxed) >= 32 {
+                    return Err(SourceError::Network("per-operation cookie limit".into()));
+                }
+                crate::network::validate_cookie(&origin, &name, &value, &permissions)?;
+                host.set_cookie(&origin, &name, &value, &token)?;
+                Ok(())
+            })();
+            match operation {
+                Ok(()) => json!({"ok":true}).to_string(),
+                Err(error) => {
+                    let result = json!({"error":{"code":code(&error),"message":error.to_string()}}).to_string();
+                    *failure_ref.lock().unwrap() = Some(error);
+                    result
+                }
+            }
+        }).map_err(script)?).map_err(script)?;
+        nova.set("cookies", cookies).map_err(script)?;
         let html = Object::new(ctx.clone()).map_err(script)?;
         html.set("select", Function::new(ctx.clone(), select_html).map_err(script)?).map_err(script)?;
         nova.set("html", html).map_err(script)?;
