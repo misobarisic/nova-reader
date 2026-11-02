@@ -602,6 +602,229 @@ fn thumbnail_clear_remains_available_with_disk_off_and_obeys_maintenance_busy() 
 }
 
 #[test]
+fn collection_grid_is_edge_to_edge_square_and_virtualized_at_each_density() {
+    i_slint_backend_testing::init_no_event_loop();
+    for width in [320., 390., 1120.] {
+        let ui = scene(width, 844., 0);
+        ui.set_overview_collection(true);
+        ui.set_overview_subtitle("".into());
+        for density in [0, 1, 2] {
+            ui.set_overview_density(density);
+            ui.set_overview_restore_index(0);
+            ui.set_overview_restore_fraction(0.);
+            ui.set_overview_restore_serial(ui.get_overview_restore_serial() + 1);
+            settle();
+            let grid = ElementHandle::find_by_element_id(&ui, "PageOverview::grid")
+                .next()
+                .unwrap();
+            let columns = if grid.size().width < 700. {
+                4 - density
+            } else {
+                (grid.size().width / 390. * (4 - density) as f32)
+                    .round()
+                    .clamp(2., 12.) as i32
+            };
+            let image = |number| {
+                ElementHandle::find_by_accessible_label(&ui, &format!("Image {number}"))
+                    .find(|element| element.accessible_role() == Some(AccessibleRole::Button))
+                    .unwrap()
+            };
+            let first = image(1);
+            let second = image(2);
+            let last = image(columns);
+            let next_row = image(columns + 1);
+            assert!((first.size().width - first.size().height).abs() < 0.01);
+            assert!((first.absolute_position().x - grid.absolute_position().x).abs() < 0.01);
+            assert!(
+                (last.absolute_position().x + last.size().width
+                    - grid.absolute_position().x
+                    - grid.size().width)
+                    .abs()
+                    < 0.02
+            );
+            assert!(
+                (second.absolute_position().x
+                    - first.absolute_position().x
+                    - first.size().width
+                    - 1.)
+                    .abs()
+                    < 0.02
+            );
+            assert!(
+                (next_row.absolute_position().y
+                    - first.absolute_position().y
+                    - first.size().height
+                    - 1.)
+                    .abs()
+                    < 0.02
+            );
+            assert!(first.accessible_value().unwrap().contains("Current"));
+            assert!(
+                image(6)
+                    .accessible_value()
+                    .unwrap()
+                    .contains("Fixture failure")
+            );
+            let maximum = columns as usize
+                * ((grid.size().height / (first.size().height + 1.)).ceil() as usize + 1);
+            let delegates = ElementHandle::find_by_element_type_name(&ui, "PageThumbnail").count();
+            assert!(
+                delegates <= maximum && delegates < 110,
+                "visible delegates={delegates}, density={density}, width={width}"
+            );
+            assert!(
+                ElementHandle::find_by_accessible_label(&ui, "Image 320")
+                    .next()
+                    .is_none()
+            );
+        }
+    }
+}
+
+#[test]
+fn collection_real_pinch_and_ctrl_wheel_preserve_focal_image_and_cancel_taps() {
+    use i_slint_core::{input::TouchPhase, lengths::LogicalPoint, platform::InternalEvent};
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = scene(390., 844., 90);
+    ui.set_overview_collection(true);
+    ui.set_overview_subtitle("".into());
+    ui.set_overview_restore_fraction(-0.05);
+    ui.set_overview_restore_serial(2);
+    let requests = Rc::new(RefCell::new(Vec::new()));
+    ui.on_overview_zoom_requested({
+        let requests = requests.clone();
+        let weak = ui.as_weak();
+        move |density, id, fraction| {
+            requests
+                .borrow_mut()
+                .push((density, id.to_string(), fraction));
+            let ui = weak.unwrap();
+            ui.set_overview_restore_index(
+                id.strip_prefix("stable-page-").unwrap().parse().unwrap(),
+            );
+            ui.set_overview_restore_fraction(fraction);
+            ui.set_overview_density(density);
+            ui.set_overview_restore_serial(ui.get_overview_restore_serial() + 1);
+        }
+    });
+    let selected = Rc::new(RefCell::new(Vec::new()));
+    ui.on_overview_selected({
+        let selected = selected.clone();
+        move |id| selected.borrow_mut().push(id.to_string())
+    });
+    settle();
+    let image = || {
+        ElementHandle::find_by_accessible_label(&ui, "Image 98")
+            .find(|element| element.accessible_role() == Some(AccessibleRole::Button))
+            .unwrap()
+    };
+    let before = image();
+    let cx = before.absolute_position().x + before.size().width / 2.;
+    let cy = before.absolute_position().y + before.size().height * 0.4;
+    let row_fraction = (cy - before.absolute_position().y) / (before.size().height + 1.);
+    let touch = |id, x, y, phase| {
+        ui.window()
+            .dispatch_event(WindowEvent::internal(InternalEvent::Touch {
+                id,
+                position: LogicalPoint::new(x, y),
+                phase,
+            }))
+    };
+    touch(11, cx - 20., cy, TouchPhase::Started);
+    mock_elapsed_time(Duration::from_millis(30));
+    touch(22, cx + 20., cy, TouchPhase::Started);
+    mock_elapsed_time(Duration::from_millis(30));
+    touch(11, cx - 30., cy, TouchPhase::Moved);
+    mock_elapsed_time(Duration::from_millis(20));
+    touch(22, cx + 45., cy, TouchPhase::Moved);
+    settle();
+    assert_eq!(
+        ui.get_overview_density(),
+        2,
+        "native spread pinch enlarges squares"
+    );
+    assert_eq!(requests.borrow().last().unwrap().1, "stable-page-97");
+    let enlarged = image();
+    assert!(
+        (enlarged.absolute_position().y + row_fraction * (enlarged.size().height + 1.) - cy).abs()
+            < 1.5
+    );
+    touch(11, cx - 30., cy + 20., TouchPhase::Moved);
+    mock_elapsed_time(Duration::from_millis(20));
+    touch(22, cx + 45., cy + 20., TouchPhase::Moved);
+    settle();
+    let translated = image();
+    assert!(
+        (translated.absolute_position().y + row_fraction * (translated.size().height + 1.)
+            - cy
+            - 20.)
+            .abs()
+            < 1.5,
+        "the same focal point follows a moving pinch midpoint"
+    );
+    touch(11, cx - 30., cy + 20., TouchPhase::Ended);
+    mock_elapsed_time(Duration::from_millis(30));
+    touch(22, cx + 50., cy + 20., TouchPhase::Moved);
+    touch(22, cx + 50., cy + 20., TouchPhase::Ended);
+    settle();
+    assert!(
+        selected.borrow().is_empty(),
+        "pinch and remaining finger never open an image"
+    );
+
+    let enlarged = image();
+    let wx = enlarged.absolute_position().x + enlarged.size().width / 2.;
+    let wy = enlarged.absolute_position().y + enlarged.size().height * 0.6;
+    let wheel_fraction = (wy - enlarged.absolute_position().y) / (enlarged.size().height + 1.);
+    ui.window().dispatch_event(WindowEvent::KeyPressed {
+        text: Key::Control.into(),
+    });
+    ui.window().dispatch_event(WindowEvent::PointerScrolled {
+        position: LogicalPosition::new(wx, wy),
+        delta_x: 0.,
+        delta_y: -120.,
+    });
+    ui.window().dispatch_event(WindowEvent::KeyReleased {
+        text: Key::Control.into(),
+    });
+    settle();
+    assert_eq!(
+        ui.get_overview_density(),
+        1,
+        "Ctrl+wheel changes collection density"
+    );
+    let smaller = image();
+    assert!(
+        (smaller.absolute_position().y + wheel_fraction * (smaller.size().height + 1.) - wy).abs()
+            < 1.5
+    );
+    assert_eq!(requests.borrow().last().unwrap().1, "stable-page-97");
+
+    // Cancellation before recognition also consumes the surviving contact.
+    let tx = smaller.absolute_position().x + smaller.size().width / 2.;
+    let ty = smaller.absolute_position().y + smaller.size().height / 2.;
+    touch(33, tx - 20., ty, TouchPhase::Started);
+    mock_elapsed_time(Duration::from_millis(30));
+    touch(44, tx + 20., ty, TouchPhase::Started);
+    mock_elapsed_time(Duration::from_millis(30));
+    touch(33, tx - 20., ty, TouchPhase::Cancelled);
+    mock_elapsed_time(Duration::from_millis(30));
+    touch(44, tx + 25., ty, TouchPhase::Moved);
+    touch(44, tx + 25., ty, TouchPhase::Ended);
+    settle();
+    assert!(selected.borrow().is_empty());
+    touch(55, tx, ty, TouchPhase::Started);
+    mock_elapsed_time(Duration::from_millis(30));
+    touch(55, tx, ty, TouchPhase::Ended);
+    settle();
+    assert_eq!(
+        *selected.borrow(),
+        ["stable-page-97"],
+        "a fresh tap works after both pinch contacts end"
+    );
+}
+
+#[test]
 #[ignore = "opt-in native shared overview phone/desktop/RTL/collection captures"]
 fn render_page_overview_previews() {
     use i_slint_backend_testing::{TestingBackend, TestingBackendOptions};
@@ -637,6 +860,18 @@ fn render_page_overview_previews() {
             source.height(),
         ))
     });
+    let gallery_pictures = ["portrait", "wide", "tall"].map(|name| {
+        let source =
+            image::open(base.join(format!("examples/addons/neutral-fixture/pages/{name}.png")))
+                .unwrap()
+                .resize_to_fill(320, 320, image::imageops::FilterType::Triangle)
+                .to_rgba8();
+        slint::Image::from_rgba8(slint::SharedPixelBuffer::clone_from_slice(
+            source.as_raw(),
+            source.width(),
+            source.height(),
+        ))
+    });
     let tiles = Rc::new(VecModel::from(
         (0..320)
             .map(|index| OverviewTile {
@@ -658,10 +893,26 @@ fn render_page_overview_previews() {
             })
             .collect::<Vec<_>>(),
     ));
-    ui.set_overview_tiles(ModelRc::from(tiles));
+    let gallery_tiles = Rc::new(VecModel::from(
+        (0..320)
+            .map(|index| OverviewTile {
+                page_id: format!("stable-page-{index}").into(),
+                page_number: index + 1,
+                // The fixture shares three bounded pixel buffers across visible cells.
+                thumbnail: if index < 96 {
+                    gallery_pictures[index as usize % 3].clone()
+                } else {
+                    Default::default()
+                },
+                loading: index >= 96,
+                ..Default::default()
+            })
+            .collect::<Vec<_>>(),
+    ));
+    ui.set_overview_tiles(ModelRc::from(tiles.clone()));
     let directory = std::path::PathBuf::from(
         std::env::var("NOVA_OVERVIEW_PREVIEW_DIR")
-            .unwrap_or_else(|_| "/workspace/artifacts/page-overview-preview".into()),
+            .unwrap_or_else(|_| "/workspace/artifacts/compact-gallery-preview".into()),
     );
     std::fs::create_dir_all(&directory).unwrap();
     for (width, height, rtl, collection) in [
@@ -675,6 +926,16 @@ fn render_page_overview_previews() {
             .set_size(slint::PhysicalSize::new(width, height));
         ui.set_overview_rtl(rtl);
         ui.set_overview_collection(collection);
+        ui.set_overview_subtitle(if collection {
+            "".into()
+        } else {
+            "Neutral fixture".into()
+        });
+        ui.set_overview_tiles(if collection {
+            ModelRc::from(gallery_tiles.clone())
+        } else {
+            ModelRc::from(tiles.clone())
+        });
         ui.set_overview_groups(if collection {
             ModelRc::new(VecModel::from(vec![
                 "Chapter 12".into(),
@@ -721,6 +982,27 @@ fn render_page_overview_previews() {
         )
         .unwrap();
     };
+    for (width, height, density, name) in [
+        (390, 844, 2, "gallery-390x844-2-columns.png"),
+        (390, 844, 1, "gallery-390x844-3-columns.png"),
+        (390, 844, 0, "gallery-390x844-4-columns.png"),
+        (1120, 780, 1, "gallery-1120x780-adaptive.png"),
+    ] {
+        ui.window()
+            .set_size(slint::PhysicalSize::new(width, height));
+        ui.set_overview_collection(true);
+        ui.set_overview_rtl(false);
+        ui.set_overview_title("Gallery".into());
+        ui.set_overview_subtitle("".into());
+        ui.set_overview_groups(ModelRc::default());
+        ui.set_overview_tiles(ModelRc::from(gallery_tiles.clone()));
+        ui.set_overview_density(density);
+        ui.set_overview_restore_index(0);
+        ui.set_overview_restore_fraction(0.);
+        ui.set_overview_restore_serial(ui.get_overview_restore_serial() + 1);
+        settle();
+        capture(name);
+    }
     ui.window().set_size(slint::PhysicalSize::new(390, 844));
     ui.set_overview_collection(true);
     ui.set_overview_groups(ModelRc::default());

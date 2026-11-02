@@ -310,6 +310,17 @@ impl ChapterCache {
             Arc::new(compress),
         )
     }
+    #[cfg(test)]
+    pub(crate) fn test_cache_without_disk(directory: PathBuf) -> Self {
+        Self::with_hooks(
+            directory,
+            Arc::new(|| gc::DiskPolicy {
+                enabled: false,
+                limit_bytes: None,
+            }),
+            Arc::new(compress),
+        )
+    }
     pub fn prepare(
         &self,
         chapter: &ChapterId,

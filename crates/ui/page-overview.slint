@@ -2,6 +2,7 @@ import { ListView, Spinner } from "std-widgets.slint";
 import { Theme, SettingsStyle } from "@NovaUiShared";
 import { ActionButton, IconAction, BackButton, ReaderSelect } from "controls.slint";
 import { OverviewTile, PageThumbnail } from "page-thumbnail.slint";
+import { ReaderZoomGesture } from "reader-zoom.slint";
 export { OverviewTile } from "page-thumbnail.slint";
 
 // One regular row grid is shared by chapter pages and title image collections.
@@ -25,27 +26,74 @@ export component PageOverview inherits Rectangle {
     in property <string> status;
     in property <[string]> groups;
     in-out property <int> group-index;
-    out property <int> columns: max(1, min(12, Math.floor((grid.visible-width + 12px) / ((root.density <= 0 ? 104px : root.density == 1 ? 144px : 190px) + 12px))));
-    out property <length> row-height: root.tile-width * 1.4 + 44px;
+    out property <int> columns: root.columns-for-density(root.density);
+    out property <length> row-height: root.collection ? root.tile-width + root.tile-gap : root.tile-width * 1.4 + 44px;
     out property <length> viewport-height: grid.visible-height;
-    private property <length> tile-width: max(1px, (grid.visible-width - (root.columns - 1) * 12px) / root.columns);
+    private property <length> tile-gap: root.collection ? 1px : 12px;
+    private property <length> tile-width: max(1px, (grid.visible-width - (root.columns - 1) * root.tile-gap) / root.columns);
     private property <int> row-count: Math.ceil(root.tiles.length * 1.0 / root.columns);
     private property <int> tile-count: root.tiles.length;
     private property <int> focus-index: max(0, root.current-index);
     private property <bool> keyboard-active;
     private property <bool> restoring: true;
     private property <int> restore-pass;
+    private property <int> pinch-index: -1;
+    private property <int> pinch-start-density;
+    private property <float> pinch-row-fraction;
+    private property <length> pinch-last-y;
     callback selected(string);
     callback visible-range(int, int, int);
     callback anchor(string, float);
     callback density-changed(int);
+    callback zoom-requested(int, string, float);
     callback back();
     callback current();
     callback menu();
     callback group-selected(int);
     callback retry();
-    background: Theme.current.artwork_canvas;
+    background: root.collection ? #000000 : Theme.current.artwork_canvas;
     forward-focus: keyboard;
+
+    function columns-for-density(value: int) -> int {
+        if root.collection {
+            return max(2, min(12, grid.visible-width < 700px ? 4 - value : round(grid.visible-width / 390px * (4 - value))));
+        }
+        return max(1, min(12, Math.floor((grid.visible-width + 12px) / ((value <= 0 ? 104px : value == 1 ? 144px : 190px) + 12px))));
+    }
+    function begin-pinch(x: length, y: length) {
+        root.pinch-start-density = root.density;
+        let row = max(0, Math.floor((y - grid.content-y) / root.row-height));
+        let column = Math.clamp(Math.floor(x / (root.tile-width + root.tile-gap)), 0, root.columns - 1);
+        root.pinch-index = min(root.tiles.length - 1, row * root.columns + (root.rtl ? root.columns - column - 1 : column));
+        root.pinch-row-fraction = Math.clamp((y - grid.content-y - row * root.row-height) / root.row-height, 0, 1);
+        root.pinch-last-y = y;
+    }
+    function zoom-at(target: int, y: length) {
+        if !root.collection || root.pinch-index < 0 || root.pinch-index >= root.tiles.length
+            || (target == root.density && abs(y - root.pinch-last-y) < 0.5px) { return; }
+        let next-columns = root.columns-for-density(target);
+        let next-row-height = (grid.visible-width - (next-columns - 1) * root.tile-gap) / next-columns + root.tile-gap;
+        let fraction = (y - root.pinch-row-fraction * next-row-height) / max(1px, grid.visible-height);
+        root.keyboard-active = false;
+        root.focus-index = root.pinch-index;
+        root.restoring = true;
+        root.zoom-requested(target, root.tiles[root.pinch-index].page-id, fraction);
+        // Follow a moving midpoint immediately. The bounded restore passes
+        // subsequently settle ListView's previous row-height estimate.
+        if root.density == target {
+            grid.content-y = Math.clamp(y - root.pinch-row-fraction * next-row-height - Math.floor(root.pinch-index / next-columns) * next-row-height,
+                min(0px, grid.visible-height - Math.ceil(root.tiles.length * 1.0 / next-columns) * next-row-height), 0px);
+        }
+        root.pinch-last-y = y;
+    }
+    function pinch(factor: float, y: length) {
+        let step = factor >= 1.75 ? 2 : factor >= 1.18 ? 1 : factor <= 0.6 ? -2 : factor <= 0.85 ? -1 : 0;
+        root.zoom-at(Math.clamp(root.pinch-start-density + step, 0, 2), y);
+    }
+    function wheel-zoom(factor: float, x: length, y: length) {
+        root.begin-pinch(x, y);
+        root.zoom-at(Math.clamp(root.density + (factor > 1 ? 1 : -1), 0, 2), y);
+    }
 
     function publish-viewport() {
         if root.tiles.length > 0 && grid.visible-height > 0px {
@@ -131,14 +179,18 @@ export component PageOverview inherits Rectangle {
             return reject;
         }
         VerticalLayout {
-            padding: 18px; spacing: 14px;
+            padding: root.collection ? 0px : 18px; spacing: root.collection ? 0px : 14px;
+          VerticalLayout {
+            padding-left: root.collection ? 18px : 0px; padding-right: root.collection ? 18px : 0px;
+            padding-top: root.collection ? 18px : 0px; padding-bottom: root.collection ? 12px : 0px;
+            spacing: 14px; vertical-stretch: 0;
             HorizontalLayout {
                 spacing: 12px; height: 48px;
                 BackButton { width: 48px; height: 48px; clicked => { root.back(); } }
                 VerticalLayout {
                     min-width: 0px; spacing: 2px;
                     Text { text: root.title; font-size: root.width < 700px ? 24px : 28px; font-weight: 700; color: Theme.current.text_bright; overflow: elide; min-width: 0px; }
-                    Text { text: root.subtitle; font-size: 12px; color: Theme.current.text_secondary; overflow: elide; min-width: 0px; }
+                    if root.subtitle != "": Text { text: root.subtitle; font-size: 12px; color: Theme.current.text_secondary; overflow: elide; min-width: 0px; }
                 }
                 if root.show-menu: IconAction {
                     width: 48px; height: 48px; text: @tr("Overview options");
@@ -199,21 +251,29 @@ export component PageOverview inherits Rectangle {
                     height: 48px; text: @tr("Retry"); clicked => { root.retry(); }
                 }
             }
+          }
+          pinch-gesture := ReaderZoomGesture {
+            min-height: 0px; vertical-stretch: 1;
+            zoom: 1; enabled: root.collection;
+            began => { root.begin-pinch(self.center.x, self.center.y); }
+            transform(factor,from-x,from-y,to-x,to-y) => { root.pinch(factor, to-y * self.height); }
             grid := ListView {
-                min-height: 0px; vertical-stretch: 1;
+                width: 100%; height: 100%; enabled: !pinch-gesture.blocking;
                 horizontal-scrollbar-policy: always-off; vertical-scrollbar-policy: always-off;
                 mouse-drag-pan-enabled: true; content-width: self.visible-width;
                 changed content-y => { root.publish-viewport(); }
                 for row in root.row-count: Rectangle {
                     width: grid.visible-width; height: root.row-height;
                     for column in root.columns: cell := Rectangle {
-                        x: (root.rtl ? root.columns - column - 1 : column) * (root.tile-width + 12px);
-                        y: 0px; width: root.tile-width; height: root.row-height - 12px;
+                        x: (root.rtl ? root.columns - column - 1 : column) * (root.tile-width + root.tile-gap);
+                        y: 0px; width: root.tile-width; height: root.row-height - root.tile-gap;
                         private property <int> tile-index: row * root.columns + column;
                         if cell.tile-index < root.tiles.length: PageThumbnail {
                             width: 100%; height: 100%; tile: root.tiles[row * root.columns + column];
                             collection: root.collection; current: row * root.columns + column == root.current-index;
                             focused: root.keyboard-active && row * root.columns + column == root.focus-index;
+                            interaction-enabled: !pinch-gesture.blocking;
+                            zoom-requested(factor,x,y) => { root.wheel-zoom(factor, x - grid.absolute-position.x, y - grid.absolute-position.y); }
                             selected(id) => {
                                 root.focus-index = row * root.columns + column;
                                 root.keyboard-active = false; keyboard.focus(); root.selected(id);
@@ -222,6 +282,7 @@ export component PageOverview inherits Rectangle {
                     }
                 }
             }
+          }
         }
     }
 }

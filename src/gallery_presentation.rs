@@ -255,7 +255,7 @@ impl Controller {
             view.overview = Some(overview);
         }
         self.thumbnails(ui)
-            .replace_inventory(generation, inventory.pages);
+            .replace_inventory_for_gallery(generation, inventory.pages);
         self.publish_overview(ui, current);
     }
     pub(super) fn gallery_group(self: &Arc<Self>, ui: &AppWindow, index: i32) {
@@ -416,7 +416,8 @@ impl Controller {
             }
             return true;
         }
-        self.thumbnails(ui).replace_inventory(generation, target.0);
+        self.thumbnails(ui)
+            .replace_inventory_for_gallery(generation, target.0);
         self.publish_overview(ui, target.1);
         true
     }
@@ -815,7 +816,25 @@ mod tests {
         );
         assert!(app.services.domain.snapshot().unwrap().progress.is_empty());
         assert!(app.services.domain.snapshot().unwrap().history.is_empty());
+        // Grid zoom changes presentation only, and publishes its focal anchor
+        // atomically before ListView can reflow the new column count.
+        ui.invoke_overview_zoom_requested(2, "stable-1".into(), 0.15);
+        assert_eq!(ui.get_overview_density(), 2);
+        assert_eq!(ui.get_overview_restore_index(), 1);
+        assert_eq!(ui.get_overview_restore_fraction(), 0.15);
+        assert_eq!(
+            app.view().overview.as_ref().unwrap().anchor,
+            ("stable-1".into(), 0.15)
+        );
+        ui.invoke_overview_zoom_requested(0, "missing-image".into(), 0.);
+        ui.invoke_overview_zoom_requested(0, "stable-0".into(), f32::NAN);
+        assert_eq!(ui.get_overview_density(), 2);
+        assert_eq!(ui.get_overview_restore_index(), 1);
+        assert!(app.services.domain.snapshot().unwrap().progress.is_empty());
+        assert!(app.services.domain.snapshot().unwrap().history.is_empty());
         ui.invoke_overview_anchor("stable-0".into(), 0.);
+        assert_eq!(ui.get_overview_restore_index(), 0);
+        assert_eq!(ui.get_overview_restore_fraction(), 0.);
         ui.invoke_overview_density_changed(0);
         activate(&ui, "Image 3");
         pump(&ui, |ui| !ui.get_reader_opening());

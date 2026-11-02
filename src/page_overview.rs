@@ -259,11 +259,11 @@ impl Controller {
         )));
         ui.set_overview_title(o.series.title.clone().into());
         ui.set_overview_subtitle(
-            format!(
-                "{} {}",
-                o.inventory.len(),
-                text::tr(if o.collection { "images" } else { "pages" })
-            )
+            if o.collection {
+                String::new()
+            } else {
+                format!("{} {}", o.inventory.len(), text::tr("pages"))
+            }
             .into(),
         );
         ui.set_overview_collection(o.collection);
@@ -386,6 +386,63 @@ impl Controller {
             self.leave_manga_overview(ui, None);
         }
     }
+    fn change_overview_density(&self, ui: &AppWindow, density: i32, focal: Option<(&str, f32)>) {
+        let (index, fraction, density, reflow, generation) = {
+            let mut view = self.view();
+            if view.section != 23 {
+                return;
+            }
+            let Some(overview) = view.overview.as_mut() else {
+                return;
+            };
+            let (id, fraction) = focal.unwrap_or((&overview.anchor.0, overview.anchor.1));
+            if !fraction.is_finite() {
+                return;
+            }
+            let Some(index) = overview.inventory.iter().position(|page| page.id == id) else {
+                return;
+            };
+            overview.anchor = (id.to_owned(), fraction);
+            let density = density.clamp(0, 2);
+            let reflow = overview.collection && overview.density != density;
+            overview.density = density;
+            (index, fraction, density, reflow, overview.generation)
+        };
+        if reflow {
+            // Release UI leases first. The worker can then rebalance its loaded
+            // squares for the new visible count, including with disk cache off.
+            self.clear_overview_images(ui);
+            if let Some(service) = self.thumbnail_service.get() {
+                service.prepare_gallery_reflow(generation);
+            }
+        }
+        // Publish the logical focal anchor before changing the column count.
+        // Otherwise ListView's density reflow can restore an older top row.
+        ui.set_overview_restore_index(index as i32);
+        ui.set_overview_restore_fraction(fraction);
+        ui.set_overview_density(density);
+        ui.set_overview_restore_serial(ui.get_overview_restore_serial().wrapping_add(1));
+    }
+    fn remember_overview_anchor(&self, ui: &AppWindow, id: &str, fraction: f32) {
+        let index = {
+            let mut view = self.view();
+            if view.section != 23 || !fraction.is_finite() {
+                return;
+            }
+            let Some(overview) = view.overview.as_mut() else {
+                return;
+            };
+            let Some(index) = overview.inventory.iter().position(|page| page.id == id) else {
+                return;
+            };
+            overview.anchor = (id.to_owned(), fraction);
+            index
+        };
+        // Keep the next resize's inputs current without initiating a restore
+        // during ordinary scrolling. Rotation must not reuse the entry anchor.
+        ui.set_overview_restore_index(index as i32);
+        ui.set_overview_restore_fraction(fraction);
+    }
     pub(super) fn overview_select(self: &Arc<Self>, ui: &AppWindow, id: &str) {
         if self.view().overview.as_ref().is_some_and(|o| o.collection) {
             self.gallery_select(ui, id);
@@ -459,10 +516,15 @@ impl Controller {
             self.clear_overview_images(ui);
             let data = self.view().overview.as_mut().map(|o| {
                 o.generation = self.generation.load(Ordering::Acquire);
-                (o.generation, o.inventory.clone(), o.range)
+                (o.generation, o.inventory.clone(), o.range, o.collection)
             });
-            if let Some((generation, inventory, range)) = data {
-                self.thumbnails(ui).replace_inventory(generation, inventory);
+            if let Some((generation, inventory, range, collection)) = data {
+                if collection {
+                    self.thumbnails(ui)
+                        .replace_inventory_for_gallery(generation, inventory);
+                } else {
+                    self.thumbnails(ui).replace_inventory(generation, inventory);
+                }
                 self.overview_viewport(ui, range.0, range.1, range.2);
             }
         }
@@ -486,18 +548,18 @@ pub(super) fn wire(app: &Arc<Controller>, ui: &AppWindow) -> slint::Timer {
             columns.max(1) as usize
         )
     );
+    callback!(on_overview_anchor, |app, ui, id, fraction| {
+        app.remember_overview_anchor(&ui, &id, fraction);
+    });
+    callback!(on_overview_density_changed, |app, ui, density| {
+        app.change_overview_density(&ui, density, None);
+    });
     callback!(
-        on_overview_anchor,
-        |app, _ui, id, fraction| if let Some(o) = app.view().overview.as_mut() {
-            o.anchor = (id.to_string(), fraction);
+        on_overview_zoom_requested,
+        |app, ui, density, id, fraction| {
+            app.change_overview_density(&ui, density, Some((&id, fraction)));
         }
     );
-    callback!(on_overview_density_changed, |app, ui, density| {
-        if let Some(o) = app.view().overview.as_mut() {
-            o.density = density;
-        }
-        ui.set_overview_density(density);
-    });
     callback!(on_overview_group_selected, |app, ui, index| app
         .gallery_group(&ui, index));
     callback!(on_overview_menu, |app, ui| app.gallery_menu(&ui));

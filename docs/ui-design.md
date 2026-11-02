@@ -349,21 +349,30 @@ gestures to Kit sliders and reveals focused controls during keyboard navigation.
 `page-overview.slint` and `page-thumbnail.slint` extend the existing Nova Kit
 Theme, Roboto, control and focus conventions. They share one responsive,
 row-virtualized grid for chapter pages and image collections, with stable page
-IDs, number labels, loading/error/current states, three thumbnail densities and
-Current page/image. RTL changes columns within each row while page identity and
-labels stay in source order. Tall-image tiles identify their top preview.
+IDs, loading/error/current states, three thumbnail densities and Current
+page/image. Manga retains whole-page tiles, visible number labels and marked
+tall-page top previews. Gallery uses black, edge-to-edge square tiles with 1px
+seams, square corners and center crops; image filenames and captions are hidden,
+while accessible image labels and current/focus outlines remain. Phones offer
+2, 3 or 4 columns (3 by default); wider galleries adapt up to 12 columns. RTL
+changes columns within each row while page identity stays in source order.
 Keyboard navigation, accessible selection and viewport anchors follow the same
 surface on desktop and Android; resizing or changing density restores the
-logical anchor.
+logical anchor. Gallery pinch and Ctrl+wheel density changes retain the focal
+page ID and point within its tile, following a moving pinch midpoint. The atomic
+`overview-zoom-requested(int, string, float)` callback publishes the restore ID
+and viewport fraction before changing density. Ordinary scrolling updates those
+resize inputs without initiating a scroll restore. Pinch blocks tile activation
+until all contacts lift, including the remaining finger after a two-finger pinch.
 
 The reader OSD's Pages action opens the current chapter overview. Selecting a
 tile returns to that page in the existing reading mode; Back restores the saved
 page, intra-page position, zoom and pan. Merely opening or scrolling the overview
 and loading thumbnails does not write reading progress or History.
 
-A Gallery-designated title opens the grid directly with its title and image
-count. Multiple source chapters remain selectable groups; a single group has no
-intermediate chapter row. The existing EntryMenu adds Presentation with
+A Gallery-designated title opens the grid directly with its title and one image
+count in the controls row. Multiple source chapters remain selectable groups; a
+single group has no intermediate chapter row. The existing EntryMenu adds Presentation with
 Default/Reader/Gallery, and collection menus retain library/status/category
 controls plus Metadata and Download. Metadata fetch begins only after the
 explicit Metadata action. Overrides take precedence over optional addon hints
@@ -387,6 +396,11 @@ an independent clear action alongside chapter maintenance; derivatives share
 the chapter disk quota. Clearing thumbnails preserves original pages, downloads,
 imports and library state. Live retained thumbnail pixels use 8 MiB plus an
 8 MiB renderer reserve, separately from bounded source/decoder allocations.
+Gallery center-square derivatives are at most 320px and shrink to the admitted
+tiles' fair share. Density reflow releases UI images and completion leases before
+recycling loaded pixels on the worker, including when disk caching is disabled;
+newly visible tiles then load normally. Gallery derivatives use their own cache
+recipe while existing manga derivative keys remain valid.
 Progressive JPEG XL previews use available prefix pixels directly without
 re-encoding or assuming a fixed byte fraction.
 

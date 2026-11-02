@@ -91,6 +91,7 @@ export component AppWindow inherits Window {
     callback overview-visible-range(int, int, int);
     callback overview-anchor(string, float);
     callback overview-density-changed(int);
+    callback overview-zoom-requested(int, string, float);
     callback overview-group-selected(int);
     callback overview-back();
     callback overview-current();
@@ -1224,6 +1225,7 @@ export component AppWindow inherits Window {
                             visible-range(first,last,columns) => { root.overview-visible-range(first,last,columns); }
                             anchor(id,fraction) => { root.overview-anchor(id,fraction); }
                             density-changed(value) => { root.overview-density-changed(value); }
+                            zoom-requested(value,id,fraction) => { root.overview-zoom-requested(value,id,fraction); }
                             group-selected(index) => { root.overview-group-selected(index); }
                             back => { root.overview-back(); }
                             current => { root.overview-current(); }

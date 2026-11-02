@@ -20,8 +20,8 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `src/artwork.rs` | Kit decoded-poster LRU and encoded variants, synchronous cross-page hits, source permits, UI handles, four bounded fetchers, serialized display decoding, independent bounded cache encoding, and legacy artwork migration |
 | `src/chapter_cache.rs` | Kit-backed disposable viewed pages and thumbnail derivatives sharing one disk namespace/quota, authorization scopes, chapter-group eviction/active leases, filtered thumbnail clear and bounded background encoding |
 | `src/page_inventory.rs`, `tests/page_inventory.rs` | Reader-free stable page/resource inventory; source-free downloaded/imported metadata and selection-time original integrity checks |
-| `src/page_overview.rs`, `src/gallery_presentation.rs` | Shared overview orchestration, reader anchor restoration, gallery-first entry/groups, explicit metadata and full-resolution selection; native controller regressions live beside these modules |
-| `src/page_thumbnails.rs`, `src/decode_admission.rs` | Lazy viewport-bounded thumbnail worker, leased pixels, direct progressive JXL prefixes and shared foreground-first heavy decode admission; service/admission regressions live beside the modules |
+| `src/page_overview.rs`, `src/gallery_presentation.rs` | Shared overview orchestration, reader anchor restoration, atomic focal gallery density changes, gallery-first entry/groups, explicit metadata and full-resolution selection; native controller regressions live beside these modules |
+| `src/page_thumbnails.rs`, `src/decode_admission.rs` | Lazy viewport-bounded thumbnail worker, mode-specific derivatives, adaptive gallery pixel leases/reflow recycling, direct progressive JXL prefixes and shared foreground-first heavy decode admission; service/admission regressions live beside the modules |
 | `src/thumbnail_cache_settings.rs` | Thumbnail usage/clear callbacks; invalidates live work and UI references while preserving originals and downloads |
 | `src/reader_settings.rs`, `src/reader_settings_ui.rs` | Durable global reader defaults, source-local series layout/orientation overrides, cached effective snapshots and fallible UI rollback |
 | `src/reader_controls.rs`, `src/reader_navigation.rs` | Nova-style OSD actions, source-anchored 0.5×–8× zoom/seek, motion-setting-aware double-tap animation, zoomed tap-zone bypass, Mihon tap maps, mode inheritance and Android/desktop preference projection |
@@ -67,7 +67,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `crates/ui/reader-context-menu.slint` | Normal selection save/copy plus optional `(simple)` viewport actions, stationary-hold/right-click handling, clamping, keyboard navigation and export feedback |
 | `crates/ui/reader-pager.slint`, `tests/reader_pager.rs` | Touch/mouse gallery dragging and wheel paging in reading order, adjacent-page motion and bounded settling; zoomed artwork yields to image panning |
 | `crates/ui/reader-zoom.slint` | Native pinch scale/moving-midpoint lifecycle and remaining-finger guard; `app.slint` forwards `reader-zoom-by` and `reader-transform` into reader controls, while image interactions consume actual Ctrl+wheel modifiers |
-| `crates/ui/page-overview.slint`, `crates/ui/page-thumbnail.slint`, `tests/page_overview.rs` | Shared chapter/collection thumbnail grid with Slint ListView row virtualization, stable-ID selection, RTL column placement, density and logical viewport-anchor restoration; native interaction and opt-in raster previews |
+| `crates/ui/page-overview.slint`, `crates/ui/page-thumbnail.slint`, `tests/page_overview.rs` | Shared row-virtualized overview with labeled manga pages or edge-to-edge square gallery tiles, stable-ID selection, RTL columns, focal pinch/Ctrl+wheel density and logical viewport-anchor restoration; native interaction and opt-in raster previews |
 | `crates/ui/navigation.slint` | Nova’s 64px icon rail, flat five-tab bottom bar, icon feedback and keyboard navigation |
 | `crates/ui/controls.slint`, `crates/ui/page-header.slint` | Thin Nova Kit control adapters and Nova’s PageHeader; shared palette, typography and accessibility |
 | `crates/ui/more.slint` | Retained Nova-style More/Settings landings, nested slide/fade layers, scroll/focus restoration and local import/categories/data/About pages |
@@ -301,7 +301,14 @@ fullscreen viewer, then visible thumbnails, then prefetch; an active decode is
 non-preemptible. Live thumbnail leases include service, mailbox and UI ownership
 within 8 MiB, with another 8 MiB reserved for the renderer's previous frame;
 source and heavy-decode allocations remain additional and image-policy bounded.
-Tall pages use a marked top preview. Tile errors stay local; authentication,
+Gallery derivatives use center-cropped squares up to 320px, adaptively reduced
+to fit the admitted tiles within the live pixel budget. Their cache recipe is
+separate from the existing manga derivative keys; manga pages retain whole-page
+or marked tall-page top previews. Gallery density reflow first releases UI image
+handles and completion leases, then revokes the old worker epoch and recycles
+loaded pixels at the new fair share before fetching newly visible tiles. This
+also avoids refetching loaded tiles when disk caching is disabled.
+Tile errors stay local; authentication,
 challenge, rate-limit and unavailable-source errors pause that source until Retry.
 Generation, source authorization, image-policy revision and cache invalidation
 guard publication. Local/remote progressive JXL uses a bounded prefix directly,
@@ -443,10 +450,10 @@ generate all installable ZIPs; Reader does not depend on a sibling checkout.
 - Automatic/manual reader mode and per-series overrides: `src/reader_modes.rs`, `docs/reader-modes.md`, `tests/reader_modes.rs`.
 - Effective-direction chapter/page controls and progress slider: `crates/ui/reader-osd.slint`, `tests/reader_mode_controls.rs`.
 - Paged gallery dragging, zoom/pan and fitted image geometry: `crates/ui/reader-pager.slint`, `crates/ui/app.slint`, `src/reader_controls.rs`, `tests/reader_pager.rs`.
-- Shared page/image overview grid, reader return anchors and native previews: `src/page_overview.rs`, `crates/ui/page-overview.slint`, `crates/ui/page-thumbnail.slint`, `tests/page_overview.rs`.
+- Shared page/image overview grid, focal gallery density changes (`overview-zoom-requested`), reader return/resize anchors and native previews: `src/page_overview.rs`, `crates/ui/app.slint`, `crates/ui/page-overview.slint`, `crates/ui/page-thumbnail.slint`, `tests/page_overview.rs`.
 - Gallery-first routing, groups, explicit Metadata/Download and collection progress: `src/gallery_presentation.rs`, `src/reader_open.rs`, `src/reader_controls.rs`.
 - Reader-free inventory and selection-time original integrity: `src/page_inventory.rs`, `DownloadStore::page_inventory`, `tests/page_inventory.rs`.
-- Lazy thumbnail admission, direct progressive JXL prefixes and pixel leases: `src/page_thumbnails.rs`, `src/decode_admission.rs`, `crates/reader-sources/src/lib.rs::Source::fetch_page_until`.
+- Lazy thumbnail admission, gallery square recipes/adaptive reflow recycling, direct progressive JXL prefixes and pixel leases: `src/page_thumbnails.rs`, `src/decode_admission.rs`, `crates/reader-sources/src/lib.rs::Source::fetch_page_until`.
 - Shared chapter/thumbnail disk quota and independent thumbnail clear: `src/chapter_cache.rs`, `src/thumbnail_cache_settings.rs`, `crates/ui/image-storage-settings.slint`.
 - Desktop Ctrl+wheel, Android pinch, source-point anchoring and magnified tap behavior: `crates/ui/reader-zoom.slint`, `crates/ui/reader-context-menu.slint`, `src/reader_controls.rs` (native production-controller regression).
 - Pinned Slint raw pinch scale correction and provenance: `vendor/i-slint-core/NOVA_PATCH.md`, `vendor/i-slint-core/input.rs`.

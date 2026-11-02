@@ -17,6 +17,7 @@ use std::{
 const PIXEL_BUDGET: usize = 8 * 1024 * 1024; // Other 8MiB reserves renderer's previous frame.
 const WIDTH: u32 = 160;
 const HEIGHT: u32 = 240;
+const GALLERY_SIDE: u32 = 320;
 const PREFIX_MAGIC: &[u8; 8] = b"NRTHJXL1";
 type Current = Arc<dyn Fn() -> bool + Send + Sync>;
 type Pixels = SharedPixelBuffer<Rgba8Pixel>;
@@ -24,7 +25,7 @@ type Publish = Arc<dyn Fn(Completion) + Send + Sync>;
 type Result<T> = std::result::Result<T, String>;
 
 #[derive(Default)]
-struct Budget(Mutex<usize>);
+struct Budget(Mutex<usize>, Condvar);
 struct Reservation {
     budget: Arc<Budget>,
     bytes: usize,
@@ -32,6 +33,7 @@ struct Reservation {
 impl Drop for Reservation {
     fn drop(&mut self) {
         *self.budget.0.lock().unwrap_or_else(|e| e.into_inner()) -= self.bytes;
+        self.budget.1.notify_all();
     }
 }
 #[derive(Clone)]
@@ -80,7 +82,34 @@ struct Ready {
     reusable: Current,
     revision: u64,
 }
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum RenderingMode {
+    #[default]
+    Page,
+    Gallery,
+}
+impl RenderingMode {
+    fn width(self) -> u32 {
+        if self == Self::Gallery {
+            GALLERY_SIDE
+        } else {
+            WIDTH
+        }
+    }
+    fn top_preview(self, dimensions: PageDimensions) -> bool {
+        self == Self::Page && dimensions.height >= dimensions.width.saturating_mul(4)
+    }
+    fn cache_identity(self, mut identity: Vec<u8>) -> Vec<u8> {
+        // Preserve existing manga derivatives. Photo squares have an independent
+        // recipe, so they can never reuse a page contain/top-window derivative.
+        if self == Self::Gallery {
+            identity.extend_from_slice(b"\0gallery-square-center-320-v1");
+        }
+        identity
+    }
+}
 struct State {
+    mode: RenderingMode,
     generation: u64,
     epoch: u64,
     inventory: Arc<Vec<Resource>>,
@@ -89,6 +118,7 @@ struct State {
     completed: BTreeSet<usize>,
     failed: BTreeSet<usize>,
     ready: BTreeMap<usize, Ready>,
+    recycled: BTreeMap<usize, Ready>,
     paused: BTreeMap<String, String>,
     active: Option<(usize, CancelToken)>,
     stopped: bool,
@@ -96,6 +126,7 @@ struct State {
 impl Default for State {
     fn default() -> Self {
         Self {
+            mode: RenderingMode::Page,
             generation: 0,
             epoch: 0,
             inventory: Arc::new(Vec::new()),
@@ -104,6 +135,7 @@ impl Default for State {
             completed: BTreeSet::new(),
             failed: BTreeSet::new(),
             ready: BTreeMap::new(),
+            recycled: BTreeMap::new(),
             paused: BTreeMap::new(),
             active: None,
             stopped: false,
@@ -137,17 +169,51 @@ impl PageThumbnails {
         Self { shared }
     }
     pub fn replace_inventory(&self, generation: u64, inventory: Arc<Vec<Resource>>) {
+        self.replace_inventory_with_mode(generation, inventory, RenderingMode::Page);
+    }
+    /// Photo grids use square center crops; page overview keeps whole-page and
+    /// explicitly labelled tall-page top previews.
+    pub fn replace_inventory_for_gallery(&self, generation: u64, inventory: Arc<Vec<Resource>>) {
+        self.replace_inventory_with_mode(generation, inventory, RenderingMode::Gallery);
+    }
+    fn replace_inventory_with_mode(
+        &self,
+        generation: u64,
+        inventory: Arc<Vec<Resource>>,
+        mode: RenderingMode,
+    ) {
         let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((_, token)) = state.active.take() {
             token.cancel();
         }
         let epoch = state.epoch.wrapping_add(1);
         *state = State {
+            mode,
             generation,
             epoch,
             inventory,
             ..Default::default()
         };
+        self.shared.changed.notify_all();
+    }
+    /// The event loop first clears its old Image handles and Thumbnail leases.
+    /// Keep decoded pixels as bounded recycle inputs, revoke old completions,
+    /// and wait for the new viewport before selecting replacement resolutions.
+    /// Disk-disabled galleries can reflow without refetching existing tiles.
+    pub fn prepare_gallery_reflow(&self, generation: u64) {
+        let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.generation != generation {
+            return;
+        }
+        state.epoch = state.epoch.wrapping_add(1);
+        if let Some((_, token)) = state.active.take() {
+            token.cancel();
+        }
+        let ready = std::mem::take(&mut state.ready);
+        state.recycled.extend(ready);
+        state.completed.clear();
+        state.desired.clear();
+        state.visible.clear();
         self.shared.changed.notify_all();
     }
     /// Visible tile range is half-open. Admit exactly its rows plus one adjacent
@@ -177,6 +243,11 @@ impl PageThumbnails {
         });
         let ready = state.ready.keys().copied().collect::<BTreeSet<_>>();
         state.completed.retain(|index| ready.contains(index));
+        state.recycled.retain(|index, entry| {
+            desired.contains(index)
+                && (entry.reusable)()
+                && entry.revision == reader_engine::limits_revision()
+        });
         state.failed.retain(|index| desired.contains(index));
         let hits = state
             .ready
@@ -214,6 +285,7 @@ impl PageThumbnails {
         state.desired.clear();
         state.visible.clear();
         state.ready.clear();
+        state.recycled.clear();
         state.completed.clear();
         state.failed.clear();
         self.shared.changed.notify_all();
@@ -306,26 +378,34 @@ fn source_id(resource: &Resource) -> Option<String> {
 }
 fn run(shared: Arc<Shared>) {
     loop {
-        let (generation, epoch, index, resource, token, priority) = {
+        let (generation, epoch, index, resource, token, priority, mode, recycled) = {
             let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
             loop {
                 if state.stopped {
                     return;
                 }
                 let next = state
-                    .visible
-                    .iter()
-                    .chain(state.desired.iter())
+                    .recycled
+                    .keys()
                     .copied()
-                    .find(|index| {
-                        !state.completed.contains(index)
-                            && !state.failed.contains(index)
-                            && source_id(&state.inventory[*index])
-                                .is_none_or(|source| !state.paused.contains_key(&source))
+                    .find(|index| state.desired.contains(index))
+                    .or_else(|| {
+                        state
+                            .visible
+                            .iter()
+                            .chain(state.desired.iter())
+                            .copied()
+                            .find(|index| {
+                                !state.completed.contains(index)
+                                    && !state.failed.contains(index)
+                                    && source_id(&state.inventory[*index])
+                                        .is_none_or(|source| !state.paused.contains_key(&source))
+                            })
                     });
                 if let Some(index) = next {
                     let token = CancelToken::default();
                     state.active = Some((index, token.clone()));
+                    let recycled = state.recycled.remove(&index);
                     break (
                         state.generation,
                         state.epoch,
@@ -337,6 +417,8 @@ fn run(shared: Arc<Shared>) {
                         } else {
                             Priority::Prefetch
                         },
+                        state.mode,
+                        recycled,
                     );
                 }
                 state = shared
@@ -355,7 +437,11 @@ fn run(shared: Arc<Shared>) {
         );
         let revision = reader_engine::limits_revision();
         let result = reader_engine::with_current_limits(|| {
-            load(&shared, &resource, &token, current.clone(), priority)
+            if let Some(recycled) = recycled {
+                recycle_ready(&shared, recycled, &current)
+            } else {
+                load(&shared, &resource, &token, current.clone(), priority, mode)
+            }
         });
         if !current() || revision != reader_engine::limits_revision() {
             continue;
@@ -425,6 +511,74 @@ fn run(shared: Arc<Shared>) {
         drop(state);
         (shared.publish)(completion);
     }
+}
+fn recycle_ready(shared: &Arc<Shared>, old: Ready, current: &Current) -> Result<Ready> {
+    if !current() || !(old.reusable)() || old.revision != reader_engine::current_limits_revision() {
+        return Err("operation cancelled".into());
+    }
+    let count = shared
+        .state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .desired
+        .len()
+        .max(1);
+    let allowance = PIXEL_BUDGET / count;
+    if old.thumbnail.pixels.as_bytes().len() <= allowance {
+        return Ok(old);
+    }
+    let pixels = &old.thumbnail.pixels;
+    let (width, height) = budget_dimensions(pixels.width(), pixels.height(), allowance)?;
+    let source = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
+        pixels.width(),
+        pixels.height(),
+        pixels.as_bytes(),
+    )
+    .ok_or_else(|| "Invalid thumbnail pixels".to_string())?;
+    // Borrow the existing backing; only one small replacement is materialized.
+    // Root has dropped UI ownership. Renderer references use the other8MiB.
+    let replacement = image::imageops::resize(
+        &source,
+        width,
+        height,
+        image::imageops::FilterType::Triangle,
+    );
+    let Ready {
+        thumbnail,
+        dimensions,
+        top_preview,
+        current: proof,
+        reusable,
+        revision,
+    } = old;
+    drop(thumbnail); // Free the old reservation before admitting its replacement.
+    let bytes = replacement.as_raw().len();
+    loop {
+        if !current() || !reusable() {
+            return Err("operation cancelled".into());
+        }
+        let used = shared.budget.0.lock().unwrap_or_else(|e| e.into_inner());
+        if used.saturating_add(bytes) <= PIXEL_BUDGET {
+            break;
+        }
+        // Queued old-generation UI closures can briefly own their old lease.
+        // Let the event loop discard those closures rather than failing tiles.
+        drop(
+            shared
+                .budget
+                .1
+                .wait_timeout(used, std::time::Duration::from_millis(25))
+                .unwrap_or_else(|e| e.into_inner()),
+        );
+    }
+    Ok(Ready {
+        thumbnail: Thumbnail::new(replacement, &shared.budget)?,
+        dimensions,
+        top_preview,
+        current: proof,
+        reusable,
+        revision,
+    })
 }
 #[cfg(test)]
 fn digest(bytes: &[u8]) -> String {
@@ -498,6 +652,7 @@ fn load(
     token: &CancelToken,
     current: Current,
     priority: Priority,
+    mode: RenderingMode,
 ) -> Result<Ready> {
     let cache_revision = shared.cache.revision();
     let cache = shared.cache.clone();
@@ -556,7 +711,7 @@ fn load(
             )
         }
     };
-    let key = ChapterCache::thumbnail_key(&resource.chapter, &identity);
+    let key = ChapterCache::thumbnail_key(&resource.chapter, &mode.cache_identity(identity));
     let active_current = current.clone();
     let active_proof = proof.clone();
     let active_cache = cache_current.clone();
@@ -568,12 +723,12 @@ fn load(
     };
     let mut reused_resource = stored.is_some();
     let mut decoded = if let Some(bytes) = stored.as_ref() {
-        Some(decode_derivative(bytes, priority, active.clone())?)
+        Some(decode_derivative(bytes, priority, active.clone(), mode)?)
     } else {
         None
     };
     if decoded.is_none() {
-        let mut preview = Preview::new(priority, active.clone());
+        let mut preview = Preview::new(priority, active.clone(), mode);
         let bytes = match &resource.kind {
             ResourceKind::Unavailable { message } => return Err(message.clone()),
             ResourceKind::Local {
@@ -631,8 +786,12 @@ fn load(
             }
         };
         if let Some((image, dimensions, consumed)) = preview.take() {
-            let top = dimensions.height >= dimensions.width.saturating_mul(4);
-            let image = fit_preview(image, top);
+            let top = mode.top_preview(dimensions);
+            let image = if mode == RenderingMode::Gallery {
+                center_square(image)?
+            } else {
+                fit_preview(image, top)
+            };
             let mut payload = PREFIX_MAGIC.to_vec();
             payload.extend_from_slice(&dimensions.width.to_le_bytes());
             payload.extend_from_slice(&dimensions.height.to_le_bytes());
@@ -649,8 +808,13 @@ fn load(
                 .ok_or_else(|| "operation cancelled".to_string())?;
             let dimensions = reader_engine::inspect_image(&bytes, reader_engine::current_limits())
                 .map_err(|e| e.to_string())?;
-            let top = dimensions.height >= dimensions.width.saturating_mul(4);
-            let image = if top {
+            let top = mode.top_preview(dimensions);
+            let image = if mode == RenderingMode::Gallery {
+                center_square(
+                    reader_engine::decode_image(&bytes, reader_engine::current_limits())
+                        .map_err(|e| e.to_string())?,
+                )?
+            } else if top {
                 let bytes = Arc::new(bytes);
                 let mut decoder = reader_engine::DisplayDecoder::default();
                 let height = (u64::from(dimensions.height)
@@ -767,10 +931,11 @@ struct Preview {
     image: Option<(image::RgbaImage, PageDimensions)>,
     priority: Priority,
     current: Current,
+    mode: RenderingMode,
     permit: Option<crate::decode_admission::Permit>,
 }
 impl Preview {
-    fn new(priority: Priority, current: Current) -> Self {
+    fn new(priority: Priority, current: Current, mode: RenderingMode) -> Self {
         Self {
             probe: Vec::new(),
             consumed: 0,
@@ -779,6 +944,7 @@ impl Preview {
             image: None,
             priority,
             current,
+            mode,
             permit: None,
         }
     }
@@ -814,7 +980,7 @@ impl Preview {
             let mut decoder = nova_image::ProgressiveJxlDecoder::new(
                 reader_engine::current_limits(),
                 nova_image::JxlPreviewOptions {
-                    max_width: WIDTH,
+                    max_width: self.mode.width(),
                     max_height: 65536,
                     max_bytes: 4 * 1024 * 1024,
                 },
@@ -845,22 +1011,77 @@ fn fit_pixel_budget(image: image::RgbaImage, max_bytes: usize) -> Result<image::
     if image.as_raw().len() <= max_bytes {
         return Ok(image);
     }
-    let pixels = max_bytes / 4;
-    if pixels == 0 {
-        return Err("Thumbnail memory budget reached".into());
-    }
-    let scale =
-        (pixels as f64 / (u64::from(image.width()) * u64::from(image.height())) as f64).sqrt();
-    let width = ((f64::from(image.width()) * scale).floor().max(1.) as u32)
-        .min(pixels.min(u32::MAX as usize) as u32);
-    let height = ((f64::from(image.height()) * scale).floor().max(1.) as u32)
-        .min((pixels / width as usize).min(u32::MAX as usize) as u32);
+    let (width, height) = budget_dimensions(image.width(), image.height(), max_bytes)?;
     Ok(image::imageops::resize(
         &image,
         width,
         height,
         image::imageops::FilterType::Triangle,
     ))
+}
+fn budget_dimensions(
+    source_width: u32,
+    source_height: u32,
+    max_bytes: usize,
+) -> Result<(u32, u32)> {
+    let pixels = max_bytes / 4;
+    if pixels == 0 {
+        return Err("Thumbnail memory budget reached".into());
+    }
+    let scale =
+        (pixels as f64 / (u64::from(source_width) * u64::from(source_height)) as f64).sqrt();
+    let width = ((f64::from(source_width) * scale).floor().max(1.) as u32)
+        .min(pixels.min(u32::MAX as usize) as u32);
+    let height = ((f64::from(source_height) * scale).floor().max(1.) as u32)
+        .min((pixels / width as usize).min(u32::MAX as usize) as u32);
+    Ok((width, height))
+}
+/// Render only the center square. Direct bilinear sampling avoids allocating a
+/// native square crop or a long resized strip beside the admitted original.
+fn center_square(original: image::RgbaImage) -> Result<image::RgbaImage> {
+    let source_side = original.width().min(original.height());
+    let side = source_side.min(GALLERY_SIDE);
+    if side == 0 {
+        return Err("Invalid thumbnail dimensions".into());
+    }
+    if original.width() == side && original.height() == side {
+        return Ok(original);
+    }
+    let output_bytes = u64::from(side) * u64::from(side) * 4;
+    if (original.as_raw().len() as u64).saturating_add(output_bytes)
+        > reader_engine::current_limits().max_decoded_bytes
+    {
+        return Err("image exceeds supported limits".into());
+    }
+    let mut output = image::RgbaImage::new(side, side);
+    let left = f64::from(original.width() - source_side) / 2.;
+    let top = f64::from(original.height() - source_side) / 2.;
+    let scale = f64::from(source_side) / f64::from(side);
+    for y in 0..side {
+        let sy =
+            (top + (f64::from(y) + 0.5) * scale - 0.5).clamp(0., f64::from(original.height() - 1));
+        let y0 = sy.floor() as u32;
+        let y1 = (y0 + 1).min(original.height() - 1);
+        let fy = sy - f64::from(y0);
+        for x in 0..side {
+            let sx = (left + (f64::from(x) + 0.5) * scale - 0.5)
+                .clamp(0., f64::from(original.width() - 1));
+            let x0 = sx.floor() as u32;
+            let x1 = (x0 + 1).min(original.width() - 1);
+            let fx = sx - f64::from(x0);
+            let a = original.get_pixel(x0, y0);
+            let b = original.get_pixel(x1, y0);
+            let c = original.get_pixel(x0, y1);
+            let d = original.get_pixel(x1, y1);
+            let pixel = output.get_pixel_mut(x, y);
+            for channel in 0..4 {
+                let upper = f64::from(a[channel]) * (1. - fx) + f64::from(b[channel]) * fx;
+                let lower = f64::from(c[channel]) * (1. - fx) + f64::from(d[channel]) * fx;
+                pixel[channel] = (upper * (1. - fy) + lower * fy).round().clamp(0., 255.) as u8;
+            }
+        }
+    }
+    Ok(output)
 }
 fn fit_preview(image: image::RgbaImage, top: bool) -> image::RgbaImage {
     if top {
@@ -906,12 +1127,13 @@ fn decode_derivative(
     bytes: &[u8],
     priority: Priority,
     current: Current,
+    mode: RenderingMode,
 ) -> Result<(image::RgbaImage, PageDimensions, bool)> {
     let (width, height) = inspect_derivative(bytes)?;
     let dimensions = PageDimensions { width, height };
-    let top = height >= width.saturating_mul(4);
+    let top = mode.top_preview(dimensions);
     let image = if &bytes[..8] == PREFIX_MAGIC {
-        let mut preview = Preview::new(priority, current.clone());
+        let mut preview = Preview::new(priority, current.clone(), mode);
         for chunk in bytes[16..].chunks(16 * 1024) {
             if preview.feed(chunk)?.is_break() {
                 break;
@@ -923,7 +1145,11 @@ fn decode_derivative(
         if source != dimensions {
             return Err("Thumbnail dimensions changed".into());
         }
-        fit_preview(image, top)
+        if mode == RenderingMode::Gallery {
+            center_square(image)?
+        } else {
+            fit_preview(image, top)
+        }
     } else {
         let _permit = SHARED
             .acquire(priority, || current())
@@ -931,8 +1157,12 @@ fn decode_derivative(
         reader_engine::decode_display_image(
             &bytes[16..],
             reader_engine::current_limits(),
-            WIDTH,
-            HEIGHT,
+            mode.width(),
+            if mode == RenderingMode::Gallery {
+                GALLERY_SIDE
+            } else {
+                HEIGHT
+            },
         )
         .map_err(|e| e.to_string())?
     };
@@ -1029,6 +1259,15 @@ mod tests {
         }
     }
     fn remote_fixture() -> (tempfile::TempDir, Vec<Resource>, Arc<Transport>) {
+        let mut png = Cursor::new(Vec::new());
+        image::RgbaImage::new(160, 240)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        remote_fixture_with_body(png.into_inner())
+    }
+    fn remote_fixture_with_body(
+        body: Vec<u8>,
+    ) -> (tempfile::TempDir, Vec<Resource>, Arc<Transport>) {
         let directory = tempfile::tempdir().unwrap();
         let manifest = serde_json::json!({"formatVersion":2,"contract":"nova-reader1","api":"^1.0","id":"thumb-network","name":"Thumbnail fixture","version":"1.0.0","language":"en","entry":"main.js","permissions":{"domains":["example.com"]},"capabilities":["pages"]});
         let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
@@ -1048,14 +1287,10 @@ mod tests {
             .install_zip(&zip.finish().unwrap().into_inner())
             .unwrap();
         registry.set_enabled("thumb-network", true).unwrap();
-        let mut png = Cursor::new(Vec::new());
-        image::RgbaImage::new(160, 240)
-            .write_to(&mut png, image::ImageFormat::Png)
-            .unwrap();
         let transport = Arc::new(Transport {
             status: std::sync::atomic::AtomicU16::new(429),
             calls: std::sync::atomic::AtomicUsize::new(0),
-            body: png.into_inner(),
+            body,
             scope: std::sync::atomic::AtomicU64::new(0),
             headers: Mutex::new(Vec::new()),
         });
@@ -1085,6 +1320,154 @@ mod tests {
             .collect();
         (directory, resources, transport)
     }
+    fn bands(width: u32, height: u32) -> image::RgbaImage {
+        image::RgbaImage::from_fn(width, height, |x, y| {
+            let coordinate = if width > height { x } else { y };
+            let total = width.max(height);
+            image::Rgba(if coordinate < total / 3 {
+                [220, 0, 0, 255]
+            } else if coordinate >= total * 2 / 3 {
+                [0, 220, 0, 255]
+            } else {
+                [0, 0, 220, 255]
+            })
+        })
+    }
+    fn png_bytes(image: &image::RgbaImage) -> Vec<u8> {
+        let mut bytes = Cursor::new(Vec::new());
+        image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        bytes.into_inner()
+    }
+    #[test]
+    fn photo_square_samples_landscape_and_portrait_centers_without_page_letterboxing() {
+        for (width, height) in [(960, 160), (160, 480), (160, 960)] {
+            let original = bands(width, height);
+            let square = center_square(original.clone()).unwrap();
+            assert_eq!((square.width(), square.height()), (160, 160));
+            assert!(square.pixels().all(|pixel| pixel.0 == [0, 0, 220, 255]));
+            let page = fit_preview(original, false);
+            assert_ne!(page.width(), page.height());
+            assert_eq!(page.get_pixel(0, 0).0, [220, 0, 0, 255]);
+            assert_eq!(
+                page.get_pixel(page.width() - 1, page.height() - 1).0,
+                [0, 220, 0, 255]
+            );
+        }
+    }
+    #[test]
+    fn remote_gallery_center_square_and_page_top_have_isolated_reusable_cache_recipes() {
+        use std::sync::atomic::Ordering;
+        let (directory, mut resources, transport) =
+            remote_fixture_with_body(png_bytes(&bands(640, 3840)));
+        resources.truncate(1);
+        let inventory = Arc::new(resources);
+        transport.status.store(200, Ordering::Release);
+        let cache = Arc::new(ChapterCache::test_cache(
+            directory.path().join("cache"),
+            4 * 1024 * 1024,
+        ));
+        let (sender, receiver) = mpsc::channel();
+        let service = PageThumbnails::new(
+            cache.clone(),
+            Arc::new(move |completion| {
+                let _ = sender.send(completion);
+            }),
+        );
+        service.replace_inventory(1, inventory.clone());
+        service.viewport(1, 0, 1, 1);
+        let page = receiver.recv_timeout(Duration::from_secs(20)).unwrap();
+        let page_pixels = &page.result.as_ref().unwrap().pixels;
+        assert!(page.top_preview);
+        assert_eq!((page_pixels.width(), page_pixels.height()), (160, 240));
+        assert_eq!(&page_pixels.as_bytes()[..4], &[220, 0, 0, 255]);
+        service.replace_inventory_for_gallery(2, inventory.clone());
+        service.viewport(2, 0, 1, 1);
+        let gallery = receiver.recv_timeout(Duration::from_secs(20)).unwrap();
+        let gallery_pixels = &gallery.result.as_ref().unwrap().pixels;
+        assert!(!gallery.top_preview);
+        assert_eq!(
+            (gallery_pixels.width(), gallery_pixels.height()),
+            (320, 320)
+        );
+        assert_eq!(&gallery_pixels.as_bytes()[..4], &[0, 0, 220, 255]);
+        assert!(!page.is_current());
+        assert_eq!(transport.calls.load(Ordering::Acquire), 2);
+        assert_eq!(cache.thumbnail_usage().1, 2);
+        service.replace_inventory(3, inventory.clone());
+        service.viewport(3, 0, 1, 1);
+        let restored = receiver.recv_timeout(Duration::from_secs(20)).unwrap();
+        assert!(restored.top_preview);
+        assert_eq!(
+            &restored.result.as_ref().unwrap().pixels.as_bytes()[..4],
+            &[220, 0, 0, 255]
+        );
+        assert_eq!(transport.calls.load(Ordering::Acquire), 2);
+        service.replace_inventory_for_gallery(4, inventory);
+        service.viewport(4, 0, 1, 1);
+        let gallery_again = receiver.recv_timeout(Duration::from_secs(20)).unwrap();
+        let pixels = &gallery_again.result.as_ref().unwrap().pixels;
+        assert_eq!((pixels.width(), pixels.height()), (320, 320));
+        assert!(!gallery_again.top_preview);
+        assert_eq!(&pixels.as_bytes()[..4], &[0, 0, 220, 255]);
+        assert_eq!(transport.calls.load(Ordering::Acquire), 2);
+        service.cancel();
+    }
+    #[test]
+    fn saved_gallery_square_works_offline_but_derivatives_cannot_replace_missing_originals() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("saved.png");
+        let bytes = png_bytes(&bands(160, 960));
+        std::fs::write(&path, &bytes).unwrap();
+        let resource = Resource {
+            chapter: ChapterId::new(SeriesId::new("removed-addon", "series"), "chapter"),
+            id: "saved".into(),
+            kind: ResourceKind::Local {
+                path: path.clone(),
+                expected_bytes: bytes.len() as u64,
+                sha256: digest(&bytes),
+            },
+        };
+        let inventory = Arc::new(vec![resource.clone()]);
+        let cache = Arc::new(ChapterCache::test_cache(
+            directory.path().join("cache"),
+            4 * 1024 * 1024,
+        ));
+        let (sender, receiver) = mpsc::channel();
+        let service = PageThumbnails::new(
+            cache.clone(),
+            Arc::new(move |completion| {
+                let _ = sender.send(completion);
+            }),
+        );
+        service.replace_inventory(1, inventory.clone());
+        service.viewport(1, 0, 1, 1);
+        let page = receiver.recv_timeout(Duration::from_secs(20)).unwrap();
+        assert!(page.top_preview);
+        service.replace_inventory_for_gallery(2, inventory.clone());
+        service.viewport(2, 0, 1, 1);
+        let gallery = receiver.recv_timeout(Duration::from_secs(20)).unwrap();
+        assert!(!gallery.top_preview);
+        assert_eq!(
+            &gallery.result.as_ref().unwrap().pixels.as_bytes()[..4],
+            &[0, 0, 220, 255]
+        );
+        assert!(resource.read(&CancelToken::default()).is_ok());
+        assert_eq!(cache.thumbnail_usage().1, 2);
+        std::fs::remove_file(path).unwrap();
+        assert!(!gallery.is_current());
+        service.replace_inventory_for_gallery(3, inventory);
+        service.viewport(3, 0, 1, 1);
+        assert!(
+            receiver
+                .recv_timeout(Duration::from_secs(20))
+                .unwrap()
+                .result
+                .is_err()
+        );
+        assert!(resource.read(&CancelToken::default()).is_err());
+        assert_eq!(cache.thumbnail_usage().1, 2);
+        service.cancel();
+    }
     #[test]
     fn source_rate_limit_pauses_all_queued_tiles_until_explicit_retry_preserving_headers() {
         use std::sync::atomic::Ordering;
@@ -1106,6 +1489,11 @@ mod tests {
         assert!(failure.result.is_err());
         assert!(service.paused().is_some());
         assert!(receiver.recv_timeout(Duration::from_millis(100)).is_err());
+        assert_eq!(transport.calls.load(Ordering::Acquire), 1);
+        service.prepare_gallery_reflow(1);
+        service.viewport(1, 0, 6, 3);
+        assert!(service.paused().is_some());
+        assert!(receiver.recv_timeout(Duration::from_millis(60)).is_err());
         assert_eq!(transport.calls.load(Ordering::Acquire), 1);
         transport.status.store(200, Ordering::Release);
         service.retry(1);
@@ -1206,11 +1594,129 @@ mod tests {
         assert_eq!(service.retained_bytes(), 0);
     }
     #[test]
+    fn dense_gallery_squares_keep_all_ui_leases_within_shared_live_pixel_allowance() {
+        use std::sync::atomic::Ordering;
+        let (directory, resources, transport) =
+            remote_fixture_with_body(png_bytes(&image::RgbaImage::new(320, 480)));
+        transport.status.store(200, Ordering::Release);
+        let cache = Arc::new(ChapterCache::test_cache(
+            directory.path().join("cache"),
+            4 * 1024 * 1024,
+        ));
+        let (sender, receiver) = mpsc::channel();
+        let service = PageThumbnails::new(
+            cache,
+            Arc::new(move |completion| {
+                let _ = sender.send(completion);
+            }),
+        );
+        service.replace_inventory_for_gallery(8, Arc::new(resources));
+        service.viewport(8, 0, 120, 12);
+        let mut ui_leases = Vec::new();
+        for _ in 0..132 {
+            let completion = receiver.recv_timeout(Duration::from_secs(20)).unwrap();
+            assert!(completion.is_current());
+            assert!(!completion.top_preview);
+            let tile = completion.result.unwrap();
+            assert_eq!(tile.pixels.width(), tile.pixels.height());
+            assert!(tile.pixels.width() <= GALLERY_SIDE);
+            ui_leases.push(tile);
+        }
+        assert_eq!(transport.calls.load(Ordering::Acquire), 132);
+        assert!(
+            ui_leases
+                .iter()
+                .any(|tile| tile.pixels.width() < GALLERY_SIDE)
+        );
+        let bytes = ui_leases
+            .iter()
+            .map(|tile| tile.pixels.as_bytes().len())
+            .sum::<usize>();
+        assert!(bytes <= PIXEL_BUDGET);
+        assert_eq!(service.retained_bytes(), bytes);
+        service.cancel();
+        assert_eq!(service.retained_bytes(), bytes);
+        drop(ui_leases);
+        assert_eq!(service.retained_bytes(), 0);
+    }
+    #[test]
+    fn gallery_density_expansion_rebalances_retained_tiles_without_disk_or_refetching() {
+        use std::sync::atomic::Ordering;
+        let (directory, resources, transport) =
+            remote_fixture_with_body(png_bytes(&image::RgbaImage::new(320, 480)));
+        transport.status.store(200, Ordering::Release);
+        let cache = Arc::new(ChapterCache::test_cache_without_disk(
+            directory.path().join("cache"),
+        ));
+        let (sender, receiver) = mpsc::channel();
+        let service = PageThumbnails::new(
+            cache.clone(),
+            Arc::new(move |completion| {
+                let _ = sender.send(completion);
+            }),
+        );
+        service.replace_inventory_for_gallery(12, Arc::new(resources));
+        service.viewport(12, 0, 12, 12);
+        let mut ui_leases = Vec::new();
+        let mut old_publication_checks = Vec::new();
+        for _ in 0..24 {
+            let completion = receiver.recv_timeout(Duration::from_secs(20)).unwrap();
+            assert!(completion.is_current());
+            old_publication_checks.push(completion.current.clone());
+            ui_leases.push(completion.result.unwrap());
+        }
+        assert_eq!(transport.calls.load(Ordering::Acquire), 24);
+        assert!(service.retained_bytes() >= 7 * 1024 * 1024);
+        assert!(ui_leases.iter().all(|tile| tile.pixels.width() >= 290));
+        assert_eq!(cache.thumbnail_usage(), (0, 0));
+        // One stale queued publication may outlive the event loop's old Image
+        // map. Reflow must wait for its lease, never fail tiles or exceed8MiB.
+        let pending_old_publication = ui_leases[0].clone();
+        drop(ui_leases);
+        service.prepare_gallery_reflow(12);
+        assert!(old_publication_checks.iter().all(|current| !current()));
+        service.viewport(12, 0, 36, 12);
+        assert!(receiver.recv_timeout(Duration::from_millis(60)).is_err());
+        assert_eq!(transport.calls.load(Ordering::Acquire), 24);
+        drop(pending_old_publication);
+        let mut new_ui_leases = Vec::new();
+        let mut indices = BTreeSet::new();
+        for _ in 0..48 {
+            let completion = receiver.recv_timeout(Duration::from_secs(20)).unwrap();
+            assert!(completion.is_current());
+            assert!(!completion.top_preview);
+            indices.insert(completion.index);
+            let tile = completion.result.unwrap();
+            assert_eq!(tile.pixels.width(), tile.pixels.height());
+            assert!(tile.pixels.width() >= 200);
+            new_ui_leases.push(tile);
+        }
+        assert_eq!(indices, (0..48).collect::<BTreeSet<_>>());
+        assert_eq!(transport.calls.load(Ordering::Acquire), 48);
+        let bytes = new_ui_leases
+            .iter()
+            .map(|tile| tile.pixels.as_bytes().len())
+            .sum::<usize>();
+        assert!(bytes <= PIXEL_BUDGET);
+        assert_eq!(service.retained_bytes(), bytes);
+        assert_eq!(cache.thumbnail_usage(), (0, 0));
+        drop(new_ui_leases);
+        service.prepare_gallery_reflow(12);
+        service.viewport(12, 0, 0, 12);
+        assert!(service.shared.state.lock().unwrap().recycled.is_empty());
+        assert_eq!(service.retained_bytes(), 0);
+        service.cancel();
+    }
+    #[test]
     fn progressive_jxl_stops_at_useful_pixels_and_replays_exact_unreencoded_prefix() {
         let bytes =
             include_bytes!("../crates/reader-engine/tests/fixtures/jxl/progressive-rgb.jxl");
         let current: Current = Arc::new(|| true);
-        let mut preview = Preview::new(Priority::VisibleThumbnail, current.clone());
+        let mut preview = Preview::new(
+            Priority::VisibleThumbnail,
+            current.clone(),
+            RenderingMode::Page,
+        );
         let mut consumed = 0;
         for chunk in bytes.chunks(1024) {
             consumed += chunk.len();
@@ -1229,12 +1735,47 @@ mod tests {
         stored.extend_from_slice(&dimensions.width.to_le_bytes());
         stored.extend_from_slice(&dimensions.height.to_le_bytes());
         stored.extend_from_slice(&bytes[..prefix_length]);
-        let (replayed, replayed_dimensions, replayed_top) =
-            decode_derivative(&stored, Priority::VisibleThumbnail, current).unwrap();
+        let (replayed, replayed_dimensions, replayed_top) = decode_derivative(
+            &stored,
+            Priority::VisibleThumbnail,
+            current.clone(),
+            RenderingMode::Page,
+        )
+        .unwrap();
         assert_eq!(replayed_dimensions, dimensions);
         assert_eq!(replayed_top, top);
         assert_eq!(replayed, expected);
         assert_eq!(&stored[16..], &bytes[..consumed]);
+        let mut gallery_preview = Preview::new(
+            Priority::VisibleThumbnail,
+            current.clone(),
+            RenderingMode::Gallery,
+        );
+        for chunk in bytes.chunks(1024) {
+            if gallery_preview.feed(chunk).unwrap().is_break() {
+                break;
+            }
+        }
+        let (gallery_image, gallery_source, gallery_consumed) = gallery_preview.take().unwrap();
+        let expected_gallery = center_square(gallery_image).unwrap();
+        let mut gallery_stored = PREFIX_MAGIC.to_vec();
+        gallery_stored.extend_from_slice(&gallery_source.width.to_le_bytes());
+        gallery_stored.extend_from_slice(&gallery_source.height.to_le_bytes());
+        gallery_stored.extend_from_slice(&bytes[..gallery_consumed]);
+        let (gallery, gallery_dimensions, gallery_top) = decode_derivative(
+            &gallery_stored,
+            Priority::VisibleThumbnail,
+            current,
+            RenderingMode::Gallery,
+        )
+        .unwrap();
+        assert_eq!(gallery, expected_gallery);
+        assert_eq!(gallery.width(), gallery.height());
+        assert!(gallery.width() <= GALLERY_SIDE);
+        assert_eq!(gallery_dimensions, dimensions);
+        assert!(!gallery_top);
+        assert!(gallery_consumed < bytes.len());
+        assert_eq!(&gallery_stored[16..], &bytes[..gallery_consumed]);
     }
     #[test]
     fn derivative_identity_is_source_local_even_for_equal_chapter_and_page_ids() {
@@ -1350,7 +1891,11 @@ mod tests {
         std::fs::write(&path, &damaged).unwrap();
         let expected_hash = digest(original);
         let current: Current = Arc::new(|| true);
-        let mut preview = Preview::new(Priority::VisibleThumbnail, current.clone());
+        let mut preview = Preview::new(
+            Priority::VisibleThumbnail,
+            current.clone(),
+            RenderingMode::Page,
+        );
         let mut reader = CountedReader {
             inner: std::fs::File::open(&path).unwrap(),
             bytes_read: 0,
@@ -1439,7 +1984,11 @@ mod tests {
                 bytes_read: 0,
             };
             let current: Current = Arc::new(|| true);
-            let mut preview = Preview::new(Priority::VisibleThumbnail, current.clone());
+            let mut preview = Preview::new(
+                Priority::VisibleThumbnail,
+                current.clone(),
+                RenderingMode::Page,
+            );
             let result = read_local_preview(
                 &mut reader,
                 original.len() as u64,
@@ -1470,7 +2019,11 @@ mod tests {
         let active = Arc::new(AtomicBool::new(true));
         let flag = active.clone();
         let current: Current = Arc::new(move || flag.load(Ordering::Acquire));
-        let mut preview = Preview::new(Priority::VisibleThumbnail, current.clone());
+        let mut preview = Preview::new(
+            Priority::VisibleThumbnail,
+            current.clone(),
+            RenderingMode::Page,
+        );
         let mut reader = CancelAfterProbe { reads: 0, active };
         assert!(read_local_preview(&mut reader, 4096, "unused", &mut preview, &current).is_err());
         assert_eq!(reader.reads, 1);
