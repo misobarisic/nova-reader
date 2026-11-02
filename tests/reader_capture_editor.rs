@@ -293,6 +293,244 @@ fn reversing_an_edge_drag_stops_scrolling_before_another_timer_tick() {
 }
 
 #[test]
+fn border_drag_survives_async_extension_without_moving_the_finger_or_opposite_edge() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().unwrap();
+    ui.set_section(6);
+    let requests = Rc::new(RefCell::new(Vec::new()));
+    ui.on_capture_editor_action({
+        let weak = ui.as_weak();
+        let requests = requests.clone();
+        move |action| {
+            if action == "extend-above" || action == "extend-below" {
+                requests.borrow_mut().push(action.to_string());
+                weak.unwrap().set_capture_editor_busy(true);
+            }
+        }
+    });
+    ui.show().unwrap();
+    for (width, height) in [(390., 844.), (1120., 780.)] {
+        ui.window().set_size(LogicalSize::new(width, height));
+        for touch in [false, true] {
+            for (label, opposite, above) in [
+                ("Resize selection top", "Resize selection bottom", true),
+                (
+                    "Resize selection top left",
+                    "Resize selection bottom left",
+                    true,
+                ),
+                (
+                    "Resize selection top right",
+                    "Resize selection bottom right",
+                    true,
+                ),
+                ("Resize selection bottom", "Resize selection top", false),
+                (
+                    "Resize selection bottom left",
+                    "Resize selection top left",
+                    false,
+                ),
+                (
+                    "Resize selection bottom right",
+                    "Resize selection top right",
+                    false,
+                ),
+            ] {
+                ui.set_capture_editor_visible(false);
+                ui.set_capture_editor_busy(false);
+                ui.set_capture_editor_image(canvas_image(800));
+                ui.set_capture_editor_crop(CaptureCropRect {
+                    x: 0.1,
+                    y: 0.,
+                    width: 0.8,
+                    height: 1.,
+                });
+                ui.set_capture_editor_can_extend_above(true);
+                ui.set_capture_editor_can_extend_below(true);
+                ui.set_capture_editor_visible(true);
+                requests.borrow_mut().clear();
+                settle();
+                let handle = button(&ui, label);
+                assert!(handle.size().width >= 48. && handle.size().height >= 48.);
+                let mut start = center(&handle);
+                if label == "Resize selection top" || label == "Resize selection bottom" {
+                    assert!(
+                        handle.size().width > 48.,
+                        "the border is draggable away from the central knob"
+                    );
+                    start.x = handle.absolute_position().x + 10.;
+                }
+                let canvas = ElementHandle::find_by_element_id(&ui, "CaptureEditor::canvas")
+                    .next()
+                    .unwrap();
+                let edge = LogicalPosition::new(
+                    start.x,
+                    canvas.absolute_position().y
+                        + if above { 8. } else { canvas.size().height - 8. },
+                );
+                let original_opposite = center(&button(&ui, opposite)).y;
+                drag_input(&ui, touch, TouchPhase::Started, start);
+                drag_input(&ui, touch, TouchPhase::Moved, edge);
+                for _ in 0..80 {
+                    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(25));
+                    if ui.get_capture_editor_busy() {
+                        break;
+                    }
+                }
+                assert_eq!(
+                    &*requests.borrow(),
+                    &[if above {
+                        "extend-above"
+                    } else {
+                        "extend-below"
+                    }]
+                );
+                let before = ui.get_capture_editor_crop();
+                // Reverse slightly while the backend is loading. The held
+                // finger remains authoritative when the larger canvas arrives.
+                let inward = if above { 1. } else { -1. };
+                let pointer = LogicalPosition::new(start.x, start.y + inward * 4.);
+                drag_input(&ui, touch, TouchPhase::Moved, pointer);
+                assert_crop_close(ui.get_capture_editor_crop(), before.clone());
+                let projected = if above {
+                    CaptureCropRect {
+                        y: 0.,
+                        height: (1. + before.y + before.height) / 2.,
+                        ..before.clone()
+                    }
+                } else {
+                    CaptureCropRect {
+                        y: before.y / 2.,
+                        height: 1. - before.y / 2.,
+                        ..before.clone()
+                    }
+                };
+                ui.set_capture_editor_busy(false);
+                ui.set_capture_editor_crop(projected);
+                ui.set_capture_editor_image(canvas_image(1600));
+                settle();
+                assert!(
+                    (center(&button(&ui, label)).y - pointer.y).abs() < 1.,
+                    "{label}, width={width}, touch={touch}: border must stay under the held pointer"
+                );
+                assert!(
+                    (center(&button(&ui, opposite)).y - original_opposite).abs() < 1.,
+                    "opposite source edge must not jump"
+                );
+                let extended = ui.get_capture_editor_crop();
+                hold_pointer();
+                assert_crop_close(ui.get_capture_editor_crop(), extended.clone());
+                let further = LogicalPosition::new(pointer.x, pointer.y + inward * 20.);
+                drag_input(&ui, touch, TouchPhase::Moved, further);
+                assert!(
+                    ui.get_capture_editor_crop().height < extended.height,
+                    "the same gesture can shorten after loading"
+                );
+                drag_input(&ui, touch, TouchPhase::Ended, further);
+                settle();
+            }
+        }
+    }
+}
+
+#[test]
+fn releasing_during_extension_preserves_the_selected_source_and_keyboard_edges_can_extend() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().unwrap();
+    ui.set_section(6);
+    ui.show().unwrap();
+    ui.window().set_size(LogicalSize::new(390., 844.));
+    let requests = Rc::new(RefCell::new(Vec::new()));
+    ui.on_capture_editor_action({
+        let weak = ui.as_weak();
+        let requests = requests.clone();
+        move |action| {
+            requests.borrow_mut().push(action.to_string());
+            if action == "extend-above" || action == "extend-below" {
+                weak.unwrap().set_capture_editor_busy(true);
+            }
+        }
+    });
+    for above in [true, false] {
+        ui.set_capture_editor_visible(false);
+        ui.set_capture_editor_busy(false);
+        ui.set_capture_editor_image(canvas_image(800));
+        ui.set_capture_editor_crop(CaptureCropRect {
+            x: 0.1,
+            y: 0.,
+            width: 0.8,
+            height: 1.,
+        });
+        ui.set_capture_editor_can_extend_above(true);
+        ui.set_capture_editor_can_extend_below(true);
+        ui.set_capture_editor_visible(true);
+        settle();
+        let label = if above {
+            "Resize selection top"
+        } else {
+            "Resize selection bottom"
+        };
+        let start = center(&button(&ui, label));
+        let canvas = ElementHandle::find_by_element_id(&ui, "CaptureEditor::canvas")
+            .next()
+            .unwrap();
+        let edge = LogicalPosition::new(
+            start.x,
+            canvas.absolute_position().y + if above { 8. } else { canvas.size().height - 8. },
+        );
+        press(&ui, start);
+        ui.window()
+            .dispatch_event(WindowEvent::PointerMoved { position: edge });
+        for _ in 0..80 {
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(25));
+            if ui.get_capture_editor_busy() {
+                break;
+            }
+        }
+        assert!(ui.get_capture_editor_busy());
+        release(&ui, edge);
+        let selected_top = center(&button(&ui, "Resize selection top")).y;
+        let selected_bottom = center(&button(&ui, "Resize selection bottom")).y;
+        ui.set_capture_editor_busy(false);
+        ui.set_capture_editor_crop(CaptureCropRect {
+            x: 0.1,
+            y: 0.,
+            width: 0.8,
+            height: 1.,
+        });
+        ui.set_capture_editor_image(canvas_image(1600));
+        settle();
+        assert!((center(&button(&ui, "Resize selection top")).y - selected_top).abs() < 1.);
+        assert!((center(&button(&ui, "Resize selection bottom")).y - selected_bottom).abs() < 1.);
+        // Source coverage is unchanged even though normalized coordinates now
+        // refer to an enlarged canvas. Late publication cannot select a chunk.
+        assert!((ui.get_capture_editor_crop().height - 0.5).abs() < 0.001);
+    }
+    ui.set_capture_editor_visible(false);
+    ui.set_capture_editor_busy(false);
+    ui.set_capture_editor_image(canvas_image(800));
+    ui.set_capture_editor_crop(CaptureCropRect {
+        x: 0.1,
+        y: 0.,
+        width: 0.8,
+        height: 1.,
+    });
+    ui.set_capture_editor_visible(true);
+    settle();
+    requests.borrow_mut().clear();
+    button(&ui, "Resize selection bottom").invoke_accessible_default_action();
+    key(&ui, Key::DownArrow);
+    assert_eq!(&*requests.borrow(), &["extend-below"]);
+    for label in ["Extend above", "Extend below"] {
+        assert!(
+            ElementHandle::find_by_accessible_label(&ui, label)
+                .next()
+                .is_none()
+        );
+    }
+}
+
+#[test]
 fn selection_editor_resizes_with_pointer_and_keyboard_and_owns_reader_input() {
     i_slint_backend_testing::init_no_event_loop();
     let ui = AppWindow::new().unwrap();
@@ -331,8 +569,6 @@ fn selection_editor_resizes_with_pointer_and_keyboard_and_owns_reader_input() {
             "Cancel",
             "Preview",
             "Save",
-            "Extend above",
-            "Extend below",
             "Resize selection top left",
             "Resize selection top",
             "Resize selection top right",
@@ -349,6 +585,14 @@ fn selection_editor_resizes_with_pointer_and_keyboard_and_owns_reader_input() {
             assert!(position.x >= -0.5 && position.y >= -0.5, "{label}");
             assert!(position.x + size.width <= width + 0.5, "{label}");
             assert!(position.y + size.height <= height + 0.5, "{label}");
+        }
+
+        for removed in ["Extend above", "Extend below"] {
+            assert!(
+                ElementHandle::find_by_accessible_label(&ui, removed)
+                    .next()
+                    .is_none()
+            );
         }
 
         let start = center(&button(&ui, "Resize selection left"));
@@ -512,6 +756,25 @@ fn simple_screencap_setting_hides_both_immediate_actions() {
     settle();
     button(&ui, "Save screencap (simple)");
     button(&ui, "Copy screencap (simple)");
+    let grouped_actions = [
+        "Save image",
+        "Save screencap (simple)",
+        "Save screencap",
+        "Copy image to clipboard",
+        "Copy screencap (simple)",
+        "Copy screencap",
+    ];
+    let positions = grouped_actions.map(|label| center(&button(&ui, label)).y);
+    assert!(
+        positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "simple screencaps precede their corresponding normal actions"
+    );
+    assert!((positions[2] - positions[1] - 54.).abs() < 0.5);
+    assert!((positions[5] - positions[4] - 54.).abs() < 0.5);
+    assert!(
+        positions[3] - positions[2] >= 62.,
+        "the divider separates save from copy, keeping each simple/normal pair together"
+    );
     ui.global::<CaptureSettings>().set_simple_screencaps(false);
     settle();
     for label in ["Save screencap (simple)", "Copy screencap (simple)"] {
@@ -618,7 +881,7 @@ fn render_capture_editor_previews() {
     ui.show().unwrap();
     let output = std::path::PathBuf::from(
         std::env::var("NOVA_READER_CAPTURE_PREVIEW_DIR")
-            .unwrap_or_else(|_| "/workspace/artifacts/reader-v0126".into()),
+            .unwrap_or_else(|_| "/workspace/artifacts/reader-capture-border-preview".into()),
     );
     std::fs::create_dir_all(&output).unwrap();
     for (width, height) in [(390, 844), (1120, 780)] {

@@ -11,6 +11,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `src/app.rs` | Worker orchestration, navigation, source/settings selection, visible-page loading, display tiles, lifecycle progress flush |
 | `src/reader_progressive.rs` | Current-page JPEG XL streaming feed, provisional source geometry/tiles, bounded preview mailbox, EOF validation and nonce-guarded cleanup; final loading/progress/cache remain owned by the ordinary image worker |
 | `src/services.rs` | Shared UI/test services: install, validated source/date conversion, library, downloads and local import |
+| `src/downloads.rs`, `crates/ui/downloads.slint`, `crates/ui/download-controls.slint` | Completed chapters grouped by series, responsive Downloaded/Queue panes, metadata-only status projection, shared bounded poster cache, stable-ID selection/actions and durable queue reordering |
 | `src/cli.rs`, `src/paths.rs` | Commands, bounded file input, independent data and platform cache directories |
 | `src/android_documents.rs`, `android/java/dev/misob/nova/reader/ReaderActivity.java` | Application-context JNI, current-activity SAF and reader status-bar visibility/lifecycle on Java main |
 | `src/android_downloads.rs`, `src/download_background.rs`, `android/java/dev/misob/nova/reader/ReaderBackgroundService.java` | Nova's copied download foreground service and JNI adapter; Reader queue leases, independent notification progress, wake lock, resumed-only permission prompt and error-safe native calls |
@@ -18,7 +19,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `src/artwork.rs` | Kit decoded-poster LRU and encoded variants, synchronous cross-page hits, source permits, UI handles, bounded worker, poster publication before optional cache encoding, and legacy artwork migration |
 | `src/chapter_cache.rs` | Kit-backed disposable viewed pages, authorization scopes, chapter-group eviction/active leases and bounded background encoding |
 | `src/reader_settings.rs`, `src/reader_settings_ui.rs` | Durable global reader defaults, source-local series layout/orientation overrides, cached effective snapshots and fallible UI rollback |
-| `src/reader_controls.rs`, `src/reader_navigation.rs` | Nova-style OSD actions, source-anchored 0.5×–8× zoom/seek, zoomed tap-zone bypass, Mihon tap maps, mode inheritance and Android/desktop preference projection |
+| `src/reader_controls.rs`, `src/reader_navigation.rs` | Nova-style OSD actions, source-anchored 0.5×–8× zoom/seek, motion-setting-aware double-tap animation, zoomed tap-zone bypass, Mihon tap maps, mode inheritance and Android/desktop preference projection |
 | `src/reader_continuity.rs` | Near-boundary chapter preparation, per-chapter source ownership and canonical progress, stable in-place page growth and bounded three-chapter retention |
 | `src/reader_desktop.rs` | Nova-derived latest-state native keep-awake worker; Linux portal/screensaver, Windows execution state and macOS caffeinate lifetime |
 | `crates/ui/reader-osd.slint`, `crates/ui/reader-settings.slint` | Responsive bottom OSD with fixed 44px chapter buttons and a single expanding bottom progress slider, aligned compact actions labeled with the effective mode, one More action per layout, animated phone-sheet/desktop-panel controls and shared global settings form under More → Settings → Reader |
@@ -27,7 +28,8 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `src/export_names.rs` | Portable UTF-8 series folders and bounded title/chapter/page/vertical-position filenames, including duplicate numbering |
 | `crates/ui/save-conflict-sheet.slint` | Retained modal Overwrite/Add number/Cancel sheet; `app.slint` owns name/open/choice properties and callbacks |
 | `crates/reader-capture`, `src/chapter_capture.rs` | Leaf bounded source compositor and source-coordinate selection/revision tickets; app re-export supports Chapter or frozen Device scale |
-| `src/reader_capture_editor.rs`, `crates/ui/capture-editor.slint` | Source-anchored crop handles, independent above/below extension, bounded worker previews, Preview/Adjust/Save/Copy, stale-result guards and selected-position naming |
+| `src/reader_capture_editor.rs`, `crates/ui/capture-editor.slint` | Source-anchored draggable crop borders/handles, dimmed initial context, continuous outward extension, bounded worker previews, Preview/Adjust/Save/Copy, stale-result guards and selected-position naming |
+| `src/reader_capture_sources.rs` | Generation/profile-scoped original-source reuse for captures, weak viewer provenance, bounded shared session bytes and cancellation/permission revalidation; compressed display variants are excluded |
 | `src/capture_settings.rs`, `crates/ui/capture-settings.slint` | Capture format/quality, Device/Chapter resolution, folders, duplicates and optional immediate simple save/copy context actions |
 | `src/image_storage.rs`, `crates/ui/image-storage-settings.slint` | Durable cache policy, unified codecs and independent input-aware lossless WebP/JXL cache/download compression; shared Kit cache controls with chapter-first maintenance and separate artwork settings |
 | `src/source_catalogs.rs` | Host-owned per-addon catalogue switches under `reader:disabled-catalogs:<JSON package ID>`; filters Browse while preserving direct/history/offline access |
@@ -83,6 +85,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `tests/appearance.rs` | Process-boundary appearance persistence, palette application, invalid edits and theme reset preserving motion preferences |
 | `tests/reader_insets.rs` | Real Window safe-area injection verifies edge-to-edge chapter/detail artwork, safe controls/chapter rows, normal-page restoration and stable OSD geometry; uses the already pinned Slint core as a dev dependency |
 | `tests/reader_design.rs` | Responsive poster/list/timeline/chapter layouts, source/pin/extension actions, retained catalogue scroll, download-delete actions, tap-versus-pan reader OSD and image-menu targeting, hold cancellation, clamping, keyboard/busy/lifecycle behavior |
+| `tests/downloads.rs` | Phone/desktop saved-chapter and queue controls, stable-ID selection/reordering, filters, empty states and opt-in production AppWindow preview captures |
 | `tests/capture_settings.rs`, `tests/image_storage.rs` | Process-boundary capture/compression persistence, corruption recovery, independent policies and accessible settings controls |
 | `tests/reader_capture_editor.rs`, `crates/reader-capture/src/selection.rs` | Phone/desktop handle, keyboard, edge-extension, menu visibility and source-selection/epoch regressions; ignored native screenshot harness |
 | `tests/reader_mode_controls.rs` | Effective-mode chapter/page actions, RTL progress pointer/keyboard/accessibility behavior and right-origin progress rendering |
@@ -127,7 +130,9 @@ Screenshots format/quality/resolution/folder preferences live separately under
 `reader:captures`; changing them preserves original chapter data and metadata.
 The duplicate dropdown stores Ask (default), Overwrite or Do nothing. Ask opens
 a nonblocking Overwrite/Add number/Cancel sheet, guarded by the current reader
-generation. Clipboard actions bypass naming and duplicate handling. Desktop
+generation. Clipboard actions bypass naming and duplicate handling. Desktop PNG
+screencap Copy moves validated RGBA directly to the native clipboard worker;
+Save and Android still encode PNG, and other formats keep their codec semantics. Desktop
 saves stage in the destination directory and publish without clobbering unless
 overwrite was selected; numbered retries remain race safe. Android API 29+
 queries app-owned MediaStore images by exact name and relative path. API 26–28
@@ -146,13 +151,21 @@ Normal screencap save/copy opens the selection editor. `simple_screencaps` in
 turning it off leaves normal selection actions. Simple Device captures retain
 the clean pre-menu viewport snapshot. The editor freezes chapter identity,
 scroll/pan, display transforms and logical rectangles, including unloaded pages,
-before selection. Handles and above/below buttons edit source-anchored bounds
-across the current chapter. Previews serialize decoding and retain at most one
+before selection. Crop borders and handles edit source-anchored bounds across
+the current chapter. The initial canvas reveals a bounded dimmed context margin
+while preserving the original crop; outward drags extend the canvas without
+automatically selecting a whole segment. Previews serialize decoding and retain at most one
 million pixels; controls never enter exports. Advanced Device exports recompose
 source pixels at frozen logical DPR; Chapter resolution uses native source scale.
 Save and clipboard retain eight-million-pixel output/128 MiB working limits.
 Preview/selection revisions and reader generations guard delayed publication;
 filenames use the first intersecting page and actual selected vertical offset.
+Capture sessions reuse validated original encoded bytes across preparation,
+Preview and Save/Copy, up to 16 MiB within the compositor working allowance.
+Viewer references are weak and generation-scoped; disk display/compression
+variants never acquire original-source provenance. Every reuse revalidates the
+source/profile scope and cancellation. Tight-memory captures drop retention and
+retry with the original working allowance rather than reducing image quality.
 `reader:image-storage` stores independent cache/download compression switches,
 formats, quality and separate `lossless_inputs` policies for new writes, plus backward-compatible cache budgets:
 disk caching, separate chapter/artwork limits, decoded artwork memory and future
@@ -259,6 +272,14 @@ unrelated files, rejects symlink trees, and keeps quota accounting aligned with
 remaining payloads. Interrupted initial-manifest publication and page-rename /
 manifest-commit crash windows are covered by real killed-process tests.
 `DownloadStore::progress` reads bounded atomic manifests without hashing pages.
+`DownloadStore::snapshot` supplies lightweight job metadata to the Downloads page.
+`move_before` persists queue order only for inactive queued jobs; `run_next` claims
+the next admissible job under that same lock, so a reorder affects the next
+dispatch. Batch preparation and transfers share one serialized worker path.
+Completed chapters and partial/failed queue jobs remain separate. Download actions
+use full chapter identities; deleting bundles preserves reading progress and
+History, and local imports are protected. Detail polling patches transfer fields
+in place to preserve open menus, read colors and scroll position.
 The service Java/API/JNI regressions live in `tools/test-android-background.py`
 and `tests/android-background/`; default packaging checks also verify its pinned
 Nova provenance and required manifest permissions without an Android SDK.
@@ -319,6 +340,7 @@ generate all installable ZIPs; Reader does not depend on a sibling checkout.
 
 - Nova design reuse and destination behavior: [UI design](ui-design.md).
 - Delete a downloaded chapter: `src/app.rs` (`delete-download`), `crates/reader-downloads/src/lib.rs` (`remove`), chapter actions and More → Downloads. Local imports are protected.
+- Saved chapter groups, bulk selection and live queue: `src/downloads.rs`, `crates/ui/downloads.slint`, `tests/downloads.rs`; durable dispatch/reordering: `DownloadStore::run_next` / `move_before` and `Services::run_next_download`.
 - Background download service, notifications and interruption cleanup: `src/android_downloads.rs`, `src/download_background.rs`, `crates/reader-downloads/src/lib.rs`, `tools/test-android-background.py`.
 - Viewed chapter cache, grouped eviction and pins: `src/chapter_cache.rs`, `src/app.rs`, Kit `nova-cache::gc`/`blob`.
 - Cache quotas, disk master switch and worker snapshots: `src/image_storage.rs`, `crates/ui/image-storage-settings.slint`, `tests/image_storage.rs`.

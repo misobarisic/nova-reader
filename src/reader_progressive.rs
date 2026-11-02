@@ -609,6 +609,7 @@ mod tests {
             chapter_cache: Arc::new(crate::chapter_cache::ChapterCache::new(
                 directory.path().join("viewed"),
             )),
+            capture_originals: Mutex::default(),
             image_worker_live: AtomicBool::new(true),
             view: Mutex::new(View {
                 section: 6,

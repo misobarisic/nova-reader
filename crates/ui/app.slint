@@ -16,6 +16,8 @@ export { ItemRow } from "media-models.slint";
 import { Appearance } from "appearance.slint";
 import { SeriesGrid, LibraryViewSwitch } from "library-cards.slint";
 import { DetailHero } from "detail-hero.slint";
+import { DownloadsPanel, DownloadEntry } from "downloads.slint";
+export { DownloadEntry } from "downloads.slint";
 import { ChapterRow } from "chapter-row.slint";
 import { SettingsCard } from "@NovaUiBase/settings-controls.slint";
 import { SourceFilterPanel } from "source-filters.slint";
@@ -168,6 +170,7 @@ export component AppWindow inherits Window {
     in property <[string]> series-genres;
     in property <string> series-artwork-key;
     in-out property <image> series-poster;
+    in-out property <int> chapter-filter;
     in-out property <bool> chapters-descending: true;
     in property <bool> in-library;
     in property <bool> has-more;
@@ -219,6 +222,40 @@ export component AppWindow inherits Window {
     callback reader-double-tap(float,float);
     callback reader-zoom-by(float,float,float);
     callback reader-transform(float,float,float,float,float);
+    // Reader gestures follow the same motion policy as gallery paging.
+    out property <bool> reader-zoom-motion: Anim.enabled && ReaderSettings.page-animations;
+    in-out property <bool> reader-zoom-animating: false;
+    private property <float> reader-zoom-progress: 0;
+    callback reader-zoom-frame(float);
+    callback reader-zoom-cancel(bool);
+    animate reader-zoom-progress { duration: root.reader-zoom-animating ? 200ms : 0ms; easing: ease-out; }
+    changed reader-zoom-progress => {
+        if root.reader-zoom-animating { root.reader-zoom-frame(root.reader-zoom-progress); }
+    }
+    public function start-reader-zoom() {
+        root.reader-zoom-animating = false;
+        root.reader-zoom-progress = 0;
+        root.reader-zoom-animating = true;
+        reader-zoom-start.start();
+    }
+    public function cancel-reader-zoom() {
+        reader-zoom-start.stop();
+        if root.reader-zoom-animating {
+            root.reader-zoom-animating = false;
+            root.reader-zoom-cancel(false);
+        }
+    }
+    public function finish-reader-zoom() {
+        reader-zoom-start.stop();
+        if root.reader-zoom-animating {
+            root.reader-zoom-animating = false;
+            root.reader-zoom-cancel(true);
+        }
+    }
+    changed reader-zoom-motion => { if !root.reader-zoom-motion { root.finish-reader-zoom(); } }
+    changed current-page => { root.cancel-reader-zoom(); }
+    changed reading-mode => { root.cancel-reader-zoom(); }
+    reader-zoom-start := Timer { interval: 1ms; running: false; triggered => { self.stop(); root.reader-zoom-progress = 1; } }
     callback reader-rotation-changed(int);
     private property <int> reader-settings-tab: 0;
     private property <bool> reader-flash-active: false;
@@ -412,6 +449,24 @@ export component AppWindow inherits Window {
         if root.library-search-open { root.close-library-search(); }
         else { root.focus-library-search(); }
     }
+    in-out property <[DownloadEntry]> downloaded-rows;
+    in-out property <[DownloadEntry]> download-queue;
+    in-out property <int> downloaded-count;
+    in-out property <int> download-queue-count;
+    in-out property <int> download-selected-count;
+    in-out property <string> download-summary;
+    in-out property <string> download-queue-summary;
+    in-out property <string> download-selected-size;
+    in-out property <bool> download-busy;
+    in-out property <string> download-query;
+    in-out property <bool> download-unread-only;
+    in-out property <int> download-sort;
+    in-out property <int> download-tab;
+    callback download-action(string,string);
+    callback download-reorder(string,string);
+    callback download-search(string);
+    callback download-filter(bool,int);
+    callback download-artwork(string);
     callback chapter-order-changed(bool);
     callback adult-visibility-changed(bool);
     callback navigate(int);
@@ -469,6 +524,7 @@ export component AppWindow inherits Window {
     }
 
     changed section => {
+        root.cancel-reader-zoom();
         if root.capture-editor-visible { root.capture-editor-action("cancel"); }
         if root.section == 5 { root.begin-detail-entry(); }
         else {
@@ -492,7 +548,7 @@ export component AppWindow inherits Window {
         if root.section == 4 || root.section >= 9 { more-page.focus_shell(); }
     }
 
-    changed reader-width => { if root.section == 6 {root.reader-reflow(root.reader-width / 1px, root.reader-viewport-height / 1px);} }
+    changed reader-width => { if root.section == 6 && !root.reader-zoom-animating {root.reader-reflow(root.reader-width / 1px, root.reader-viewport-height / 1px);} }
 
     // Insets come from the actual Window, including Android system bars and
     // cutouts. Both shells share pages/callbacks, never the desktop geometry.
@@ -526,7 +582,7 @@ export component AppWindow inherits Window {
                     page-content := Rectangle {
                         min-width: 0px;
                         opacity: root.section == 5 ? root.detail-opacity : 1;
-                        if root.section != 6 && root.section != 4 && root.section < 9: page-scroll := ScrollView {
+                        if root.section != 6 && root.section != 4 && root.section != 7 && root.section < 9: page-scroll := ScrollView {
                             private property <int> control-focus-request: SettingsStyle.focus-request;
                             changed control-focus-request => {
                                 if SettingsStyle.keyboard-mode {
@@ -768,7 +824,15 @@ export component AppWindow inherits Window {
                                             clicked => { root.chapter-order-changed(!root.chapters-descending); }
                                         }
                                     }
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        LibraryFilterChip { label: @tr("All"); selected: root.chapter-filter == 0; keyboard-focusable: true; picked => {root.chapter-filter=0;} accessible-action-default => {root.chapter-filter=0;} }
+                                        LibraryFilterChip { label: @tr("Unread"); selected: root.chapter-filter == 1; keyboard-focusable: true; picked => {root.chapter-filter=1;} accessible-action-default => {root.chapter-filter=1;} }
+                                        LibraryFilterChip { label: @tr("Downloaded"); selected: root.chapter-filter == 2; keyboard-focusable: true; picked => {root.chapter-filter=2;} accessible-action-default => {root.chapter-filter=2;} }
+                                    }
                                     for chapter[i] in root.items: ChapterRow {
+                                        visible: root.chapter-filter == 0 || (root.chapter-filter == 1 && !chapter.read) || (root.chapter-filter == 2 && chapter.downloaded);
+                                        height: self.visible ? 80px : 0px;
                                         chapter: chapter; picked => { root.detail-scroll-y = page-scroll.content-y; root.open-item(i); } action(action) => { root.item-action(i,action); }
                                     }
                                 }
@@ -853,6 +917,25 @@ export component AppWindow inherits Window {
                                 }
                             }
                         }
+                        if root.section == 7: Rectangle {
+                            VerticalLayout {
+                                padding: 18px; spacing: 16px;
+                                PageHeader { title: @tr("Downloads"); narrow: root.mobile-ui; show-back: true; back => {root.go-back();} }
+                                if root.status != "": Text { text: root.status; color: Theme.current.text_secondary; wrap: word-wrap; min-width: 0px; }
+                                DownloadsPanel {
+                                    downloaded: root.downloaded-rows; queue: root.download-queue;
+                                    downloaded-count: root.downloaded-count; queue-count: root.download-queue-count;
+                                    selected-count: root.download-selected-count; selected-size: root.download-selected-size;
+                                    summary: root.download-summary; queue-summary: root.download-queue-summary; busy: root.download-busy;
+                                    query <=> root.download-query; unread-only <=> root.download-unread-only; sort <=> root.download-sort; active-tab <=> root.download-tab;
+                                    search-changed(query) => {root.download-search(query);}
+                                    filter-changed(unread,sort) => {root.download-filter(unread,sort);}
+                                    action(key,action) => {root.download-action(key,action);}
+                                    reorder(key,before) => {root.download-reorder(key,before);}
+                                    artwork-requested(key) => {root.download-artwork(key);}
+                                }
+                            }
+                        }
                         if root.section == 6: Rectangle {
                             background: root.reader-background;
                             pager := ReaderPagerMotion {
@@ -869,7 +952,7 @@ export component AppWindow inherits Window {
                               width: root.reader-frame-width; height: root.reader-frame-height;
                               zoom: root.zoom;
                               enabled: !root.capture-editor-visible && !root.reader-context-visible && !root.show-reader-options;
-                              began => { pager.cancel(); }
+                              began => { root.cancel-reader-zoom(); pager.cancel(); }
                               transform(factor,from-x,from-y,to-x,to-y) => { root.reader-transform(factor,from-x,from-y,to-x,to-y); }
                               reader := Flickable {
                                 private property <length> physical-pixel: 1phx;
@@ -878,12 +961,13 @@ export component AppWindow inherits Window {
                                 width: parent.width; height: parent.height;
                                 content-y <=> root.scroll-y;
                                 content-x <=> root.scroll-x;
-                                changed content-y => {if root.reading-mode==0{root.reader-position(-self.content-y / 1px,root.reader-width / 1px,self.height / 1px);}}
+                                changed content-y => {if root.reading-mode==0 && !root.reader-zoom-animating{root.reader-position(-self.content-y / 1px,root.reader-width / 1px,self.height / 1px);}}
                                 changed height => {root.reader-reflow(root.reader-width / 1px,self.height / 1px);}
                                 interactive: !root.capture-editor-visible && !zoom-gesture.blocking && (root.reading-mode == 0 || root.zoom > 1);
                                 content-width: max(self.width, root.reading-mode == 0 ? root.reader-width : root.reader-paged-width);
                                 content-height: root.reading-mode == 0 ? max(self.height, root.reader-height) : max(self.height, root.reader-paged-height);
                                 ReaderImageInteraction {
+                                    press-started => { root.cancel-reader-zoom(); }
                                     width: reader.content-width; height: reader.content-height;
                                     enabled: !zoom-gesture.blocking;
                                     wheel-zoom-enabled: true;
@@ -953,6 +1037,7 @@ export component AppWindow inherits Window {
                                             image-rendering: smooth;
                                         }
                                         ReaderImageInteraction {
+                                            press-started => { root.cancel-reader-zoom(); }
                                             width: 100%; height: 100%;
                                             enabled: !zoom-gesture.blocking;
                                             context-enabled: page.loaded;

@@ -199,6 +199,7 @@ fn reader_context_menu_targets_images_and_preserves_reader_gestures() {
     assert!(ui.get_reader_context_visible());
     assert_eq!(ui.get_reader_context_page(), 1);
     key(&ui, Key::DownArrow);
+    key(&ui, Key::DownArrow);
     key(&ui, Key::Return);
     assert!(!ui.get_reader_context_visible());
     assert_eq!(
@@ -328,9 +329,23 @@ fn chapter_download_delete_actions_follow_saved_remote_jobs() {
     for complete in [true, false] {
         let mut chapter = rows.row_data(1).unwrap();
         chapter.downloaded = complete;
+        chapter.download_state = if complete { 5 } else { 3 };
         rows.set_row_data(1, chapter);
         settle();
-        button(&ui, "Delete download").invoke_accessible_default_action();
+        if complete {
+            button(&ui, "Downloaded chapter options").invoke_accessible_default_action();
+        } else {
+            ElementHandle::find_by_accessible_label(&ui, "Chapter options")
+                .filter(|element| element.accessible_role() == Some(AccessibleRole::Button))
+                .nth(1)
+                .unwrap()
+                .invoke_accessible_default_action();
+        }
+        settle();
+        ElementHandle::find_by_accessible_label(&ui, "Delete download")
+            .find(|element| element.type_name().as_deref() == Some("PillButton"))
+            .unwrap()
+            .invoke_accessible_default_action();
         assert_eq!(
             actions.borrow().last().unwrap(),
             &(1, "delete-download".into())

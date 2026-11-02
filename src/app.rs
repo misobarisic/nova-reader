@@ -20,9 +20,14 @@ use std::{
     },
 };
 
+#[path = "downloads.rs"]
+mod downloads;
+
 static LIFECYCLE: OnceLock<Weak<Controller>> = OnceLock::new();
 #[path = "reader_capture_editor.rs"]
 mod reader_capture_editor;
+#[path = "reader_capture_sources.rs"]
+mod reader_capture_sources;
 #[path = "reader_continuity.rs"]
 mod reader_continuity;
 #[path = "reader_controls.rs"]
@@ -71,7 +76,6 @@ struct BrowseSources {
 enum Row {
     Series(Series),
     Chapter(Chapter),
-    Download(ChapterId),
 }
 #[derive(Clone)]
 enum PageInput {
@@ -533,6 +537,7 @@ struct CatalogueState {
 struct View {
     section: i32,
     rows: Vec<Row>,
+    downloads: downloads::DownloadView,
     download_states: BTreeMap<ChapterId, reader_downloads::JobStatus>,
     download_refreshing: bool,
     download_refresh_again: bool,
@@ -652,6 +657,7 @@ struct Controller {
     progress_checkpoint: crate::progress_checkpoint::ProgressWriter,
     artwork: crate::artwork::ArtworkLoader,
     chapter_cache: Arc<crate::chapter_cache::ChapterCache>,
+    capture_originals: Mutex<reader_capture_sources::Originals>,
     image_worker_live: AtomicBool,
     view: Mutex<View>,
     generation: AtomicU64,
@@ -1187,7 +1193,6 @@ impl Controller {
                     .iter()
                     .find(|s| s.id == c.id.series)
                     .cloned(),
-                Row::Download(c) => snapshot.series.iter().find(|s| s.id == c.series).cloned(),
             })
             .collect();
         view.artwork_seen.clear();
@@ -1292,7 +1297,7 @@ impl Controller {
                     if let Some(language) = &c.language {
                         meta.push(language.clone());
                     }
-                    if downloaded {
+                    if downloaded && view.section != 5 {
                         meta.push(text::tr("Downloaded"));
                     }
                     ItemRow {
@@ -1313,6 +1318,24 @@ impl Controller {
                         badge: text::tr(if read { "Read" } else { "Unread" }).into(),
                         read,
                         downloaded,
+                        download_state: download
+                            .map(|s| match s {
+                                reader_downloads::JobStatus::Complete => 5,
+                                reader_downloads::JobStatus::Queued => 1,
+                                reader_downloads::JobStatus::Running => 2,
+                                reader_downloads::JobStatus::Paused => 3,
+                                reader_downloads::JobStatus::Failed => 4,
+                                reader_downloads::JobStatus::Cancelled => 6,
+                            })
+                            .unwrap_or(0),
+                        download_progress: view
+                            .downloads
+                            .jobs
+                            .iter()
+                            .find(|j| j.chapter == c.id)
+                            .filter(|j| !j.pages.is_empty())
+                            .map(|j| j.completed_pages() as f32 / j.pages.len() as f32)
+                            .unwrap_or(0.),
                         has_download: download.is_some(),
                         local_import,
                         chapter_meta: meta.join(" · ").into(),
@@ -1326,20 +1349,6 @@ impl Controller {
                         ..ItemRow::default()
                     }
                 }
-                Row::Download(c) => ItemRow {
-                    local_import: c.series.source_id == "local",
-                    title: snapshot
-                        .chapters
-                        .iter()
-                        .find(|ch| ch.id == *c)
-                        .map(|ch| ch.title.clone())
-                        .unwrap_or_else(|| c.local_id.clone())
-                        .into(),
-                    subtitle: "".into(),
-                    badge: "".into(),
-                    bookmarked: false,
-                    ..ItemRow::default()
-                },
             })
             .collect();
         if view.section != 7 {
@@ -1837,6 +1846,9 @@ impl Controller {
     }
     fn open_series(self: &Arc<Self>, ui: &AppWindow, series: Series) {
         ui.set_detail_origin(self.view().section);
+        if self.view().series.as_ref().map(|current| &current.id) != Some(&series.id) {
+            ui.set_chapter_filter(0);
+        }
         self.flush();
         {
             let mut view = self.view();
@@ -2458,8 +2470,11 @@ impl Controller {
             let result: Result<_> = (|| {
                 let mut pending_write = None;
                 let mut cache_request = None;
+                let before_scope = reader_capture_sources::scope(&input, source.as_ref())?;
+                let mut fresh_original = false;
                 let bytes = match &input {
                     PageInput::Local { .. } => encoded.read(task.generation, task.index, || {
+                        fresh_original = true;
                         input.read(source.as_ref(), &cancel)
                     })?,
                     PageInput::Remote(page) => {
@@ -2534,6 +2549,7 @@ impl Controller {
                             bytes = Arc::new(read.bytes);
                         }
                         request.validate_active()?;
+                        fresh_original = fetched && !reused;
                         app.chapter_cache.touch(&request);
                         cache_request = Some((request, reused));
                         bytes
@@ -2543,6 +2559,21 @@ impl Controller {
                     stream.finish()?;
                 }
                 cancel.check().map_err(error)?;
+                let after_scope = reader_capture_sources::scope(&input, source.as_ref())?;
+                app.capture_originals
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .record(
+                        task.generation,
+                        task.index,
+                        &bytes,
+                        if before_scope == after_scope {
+                            before_scope
+                        } else {
+                            None
+                        },
+                        fresh_original,
+                    );
                 let source_dimensions =
                     reader_engine::inspect_image(&bytes, reader_engine::DecodeLimits::default())
                         .map_err(error)?;
@@ -2952,96 +2983,111 @@ impl Controller {
         }
     }
     fn download_list(self: &Arc<Self>, ui: &AppWindow) {
-        self.task(
-            ui,
-            |app, _| app.services.downloads.jobs().map_err(error),
-            |app, ui, jobs| {
-                let state = app.services.domain.snapshot().unwrap_or_default();
-                let rows = jobs
-                    .iter()
-                    .map(|job| ItemRow {
-                        title: state
-                            .chapters
-                            .iter()
-                            .find(|c| c.id == job.chapter)
-                            .map(|c| c.title.clone())
-                            .unwrap_or_else(|| job.chapter.local_id.clone())
-                            .into(),
-                        subtitle: job.error.clone().unwrap_or_default().into(),
-                        badge: format!(
-                            "{:?} · {}/{}",
-                            job.status,
-                            job.completed_pages(),
-                            job.pages.len()
-                        )
-                        .into(),
-                        bookmarked: job.status == reader_downloads::JobStatus::Complete,
-                        downloaded: job.chapter.series.source_id != "local"
-                            && job.status == reader_downloads::JobStatus::Complete,
-                        has_download: job.chapter.series.source_id != "local",
-                        local_import: job.chapter.series.source_id == "local",
-                        ..ItemRow::default()
-                    })
-                    .collect::<Vec<_>>();
-                let mut view = app.view();
-                view.download_states = jobs
-                    .iter()
-                    .map(|job| (job.chapter.clone(), job.status.clone()))
-                    .collect();
-                view.rows = jobs
-                    .into_iter()
-                    .map(|job| Row::Download(job.chapter))
-                    .collect();
-                drop(view);
-                app.render(ui);
-                ui.set_items(ModelRc::new(VecModel::from(rows)));
-            },
-        );
+        ui.set_section(7);
+        ui.set_heading(text::tr("Downloads").into());
+        ui.set_download_busy(self.view().downloads.catalogue.is_none());
+        self.publish_downloads(ui);
+        self.refresh_download_states(ui);
     }
     fn download(self: &Arc<Self>, ui: &AppWindow, chapter: ChapterId) {
-        // Downloads outlive navigation; pausing/cancellation is persisted in the
-        // chapter job and checked before each page is published.
-        ui.set_status(
-            text::tr("Chapter download started. Open Downloads to pause or retry.").into(),
-        );
+        self.download_many(ui, vec![chapter]);
+    }
+    fn download_many(self: &Arc<Self>, ui: &AppWindow, chapters: Vec<ChapterId>) {
+        let chapters = {
+            let mut view = self.view();
+            chapters
+                .into_iter()
+                .filter(|chapter| {
+                    if chapter.series.source_id == "local"
+                        || view.downloads.pending.contains_key(chapter)
+                    {
+                        return false;
+                    }
+                    view.downloads.pending.insert(chapter.clone(), None);
+                    view.downloads.prepare_errors.remove(chapter);
+                    true
+                })
+                .collect::<Vec<_>>()
+        };
+        if chapters.is_empty() {
+            return;
+        }
+        ui.set_status("".into());
+        self.publish_downloads(ui);
         let app = self.clone();
         let weak = ui.as_weak();
-        let download_lease = crate::download_background::begin(&self.services.downloads);
+        let lease = crate::download_background::begin(&self.services.downloads);
         std::thread::spawn(move || {
-            let _download_lease = download_lease;
-            let result = (|| {
+            let _lease = lease;
+            // One worker per explicit batch; metadata and transfers remain
+            // bounded even when Resume all contains hundreds of chapters.
+            let _serial = app
+                .download_serial
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            for chapter in chapters {
                 let cancel = CancelToken::default();
-                app.services.prepare_download(&chapter, &cancel)?;
-                let queued_app = app.clone();
-                let series = chapter.series.clone();
-                let _ = weak.upgrade_in_event_loop(move |ui| {
-                    let view = queued_app.view();
-                    let refresh =
-                        view.section == 5 && view.series.as_ref().is_some_and(|s| s.id == series);
-                    drop(view);
-                    if refresh {
-                        queued_app.refresh_download_states(&ui);
+                let prepared = app.services.prepare_download(&chapter, &cancel);
+                {
+                    let mut view = app.view();
+                    if let Err(failure) = &prepared {
+                        view.downloads
+                            .prepare_errors
+                            .insert(chapter.clone(), failure.clone());
                     }
-                });
-                let _serial = app
-                    .download_serial
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                app.services.run_queued_download(&chapter, &cancel)
-            })();
-            let _ = weak.upgrade_in_event_loop(move |ui| {
-                ui.set_status(
-                    match result {
-                        Ok(()) => text::tr("Download finished or paused."),
-                        Err(e) => e,
-                    }
-                    .into(),
-                );
-                if app.view().section == 7 {
-                    app.download_list(&ui);
                 }
-                app.refresh_download_states(&ui);
-            });
+                let desired = app.view().downloads.pending.remove(&chapter).flatten();
+                if prepared.is_ok() {
+                    match desired {
+                        Some(reader_downloads::JobStatus::Paused) => {
+                            let _ = app.services.downloads.pause(&chapter);
+                        }
+                        Some(reader_downloads::JobStatus::Cancelled) => {
+                            let _ = app.services.downloads.cancel(&chapter);
+                        }
+                        _ => {}
+                    }
+                }
+                let owner = app.clone();
+                let _ = weak.upgrade_in_event_loop(move |ui| owner.refresh_download_states(&ui));
+                loop {
+                    let before = app
+                        .services
+                        .downloads
+                        .snapshot()
+                        .ok()
+                        .and_then(|jobs| {
+                            jobs.into_iter()
+                                .find(|j| j.status == reader_downloads::JobStatus::Queued)
+                        })
+                        .map(|j| j.chapter);
+                    match app.services.run_next_download(&cancel) {
+                        Ok(Some(_)) => {}
+                        Ok(None) => break,
+                        Err(failure) => {
+                            eprintln!("Nova Reader download: {failure}");
+                            // A transport failure is persisted as Failed and
+                            // advances the queue. A failed metadata write must
+                            // not retry the same queued identity indefinitely.
+                            let after = app
+                                .services
+                                .downloads
+                                .snapshot()
+                                .ok()
+                                .and_then(|jobs| {
+                                    jobs.into_iter()
+                                        .find(|j| j.status == reader_downloads::JobStatus::Queued)
+                                })
+                                .map(|j| j.chapter);
+                            if before == after {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            drop(_serial);
+            let _ = weak.upgrade_in_event_loop(move |ui| app.refresh_download_states(&ui));
         });
     }
     fn entry_action(self: &Arc<Self>, ui: &AppWindow, key: &str, action: &str) {
@@ -3138,9 +3184,16 @@ impl Controller {
         }
         let chapter = match row {
             Some(Row::Chapter(c)) => c.id,
-            Some(Row::Download(c)) => c,
             _ => return,
         };
+        if matches!(action, "pause" | "cancel") {
+            self.downloads_action(
+                ui,
+                &serde_json::to_string(&chapter).unwrap_or_default(),
+                action,
+            );
+            return;
+        }
         let result = match action {
             "delete-download" => {
                 // Capture the stable identity before asynchronous work; row
@@ -3164,7 +3217,7 @@ impl Controller {
                 );
                 return;
             }
-            "download" | "resume" => {
+            "download" | "resume" | "retry" => {
                 self.download(ui, chapter);
                 return;
             }
@@ -3204,18 +3257,29 @@ impl Controller {
     fn refresh_download_states(self: &Arc<Self>, ui: &AppWindow) {
         let revision = {
             let mut view = self.view();
-            view.download_revision = view.download_revision.wrapping_add(1);
             if view.download_refreshing {
                 view.download_refresh_again = true;
                 return;
             }
+            view.download_revision = view.download_revision.wrapping_add(1);
             view.download_refreshing = true;
             view.download_revision
         };
         let app = self.clone();
         let weak = ui.as_weak();
         std::thread::spawn(move || {
-            let states = app.services.downloads.statuses().map_err(error);
+            let states = app
+                .services
+                .downloads
+                .snapshot()
+                .map_err(error)
+                .and_then(|jobs| {
+                    app.services
+                        .domain
+                        .snapshot()
+                        .map(|state| (jobs, state))
+                        .map_err(error)
+                });
             let _ = weak.upgrade_in_event_loop(move |ui| {
                 let mut view = app.view();
                 view.download_refreshing = false;
@@ -3224,13 +3288,22 @@ impl Controller {
                 let refresh = current && view.section == 5;
                 if current {
                     match states {
-                        Ok(states) => view.download_states = states,
+                        Ok((jobs, catalogue)) => {
+                            view.download_states = jobs
+                                .iter()
+                                .map(|job| (job.chapter.clone(), job.status.clone()))
+                                .collect();
+                            view.downloads.jobs = jobs;
+                            view.downloads.catalogue = Some(catalogue);
+                        }
                         Err(message) => ui.set_status(message.into()),
                     }
                 }
                 drop(view);
                 if refresh {
-                    app.render(&ui);
+                    app.patch_chapter_downloads(&ui);
+                } else if app.view().section == 7 {
+                    app.publish_downloads(&ui);
                 }
                 if again {
                     app.refresh_download_states(&ui);
@@ -3578,6 +3651,7 @@ struct ChapterScreencap {
     reference: usize,
     pages: Vec<crate::chapter_capture::PageRect>,
     inputs: BTreeMap<usize, (PageInput, Option<Source>)>,
+    originals: reader_capture_sources::Session,
     options: reader_engine::DisplayOptions,
     brightness: u8,
     device_scale: f64,
@@ -3585,9 +3659,58 @@ struct ChapterScreencap {
     known_dimensions: BTreeSet<usize>,
     layout_anchor: usize,
     layout_gaps: Vec<f64>,
-    paged_fit: Option<(f64, f64, f64, f64, f64)>,
+    paged_fit: Option<PagedCaptureFit>,
     naming: BTreeMap<usize, (ChapterId, usize)>,
     background: [u8; 4],
+}
+#[derive(Clone)]
+struct PagedCaptureFit {
+    frame: crate::ReaderCaptureViewport,
+    width: f64,
+    zoom: f64,
+    split_half: i32,
+    split_pages: BTreeSet<usize>,
+}
+fn layout_paged_capture(
+    pages: &mut [crate::chapter_capture::PageRect],
+    anchor: usize,
+    fit: &PagedCaptureFit,
+) -> Result<()> {
+    let anchor = pages
+        .iter()
+        .position(|page| page.index == anchor)
+        .ok_or_else(|| text::tr("Capture geometry unavailable"))?;
+    // Each source retains its own contained artwork inside a separate frame.
+    // Putting neighbors flush against artwork would paint the current frame's
+    // black gutters before the user explicitly extends the selection.
+    for page in pages.iter_mut() {
+        page.rect = paged_capture_rect(
+            &fit.frame,
+            fit.width,
+            page.rect.height / page.rect.width,
+            fit.split_pages
+                .contains(&page.index)
+                .then_some(fit.split_half),
+            fit.zoom,
+        );
+    }
+    let top = f64::from(fit.frame.y);
+    let bottom = f64::from(fit.frame.y + fit.frame.height);
+    let extents = pages
+        .iter()
+        .map(|page| (top.min(page.rect.y), bottom.max(page.rect.bottom())))
+        .collect::<Vec<_>>();
+    let mut offsets = vec![0.; pages.len()];
+    for index in (0..anchor).rev() {
+        offsets[index] = extents[index + 1].0 + offsets[index + 1] - extents[index].1;
+    }
+    for index in anchor + 1..pages.len() {
+        offsets[index] = extents[index - 1].1 + offsets[index - 1] - extents[index].0;
+    }
+    for (page, offset) in pages.iter_mut().zip(offsets) {
+        page.rect.y += offset;
+    }
+    Ok(())
 }
 fn capture_chapter_request(
     app: &Controller,
@@ -3654,20 +3777,19 @@ fn capture_chapter_request(
             );
         }
     }
-    // Paged layouts have one painted page. Lay out adjacent source pages in a
-    // frozen vertical strip anchored to that page, retaining each contain fit.
-    if advanced && ui.get_reading_mode() != 0 {
-        let current = reference;
-        let anchor = pages
+    let paged_fit = (ui.get_reading_mode() != 0).then(|| PagedCaptureFit {
+        frame: frame.clone(),
+        width,
+        zoom: f64::from(ui.get_zoom()),
+        split_half: ui.get_reader_split_half(),
+        split_pages: pages
             .iter()
-            .position(|p| p.index == current)
-            .ok_or_else(|| text::tr("Capture geometry unavailable"))?;
-        for i in (0..anchor).rev() {
-            pages[i].rect.y = pages[i + 1].rect.y - pages[i].rect.height;
-        }
-        for i in anchor + 1..pages.len() {
-            pages[i].rect.y = pages[i - 1].rect.y + pages[i - 1].rect.height;
-        }
+            .filter(|page| reader.is_split(page.index))
+            .map(|page| page.index)
+            .collect(),
+    });
+    if let Some(fit) = &paged_fit {
+        layout_paged_capture(&mut pages, reference, fit)?;
     }
     let layout_gaps = pages
         .windows(2)
@@ -3680,7 +3802,16 @@ fn capture_chapter_request(
         .copied()
         .collect();
     let color = ui.get_reader_capture_background();
+    let originals = app
+        .capture_originals
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .session(
+            app.generation.load(Ordering::Acquire),
+            inputs.keys().copied(),
+        );
     Ok(ChapterScreencap {
+        originals,
         viewport,
         reference,
         pages,
@@ -3691,13 +3822,7 @@ fn capture_chapter_request(
         known_dimensions,
         layout_anchor: reference,
         layout_gaps,
-        paged_fit: (ui.get_reading_mode() != 0).then_some((
-            f64::from(frame.x + frame.content_x),
-            width / f64::from(ui.get_zoom()).max(0.01),
-            viewport.height,
-            f64::from(ui.get_zoom()),
-            viewport.width,
-        )),
+        paged_fit,
         naming,
         brightness: if crate::reader_settings::snapshot().custom_brightness {
             crate::reader_settings::snapshot().brightness
@@ -3738,22 +3863,31 @@ fn chapter_capture_rect_with_split(
             height: width * f64::from(row.ratio),
         }
     } else {
-        let height = f64::from(viewport.height);
-        let zoom = zoom.max(0.01);
-        let image_width = (width / zoom)
-            .min(height / (f64::from(row.ratio) / if split.is_some() { 2. } else { 1. }))
-            * zoom;
-        let image_height = image_width * f64::from(row.ratio);
-        let visible_height = image_height / if split.is_some() { 2. } else { 1. };
-        crate::chapter_capture::Rect {
-            x: f64::from(viewport.x + viewport.content_x)
-                + (f64::from(viewport.width).max(image_width) - image_width) / 2.,
-            y: y + split
+        paged_capture_rect(viewport, width, f64::from(row.ratio), split, zoom)
+    }
+}
+fn paged_capture_rect(
+    viewport: &crate::ReaderCaptureViewport,
+    width: f64,
+    ratio: f64,
+    split: Option<i32>,
+    zoom: f64,
+) -> crate::chapter_capture::Rect {
+    let height = f64::from(viewport.height);
+    let zoom = zoom.max(0.01);
+    let image_width =
+        (width / zoom).min(height / (ratio / if split.is_some() { 2. } else { 1. })) * zoom;
+    let image_height = image_width * ratio;
+    let visible_height = image_height / if split.is_some() { 2. } else { 1. };
+    crate::chapter_capture::Rect {
+        x: f64::from(viewport.x + viewport.content_x)
+            + (f64::from(viewport.width).max(image_width) - image_width) / 2.,
+        y: f64::from(viewport.y + viewport.content_y)
+            + split
                 .map(|half| -f64::from(half) * image_height / 2.)
                 .unwrap_or((height.max(visible_height) - image_height) / 2.),
-            width: image_width,
-            height: image_height,
-        }
+        width: image_width,
+        height: image_height,
     }
 }
 fn capture_reader(ui: &AppWindow) -> Result<ReaderScreencap> {
@@ -4152,11 +4286,12 @@ fn wire_reader_context(app: &Arc<Controller>, ui: &AppWindow) {
                                 rendered
                             }
                         };
-                        crate::reader_export::ExportImage::from_rgba_with_preferences(
+                        crate::reader_export::ExportImage::from_rgba_for_delivery(
                             capture.width,
                             capture.height,
-                            &capture.pixels,
+                            capture.pixels,
                             &preferences,
+                            clipboard,
                         )
                     } else {
                         let (page, source) =
@@ -4289,6 +4424,7 @@ pub fn run(services: Services) -> Result<()> {
         chapter_cache: Arc::new(crate::chapter_cache::ChapterCache::new(
             crate::paths::chapter_cache_dir()?,
         )),
+        capture_originals: Mutex::default(),
         image_worker_live: AtomicBool::new(true),
         view: Mutex::new(View {
             source_browser: crate::source_browser::SourceBrowser::load(),
@@ -4409,7 +4545,6 @@ pub fn run(services: Services) -> Result<()> {
         match row {
             Some(Row::Series(series)) => app.open_series(&ui, series),
             Some(Row::Chapter(chapter)) => app.open_chapter(&ui, chapter.id),
-            Some(Row::Download(chapter)) => app.open_chapter(&ui, chapter),
             None => {}
         }
     });
@@ -4884,6 +5019,7 @@ pub fn run(services: Services) -> Result<()> {
         let app = app.clone();
         ui.on_flush_progress(move || app.flush());
     }
+    downloads::wire(&app, &ui);
     let timer = slint::Timer::default();
     let checkpoint = app.clone();
     let refresh_ui = ui.as_weak();
@@ -4896,6 +5032,10 @@ pub fn run(services: Services) -> Result<()> {
             checkpoint.checkpoint_progress();
             if let Some(ui) = refresh_ui.upgrade() {
                 sync_timer.tick(&ui);
+                let download_surface = matches!(checkpoint.view().section, 5 | 7);
+                if download_surface {
+                    checkpoint.refresh_download_states(&ui);
+                }
             }
             if let Some(ui) = refresh_ui.upgrade()
                 && !checkpoint.metadata_refresh_allowed(&ui)
@@ -4938,9 +5078,7 @@ pub fn run(services: Services) -> Result<()> {
         });
         if let Ok(queued) = queued {
             let _ = startup_ui.upgrade_in_event_loop(move |ui| {
-                for chapter in queued {
-                    startup.download(&ui, chapter);
-                }
+                startup.download_many(&ui, queued);
                 startup.refresh_download_states(&ui);
             });
         }
@@ -5034,6 +5172,7 @@ mod tests {
             chapter_cache: Arc::new(crate::chapter_cache::ChapterCache::new(
                 dir.path().join("chapters"),
             )),
+            capture_originals: Mutex::default(),
             image_worker_live: AtomicBool::new(true),
             view: Mutex::new(View {
                 section: 3,
@@ -6158,6 +6297,7 @@ mod tests {
             chapter_cache: Arc::new(crate::chapter_cache::ChapterCache::new(
                 dir.path().join("cache/viewed-chapters"),
             )),
+            capture_originals: Mutex::default(),
             image_worker_live: AtomicBool::new(true),
             view: Mutex::new(View {
                 reader: Some(reader),

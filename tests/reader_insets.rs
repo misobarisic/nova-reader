@@ -1,7 +1,7 @@
 //! Exercise actual Window safe-area values, including a persistent camera cutout.
 use i_slint_backend_testing::{AccessibleRole, ElementHandle};
 use i_slint_core::{lengths::LogicalEdges, window::WindowInner};
-use nova_reader::{AppWindow, ItemRow, PageRow, TileRow};
+use nova_reader::{AppWindow, DownloadEntry, ItemRow, PageRow, TileRow};
 use slint::{ComponentHandle, LogicalSize, ModelRc, VecModel};
 use std::time::Duration;
 
@@ -150,14 +150,14 @@ fn reader_art_reaches_status_area_while_controls_and_normal_pages_respect_insets
     );
     // Downloads exposes the same chapter action with usable phone targets.
     let chosen = std::rc::Rc::new(std::cell::RefCell::new(None));
-    ui.on_item_action({
+    ui.on_download_action({
         let chosen = chosen.clone();
-        move |index, action| *chosen.borrow_mut() = Some((index, action.to_string()))
+        move |key, action| *chosen.borrow_mut() = Some((key.to_string(), action.to_string()))
     });
-    ui.set_items(ModelRc::new(VecModel::from(vec![ItemRow {
+    ui.set_downloaded_rows(ModelRc::new(VecModel::from(vec![DownloadEntry {
+        key: "fixture:download".into(),
+        kind: 1,
         title: "Downloaded chapter".into(),
-        has_download: true,
-        downloaded: true,
         ..Default::default()
     }])));
     ui.set_section(7);
@@ -165,15 +165,19 @@ fn reader_art_reaches_status_area_while_controls_and_normal_pages_respect_insets
         ui.window().set_size(LogicalSize::new(width, 844.));
         insets(&ui, 32., 24., 0., 0.);
         let delete = button(&ui, "Delete download");
-        assert!(delete.size().height >= 44.);
+        assert!(delete.size().height >= 48.);
         assert!(delete.absolute_position().x >= 0.);
         assert!(delete.absolute_position().x + delete.size().width <= width);
         delete.mock_single_click(slint::platform::PointerEventButton::Left);
-        assert_eq!(*chosen.borrow(), Some((0, "delete-download".to_owned())));
+        assert_eq!(
+            *chosen.borrow(),
+            Some(("fixture:download".to_owned(), "delete".to_owned()))
+        );
     }
-    ui.set_items(ModelRc::new(VecModel::from(vec![ItemRow {
+    ui.set_downloaded_rows(ModelRc::new(VecModel::from(vec![DownloadEntry {
+        key: "fixture:import".into(),
+        kind: 1,
         title: "Imported chapter".into(),
-        has_download: true,
         local_import: true,
         ..Default::default()
     }])));

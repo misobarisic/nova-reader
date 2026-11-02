@@ -536,6 +536,17 @@ fn publish(ui: &AppWindow, key: &str, image: Image) {
             model.set_row_data(index, row);
         }
     }
+    for model in [ui.get_downloaded_rows(), ui.get_download_queue()] {
+        for index in 0..model.row_count() {
+            if let Some(mut row) = model.row_data(index)
+                && row.artwork_key.as_str() == key
+                && row.poster != image
+            {
+                row.poster = image.clone();
+                model.set_row_data(index, row);
+            }
+        }
+    }
     if ui.get_series_artwork_key().as_str() == key {
         ui.set_series_poster(image);
     }
@@ -558,6 +569,17 @@ fn forget_images(ui: &AppWindow, id: u64, keys: &BTreeSet<String>) {
         {
             row.poster = Image::default();
             model.set_row_data(index, row);
+        }
+    }
+    for model in [ui.get_downloaded_rows(), ui.get_download_queue()] {
+        for index in 0..model.row_count() {
+            if let Some(mut row) = model.row_data(index)
+                && keys.contains(row.artwork_key.as_str())
+                && row.poster.size().width > 0
+            {
+                row.poster = Image::default();
+                model.set_row_data(index, row);
+            }
         }
     }
     if keys.contains(ui.get_series_artwork_key().as_str()) {
@@ -587,6 +609,14 @@ fn trim_ui(ui: &AppWindow, id: u64, shared: &Shared) {
             .filter(|row| !keep.contains(row.artwork_key.as_str()))
             .map(|row| row.artwork_key.to_string()),
     );
+    for model in [ui.get_downloaded_rows(), ui.get_download_queue()] {
+        remove.extend(
+            model
+                .iter()
+                .filter(|row| !keep.contains(row.artwork_key.as_str()))
+                .map(|row| row.artwork_key.to_string()),
+        );
+    }
     if !keep.contains(ui.get_series_artwork_key().as_str()) {
         remove.insert(ui.get_series_artwork_key().to_string());
     }

@@ -16,6 +16,32 @@ pub fn now() -> i64 {
         .as_secs() as i64
 }
 
+fn fetch_download_page(
+    source: &Source,
+    page: &PageResource,
+    cancel: &CancelToken,
+    compression: crate::image_storage::ImageCompression,
+) -> Result<Vec<u8>> {
+    let original = source
+        .fetch_page(&page.url, &page.headers, cancel)
+        .map_err(error)?;
+    cancel.check().map_err(error)?;
+    let bytes = if compression.enabled {
+        // Preserve source bytes when a codec cannot represent this page. The
+        // download store still validates every committed image and checksum.
+        crate::reader_export::reencode_storage_image(
+            &original,
+            compression,
+            reader_engine::DecodeLimits::default(),
+        )
+        .unwrap_or(original)
+    } else {
+        original
+    };
+    cancel.check().map_err(error)?;
+    Ok(bytes)
+}
+
 pub(crate) fn chapter_from_source(
     series: &SeriesId,
     chapter: reader_sources::Chapter,
@@ -262,25 +288,23 @@ impl Services {
         let compression = crate::image_storage::load().downloads;
         self.downloads
             .run(chapter, |page| {
-                let original = source
-                    .fetch_page(&page.url, &page.headers, cancel)
-                    .map_err(error)?;
-                cancel.check().map_err(error)?;
-                let bytes = if compression.enabled {
-                    // Some tall pages exceed a codec's dimensional limit.
-                    // Preserve the original rather than resizing or losing it;
-                    // the download store still validates all committed bytes.
-                    crate::reader_export::reencode_storage_image(
-                        &original,
-                        compression,
-                        reader_engine::DecodeLimits::default(),
-                    )
-                    .unwrap_or(original)
-                } else {
-                    original
-                };
-                cancel.check().map_err(error)?;
-                Ok(bytes)
+                fetch_download_page(&source, page, cancel, compression)
+            })
+            .map_err(error)
+    }
+    /// Atomically claim the next persisted queued job before resolving its
+    /// source. Unavailable sources become Failed, allowing the next call to
+    /// advance to another chapter rather than repeatedly selecting that job.
+    pub fn run_next_download(&self, cancel: &CancelToken) -> Result<Option<ChapterId>> {
+        cancel.check().map_err(error)?;
+        let compression = crate::image_storage::load().downloads;
+        let mut source = None;
+        self.downloads
+            .run_next(|chapter, page| {
+                if source.is_none() {
+                    source = Some(self.source(&chapter.series.source_id)?);
+                }
+                fetch_download_page(source.as_ref().unwrap(), page, cancel, compression)
             })
             .map_err(error)
     }
@@ -344,6 +368,97 @@ impl Services {
 mod tests {
     use super::*;
     use time::{Date, Month, OffsetDateTime, UtcOffset};
+
+    #[test]
+    fn unavailable_queued_source_fails_after_claim_and_does_not_starve_next_download() {
+        const CHILD: &str = "NOVA_READER_NEXT_DOWNLOAD_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "services::tests::unavailable_queued_source_fails_after_claim_and_does_not_starve_next_download", "--nocapture"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        use std::io::Write;
+        let directory = tempfile::tempdir().unwrap();
+        let services = Services::open(directory.path()).unwrap();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/addons/neutral-fixture");
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("manifest.json")).unwrap()).unwrap();
+        let mut files = vec!["manifest.json".to_owned(), "main.js".to_owned()];
+        files.extend(
+            manifest["assets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|asset| asset.as_str().unwrap().to_owned()),
+        );
+        let mut archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for file in files {
+            archive
+                .start_file(&file, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            archive
+                .write_all(&std::fs::read(root.join(file)).unwrap())
+                .unwrap();
+        }
+        let package = archive.finish().unwrap().into_inner();
+        services.sources.install_zip(&package).unwrap();
+        services
+            .sources
+            .set_enabled("neutral-fixture", true)
+            .unwrap();
+        let missing = ChapterId::new(SeriesId::new("removed-source", "series"), "missing");
+        services
+            .downloads
+            .enqueue(
+                missing.clone(),
+                vec![PageResource {
+                    id: "page".into(),
+                    url: "https://fixture.invalid/page.png".into(),
+                    headers: Default::default(),
+                }],
+            )
+            .unwrap();
+        let cancel = CancelToken::default();
+        let source = services.source("neutral-fixture").unwrap();
+        let item = source.browse(&json!({"page": 1})).unwrap().items.remove(0);
+        let series = services.series("neutral-fixture", item);
+        let (_, chapters) = services.details(&series, &cancel).unwrap();
+        let chapter = chapters
+            .iter()
+            .find(|chapter| chapter.id.local_id.ends_with("mixed"))
+            .unwrap();
+        services.prepare_download(&chapter.id, &cancel).unwrap();
+        assert!(
+            services
+                .run_next_download(&cancel)
+                .unwrap_err()
+                .contains("unavailable")
+        );
+        let failed = services
+            .downloads
+            .snapshot()
+            .unwrap()
+            .into_iter()
+            .find(|job| job.chapter == missing)
+            .unwrap();
+        assert_eq!(failed.status, reader_downloads::JobStatus::Failed);
+        assert_eq!(failed.completed_pages(), 0);
+        assert_eq!(
+            services.run_next_download(&cancel).unwrap(),
+            Some(chapter.id.clone())
+        );
+        assert!(services.downloads.offline(&chapter.id).is_ok());
+        assert_eq!(services.run_next_download(&cancel).unwrap(), None);
+    }
 
     fn provider_chapter(uploaded_at: Option<&str>) -> reader_sources::Chapter {
         // Mirrors the YiiMadara synthetic chapter fixture's fractional chapter

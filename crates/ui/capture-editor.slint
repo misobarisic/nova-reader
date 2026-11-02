@@ -15,11 +15,12 @@ component CropHandle inherits Rectangle {
     in property <string> label;
     in property <bool> enabled: true;
     in property <bool> focused;
+    in property <length> span-width: 48px;
     callback began(length, length);
     callback dragged(length, length);
     callback ended;
     callback activated;
-    width: 44px; height: 44px;
+    width: root.span-width; height: 48px;
     accessible-role: button; accessible-label: root.label;
     accessible-enabled: root.enabled;
     accessible-action-default => { if root.enabled { root.activated(); } }
@@ -76,6 +77,9 @@ export component CaptureEditor inherits Rectangle {
     private property <length> drag-offset-y;
     private property <int> extension-direction;
     private property <bool> extension-wait;
+    private property <length> extension-anchor-y;
+    private property <length> extension-edge-y;
+    private property <length> extension-key-step;
     private property <[HandlePosition]> handles: [
         { horizontal: -1, vertical: -1, label: @tr("Resize selection top left") },
         { horizontal: 0, vertical: -1, label: @tr("Resize selection top") },
@@ -95,18 +99,21 @@ export component CaptureEditor inherits Rectangle {
         if root.initial-ratio == 0 && root.has-image && !root.preview-mode {
             root.initial-ratio = root.source.height / max(1, root.source.width);
         }
-        if root.extension-direction != 0 { reveal-extension.restart(); }
+        if root.extension-direction != 0 { settle-extension.start(); }
     }
     changed preview-mode => { root.dragging = false; canvas-scroll.content-y = 0px; root.focused-control = 1; }
-    changed busy => { if !root.busy { root.extension-wait = false; } }
+    changed error => {
+        if root.error != "" { root.extension-wait = false; root.extension-direction = 0; root.dragging = false; root.scroll-direction = 0; }
+    }
     function handle-x(side: int) -> float { return root.crop.x + root.crop.width * (side + 1) / 2; }
     function handle-y(side: int) -> float { return root.crop.y + root.crop.height * (side + 1) / 2; }
     function extend(direction: int) {
         if root.busy || root.extension-wait || root.preview-mode { return; }
         if (direction < 0 && !root.can-extend-above) || (direction > 0 && !root.can-extend-below) { return; }
+        root.extension-anchor-y = image-content.absolute-position.y + root.handle-y(direction < 0 ? 1 : -1) * image-content.height;
+        root.extension-edge-y = image-content.absolute-position.y + root.handle-y(direction) * image-content.height;
         root.extension-direction = direction;
         root.extension-wait = true;
-        extension-delay.restart();
         root.action(direction < 0 ? "extend-above" : "extend-below");
     }
     function resize(horizontal: int, vertical: int, x: float, y: float) {
@@ -121,6 +128,7 @@ export component CaptureEditor inherits Rectangle {
     }
     function drag-to(x: length, y: length) {
         root.pointer-x = x; root.pointer-y = y;
+        if root.extension-wait || root.busy { return; }
         root.resize(root.drag-horizontal, root.drag-vertical,
             (x - root.drag-offset-x - image-content.absolute-position.x) / max(1px, image-content.width),
             (y - root.drag-offset-y - image-content.absolute-position.y) / max(1px, image-content.height));
@@ -146,8 +154,6 @@ export component CaptureEditor inherits Rectangle {
         else if root.busy || !root.has-image { return; }
         else if index == 1 { root.action(root.preview-mode ? "adjust" : "preview"); }
         else if index == 2 { root.action("confirm"); }
-        else if index == 3 { root.extend(-1); }
-        else if index == 4 { root.extend(1); }
     }
     // The overlay owns input. The reader below never receives scroll, taps or
     // keys while selecting; handles are siblings of Flickable, so touch drags
@@ -173,13 +179,16 @@ export component CaptureEditor inherits Rectangle {
             width: 100%; height: 100%;
             interactive: !root.dragging;
             content-width: self.width;
-            content-height: max(self.height, image-content.height + (root.preview-mode ? 48px : 144px));
+            content-height: max(self.height, image-content.y + image-content.height + (root.preview-mode ? 24px : 72px));
             image-content := Rectangle {
                 width: root.preview-mode ? min(max(1px, canvas.width - 48px), max(1px, canvas.height - 48px) * max(1, root.source.width) / max(1, root.source.height))
                     : min(max(1px, canvas.width - 48px), max(1px, canvas.height - 144px) / max(0.1, root.initial-ratio));
                 height: root.has-image ? self.width * root.source.height / max(1, root.source.width) : max(1px, canvas.height - 56px);
                 x: (canvas.width - self.width) / 2;
-                y: max(root.preview-mode ? 24px : 72px, (canvas.height - self.height) / 2);
+                // Keep the initial content origin while more source is revealed;
+                // growing the image must not recenter existing artwork.
+                y: root.preview-mode ? max(24px, (canvas.height - self.height) / 2)
+                    : max(72px, (canvas.height - self.width * root.initial-ratio) / 2);
                 Image { source: root.source; width: 100%; height: 100%; image-fit: fill; }
                 if !root.preview-mode && root.has-image: Rectangle {
                     x: 0px; y: 0px; width: 100%; height: root.crop.y * parent.height; background: #00000099;
@@ -204,39 +213,25 @@ export component CaptureEditor inherits Rectangle {
         if !root.preview-mode && root.has-image: Rectangle {
           width: 100%; height: 100%;
           for handle[index] in root.handles: CropHandle {
-            enabled: !root.busy;
+            enabled: !root.busy || root.extension-wait;
+            span-width: handle.horizontal == 0 ? max(48px, root.crop.width * image-content.width - 64px) : 48px;
             horizontal: handle.horizontal; vertical: handle.vertical; label: handle.label;
             x: image-content.x + root.handle-x(handle.horizontal) * image-content.width - self.width / 2;
             y: canvas-scroll.content-y + image-content.y + root.handle-y(handle.vertical) * image-content.height - self.height / 2;
-            focused: scope.has-focus && SettingsStyle.keyboard-mode && root.focused-control == index + 5;
-            activated => { root.focused-control = index + 5; SettingsStyle.keyboard-mode = true; scope.focus(); }
+            focused: scope.has-focus && SettingsStyle.keyboard-mode && root.focused-control == index + 3;
+            activated => { root.focused-control = index + 3; SettingsStyle.keyboard-mode = true; scope.focus(); }
             began(x,y) => {
-                root.focused-control = index + 5; SettingsStyle.keyboard-mode = false; scope.focus();
+                root.focused-control = index + 3; SettingsStyle.keyboard-mode = false; scope.focus();
                 root.drag-horizontal = handle.horizontal; root.drag-vertical = handle.vertical;
                 root.drag-offset-x = x - image-content.absolute-position.x - root.handle-x(handle.horizontal) * image-content.width;
                 root.drag-offset-y = y - image-content.absolute-position.y - root.handle-y(handle.vertical) * image-content.height;
+                root.extension-key-step = 0px;
                 root.drag-intent-y = y; root.scroll-direction = 0;
                 root.pointer-x = x; root.pointer-y = y; root.dragging = true;
             }
             dragged(x,y) => { if root.dragging { root.pointer-dragged(x,y); } }
             ended => { root.dragging = false; root.scroll-direction = 0; }
           }
-        }
-        if !root.preview-mode: PillButton {
-            x: (canvas.width - self.width) / 2; y: 8px;
-            label: @tr("Extend above"); compact: true;
-            enabled: !root.busy && root.has-image && root.can-extend-above;
-            focused: scope.has-focus && SettingsStyle.keyboard-mode && root.focused-control == 3;
-            accessible-action-default => { root.extend(-1); }
-            clicked => { root.extend(-1); }
-        }
-        if !root.preview-mode: PillButton {
-            x: (canvas.width - self.width) / 2; y: max(8px, canvas.height - self.height - 8px);
-            label: @tr("Extend below"); compact: true;
-            enabled: !root.busy && root.has-image && root.can-extend-below;
-            focused: scope.has-focus && SettingsStyle.keyboard-mode && root.focused-control == 4;
-            accessible-action-default => { root.extend(1); }
-            clicked => { root.extend(1); }
         }
         if root.busy || !root.has-image: Rectangle {
             x: (parent.width - 180px) / 2; y: (parent.height - 56px) / 2;
@@ -287,17 +282,27 @@ export component CaptureEditor inherits Rectangle {
             }
         }
     }
-    extension-delay := Timer { interval: 400ms; running: false; triggered => { self.stop(); if !root.busy { root.extension-wait = false; } } }
-    reveal-extension := Timer {
+    settle-extension := Timer {
         interval: 1ms; running: false;
         triggered => {
             self.stop();
-            canvas-scroll.content-y = root.extension-direction < 0 ? 0px : min(0px, canvas.height - canvas-scroll.content-height);
-            root.extension-direction = 0;
+            let opposite = root.handle-y(root.extension-direction < 0 ? 1 : -1);
+            let desired = root.extension-anchor-y - canvas.absolute-position.y - image-content.y - opposite * image-content.height;
+            canvas-scroll.content-y = Math.clamp(desired, min(0px, canvas.height - canvas-scroll.content-height), 0px);
+            let pointer-edge = root.pointer-y - root.drag-offset-y;
+            let edge = root.extension-key-step != 0px ? root.extension-edge-y + root.extension-key-step
+                : !root.dragging ? root.extension-edge-y
+                : root.scroll-direction == root.extension-direction ? pointer-edge
+                : root.extension-direction < 0 ? max(pointer-edge, root.extension-edge-y) : min(pointer-edge, root.extension-edge-y);
+            root.extension-wait = false;
+            root.resize(root.drag-horizontal, root.drag-vertical,
+                root.dragging ? (root.pointer-x - root.drag-offset-x - image-content.absolute-position.x) / max(1px, image-content.width) : root.handle-x(root.drag-horizontal),
+                (edge - image-content.absolute-position.y) / max(1px, image-content.height));
+            root.extension-direction = 0; root.extension-key-step = 0px;
         }
     }
     auto-scroll := Timer {
-        interval: 24ms; running: root.dragging && !root.busy && root.drag-vertical != 0 && root.scroll-direction != 0;
+        interval: 24ms; running: root.dragging && !root.busy && !root.extension-wait && root.drag-vertical != 0 && root.scroll-direction != 0;
         triggered => {
             let y = root.pointer-y - canvas.absolute-position.y;
             let above = root.drag-vertical < 0 && root.scroll-direction < 0 && y < 72px;
@@ -319,9 +324,9 @@ export component CaptureEditor inherits Rectangle {
                 root.action(root.preview-mode ? "adjust" : "cancel"); return accept;
             }
             if event.text == Key.Tab {
-                root.focused-control = Math.mod(root.focused-control + (event.modifiers.shift ? (root.preview-mode ? 2 : 12) : 1), root.preview-mode ? 3 : 13);
-                if root.focused-control >= 5 {
-                    let handle = root.handles[root.focused-control - 5];
+                root.focused-control = Math.mod(root.focused-control + (event.modifiers.shift ? (root.preview-mode ? 2 : 10) : 1), root.preview-mode ? 3 : 11);
+                if root.focused-control >= 3 {
+                    let handle = root.handles[root.focused-control - 3];
                     let y = image-content.y + root.handle-y(handle.vertical) * image-content.height;
                     canvas-scroll.content-y = Math.clamp(canvas.height / 2 - y, min(0px, canvas.height - canvas-scroll.content-height), 0px);
                 }
@@ -330,10 +335,18 @@ export component CaptureEditor inherits Rectangle {
             if event.text == Key.Return || event.text == " " {
                 if !event.repeat { root.activate(root.focused-control); } return accept;
             }
-            if root.focused-control >= 5 && !root.preview-mode && !root.busy {
-                let handle = root.handles[root.focused-control - 5];
+            if root.focused-control >= 3 && !root.preview-mode && !root.busy {
+                let handle = root.handles[root.focused-control - 3];
                 let step = event.modifiers.shift ? 0.05 : 0.01;
                 if event.text == Key.LeftArrow || event.text == Key.RightArrow || event.text == Key.UpArrow || event.text == Key.DownArrow {
+                    let above = handle.vertical < 0 && event.text == Key.UpArrow && root.handle-y(-1) <= 0.0001;
+                    let below = handle.vertical > 0 && event.text == Key.DownArrow && root.handle-y(1) >= 0.9999;
+                    if above || below {
+                        root.drag-horizontal = handle.horizontal; root.drag-vertical = handle.vertical;
+                        root.extension-key-step = (above ? -1 : 1) * step * image-content.height;
+                        root.extend(above ? -1 : 1);
+                        return accept;
+                    }
                     root.resize(handle.horizontal, handle.vertical,
                         root.handle-x(handle.horizontal) + (event.text == Key.LeftArrow ? -step : event.text == Key.RightArrow ? step : 0),
                         root.handle-y(handle.vertical) + (event.text == Key.UpArrow ? -step : event.text == Key.DownArrow ? step : 0));

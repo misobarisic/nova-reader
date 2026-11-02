@@ -2,9 +2,12 @@ import { ControlTouchArea } from "@NovaUiBase/control-input.slint";
 // Compact chapter list requested from the Mihon reference; Nova Kit controls.
 import { Theme, SettingsStyle } from "@NovaUiShared";
 import { ItemRow } from "media-models.slint";
+import { DownloadIconButton } from "download-controls.slint";
 import { IconAction, ActionButton } from "controls.slint";
 export component ChapterRow inherits Rectangle {
     in property <ItemRow> chapter;
+    private property <string> transfer-action: root.chapter.download-state == 1 || root.chapter.download-state == 2 ? "pause" : root.chapter.download-state == 4 ? "retry" : root.chapter.has-download ? "resume" : "download";
+    private property <string> transfer-label: root.transfer-action == "pause" ? @tr("Pause download") : root.transfer-action == "retry" ? @tr("Retry download") : root.transfer-action == "resume" ? @tr("Resume download") : @tr("Download");
     callback picked;
     callback action(string);
     height: 80px; min-width: 0px;
@@ -14,7 +17,7 @@ export component ChapterRow inherits Rectangle {
     accessible-action-default => { root.picked(); }
     Rectangle { x: 4px; y: 25px; width: 7px; height: 7px; border-radius: 4px; background: root.chapter.read ? transparent : Theme.current.accent_soft; }
     VerticalLayout {
-        x: 20px; y: 16px; width: max(1px, root.width - 128px); height: 48px;
+        x: 20px; y: 16px; width: max(1px, root.width - 144px); height: 48px;
         spacing: 6px; alignment: start;
         chapter-title := Text { text: root.chapter.title; color: root.chapter.read ? Theme.current.text_muted : Theme.current.text_bright; font-size: 16px; min-width: 0px; overflow: elide; }
         chapter-metadata := Text { text: root.chapter.chapter-meta; color: Theme.current.text_secondary; font-size: 12px; min-width: 0px; overflow: elide; }
@@ -36,7 +39,7 @@ export component ChapterRow inherits Rectangle {
     }
     actions := PopupWindow {
         x: max(0px, root.width - self.width); y: root.height - 8px;
-        width: min(240px,root.width); height: root.chapter.local-import ? 108px : 156px;
+        width: min(240px,root.width); height: root.chapter.local-import ? 108px : root.chapter.has-download && !root.chapter.downloaded ? 204px : 156px;
         Rectangle {
             background: Theme.current.popup; border-width: 1px; border-color: Theme.current.border_soft;
             border-radius: Theme.card_corner_radius;
@@ -45,18 +48,27 @@ export component ChapterRow inherits Rectangle {
                 ActionButton { text: @tr("Read / unread"); clicked => { actions.close(); root.action("read"); } }
                 ActionButton { text: root.chapter.bookmarked ? @tr("Unbookmark") : @tr("Bookmark"); clicked => { actions.close(); root.action("bookmark"); } }
                 if !root.chapter.local-import: ActionButton {
-                    text: root.chapter.has-download ? @tr("Delete download") : @tr("Download");
-                    clicked => { root.action(root.chapter.has-download ? "delete-download" : "download"); actions.close(); }
+                    text: root.chapter.downloaded ? @tr("Delete download") : root.transfer-label;
+                    clicked => { root.action(root.chapter.downloaded ? "delete-download" : root.transfer-action); actions.close(); }
+                }
+                if !root.chapter.local-import && root.chapter.has-download && !root.chapter.downloaded: ActionButton {
+                    text: root.chapter.download-state == 1 || root.chapter.download-state == 2 ? @tr("Cancel download") : @tr("Delete download");
+                    clicked => { root.action(root.chapter.download-state == 1 || root.chapter.download-state == 2 ? "cancel" : "delete-download"); actions.close(); }
                 }
             }
         }
     }
     hold := Timer { interval: 600ms; running: false; triggered => { self.stop(); touch.held = true; actions.show(); } }
-    if !root.chapter.local-import: IconAction {
-        x: root.width - 100px; y: 18px; width: 44px;
-        text: root.chapter.has-download ? @tr("Delete download") : @tr("Download");
-        icon: root.chapter.has-download ? @image-url("../../assets/icons/navigation/delete.svg") : @image-url("../../assets/icons/navigation/downloads.svg");
-        clicked => { root.action(root.chapter.has-download ? "delete-download" : "download"); }
+    if !root.chapter.local-import: DownloadIconButton {
+        x: root.width - 112px; y: 16px;
+        label: root.chapter.downloaded ? @tr("Downloaded chapter options") : root.transfer-label;
+        glyph: root.chapter.downloaded ? "check" : root.chapter.download-state == 1 ? "clock" : root.chapter.download-state == 2 ? "pause" : root.chapter.download-state == 4 ? "retry" : root.chapter.has-download ? "play" : "download";
+        accent: root.chapter.has-download;
+        clicked => { if root.chapter.downloaded { actions.show(); } else { root.action(root.transfer-action); } }
     }
-    IconAction { x: root.width - 48px; y: 18px; width: 44px; text: @tr("Chapter options"); icon: @image-url("../../assets/icons/navigation/more.svg"); clicked => { actions.show(); } }
+    if root.chapter.download-state == 2: Rectangle {
+        x: root.width - 106px; y: 64px; width: 36px; height: 2px; background: Theme.current.control_border;
+        Rectangle { x: 0px; y: 0px; width: parent.width * max(0,min(1,root.chapter.download-progress)); height: 2px; background: Theme.current.accent_soft; }
+    }
+    IconAction { x: root.width - 56px; y: 16px; width: 48px; height: 48px; text: @tr("Chapter options"); icon: @image-url("../../assets/icons/navigation/more.svg"); clicked => { actions.show(); } }
 }

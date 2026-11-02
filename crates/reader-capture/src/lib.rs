@@ -127,7 +127,7 @@ pub fn capture_with_options(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn capture_with_budget(
+fn capture_with_budget<B: AsRef<[u8]>>(
     viewport: Rect,
     reference_index: usize,
     pages: &[PageRect],
@@ -135,7 +135,7 @@ fn capture_with_budget(
     options: reader_engine::DisplayOptions,
     memory_limit: u64,
     target_scale: Option<f64>,
-    mut fetch: impl FnMut(usize) -> Result<Vec<u8>, String>,
+    mut fetch: impl FnMut(usize) -> Result<B, String>,
 ) -> Result<Capture, String> {
     if !viewport.valid() || pages.len() > 10_000 {
         return Err(geometry_error());
@@ -159,7 +159,7 @@ fn capture_with_budget(
         .find(|page| page.index == reference_index)
         .ok_or_else(geometry_error)?;
     let reference_bytes = fetch(reference_index)?;
-    let reference_encoded = reference_bytes.len() as u64;
+    let reference_encoded = reference_bytes.as_ref().len() as u64;
     let limits = reader_engine::DecodeLimits {
         max_decoded_bytes: memory_limit
             .checked_sub(reference_encoded)
@@ -170,7 +170,7 @@ fn capture_with_budget(
     // later, admit its retained original plus output as a separate phase.
     // Default keeps the legacy probe-first/reduced-decode admission unchanged.
     let early_reference = if options.crop_borders || options.split_wide || options.rotate_wide {
-        let image = reader_engine::decode_image(&reference_bytes, limits).map_err(|error| {
+        let image = reader_engine::decode_image(reference_bytes.as_ref(), limits).map_err(|error| {
             format!(
                 "Original chapter image exceeds capture admission: {error}. Use Device resolution."
             )
@@ -187,7 +187,7 @@ fn capture_with_budget(
     let dimensions = if let Some(presentation) = reference_presentation {
         presentation.effective
     } else {
-        reader_engine::inspect_image(&reference_bytes, limits)
+        reader_engine::inspect_image(reference_bytes.as_ref(), limits)
             .map_err(|error| format!("Cannot inspect original chapter image: {error}"))?
     };
     let scale = target_scale.unwrap_or(f64::from(dimensions.width) / reference.rect.width);
@@ -241,30 +241,31 @@ fn capture_with_budget(
         max_decoded_bytes: remaining,
         ..limits
     };
-    // Admit and decode the reference before allocating the output. If it is
-    // first in paint order, retain that decode; otherwise drop it before any
-    // other page is decoded and reuse its fetched bytes when its turn arrives.
+    // Admit the reference before allocating output. Decode now only when it
+    // paints first; otherwise defer decompression until its turn. Pixel-based
+    // presentation geometry may already have required an early decode.
+    let reference_first = visible
+        .first()
+        .is_some_and(|page| page.index == reference_index);
     let reference_image = if let Some((image, _)) = early_reference {
         if image.as_raw().len() as u64 > remaining {
             return Err(budget_error());
         }
-        image
-    } else {
-        reader_engine::decode_image(&reference_bytes, limits).map_err(|error| {
+        reference_first.then_some(image)
+    } else if reference_first {
+        Some(reader_engine::decode_image(reference_bytes.as_ref(), limits).map_err(|error| {
             format!(
                 "Original chapter image exceeds capture admission: {error}. Use Device resolution."
             )
-        })?
-    };
-    let mut reference_image = if visible
-        .first()
-        .is_some_and(|page| page.index == reference_index)
-    {
-        Some(reference_image)
+        })?)
     } else {
-        drop(reference_image);
+        // Preserve decode admission without decompressing this source twice.
+        reader_engine::inspect_image(reference_bytes.as_ref(), limits).map_err(|error| {
+            format!("Original chapter image exceeds capture admission: {error}")
+        })?;
         None
     };
+    let mut reference_image = reference_image;
     let mut reference_bytes = Some(reference_bytes);
     let mut output = Vec::new();
     output
@@ -281,7 +282,7 @@ fn capture_with_budget(
             if let Some(image) = reference_image.take() {
                 image
             } else {
-                reader_engine::decode_image(&bytes, limits).map_err(|error| {
+                reader_engine::decode_image(bytes.as_ref(), limits).map_err(|error| {
                     format!("Cannot decode original chapter image: {error}. Use Device resolution.")
                 })?
             }
@@ -289,16 +290,16 @@ fn capture_with_budget(
             let bytes = fetch(page.index)?;
             let live_reference = reference_bytes
                 .as_ref()
-                .map_or(0, |bytes| bytes.len() as u64);
+                .map_or(0, |bytes| bytes.as_ref().len() as u64);
             let limits = reader_engine::DecodeLimits {
                 max_decoded_bytes: memory_limit
                     .checked_sub(output_bytes)
                     .and_then(|remaining| remaining.checked_sub(live_reference))
-                    .and_then(|remaining| remaining.checked_sub(bytes.len() as u64))
+                    .and_then(|remaining| remaining.checked_sub(bytes.as_ref().len() as u64))
                     .ok_or_else(budget_error)?,
                 ..limits
             };
-            reader_engine::decode_image(&bytes, limits).map_err(|error| {
+            reader_engine::decode_image(bytes.as_ref(), limits).map_err(|error| {
                 format!("Cannot decode original chapter image: {error}. Use Device resolution.")
             })?
         };
@@ -1250,7 +1251,7 @@ pub mod selection;
 /// Same compositor with an explicit resident-memory reservation for originals
 /// prefetched while resolving incoming page geometry.
 #[allow(clippy::too_many_arguments)]
-pub fn capture_at_scale_with_memory(
+pub fn capture_at_scale_with_memory<B: AsRef<[u8]>>(
     viewport: Rect,
     reference: usize,
     pages: &[PageRect],
@@ -1258,7 +1259,7 @@ pub fn capture_at_scale_with_memory(
     options: reader_engine::DisplayOptions,
     scale: Option<f64>,
     memory_limit: u64,
-    fetch: impl FnMut(usize) -> Result<Vec<u8>, String>,
+    fetch: impl FnMut(usize) -> Result<B, String>,
 ) -> Result<Capture, String> {
     capture_with_budget(
         viewport,

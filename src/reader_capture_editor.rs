@@ -20,6 +20,13 @@ pub(super) type Shared = Arc<Mutex<State>>;
 // Obsolete requests may finish a native decode before observing cancellation.
 // Serialize preparation and composition to retain one shared memory allowance.
 static RENDER: Mutex<()> = Mutex::new(());
+fn capture_selection(capture: &ChapterScreencap) -> Result<Selection> {
+    if capture.paged_fit.is_some() {
+        Selection::new_with_viewport(capture.viewport, &capture.pages)
+    } else {
+        Selection::new(capture.viewport, &capture.pages)
+    }
+}
 
 pub(super) fn freeze(state: &Shared, app: &Controller, ui: &AppWindow, index: i32) {
     let frozen = (
@@ -48,7 +55,8 @@ pub(super) fn open(state: &Shared, app: &Arc<Controller>, ui: &AppWindow, copy: 
             return Err(text::tr("Image action cancelled"));
         }
         let capture = capture?;
-        let selection = Selection::new(capture.viewport, &capture.pages)?;
+        let mut selection = capture_selection(&capture)?;
+        selection.reveal_context(capture.viewport.height * 0.2);
         let index = capture.reference as i32;
         state.lock().unwrap_or_else(|e| e.into_inner()).active = Some(Editor {
             generation,
@@ -105,7 +113,7 @@ fn prepare(
     extension: Option<bool>,
     cancel: &CancelToken,
     ticket: Option<&Ticket>,
-) -> Result<BTreeMap<usize, Vec<u8>>> {
+) -> Result<BTreeMap<usize, Arc<Vec<u8>>>> {
     let mut encoded = BTreeMap::new();
     let mut encoded_bytes = 0usize;
     loop {
@@ -130,7 +138,9 @@ fn prepare(
             .inputs
             .get(&index)
             .ok_or_else(|| text::tr("Chapter image is unavailable"))?;
-        let bytes = input.read(source.as_ref(), cancel)?;
+        let bytes = capture
+            .originals
+            .read(index, input, source.as_ref(), cancel)?;
         encoded_bytes = encoded_bytes
             .checked_add(bytes.len())
             .filter(|total| *total <= PREPARED_BYTES)
@@ -139,7 +149,9 @@ fn prepare(
             })?;
         check(cancel, ticket)?;
         let limits = reader_engine::DecodeLimits {
-            max_decoded_bytes: CAPTURE_MEMORY - encoded_bytes as u64,
+            max_decoded_bytes: CAPTURE_MEMORY
+                - encoded_bytes as u64
+                - capture.originals.reservation(),
             ..Default::default()
         };
         let (effective, split) = if capture.options.crop_borders
@@ -165,23 +177,29 @@ fn prepare(
             .find(|page| page.index == index)
             .ok_or_else(|| text::tr("Capture geometry unavailable"))?;
         let ratio = f64::from(effective.height) / f64::from(effective.width);
-        if let Some((x, width, height, zoom, viewport_width)) = capture.paged_fit {
-            page.rect.width = width.min(height / (ratio / if split { 2. } else { 1. })) * zoom;
-            page.rect.x = x + (viewport_width.max(page.rect.width) - page.rect.width) / 2.;
-        }
         page.rect.height = page.rect.width * ratio;
-        let anchor = capture
-            .pages
-            .iter()
-            .position(|page| page.index == capture.layout_anchor)
-            .ok_or_else(|| text::tr("Capture geometry unavailable"))?;
-        for i in (0..anchor).rev() {
-            capture.pages[i].rect.y =
-                capture.pages[i + 1].rect.y - capture.layout_gaps[i] - capture.pages[i].rect.height;
-        }
-        for i in anchor + 1..capture.pages.len() {
-            capture.pages[i].rect.y =
-                capture.pages[i - 1].rect.bottom() + capture.layout_gaps[i - 1];
+        if let Some(fit) = &mut capture.paged_fit {
+            if split {
+                fit.split_pages.insert(index);
+            } else {
+                fit.split_pages.remove(&index);
+            }
+            layout_paged_capture(&mut capture.pages, capture.layout_anchor, fit)?;
+        } else {
+            let anchor = capture
+                .pages
+                .iter()
+                .position(|page| page.index == capture.layout_anchor)
+                .ok_or_else(|| text::tr("Capture geometry unavailable"))?;
+            for i in (0..anchor).rev() {
+                capture.pages[i].rect.y = capture.pages[i + 1].rect.y
+                    - capture.layout_gaps[i]
+                    - capture.pages[i].rect.height;
+            }
+            for i in anchor + 1..capture.pages.len() {
+                capture.pages[i].rect.y =
+                    capture.pages[i - 1].rect.bottom() + capture.layout_gaps[i - 1];
+            }
         }
         selection.reanchor_known(&previous, &capture.pages, |index| {
             capture.known_dimensions.contains(&index)
@@ -215,33 +233,41 @@ fn refresh(
     let state = state.clone();
     let cancel = app.cancel.lock().unwrap_or_else(|e| e.into_inner()).clone();
     std::thread::spawn(move || {
-        let result = (|| {
+        let result = {
             let _render = RENDER.lock().unwrap_or_else(|e| e.into_inner());
-            let encoded = prepare(
-                &mut capture,
-                &mut selection,
-                extension,
-                &cancel,
-                Some(&ticket),
-            )?;
-            capture.viewport = if preview {
-                selection.crop
-            } else {
-                selection.canvas
+            let originals = capture.originals.clone();
+            let initial_capture = capture.clone();
+            let initial_selection = selection.clone();
+            let render = || -> Result<_> {
+                capture = initial_capture.clone();
+                selection = initial_selection.clone();
+                let encoded = prepare(
+                    &mut capture,
+                    &mut selection,
+                    extension,
+                    &cancel,
+                    Some(&ticket),
+                )?;
+                capture.viewport = if preview {
+                    selection.crop
+                } else {
+                    selection.canvas
+                };
+                capture.reference = selection
+                    .first_page(&capture.pages, preview)
+                    .ok_or_else(|| text::tr("No artwork in the selected area."))?;
+                // Preview dimensions stay independent of native export scale and
+                // never require a large GPU texture or full chapter bitmap.
+                let scale = (1_000_000. / (capture.viewport.width * capture.viewport.height))
+                    .sqrt()
+                    .min(1200. / capture.viewport.width)
+                    .min(2048. / capture.viewport.height)
+                    .min(capture.device_scale);
+                capture.output_scale = Some(scale);
+                render_prepared(&capture, &cancel, Some(&ticket), encoded)
             };
-            capture.reference = selection
-                .first_page(&capture.pages, preview)
-                .ok_or_else(|| text::tr("No artwork in the selected area."))?;
-            // Preview dimensions stay independent of native export scale and
-            // never require a large GPU texture or full chapter bitmap.
-            let scale = (1_000_000. / (capture.viewport.width * capture.viewport.height))
-                .sqrt()
-                .min(1200. / capture.viewport.width)
-                .min(2048. / capture.viewport.height)
-                .min(capture.device_scale);
-            capture.output_scale = Some(scale);
-            render_prepared(&capture, &cancel, Some(&ticket), encoded)
-        })();
+            with_memory_fallback(&originals, render)
+        };
         if !ticket.current() {
             return;
         }
@@ -384,17 +410,37 @@ pub(super) fn render_capture(
 ) -> Result<(ReaderScreencap, FrozenExportName)> {
     let _render = RENDER.lock().unwrap_or_else(|e| e.into_inner());
     let mut capture = capture.clone();
-    let mut selection = Selection::new(capture.viewport, &capture.pages)?;
-    let encoded = prepare(&mut capture, &mut selection, None, cancel, ticket)?;
-    // Export's requested crop remains a logical viewport over resolved sources.
-    // Its resolution is independent of preview's downsampled artwork image.
-    render_prepared(&capture, cancel, ticket, encoded)
+    let mut selection = capture_selection(&capture)?;
+    with_memory_fallback(&capture.originals.clone(), || {
+        let encoded = prepare(&mut capture, &mut selection, None, cancel, ticket)?;
+        // Native export remains independent of preview's downsampled artwork.
+        render_prepared(&capture, cancel, ticket, encoded)
+    })
+}
+fn with_memory_fallback<T>(
+    originals: &reader_capture_sources::Session,
+    mut render: impl FnMut() -> Result<T>,
+) -> Result<T> {
+    match render() {
+        Err(message)
+            if originals.reservation() > 0
+                && (message.contains("capture admission")
+                    || message.contains("memory limits")
+                    || message.contains("decoded image")
+                    || message.contains("decode limit")
+                    || message.contains("exceeds supported limits")) =>
+        {
+            originals.release();
+            render()
+        }
+        result => result,
+    }
 }
 fn render_prepared(
     capture: &ChapterScreencap,
     cancel: &CancelToken,
     ticket: Option<&Ticket>,
-    mut encoded: BTreeMap<usize, Vec<u8>>,
+    mut encoded: BTreeMap<usize, Arc<Vec<u8>>>,
 ) -> Result<(ReaderScreencap, FrozenExportName)> {
     check(cancel, ticket)?;
     let reserved = encoded
@@ -408,17 +454,20 @@ fn render_prepared(
         capture.background,
         capture.options,
         capture.output_scale,
-        CAPTURE_MEMORY - reserved,
+        CAPTURE_MEMORY - reserved - capture.originals.reservation(),
         |index| {
             check(cancel, ticket)?;
             if let Some(bytes) = encoded.remove(&index) {
-                return Ok(bytes);
+                return Ok(reader_capture_sources::Bytes(bytes));
             }
             let (input, source) = capture
                 .inputs
                 .get(&index)
                 .ok_or_else(|| text::tr("Chapter image is unavailable"))?;
-            input.read(source.as_ref(), cancel)
+            capture
+                .originals
+                .read(index, input, source.as_ref(), cancel)
+                .map(reader_capture_sources::Bytes)
         },
     )?;
     check(cancel, ticket)?;
@@ -468,7 +517,14 @@ mod tests {
             );
             return;
         }
-        i_slint_backend_testing::init_no_event_loop();
+        slint::platform::set_platform(Box::new(i_slint_backend_testing::TestingBackend::new(
+            i_slint_backend_testing::TestingBackendOptions {
+                mock_time: true,
+                renderer_name: Some("software".into()),
+                ..Default::default()
+            },
+        )))
+        .unwrap();
         let ui = AppWindow::new().unwrap();
         ui.window().set_size(slint::LogicalSize::new(100., 100.));
         ui.set_section(6);
@@ -517,6 +573,7 @@ mod tests {
             chapter_cache: Arc::new(crate::chapter_cache::ChapterCache::new(
                 dir.path().join("cache"),
             )),
+            capture_originals: Mutex::default(),
             image_worker_live: AtomicBool::new(true),
             view: Mutex::new(View {
                 reader: Some(reader),
@@ -659,11 +716,202 @@ mod tests {
             assert!(ui.get_capture_editor_visible());
             ui.invoke_capture_editor_action("cancel".into());
         }
+        paged_letterbox_matches_native_frame(&app, &ui, dir.path());
         freeze(&state, &app, &ui, 0);
         app.invalidate();
         open(&state, &app, &ui, false);
         assert!(!ui.get_capture_editor_visible());
         // Neither preview nor Cancel enters any platform publication function.
         assert!(!dir.path().join("image-export").exists());
+    }
+
+    fn paged_letterbox_matches_native_frame(
+        app: &Controller,
+        ui: &AppWindow,
+        directory: &std::path::Path,
+    ) {
+        let colors = [[210, 30, 50, 255], [30, 80, 220, 255]];
+        let mut rows = Vec::new();
+        {
+            let mut view = app.view();
+            let reader = view.reader.as_mut().unwrap();
+            reader.ratios = vec![0.5; 2];
+            reader.presentations.clear();
+            for (index, color) in colors.iter().enumerate() {
+                let path = directory.join(format!("letterbox-{index}.png"));
+                let image = image::RgbaImage::from_pixel(10, 5, image::Rgba(*color));
+                image.save(&path).unwrap();
+                reader.pages[index] = PageInput::Local {
+                    path,
+                    id: format!("letterbox-{index}"),
+                };
+                rows.push(PageRow {
+                    page_id: format!("letterbox-{index}").into(),
+                    ratio: 0.5,
+                    loaded: true,
+                    position: index as f32 * 0.5,
+                    tiles: ModelRc::new(VecModel::from(vec![crate::TileRow {
+                        image: slint::Image::from_rgba8(
+                            slint::SharedPixelBuffer::clone_from_slice(image.as_raw(), 10, 5),
+                        ),
+                        fraction: 1.,
+                        ..Default::default()
+                    }])),
+                    ..Default::default()
+                });
+            }
+        }
+        ui.global::<crate::Anim>().set_enabled(false);
+        ui.set_zoom(1.);
+        ui.set_reader_osd(false);
+        ui.set_reader_background(slint::Color::from_rgb_u8(0, 0, 0));
+        ui.show().unwrap();
+        ui.window().set_size(slint::LogicalSize::new(320., 240.));
+        let advance = || {
+            for _ in 0..32 {
+                i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
+            }
+        };
+        for mode in [1, 2] {
+            ui.set_reading_mode(mode);
+            app.view().reader.as_mut().unwrap().mode = if mode == 1 {
+                ReadingMode::LeftToRight
+            } else {
+                ReadingMode::RightToLeft
+            };
+            for reference in 0..2 {
+                ui.set_current_page(reference);
+                for known in [true, false] {
+                    {
+                        let mut view = app.view();
+                        let reader = view.reader.as_mut().unwrap();
+                        reader.native_dimensions.clear();
+                        if known {
+                            for index in 0..2 {
+                                reader.native_dimensions.insert(
+                                    index,
+                                    reader_engine::PageDimensions {
+                                        width: 10,
+                                        height: 5,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                    for advanced in [false, true] {
+                        let mut provisional = rows.clone();
+                        if !known {
+                            for row in &mut provisional {
+                                row.ratio = 3.;
+                            }
+                        }
+                        ui.set_pages(ModelRc::new(VecModel::from(provisional)));
+                        advance();
+                        ui.set_reader_capture_viewport(crate::ReaderCaptureViewport {
+                            x: 0.,
+                            y: 0.,
+                            width: 320.,
+                            height: 240.,
+                            content_x: 0.,
+                            content_y: 0.,
+                        });
+                        let mut capture =
+                            capture_chapter_request(app, ui, reference, advanced).unwrap();
+                        capture.output_scale = Some(1.);
+                        // Resolve provisional original dimensions against the
+                        // same actual contained geometry the reader paints.
+                        ui.set_pages(ModelRc::new(VecModel::from(rows.clone())));
+                        advance();
+                        let native = capture_reader(ui).unwrap();
+                        let (rendered, naming) =
+                            render_capture(&capture, &CancelToken::default(), None).unwrap();
+                        assert_eq!((rendered.width, rendered.height), (320, 240));
+                        assert_eq!(naming.page, reference as usize + 1);
+                        for (x, y) in [
+                            (160, 0),
+                            (160, 39),
+                            (160, 40),
+                            (160, 120),
+                            (160, 199),
+                            (160, 200),
+                            (160, 239),
+                        ] {
+                            let offset = (y * 320 + x) * 4;
+                            assert_eq!(
+                                &rendered.pixels[offset..offset + 4],
+                                &native.pixels[offset..offset + 4],
+                                "mode={mode} reference={reference} known={known} advanced={advanced} at({x},{y})"
+                            );
+                            let expected = if (40..200).contains(&y) {
+                                colors[reference as usize]
+                            } else {
+                                [0, 0, 0, 255]
+                            };
+                            assert_eq!(&rendered.pixels[offset..offset + 4], &expected);
+                        }
+                        let mut resolved = capture.clone();
+                        let mut selection = capture_selection(&resolved).unwrap();
+                        prepare(
+                            &mut resolved,
+                            &mut selection,
+                            None,
+                            &CancelToken::default(),
+                            None,
+                        )
+                        .unwrap();
+                        assert_eq!(
+                            selection.crop, capture.viewport,
+                            "advanced default keeps the full letterbox"
+                        );
+                        assert_eq!(
+                            resolved
+                                .pages
+                                .iter()
+                                .find(|page| page.index == reference as usize)
+                                .unwrap()
+                                .rect
+                                .y,
+                            40.
+                        );
+                        if advanced {
+                            let mut contextual = capture.clone();
+                            let mut selected = capture_selection(&contextual).unwrap();
+                            selected.reveal_context(contextual.viewport.height * 0.2);
+                            let originals = prepare(
+                                &mut contextual,
+                                &mut selected,
+                                None,
+                                &CancelToken::default(),
+                                None,
+                            )
+                            .unwrap();
+                            assert_eq!(
+                                selected.crop, capture.viewport,
+                                "context never enters the default export"
+                            );
+                            contextual.viewport = selected.canvas;
+                            let (context_image, _) = render_prepared(
+                                &contextual,
+                                &CancelToken::default(),
+                                None,
+                                originals,
+                            )
+                            .unwrap();
+                            let row = if reference == 0 {
+                                context_image.height as usize - 4
+                            } else {
+                                4
+                            };
+                            let offset = (row * context_image.width as usize + 160) * 4;
+                            assert_eq!(
+                                &context_image.pixels[offset..offset + 4],
+                                &colors[1 - reference as usize],
+                                "the editor context reveals real adjacent source pixels"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 }

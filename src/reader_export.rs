@@ -10,6 +10,8 @@ pub struct ExportImage {
     pub bytes: Vec<u8>,
     pub mime: String,
     pub name: String,
+    #[cfg(not(target_os = "android"))]
+    clipboard_rgba: Option<image::RgbaImage>,
 }
 
 impl ExportImage {
@@ -48,6 +50,8 @@ impl ExportImage {
             bytes,
             mime: mime.into(),
             name: format!("{stem}.{extension}"),
+            #[cfg(not(target_os = "android"))]
+            clipboard_rgba: None,
         })
     }
 
@@ -58,22 +62,42 @@ impl ExportImage {
         Self::from_rgba_with_preferences(width, height, pixels, &CapturePreferences::default())
     }
 
+    /// Desktop PNG clipboard ownership consumes the existing composed pixels.
+    /// PNG is lossless, so its encode/decode round trip cannot change them.
+    /// File delivery and other codecs retain their selected encoding semantics.
+    pub fn from_rgba_for_delivery(
+        width: u32,
+        height: u32,
+        pixels: Vec<u8>,
+        preferences: &CapturePreferences,
+        clipboard: bool,
+    ) -> Result<Self, String> {
+        #[cfg(not(target_os = "android"))]
+        if clipboard && preferences.format == CaptureFormat::Png {
+            validate_screencap(width, height, pixels.len())?;
+            return Ok(Self {
+                bytes: Vec::new(),
+                mime: "image/png".into(),
+                name: "screencap.png".into(),
+                clipboard_rgba: Some(
+                    image::RgbaImage::from_raw(width, height, pixels).ok_or_else(|| {
+                        "Screenshot pixels do not match its dimensions".to_string()
+                    })?,
+                ),
+            });
+        }
+        #[cfg(target_os = "android")]
+        let _ = clipboard;
+        Self::from_rgba_with_preferences(width, height, &pixels, preferences)
+    }
+
     pub fn from_rgba_with_preferences(
         width: u32,
         height: u32,
         pixels: &[u8],
         preferences: &CapturePreferences,
     ) -> Result<Self, String> {
-        let expected = u64::from(width)
-            .checked_mul(u64::from(height))
-            .and_then(|pixels| pixels.checked_mul(4))
-            .filter(|bytes| {
-                *bytes > 0 && *bytes <= 8_000_000 * 4 && width <= 16384 && height <= 65536
-            })
-            .ok_or_else(|| "Screenshot dimensions exceed supported limits".to_string())?;
-        if expected != pixels.len() as u64 {
-            return Err("Screenshot pixels do not match its dimensions".into());
-        }
+        validate_screencap(width, height, pixels.len())?;
         let quality = match preferences.format {
             CaptureFormat::Jpeg => preferences.jpeg_quality,
             CaptureFormat::Avif => preferences.avif_quality,
@@ -111,8 +135,38 @@ impl ExportImage {
             bytes,
             mime: mime.into(),
             name: format!("screencap.{extension}"),
+            #[cfg(not(target_os = "android"))]
+            clipboard_rgba: None,
         })
     }
+}
+
+fn validate_screencap(width: u32, height: u32, bytes: usize) -> Result<(), String> {
+    let expected = u64::from(width)
+        .checked_mul(u64::from(height))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .filter(|bytes| *bytes > 0 && *bytes <= 8_000_000 * 4 && width <= 16384 && height <= 65536)
+        .ok_or_else(|| "Screenshot dimensions exceed supported limits".to_string())?;
+    if expected != bytes as u64 {
+        return Err("Screenshot pixels do not match its dimensions".into());
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "android"))]
+fn clipboard_pixels(image: &mut ExportImage) -> Result<image::RgbaImage, String> {
+    if let Some(rgba) = image.clipboard_rgba.take() {
+        return Ok(rgba);
+    }
+    reader_engine::decode_image(
+        &image.bytes,
+        reader_engine::DecodeLimits {
+            // Locally generated PNGs can exceed a source page's encoded limit.
+            max_encoded_bytes: 128 * 1024 * 1024,
+            ..reader_engine::DecodeLimits::default()
+        },
+    )
+    .map_err(|error| format!("Cannot decode clipboard image: {error}"))
 }
 
 /// Reencode only newly fetched storage bytes. Source dimensions are preserved;
@@ -358,6 +412,13 @@ pub fn deliver_with_context(
         callback(Err("Unsupported image export format".into()));
         return;
     }
+    #[cfg(not(target_os = "android"))]
+    if !clipboard && image.clipboard_rgba.is_some() {
+        callback(Err(
+            "Clipboard pixels cannot be saved without encoding".into()
+        ));
+        return;
+    }
     platform::deliver(image, clipboard, context, Box::new(callback));
 }
 
@@ -559,10 +620,10 @@ mod platform {
                     // Keep the clipboard alive while the user pastes. Linux
                     // selections are served by their owner after set_image.
                     let mut clipboard = None;
-                    while let Ok(job) = receiver.recv() {
+                    while let Ok(mut job) = receiver.recv() {
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             if job.clipboard {
-                                copy(&job.image, &job.context, &mut clipboard)
+                                copy(&mut job.image, &job.context, &mut clipboard)
                             } else {
                                 save(&job.image, &job.context)
                             }
@@ -614,23 +675,14 @@ mod platform {
     }
 
     fn copy(
-        image: &ExportImage,
+        image: &mut ExportImage,
         context: &SaveContext,
         clipboard: &mut Option<arboard::Clipboard>,
     ) -> Result<(), String> {
         if !(context.current)() {
             return Err("Image action cancelled".into());
         }
-        let rgba = reader_engine::decode_image(
-            &image.bytes,
-            reader_engine::DecodeLimits {
-                // Screenshots are generated locally and may exceed a source
-                // page's encoded byte limit while retaining the decode limits.
-                max_encoded_bytes: 128 * 1024 * 1024,
-                ..reader_engine::DecodeLimits::default()
-            },
-        )
-        .map_err(|error| format!("Cannot decode clipboard image: {error}"))?;
+        let rgba = super::clipboard_pixels(image)?;
         if clipboard.is_none() {
             *clipboard = Some(
                 arboard::Clipboard::new()
@@ -813,6 +865,78 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn png_screencap_clipboard_moves_pixels_without_encoding_and_preserves_alpha() {
+        let pixels = vec![
+            17, 31, 49, 0, 120, 77, 33, 128, 2, 8, 16, 255, 255, 255, 255, 1,
+        ];
+        let expected = pixels.clone();
+        let original_allocation = pixels.as_ptr();
+        let preferences = CapturePreferences::default();
+        let mut copy =
+            ExportImage::from_rgba_for_delivery(2, 2, pixels, &preferences, true).unwrap();
+        assert!(
+            copy.bytes.is_empty(),
+            "PNG clipboard must not invoke the encoder"
+        );
+        let rgba = clipboard_pixels(&mut copy).unwrap();
+        assert_eq!(
+            rgba.as_raw().as_ptr(),
+            original_allocation,
+            "handoff moves the composed allocation"
+        );
+        assert_eq!(rgba.as_raw(), &expected);
+        let mut save =
+            ExportImage::from_rgba_for_delivery(2, 2, expected.clone(), &preferences, false)
+                .unwrap();
+        assert!(!save.bytes.is_empty(), "Save must still produce a PNG file");
+        assert_eq!(
+            clipboard_pixels(&mut save).unwrap(),
+            rgba,
+            "exact parity with PNG roundtrip, including transparent RGB"
+        );
+        let mut jpeg = ExportImage::from_rgba_for_delivery(
+            2,
+            2,
+            expected,
+            &CapturePreferences {
+                format: CaptureFormat::Jpeg,
+                ..preferences
+            },
+            true,
+        )
+        .unwrap();
+        assert!(!jpeg.bytes.is_empty());
+        assert_eq!(jpeg.mime, "image/jpeg");
+        assert!(
+            clipboard_pixels(&mut jpeg)
+                .unwrap()
+                .pixels()
+                .all(|pixel| pixel[3] == 255)
+        );
+        assert!(
+            ExportImage::from_rgba_for_delivery(
+                2,
+                2,
+                vec![0; 15],
+                &CapturePreferences::default(),
+                true
+            )
+            .is_err()
+        );
+        assert!(
+            ExportImage::from_rgba_for_delivery(
+                8001,
+                1000,
+                vec![],
+                &CapturePreferences::default(),
+                true
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn cancelled_selection_never_enters_save_or_clipboard_delivery() {

@@ -201,6 +201,7 @@ fn render_reader_settings_previews() {
         chapter_cache: Arc::new(crate::chapter_cache::ChapterCache::new(
             temp.path().join("cache/chapters"),
         )),
+        capture_originals: Mutex::default(),
         image_worker_live: AtomicBool::new(true),
         view: Mutex::new(View::default()),
         generation: AtomicU64::new(0),
@@ -473,6 +474,7 @@ fn paged_first_frame_and_zoom_keep_native_detail_at_android_density() {
         chapter_cache: Arc::new(crate::chapter_cache::ChapterCache::new(
             temp.path().join("cache/chapters"),
         )),
+        capture_originals: Mutex::default(),
         image_worker_live: AtomicBool::new(true),
         view: Mutex::new(View::default()),
         generation: AtomicU64::new(0),

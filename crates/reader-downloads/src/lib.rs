@@ -305,6 +305,24 @@ fn load(root: &Path, chapter: &ChapterId) -> Result<ChapterDownload> {
     }
     Ok(job)
 }
+fn metadata_jobs(root: &Path) -> Result<Vec<ChapterDownload>> {
+    let mut jobs = Vec::new();
+    for directory in owned_directories(root)? {
+        let job = match load_manifest(&directory.join("manifest.json")) {
+            Ok(job) => job,
+            Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        if directory.file_name() != Some(std::ffi::OsStr::new(&chapter_key(&job.chapter))) {
+            return Err(Error::Invalid("invalid download directory identity".into()));
+        }
+        jobs.push(job);
+    }
+    // Old schema-1 manifests default to order zero. Identity breaks ties so
+    // their display and scheduling order never depends on directory iteration.
+    jobs.sort_by(|a, b| (a.queue_order, &a.chapter).cmp(&(b.queue_order, &b.chapter)));
+    Ok(jobs)
+}
 fn verify(path: &Path, page: &DownloadedPage) -> Result<bool> {
     let Some(expected) = &page.sha256 else {
         return Ok(false);
@@ -373,6 +391,34 @@ fn usage(root: &Path) -> Result<u64> {
         }
     }
     Ok(bytes)
+}
+fn admission_available(inner: &Inner, chapter: &ChapterId) -> bool {
+    !inner.active.contains_key(&chapter_key(chapter))
+        && inner
+            .active
+            .values()
+            .filter(|source| *source == &chapter.series.source_id)
+            .count()
+            < 2
+}
+fn admit_job(inner: &mut Inner, mut job: ChapterDownload) -> Result<()> {
+    let key = chapter_key(&job.chapter);
+    if inner.active.contains_key(&key) {
+        return Err(Error::Invalid("chapter already running".into()));
+    }
+    if !admission_available(inner, &job.chapter) {
+        return Err(Error::Invalid(
+            "source download concurrency limit reached".into(),
+        ));
+    }
+    if !matches!(job.status, JobStatus::Queued | JobStatus::Failed) {
+        return Err(Error::Invalid("chapter is not queued".into()));
+    }
+    job.status = JobStatus::Running;
+    job.error = None;
+    save(&inner.root, &job)?;
+    inner.active.insert(key, job.chapter.series.source_id);
+    Ok(())
 }
 /// Releases admission and reconciles interrupted writes on both returned errors
 /// and unwinding callbacks. Process termination is handled by startup recovery.
@@ -509,6 +555,69 @@ impl DownloadStore {
         jobs.sort_by_key(|job| job.queue_order);
         Ok(jobs)
     }
+    /// Manifest-only status, byte-count and committed-page hints for live lists.
+    /// Does not open, hash, repair or remove page payloads. Use `offline` before
+    /// opening a bundle. Atomic manifests may reflect different moments while
+    /// a worker is progressing; records are sorted by queue order and identity.
+    pub fn snapshot(&self) -> Result<Vec<ChapterDownload>> {
+        let root = self
+            .inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .root
+            .clone();
+        metadata_jobs(&root)
+    }
+    /// Move a queued chapter before another queued chapter, or to the tail when
+    /// `before` is `None`. Active workers and nonqueued jobs cannot be moved or
+    /// used as targets. Only queued, inactive manifests receive new orders.
+    pub fn move_before(&self, chapter: &ChapterId, before: Option<&ChapterId>) -> Result<()> {
+        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let mut jobs = metadata_jobs(&inner.root)?
+            .into_iter()
+            .filter(|job| {
+                job.status == JobStatus::Queued
+                    && !inner.active.contains_key(&chapter_key(&job.chapter))
+            })
+            .collect::<Vec<_>>();
+        let position = jobs
+            .iter()
+            .position(|job| &job.chapter == chapter)
+            .ok_or_else(|| Error::Invalid("chapter is not an inactive queued job".into()))?;
+        let target = match before {
+            Some(before) => jobs
+                .iter()
+                .position(|job| &job.chapter == before)
+                .ok_or_else(|| Error::Invalid("target is not an inactive queued job".into()))?,
+            None => jobs.len(),
+        };
+        if position == target || position + 1 == target {
+            return Ok(());
+        }
+        let job = jobs.remove(position);
+        jobs.insert(
+            if target > position {
+                target - 1
+            } else {
+                target
+            },
+            job,
+        );
+        // Reserve fresh orders before writing. Completed/imported bundles and
+        // the current worker keep their orders, and future enqueues follow this
+        // queue even after reopening. Schema-1 readers already know this field.
+        let next = inner
+            .next_order
+            .checked_add(jobs.len() as u64)
+            .ok_or_else(|| Error::Invalid("download queue sequence exhausted".into()))?;
+        let first = inner.next_order;
+        inner.next_order = next;
+        for (index, mut job) in jobs.into_iter().enumerate() {
+            job.queue_order = first + index as u64;
+            save(&inner.root, &job)?;
+        }
+        Ok(())
+    }
     /// Persisted status hints for list actions, without reading page payloads
     /// or hashing chapter bundles. Call `offline` before opening stored pages.
     /// Manifest publication is atomic, so readers need no lock during disk I/O.
@@ -633,40 +742,47 @@ impl DownloadStore {
         chapter: &ChapterId,
         mut fetch: impl FnMut(&PageResource) -> std::result::Result<Vec<u8>, String>,
     ) -> Result<()> {
-        let key = chapter_key(chapter);
         {
             let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            if inner.active.contains_key(&key) {
-                return Err(Error::Invalid("chapter already running".into()));
-            }
-            if inner
-                .active
-                .values()
-                .filter(|source| *source == &chapter.series.source_id)
-                .count()
-                >= 2
-            {
-                return Err(Error::Invalid(
-                    "source download concurrency limit reached".into(),
-                ));
-            }
-            let mut job = load(&inner.root, chapter)?;
-            if !matches!(job.status, JobStatus::Queued | JobStatus::Failed) {
-                return Err(Error::Invalid("chapter is not queued".into()));
-            }
-            job.status = JobStatus::Running;
-            job.error = None;
-            save(&inner.root, &job)?;
-            inner
-                .active
-                .insert(key.clone(), chapter.series.source_id.clone());
+            let job = load(&inner.root, chapter)?;
+            admit_job(&mut inner, job)?;
         }
+        self.run_claimed(chapter, &mut fetch)
+    }
+    /// Claim the first admissible queued chapter in persisted order. Selection,
+    /// active admission and the Running publication share the reorder lock, so
+    /// a successful move always affects the next chapter that has not started.
+    /// Payload validation and fetching happen only after this atomic claim.
+    /// Returns None when no queued chapter has an available source slot.
+    pub fn run_next(
+        &self,
+        mut fetch: impl FnMut(&ChapterId, &PageResource) -> std::result::Result<Vec<u8>, String>,
+    ) -> Result<Option<ChapterId>> {
+        let chapter = {
+            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(job) = metadata_jobs(&inner.root)?.into_iter().find(|job| {
+                job.status == JobStatus::Queued && admission_available(&inner, &job.chapter)
+            }) else {
+                return Ok(None);
+            };
+            let chapter = job.chapter.clone();
+            admit_job(&mut inner, job)?;
+            chapter
+        };
+        self.run_claimed(&chapter, &mut |page| fetch(&chapter, page))?;
+        Ok(Some(chapter))
+    }
+    fn run_claimed(
+        &self,
+        chapter: &ChapterId,
+        fetch: &mut impl FnMut(&PageResource) -> std::result::Result<Vec<u8>, String>,
+    ) -> Result<()> {
         let mut active = ActiveRun {
             store: self.clone(),
             chapter: chapter.clone(),
             finished: false,
         };
-        let result = self.run_pages(chapter, &mut fetch);
+        let result = self.run_pages(chapter, fetch);
         active.finish(result.as_ref().err().map(ToString::to_string))?;
         result
     }
@@ -1226,6 +1342,294 @@ mod tests {
                 total_pages: 6,
             }
         );
+    }
+    #[test]
+    fn snapshot_preserves_manifest_hints_without_touching_payloads() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DownloadStore::open(directory.path(), 1_000_000).unwrap();
+        let chapter = chapter();
+        store.enqueue(chapter.clone(), pages()).unwrap();
+        store.run(&chapter, |_| Ok(png())).unwrap();
+        let bundle = directory.path().join(chapter_key(&chapter));
+        let original = fs::read(bundle.join("manifest.json")).unwrap();
+        let job = store.snapshot().unwrap().remove(0);
+        let payload = bundle.join(&job.pages[0].filename);
+        fs::remove_file(&payload).unwrap();
+        // A directory here makes checked_job's cleanup fail; a corrupt page
+        // would be erased by verification. Neither may be touched by polling.
+        fs::create_dir(&payload).unwrap();
+        fs::write(bundle.join(&job.pages[1].filename), b"corrupt").unwrap();
+        fs::remove_file(bundle.join(&job.pages[2].filename)).unwrap();
+        let snapshot = store.snapshot().unwrap();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].chapter, chapter);
+        assert_eq!(snapshot[0].status, JobStatus::Complete);
+        assert_eq!(snapshot[0].completed_pages(), 3);
+        assert_eq!(snapshot[0].downloaded_bytes(), job.downloaded_bytes());
+        assert_eq!(fs::read(bundle.join("manifest.json")).unwrap(), original);
+        assert!(payload.is_dir());
+        assert_eq!(
+            fs::read(bundle.join(&job.pages[1].filename)).unwrap(),
+            b"corrupt"
+        );
+    }
+    #[test]
+    fn snapshot_validates_manifest_bounds_and_owned_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DownloadStore::open(directory.path(), 1_000_000).unwrap();
+        let chapter = chapter();
+        store.enqueue(chapter.clone(), pages()).unwrap();
+        let mut job = store.snapshot().unwrap().remove(0);
+        job.pages[0].filename = "../outside".into();
+        save(directory.path(), &job).unwrap();
+        assert!(store.snapshot().is_err());
+        job.pages[0].filename = page_name(0, "0");
+        let valid_pages = std::mem::take(&mut job.pages);
+        save(directory.path(), &job).unwrap();
+        assert!(store.snapshot().is_err());
+        job.pages = valid_pages;
+        job.chapter.local_id = "other".into();
+        fs::write(
+            directory
+                .path()
+                .join(chapter_key(&chapter))
+                .join("manifest.json"),
+            serde_json::to_vec(&job).unwrap(),
+        )
+        .unwrap();
+        assert!(store.snapshot().is_err());
+    }
+    #[test]
+    fn queue_reorder_survives_reopen_and_legacy_orders() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DownloadStore::open(directory.path(), 1_000_000).unwrap();
+        let first = chapter();
+        let second = ChapterId::new(first.series.clone(), "second");
+        let third = ChapterId::new(first.series.clone(), "third");
+        for chapter in [&first, &second, &third] {
+            store.enqueue(chapter.clone(), pages()).unwrap();
+        }
+        // Old manifests have no queue_order; reading them must remain valid.
+        let path = directory
+            .path()
+            .join(chapter_key(&first))
+            .join("manifest.json");
+        let mut legacy: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        legacy.as_object_mut().unwrap().remove("queue_order");
+        fs::write(path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        store.move_before(&third, Some(&first)).unwrap();
+        store.move_before(&first, None).unwrap();
+        let expected = vec![third.clone(), second.clone(), first.clone()];
+        assert_eq!(
+            store
+                .snapshot()
+                .unwrap()
+                .into_iter()
+                .map(|job| job.chapter)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        drop(store);
+        let store = DownloadStore::open(directory.path(), 1_000_000).unwrap();
+        assert_eq!(
+            store
+                .snapshot()
+                .unwrap()
+                .into_iter()
+                .map(|job| job.chapter)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        let later = ChapterId::new(first.series.clone(), "later");
+        store.enqueue(later.clone(), pages()).unwrap();
+        assert_eq!(store.snapshot().unwrap().last().unwrap().chapter, later);
+    }
+    #[test]
+    fn queue_reorder_rejects_invalid_targets_and_protects_active_jobs() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DownloadStore::open(directory.path(), 1_000_000).unwrap();
+        let first = chapter();
+        let second = ChapterId::new(first.series.clone(), "second");
+        let other = ChapterId::new(first.series.clone(), "other");
+        let missing = ChapterId::new(first.series.clone(), "missing");
+        for chapter in [&first, &second, &other] {
+            store.enqueue(chapter.clone(), pages()).unwrap();
+        }
+        store.pause(&other).unwrap();
+        let orders = store
+            .snapshot()
+            .unwrap()
+            .iter()
+            .map(|job| job.queue_order)
+            .collect::<Vec<_>>();
+        assert!(store.move_before(&first, Some(&missing)).is_err());
+        assert!(store.move_before(&missing, None).is_err());
+        assert!(store.move_before(&first, Some(&other)).is_err());
+        assert!(store.move_before(&other, None).is_err());
+        assert_eq!(
+            store
+                .snapshot()
+                .unwrap()
+                .iter()
+                .map(|job| job.queue_order)
+                .collect::<Vec<_>>(),
+            orders
+        );
+        store
+            .run(&first, |_| {
+                assert!(store.move_before(&first, None).is_err());
+                assert!(store.move_before(&second, Some(&first)).is_err());
+                // Resume can publish Queued while a fetch callback still owns the
+                // active lease. That current job must remain protected as well.
+                store.pause(&first).unwrap();
+                store.resume(&first).unwrap();
+                assert!(store.move_before(&first, None).is_err());
+                assert!(store.move_before(&second, Some(&first)).is_err());
+                Ok(png())
+            })
+            .unwrap();
+        let complete_order = store
+            .snapshot()
+            .unwrap()
+            .into_iter()
+            .find(|job| job.chapter == first)
+            .unwrap()
+            .queue_order;
+        assert!(store.move_before(&first, None).is_err());
+        assert!(store.move_before(&second, Some(&first)).is_err());
+        store.resume(&other).unwrap();
+        store.move_before(&other, Some(&second)).unwrap();
+        assert_eq!(
+            store
+                .snapshot()
+                .unwrap()
+                .into_iter()
+                .find(|job| job.chapter == first)
+                .unwrap()
+                .queue_order,
+            complete_order
+        );
+    }
+    #[test]
+    fn run_next_claims_before_fetch_and_observes_pending_reorder() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DownloadStore::open(directory.path(), 1_000_000).unwrap();
+        let first = chapter();
+        let second = ChapterId::new(first.series.clone(), "second");
+        let third = ChapterId::new(first.series.clone(), "third");
+        for chapter in [&first, &second, &third] {
+            store.enqueue(chapter.clone(), pages()).unwrap();
+        }
+        let (started, claimed) = std::sync::mpsc::channel();
+        let (release, continue_fetch) = std::sync::mpsc::channel();
+        let worker = {
+            let store = store.clone();
+            std::thread::spawn(move || {
+                let mut gated = false;
+                store.run_next(|chapter, _| {
+                    if !gated {
+                        started.send(chapter.clone()).unwrap();
+                        continue_fetch
+                            .recv_timeout(std::time::Duration::from_secs(5))
+                            .unwrap();
+                        gated = true;
+                    }
+                    Ok(png())
+                })
+            })
+        };
+        assert_eq!(
+            claimed
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap(),
+            first
+        );
+        assert_eq!(store.snapshot().unwrap()[0].status, JobStatus::Running);
+        assert!(store.move_before(&first, None).is_err());
+        store.move_before(&third, Some(&second)).unwrap();
+        release.send(()).unwrap();
+        assert_eq!(worker.join().unwrap().unwrap(), Some(first));
+        assert_eq!(
+            store
+                .run_next(|id, _| {
+                    assert_eq!(id, &third);
+                    Ok(png())
+                })
+                .unwrap(),
+            Some(third)
+        );
+        assert_eq!(
+            store
+                .run_next(|id, _| {
+                    assert_eq!(id, &second);
+                    Ok(png())
+                })
+                .unwrap(),
+            Some(second)
+        );
+        assert_eq!(
+            store.run_next(|_, _| panic!("no queued jobs")).unwrap(),
+            None
+        );
+    }
+    #[test]
+    fn run_next_failures_advance_and_source_capacity_skips_blocked_jobs() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DownloadStore::open(directory.path(), 1_000_000).unwrap();
+        let missing = chapter();
+        let valid = ChapterId::new(missing.series.clone(), "valid");
+        store.enqueue(missing.clone(), pages()).unwrap();
+        store.enqueue(valid.clone(), pages()).unwrap();
+        assert!(
+            store
+                .run_next(|id, _| {
+                    assert_eq!(id, &missing);
+                    assert_eq!(store.snapshot().unwrap()[0].status, JobStatus::Running);
+                    Err("source is unavailable".into())
+                })
+                .is_err()
+        );
+        assert_eq!(store.snapshot().unwrap()[0].status, JobStatus::Failed);
+        assert_eq!(
+            store
+                .run_next(|id, _| {
+                    assert_eq!(id, &valid);
+                    Ok(png())
+                })
+                .unwrap(),
+            Some(valid.clone())
+        );
+        let blocked = ChapterId::new(valid.series.clone(), "blocked");
+        let other = ChapterId::new(SeriesId::new("other-source", "series"), "other");
+        store.enqueue(blocked.clone(), pages()).unwrap();
+        store.enqueue(other.clone(), pages()).unwrap();
+        {
+            let mut inner = store.inner.lock().unwrap();
+            inner
+                .active
+                .insert("active-one".into(), valid.series.source_id.clone());
+            inner
+                .active
+                .insert("active-two".into(), valid.series.source_id.clone());
+        }
+        assert_eq!(
+            store
+                .run_next(|id, _| {
+                    assert_eq!(id, &other);
+                    Ok(png())
+                })
+                .unwrap(),
+            Some(other)
+        );
+        assert_eq!(
+            store
+                .run_next(|_, _| panic!("source slots occupied"))
+                .unwrap(),
+            None
+        );
+        store.inner.lock().unwrap().active.clear();
+        assert_eq!(store.run_next(|_, _| Ok(png())).unwrap(), Some(blocked));
     }
     #[cfg(unix)]
     #[test]

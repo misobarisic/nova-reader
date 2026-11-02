@@ -121,6 +121,23 @@ Nova supplies colors, radii, typography, actions and the existing five-tab bar.
 History posters open the series detail page; the text area opens the recorded
 chapter. Unread chapter rows show an accent dot and bright title; read rows
 remove the dot and dim the title. Download/options actions retain an 8px gap.
+Chapter transfer icons show queued, running, paused, failed and completed states;
+the completed check opens options rather than immediately deleting the bundle.
+All/Unread/Downloaded filters keep chapter identity and existing text colors.
+Normal detail rows do not add read/download labels or file sizes.
+
+Downloads uses Downloaded/Queue tabs on narrow windows and adjacent saved/queue
+panes on desktop. Saved chapters group beneath a collapsible series cover/header,
+with search, unread filtering, title/size sorting and stable-identity selection
+for bulk deletion. Sizes and read-position labels belong here. The queue shows
+committed page progress, approximate committed-byte rate, errors and per-state
+pause/resume/retry/cancel controls. Queued jobs can be dragged, moved with
+Control+Up/Down or reordered through the accessible Move earlier/Move later
+menu; durable ordering determines the next dispatch. Pause all and
+Resume all operate on the queue without blocking navigation. The shared bounded
+artwork loader admits visible group/queue covers; status polling patches rows
+without rebuilding unchanged models.
+
 Browse separates Sources and Extensions. Source rows group Last used/Pinned/
 language, with independent Latest/pin actions; a source opens Popular/Latest,
 search, provider-defined filters and a poster gallery. Catalogue Back retains
@@ -144,8 +161,13 @@ Ctrl+mouse wheel and native two-finger pinch on Android zoom from 0.5×
 to 8×, preserving the source point beneath the cursor or moving finger midpoint.
 The 1100px fitted-width limit applies before magnification. Once zoomed above
 1.01×, single taps anywhere only toggle the OSD; navigation tap regions and
-their inversions are bypassed. Double tap retains its fit/2× toggle, while image
-context actions remain available. Starting a pinch cancels pending taps, holds
+their inversions are bypassed. Double tap retains its fit/2× toggle with a 200ms
+ease-out transition anchored to the tapped source point. It follows the master
+animation and reader page-animation switches; disabling either settles the
+target immediately. Pinch and wheel remain direct, and interrupted gestures
+continue from the current zoom. Animation frames reuse displayed pixels before
+one final display reflow. Image context actions remain available. Starting a
+pinch cancels pending taps, holds
 and gallery motion; lifting a finger cannot turn the remaining contact into an
 action. On
 Android the status bar follows OSD visibility and its desired state survives recreation and
@@ -173,14 +195,22 @@ controls for format, encoding quality, screencap resolution and separate series 
 `CaptureSettings` global publishes validated device preferences; they persist
 under `reader:captures`, independently of library backups and chapter bytes.
 Normal screencap actions open `capture-editor.slint`, with a dimmed crop canvas,
-eight drag handles, edge scrolling, independent above/below extension and
-Preview/Adjust plus Save or Copy. Edge scrolling requires an outward drag;
+draggable borders and corner handles, edge scrolling and Preview/Adjust plus
+Save or Copy. A dimmed context strip above/below the initial crop shows available
+chapter content without adding it to the export. Dragging the top or bottom
+border outward reveals more content continuously; no separate extension buttons
+are shown. Keyboard edge adjustment supports the same extension. Edge scrolling requires an outward drag;
 pressing a handle leaves the selection unchanged and dragging inward stops
 extension immediately. The `simple_screencaps` preference defaults on
-and adds immediate viewport save/copy actions; disabling it hides both simple
+and adds immediate viewport save/copy actions directly before their respective
+selection actions; disabling it hides both simple
 entries. The clean live viewport snapshot is centralized before every context
 open, including keyboard invocation after scrolling or zooming. Controls and
 dimming never enter the worker-rendered export.
+Paged captures preserve each page's frozen fit, pan and zoom, including black
+letterboxing. Adjacent pages occupy their own viewport frames and enter an
+advanced selection only when it extends into those frames. Resolving unknown
+source dimensions recenters the fitted page without filling its gutters.
 
 The OSD consumes the effective mode: RTL swaps chapter/page semantic actions and
 enabled states while arrows keep their physical direction. Its progress adapter

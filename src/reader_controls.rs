@@ -1,32 +1,24 @@
 //! Reader input and preference projection; shared by desktop and Android.
 use super::*;
 use crate::reader_settings::{self, Background, ReaderSettings, Rotation};
-use std::cell::Cell;
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 
 thread_local! { static PRE_READER_FULLSCREEN: Cell<Option<bool>> = const { Cell::new(None) }; }
 const MIN_ZOOM: f32 = 0.5;
 const MAX_ZOOM: f32 = 8.;
 
-/// Keep the same source point beneath the cursor/fingers, including contained
-/// image margins. A moving pinch midpoint also translates that point before
-/// the bounds are clamped. All dimensions come from the mounted reader frame.
-fn apply_zoom_transform(ui: &AppWindow, zoom: f32, from: (f32, f32), to: (f32, f32)) -> bool {
-    if ![zoom, from.0, from.1, to.0, to.1]
-        .into_iter()
-        .all(f32::is_finite)
-    {
-        return false;
-    }
-    let viewport_width = ui.get_reader_viewport_width().max(1.);
-    let viewport_height = ui.get_reader_viewport_height().max(1.);
-    let from = (
-        from.0.clamp(0., 1.) * viewport_width,
-        from.1.clamp(0., 1.) * viewport_height,
-    );
-    let to = (
-        to.0.clamp(0., 1.) * viewport_width,
-        to.1.clamp(0., 1.) * viewport_height,
-    );
+/// A fixed source anchor avoids drift while an axis changes from contained to
+/// pannable during an animated zoom. Webtoon y is in fit-column widths.
+#[derive(Clone, Copy)]
+struct ZoomAnchor {
+    source: (f32, f32),
+    target: (f32, f32),
+}
+
+fn zoom_geometry(ui: &AppWindow) -> (f32, f32, f32) {
     let paged = ui.get_reading_mode() != 0;
     let width = if paged {
         ui.get_reader_paged_width()
@@ -40,44 +32,66 @@ fn apply_zoom_transform(ui: &AppWindow, zoom: f32, from: (f32, f32), to: (f32, f
         width
     }
     .max(1.);
-    let vertical_margin = |height: f32| {
-        if !paged || ui.get_reader_split_page() {
-            0.
-        } else {
-            (viewport_height - height).max(0.) / 2.
+    let margin = if paged && !ui.get_reader_split_page() {
+        (ui.get_reader_viewport_height() - height).max(0.) / 2.
+    } else {
+        0.
+    };
+    (width, height, margin)
+}
+
+impl ZoomAnchor {
+    fn capture(ui: &AppWindow, from: (f32, f32), to: (f32, f32)) -> Self {
+        let vw = ui.get_reader_viewport_width().max(1.);
+        let vh = ui.get_reader_viewport_height().max(1.);
+        let (width, height, margin) = zoom_geometry(ui);
+        Self {
+            source: (
+                (from.0.clamp(0., 1.) * vw - ui.get_scroll_x() - (vw - width).max(0.) / 2.) / width,
+                (from.1.clamp(0., 1.) * vh - ui.get_scroll_y() - margin) / height,
+            ),
+            target: (to.0.clamp(0., 1.), to.1.clamp(0., 1.)),
         }
-    };
-    let source = (
-        (from.0 - ui.get_scroll_x() - (viewport_width - width).max(0.) / 2.) / width,
-        (from.1 - ui.get_scroll_y() - vertical_margin(height)) / height,
-    );
-    ui.set_zoom(zoom.clamp(MIN_ZOOM, MAX_ZOOM));
-    let width = if paged {
-        ui.get_reader_paged_width()
-    } else {
-        ui.get_reader_width()
     }
-    .max(1.);
-    let height = if paged {
-        ui.get_reader_paged_height()
-    } else {
-        width
+
+    fn apply(self, ui: &AppWindow, zoom: f32) {
+        ui.set_zoom(zoom.clamp(MIN_ZOOM, MAX_ZOOM));
+        let vw = ui.get_reader_viewport_width().max(1.);
+        let vh = ui.get_reader_viewport_height().max(1.);
+        let (width, height, margin) = zoom_geometry(ui);
+        ui.set_scroll_x(
+            -((vw - width).max(0.) / 2. + self.source.0 * width - self.target.0 * vw)
+                .clamp(0., (width - vw).max(0.)),
+        );
+        let content_height = if ui.get_reading_mode() != 0 {
+            height
+        } else {
+            ui.get_total_ratio() * width
+        };
+        ui.set_scroll_y(
+            -(margin + self.source.1 * height - self.target.1 * vh)
+                .clamp(0., (content_height - vh).max(0.)),
+        );
     }
-    .max(1.);
-    ui.set_scroll_x(
-        -((viewport_width - width).max(0.) / 2. + source.0 * width - to.0)
-            .clamp(0., (width - viewport_width).max(0.)),
-    );
-    let content_height = if paged {
-        height
-    } else {
-        ui.get_total_ratio() * width
-    };
-    ui.set_scroll_y(
-        -(vertical_margin(height) + source.1 * height - to.1)
-            .clamp(0., (content_height - viewport_height).max(0.)),
-    );
+}
+
+/// Keep the source point beneath moving fingers, including contained margins.
+fn apply_zoom_transform(ui: &AppWindow, zoom: f32, from: (f32, f32), to: (f32, f32)) -> bool {
+    if ![zoom, from.0, from.1, to.0, to.1]
+        .into_iter()
+        .all(f32::is_finite)
+    {
+        return false;
+    }
+    ZoomAnchor::capture(ui, from, to).apply(ui, zoom);
     true
+}
+
+#[derive(Clone, Copy)]
+struct ZoomAnimation {
+    anchor: ZoomAnchor,
+    start: f32,
+    target: f32,
 }
 
 pub(super) fn mode_label(mode: ReadingMode, gaps: bool) -> &'static str {
@@ -238,12 +252,74 @@ pub(super) fn wire(app: &Arc<Controller>, ui: &AppWindow) {
             }
         }
     });
+    let zoom_animation = Rc::new(RefCell::new(None::<ZoomAnimation>));
+    ui.on_reader_zoom_frame({
+        let weak = ui.as_weak();
+        let animation = zoom_animation.clone();
+        move |progress| {
+            let frame = *animation.borrow();
+            if let Some(ui) = weak.upgrade()
+                && let Some(frame) = frame
+            {
+                frame
+                    .anchor
+                    .apply(&ui, frame.start + (frame.target - frame.start) * progress);
+                if progress >= 1. {
+                    // Drop the borrow before the settling callback takes state.
+                    ui.invoke_finish_reader_zoom();
+                }
+            }
+        }
+    });
+    ui.on_reader_zoom_cancel({
+        let app = app.clone();
+        let weak = ui.as_weak();
+        let animation = zoom_animation.clone();
+        move |finish| {
+            let frame = animation.borrow_mut().take();
+            if let (Some(ui), Some(frame)) = (weak.upgrade(), frame) {
+                if ui.get_section() != 6 {
+                    return;
+                }
+                let zoom = if finish { frame.target } else { ui.get_zoom() };
+                let anchor = if finish {
+                    frame.anchor
+                } else {
+                    ZoomAnchor::capture(&ui, frame.anchor.target, frame.anchor.target)
+                };
+                anchor.apply(&ui, zoom);
+                // One final display request uses the settled geometry; frames
+                // only scale existing artwork and never enqueue decode work.
+                app.reflow(&ui, ui.get_reader_width(), ui.get_reader_viewport_height());
+                anchor.apply(&ui, zoom);
+            }
+        }
+    });
     ui.on_reader_double_tap({
         let app = app.clone();
         let weak = ui.as_weak();
+        let animation = zoom_animation.clone();
         move |x, y| {
+            if !x.is_finite() || !y.is_finite() {
+                return;
+            }
             if let Some(ui) = weak.upgrade() {
-                app.reader_zoom(&ui, if ui.get_zoom() > 1.01 { 1. } else { 2. }, x, y);
+                let previous_target = animation
+                    .borrow()
+                    .map(|frame| frame.target)
+                    .unwrap_or(ui.get_zoom());
+                ui.invoke_cancel_reader_zoom();
+                let target = if previous_target > 1.01 { 1. } else { 2. };
+                if !ui.get_reader_zoom_motion() {
+                    app.reader_zoom(&ui, target, x, y);
+                    return;
+                }
+                *animation.borrow_mut() = Some(ZoomAnimation {
+                    anchor: ZoomAnchor::capture(&ui, (x, y), (x, y)),
+                    start: ui.get_zoom(),
+                    target,
+                });
+                ui.invoke_start_reader_zoom();
             }
         }
     });
@@ -542,12 +618,14 @@ impl Controller {
     }
 
     pub(super) fn reader_zoom(&self, ui: &AppWindow, zoom: f32, x: f32, y: f32) {
+        ui.invoke_cancel_reader_zoom();
         if apply_zoom_transform(ui, zoom, (x, y), (x, y)) && ui.get_reading_mode() != 0 {
             self.reflow(ui, ui.get_reader_width(), ui.get_reader_viewport_height());
         }
     }
 
     fn reader_transform(&self, ui: &AppWindow, factor: f32, from: (f32, f32), to: (f32, f32)) {
+        ui.invoke_cancel_reader_zoom();
         if !factor.is_finite() || factor <= 0. {
             return;
         }
@@ -764,6 +842,7 @@ mod tests {
             images,
             download_serial: Mutex::new(()),
             active_image: Mutex::new(None),
+            capture_originals: Mutex::default(),
             metadata_refresh: Arc::default(),
         });
         wire(&app, &ui);
@@ -911,6 +990,103 @@ mod tests {
                 ui.set_reader_platform_android(true);
                 advance(100);
                 let (cx, cy) = (width / 2., height * 0.4);
+                // Exercise the production frame callbacks before native double
+                // taps below, including switches and interruption. Off-center
+                // source coordinates must remain fixed throughout the zoom.
+                ui.global::<crate::Anim>().set_enabled(true);
+                ui.global::<crate::ReaderSettings>()
+                    .set_page_animations(true);
+                // A contained axis must remain centered until it has pan
+                // range. Test off-center anchoring on the already fitted axis.
+                let anchor_x = if mode != 0 && ui.get_reader_paged_width() < width {
+                    cx
+                } else {
+                    cx + 2.
+                };
+                let anchor_y = if mode != 0 && ui.get_reader_paged_height() < height {
+                    height / 2.
+                } else {
+                    cy
+                };
+                let anchor = source_at(&ui, anchor_x, anchor_y);
+                ui.invoke_reader_double_tap(anchor_x / width, anchor_y / height);
+                advance(80);
+                assert!(
+                    ui.get_zoom() > 1. && ui.get_zoom() < 2.,
+                    "double tap exposes intermediate scale: zoom={}, motion={}, active={}, mode={mode}",
+                    ui.get_zoom(),
+                    ui.get_reader_zoom_motion(),
+                    ui.get_reader_zoom_animating()
+                );
+                let intermediate = source_at(&ui, anchor_x, anchor_y);
+                assert!(
+                    (anchor.0 - intermediate.0).abs() < 0.003
+                        && (anchor.1 - intermediate.1).abs() < 0.003,
+                    "animated anchor mode={mode} viewport={width}x{height} zoom={}: {anchor:?} -> {intermediate:?}",
+                    ui.get_zoom()
+                );
+                advance(180);
+                assert_eq!(ui.get_zoom(), 2.);
+                let final_anchor = source_at(&ui, anchor_x, anchor_y);
+                assert!(
+                    (anchor.0 - final_anchor.0).abs() < 0.003
+                        && (anchor.1 - final_anchor.1).abs() < 0.003
+                );
+                app.reader_zoom(&ui, 1., 0.5, 0.5);
+                for (master, reader_motion) in [(false, true), (true, false)] {
+                    ui.global::<crate::Anim>().set_enabled(master);
+                    ui.global::<crate::ReaderSettings>()
+                        .set_page_animations(reader_motion);
+                    ui.invoke_reader_double_tap(0.5, 0.4);
+                    assert_eq!(ui.get_zoom(), 2., "disabled animation settles immediately");
+                    assert!(!ui.get_reader_zoom_animating());
+                    app.reader_zoom(&ui, 1., 0.5, 0.5);
+                }
+                ui.global::<crate::Anim>().set_enabled(true);
+                ui.global::<crate::ReaderSettings>()
+                    .set_page_animations(true);
+                ui.invoke_reader_double_tap(0.5, 0.4);
+                advance(80);
+                app.reader_zoom(&ui, 1.5, 0.5, 0.4);
+                advance(300);
+                assert_eq!(
+                    ui.get_zoom(),
+                    1.5,
+                    "direct input cancels the animated target"
+                );
+                app.reader_zoom(&ui, 1., 0.5, 0.5);
+                ui.invoke_reader_double_tap(0.5, 0.4);
+                advance(80);
+                ui.global::<crate::Anim>().set_enabled(false);
+                advance(20);
+                assert_eq!(ui.get_zoom(), 2., "disabling motion settles the target");
+                assert!(!ui.get_reader_zoom_animating());
+                ui.global::<crate::Anim>().set_enabled(true);
+                app.reader_zoom(&ui, 1., 0.5, 0.5);
+                ui.invoke_reader_double_tap(0.5, 0.4);
+                advance(80);
+                ui.invoke_reader_double_tap(0.5, 0.4);
+                advance(250);
+                assert_eq!(
+                    ui.get_zoom(),
+                    1.,
+                    "a new double tap replaces the animated target"
+                );
+                ui.invoke_reader_double_tap(0.5, 0.4);
+                advance(80);
+                ui.set_section(5);
+                advance(20);
+                let interrupted_zoom = ui.get_zoom();
+                advance(250);
+                assert_eq!(
+                    ui.get_zoom(),
+                    interrupted_zoom,
+                    "navigation cancels stale frames"
+                );
+                assert!(!ui.get_reader_zoom_animating());
+                ui.set_section(6);
+                app.reader_zoom(&ui, 1., 0.5, 0.5);
+                advance(50);
                 for expected in [2., 1.] {
                     ui.set_reader_osd(false);
                     touch(&ui, 1, cx, cy, TouchPhase::Started);
@@ -920,7 +1096,12 @@ mod tests {
                     touch(&ui, 1, cx + 2., cy, TouchPhase::Started);
                     advance(30);
                     touch(&ui, 1, cx + 2., cy, TouchPhase::Ended);
-                    advance(300);
+                    advance(80);
+                    assert!(
+                        ui.get_zoom() > 1. && ui.get_zoom() < 2.,
+                        "native double tap animates in mode {mode}"
+                    );
+                    advance(220);
                     assert!(
                         (ui.get_zoom() - expected).abs() < 0.001,
                         "double tap remains fit/2x in mode {mode}"

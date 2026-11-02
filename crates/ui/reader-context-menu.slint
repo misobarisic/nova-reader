@@ -11,6 +11,7 @@ export component ReaderImageInteraction inherits ControlTouchArea {
     in property <bool> page-drag-enabled: false;
     in property <bool> wheel-zoom-enabled: false;
     callback zoom-requested(float, length, length);
+    callback press-started;
     callback page-drag-moved(length, length);
     callback page-drag-ended(length, length);
     callback page-drag-cancelled;
@@ -64,6 +65,7 @@ export component ReaderImageInteraction inherits ControlTouchArea {
     clicked => { root.click-pending = true; }
     pointer-event(event) => {
         if event.kind == PointerEventKind.down {
+            root.press-started();
             root.dragged = false;
             root.primary-press = event.button == PointerEventButton.left;
             root.press-finger-id = event.touch-finger-id;
@@ -173,22 +175,23 @@ export component ReaderContextMenu inherits Rectangle {
     private property <int> selected: 0;
     private property <[ReaderImageAction]> actions: root.simple-screencaps ? [
         { label: @tr("Save image"), id: "save-image", icon: 0 },
+        { label: @tr("Save screencap (simple)"), id: "save-screencap-simple", icon: 1 },
         { label: @tr("Save screencap"), id: "save-screencap", icon: 1 },
         { label: @tr("Copy image to clipboard"), id: "copy-image", icon: 2 },
-        { label: @tr("Copy screencap"), id: "copy-screencap", icon: 3 },
-        { label: @tr("Save screencap (simple)"), id: "save-screencap-simple", icon: 1 },
         { label: @tr("Copy screencap (simple)"), id: "copy-screencap-simple", icon: 3 },
+        { label: @tr("Copy screencap"), id: "copy-screencap", icon: 3 },
     ] : [
         { label: @tr("Save image"), id: "save-image", icon: 0 },
         { label: @tr("Save screencap"), id: "save-screencap", icon: 1 },
         { label: @tr("Copy image to clipboard"), id: "copy-image", icon: 2 },
         { label: @tr("Copy screencap"), id: "copy-screencap", icon: 3 },
     ];
+    private property <int> copy-start: root.simple-screencaps ? 3 : 2;
     private property <length> menu-content-height: 16px + root.actions.length * 54px + 9px;
     changed simple-screencaps => { root.selected = 0; }
     init => { scope.focus(); }
     function reveal-selected() {
-        let top = 8px + root.selected * 54px + (root.selected >= 2 ? 9px : 0px);
+        let top = 8px + root.selected * 54px + (root.selected >= root.copy-start ? 9px : 0px);
         if top < -menu-scroll.content-y { menu-scroll.content-y = -top; }
         else if top + 54px > -menu-scroll.content-y + menu-scroll.height {
             menu-scroll.content-y = menu-scroll.height - top - 54px;
@@ -217,7 +220,7 @@ export component ReaderContextMenu inherits Rectangle {
             content-width: self.width; content-height: root.menu-content-height;
             interactive: self.height < self.content-height;
             for action[index] in root.actions: Rectangle {
-                x: 8px; y: 8px + index * 54px + (index >= 2 ? 9px : 0px);
+                x: 8px; y: 8px + index * 54px + (index >= root.copy-start ? 9px : 0px);
                 width: max(1px, menu-scroll.width - 16px); height: 54px;
                 border-radius: max(6px, min(12px, Theme.button_corner_radius));
                 background: !root.busy && (touch.feedback-active || (scope.has-focus && SettingsStyle.keyboard-mode && root.selected == index))
@@ -251,7 +254,7 @@ export component ReaderContextMenu inherits Rectangle {
                 }
             }
             Rectangle {
-                x: 16px; y: 120px; width: max(1px, parent.width - 32px); height: 1px;
+                x: 16px; y: 12px + root.copy-start * 54px; width: max(1px, parent.width - 32px); height: 1px;
                 background: Theme.current.border_medium;
             }
         }
