@@ -150,8 +150,6 @@ Run focused checks before broad workspace checks:
 
 ```sh
 node examples/addons/neutral-fixture/tests/fixture.test.mjs
-npm ci --ignore-scripts --prefix examples/addons/manhwa18cc/tests
-npm test --prefix examples/addons/manhwa18cc/tests
 python3 -B -m unittest discover -s .github/scripts -p 'test_package_*.py'
 cargo test --locked -p reader-sources
 cargo test --locked -p reader-domain -p reader-engine -p reader-downloads -p reader-catalogue

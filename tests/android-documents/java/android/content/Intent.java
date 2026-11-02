@@ -14,6 +14,8 @@ public class Intent {
     public static final int FLAG_GRANT_PERSISTABLE_URI_PERMISSION=64;
     public static final int FLAG_GRANT_PREFIX_URI_PERMISSION=128;
     public static final int FLAG_ACTIVITY_NEW_TASK=0x10000000;
+    public static final int FLAG_ACTIVITY_SINGLE_TOP=0x20000000;
+    public Class<?> serviceClass;
     public final String action;
     public String type;
     public String title;
@@ -21,6 +23,7 @@ public class Intent {
     private int flags;
     private final java.util.Set<String> categories=new java.util.HashSet<>();
     public Intent(String action) { this.action=action; }
+    public Intent(Context context,Class<?> type) {this.action="fixture-service";this.serviceClass=type;}
     public Intent(String action,Uri data) { this(action);this.data=data; }
     public Intent setType(String type) { this.type=type; return this; }
     public Intent addFlags(int flags) { this.flags|=flags; return this; }

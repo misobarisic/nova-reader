@@ -12,6 +12,8 @@ use std::{
     time::{Duration, Instant},
 };
 use url::Url;
+pub(crate) const BODY_CHUNK_BYTES: usize = 16 * 1024;
+type BodyChunkObserver<'a> = &'a mut dyn FnMut(&[u8]) -> Result<()>;
 #[derive(Clone, Default)]
 pub struct CancelToken(Arc<AtomicBool>);
 impl CancelToken {
@@ -51,6 +53,11 @@ pub struct HttpResponse {
     pub body: Vec<u8>,
 }
 pub trait SourceTransport: Send + Sync {
+    /// Revision of settings-owned in-memory session state. Production snapshots
+    /// retain their original revision; legacy custom transports may omit it.
+    fn session_revision(&self) -> Option<u64> {
+        None
+    }
     /// Optional operation-local view of a mutable session. Production freezes
     /// the current cookie generation alongside the invocation's settings.
     fn snapshot(&self) -> Option<Arc<dyn SourceTransport>> {
@@ -78,6 +85,32 @@ pub trait SourceTransport: Send + Sync {
         max_bytes: usize,
         cancel: &CancelToken,
     ) -> Result<HttpResponse>;
+    /// Native-only observation of successful response body bytes. Observations
+    /// are provisional until the returned full response has been validated.
+    /// Existing custom transports remain compatible and feed only after their
+    /// complete request returns; production feeds while reading the body.
+    fn request_with_chunks(
+        &self,
+        request: &HttpRequest,
+        max_bytes: usize,
+        cancel: &CancelToken,
+        on_chunk: &mut dyn FnMut(&[u8]) -> Result<()>,
+    ) -> Result<HttpResponse> {
+        cancel.check()?;
+        let response = self.request(request, max_bytes, cancel)?;
+        cancel.check()?;
+        if response.body.len() > max_bytes {
+            return Err(network("response byte limit"));
+        }
+        if (200..=299).contains(&response.status) {
+            for chunk in response.body.chunks(BODY_CHUNK_BYTES) {
+                cancel.check()?;
+                on_chunk(chunk)?;
+                cancel.check()?;
+            }
+        }
+        Ok(response)
+    }
 }
 pub(crate) struct NetworkTransport {
     permissions: Permissions,
@@ -276,7 +309,37 @@ fn check_redirect(current: &Url, next: &Url, sensitive: bool, has_cookies: bool)
     }
     Ok(())
 }
+fn read_body(
+    reader: &mut dyn Read,
+    max_bytes: usize,
+    cancel: &CancelToken,
+    mut on_chunk: Option<BodyChunkObserver<'_>>,
+) -> Result<Vec<u8>> {
+    let mut body = Vec::new();
+    let mut chunk = [0; BODY_CHUNK_BYTES];
+    loop {
+        cancel.check()?;
+        let n = reader
+            .read(&mut chunk)
+            .map_err(|_| network("response read failed"))?;
+        cancel.check()?;
+        if n == 0 {
+            return Ok(body);
+        }
+        if n > max_bytes.saturating_sub(body.len()) {
+            return Err(network("response byte limit"));
+        }
+        body.extend_from_slice(&chunk[..n]);
+        if let Some(observer) = on_chunk.as_mut() {
+            observer(&chunk[..n])?;
+            cancel.check()?;
+        }
+    }
+}
 impl SourceTransport for NetworkTransport {
+    fn session_revision(&self) -> Option<u64> {
+        Some(self.session.lock().unwrap().generation)
+    }
     fn snapshot(&self) -> Option<Arc<dyn SourceTransport>> {
         Some(Arc::new(Self {
             permissions: self.permissions.clone(),
@@ -318,6 +381,26 @@ impl SourceTransport for NetworkTransport {
         input: &HttpRequest,
         max_bytes: usize,
         cancel: &CancelToken,
+    ) -> Result<HttpResponse> {
+        self.request_internal(input, max_bytes, cancel, None)
+    }
+    fn request_with_chunks(
+        &self,
+        input: &HttpRequest,
+        max_bytes: usize,
+        cancel: &CancelToken,
+        on_chunk: &mut dyn FnMut(&[u8]) -> Result<()>,
+    ) -> Result<HttpResponse> {
+        self.request_internal(input, max_bytes, cancel, Some(on_chunk))
+    }
+}
+impl NetworkTransport {
+    fn request_internal(
+        &self,
+        input: &HttpRequest,
+        max_bytes: usize,
+        cancel: &CancelToken,
+        on_chunk: Option<BodyChunkObserver<'_>>,
     ) -> Result<HttpResponse> {
         let session = self.session.lock().unwrap().clone();
         cancel.check()?;
@@ -441,21 +524,16 @@ impl SourceTransport for NetworkTransport {
                     headers.insert(name.into(), v.into());
                 }
             }
-            let mut body = Vec::new();
-            let mut chunk = [0; 16384];
-            loop {
-                cancel.check()?;
-                let n = response
-                    .read(&mut chunk)
-                    .map_err(|_| network("response read failed"))?;
-                if n == 0 {
-                    break;
-                }
-                if body.len() + n > max_bytes {
-                    return Err(network("response byte limit"));
-                }
-                body.extend_from_slice(&chunk[..n]);
-            }
+            let body = read_body(
+                &mut response,
+                max_bytes,
+                cancel,
+                if (200..=299).contains(&status) {
+                    on_chunk
+                } else {
+                    None
+                },
+            )?;
             return Ok(HttpResponse {
                 status,
                 url: url.into(),
@@ -700,7 +778,9 @@ mod tests {
         let token = CancelToken::default();
         let initial = transport.page_cache_partition(url);
         let old = transport.snapshot().unwrap();
+        assert_eq!(old.session_revision(), transport.session_revision());
         transport.reset_session();
+        assert_ne!(old.session_revision(), transport.session_revision());
         assert_ne!(initial, transport.page_cache_partition(url));
         transport
             .set_cookie("https://example.com", "mature", "0", &token)
@@ -802,6 +882,147 @@ mod tests {
                 "cross-origin admission must follow the actual outgoing Cookie header"
             );
         }
+    }
+    #[test]
+    fn native_body_observer_receives_bounded_chunks_before_eof_and_preserves_final_bytes() {
+        use std::sync::atomic::AtomicUsize;
+        struct ObservedReader {
+            bytes: std::io::Cursor<Vec<u8>>,
+            reads: Arc<AtomicUsize>,
+        }
+        impl Read for ObservedReader {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                self.reads.fetch_add(1, Ordering::Relaxed);
+                self.bytes.read(buffer)
+            }
+        }
+        let bytes = (0..BODY_CHUNK_BYTES * 3 + 7)
+            .map(|n| n as u8)
+            .collect::<Vec<_>>();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let mut reader = ObservedReader {
+            bytes: std::io::Cursor::new(bytes.clone()),
+            reads: reads.clone(),
+        };
+        let mut observed = Vec::new();
+        let mut calls = 0;
+        let full = read_body(
+            &mut reader,
+            bytes.len(),
+            &CancelToken::default(),
+            Some(&mut |chunk| {
+                calls += 1;
+                assert_eq!(
+                    reads.load(Ordering::Relaxed),
+                    calls,
+                    "callback must run before the next body read"
+                );
+                assert!(chunk.len() <= BODY_CHUNK_BYTES);
+                observed.extend_from_slice(chunk);
+                Ok(())
+            }),
+        )
+        .unwrap();
+        assert_eq!(calls, 4);
+        assert_eq!(reads.load(Ordering::Relaxed), 5);
+        assert_eq!(observed, bytes);
+        assert_eq!(full, bytes);
+        assert_eq!(
+            read_body(
+                &mut std::io::Cursor::new(bytes.clone()),
+                bytes.len(),
+                &CancelToken::default(),
+                None
+            )
+            .unwrap(),
+            bytes
+        );
+    }
+    #[test]
+    fn native_body_observer_checks_limits_cancellation_and_transfer_errors_before_delivery() {
+        let mut calls = 0;
+        assert!(
+            read_body(
+                &mut std::io::Cursor::new(b"oversized"),
+                3,
+                &CancelToken::default(),
+                Some(&mut |_| {
+                    calls += 1;
+                    Ok(())
+                })
+            )
+            .is_err()
+        );
+        assert_eq!(calls, 0, "over-limit bytes must never reach the observer");
+        let token = CancelToken::default();
+        assert!(matches!(
+            read_body(
+                &mut std::io::Cursor::new(vec![1; BODY_CHUNK_BYTES * 2]),
+                BODY_CHUNK_BYTES * 2,
+                &token,
+                Some(&mut |_| {
+                    calls += 1;
+                    token.cancel();
+                    Ok(())
+                })
+            ),
+            Err(SourceError::Cancelled)
+        ));
+        assert_eq!(calls, 1);
+        struct CancelOnRead(CancelToken);
+        impl Read for CancelOnRead {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                buffer[0] = 1;
+                self.0.cancel();
+                Ok(1)
+            }
+        }
+        let token = CancelToken::default();
+        assert!(matches!(
+            read_body(
+                &mut CancelOnRead(token.clone()),
+                8,
+                &token,
+                Some(&mut |_| {
+                    calls += 1;
+                    Ok(())
+                })
+            ),
+            Err(SourceError::Cancelled)
+        ));
+        assert_eq!(
+            calls, 1,
+            "cancellation during a blocking read must suppress its chunk"
+        );
+        struct FailingReader(bool);
+        impl Read for FailingReader {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                if self.0 {
+                    return Err(std::io::Error::other("fixture failure"));
+                }
+                self.0 = true;
+                buffer[0] = 7;
+                Ok(1)
+            }
+        }
+        let mut observed = Vec::new();
+        assert!(matches!(
+            read_body(
+                &mut FailingReader(false),
+                8,
+                &CancelToken::default(),
+                Some(&mut |chunk| {
+                    observed.extend_from_slice(chunk);
+                    Ok(())
+                })
+            ),
+            Err(SourceError::Network(_))
+        ));
+        assert_eq!(
+            observed,
+            vec![7],
+            "previews stay provisional when the final transfer fails"
+        );
     }
 }
 

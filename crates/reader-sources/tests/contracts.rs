@@ -293,86 +293,6 @@ fn request_count_and_header_policy_enforced_before_custom_transport() {
         assert!(transport.seen.lock().unwrap().len() <= 12);
     }
 }
-#[test]
-fn manhwa_parser_executes_through_quickjs_with_sanitized_html() {
-    let dir = tempfile::tempdir().unwrap();
-    let registry = SourceRegistry::open(dir.path()).unwrap();
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    registry.install_zip(&load(root, "manhwa18cc")).unwrap();
-    registry.set_enabled("manhwa18cc", true).unwrap();
-    for (op, file, request) in [
-        (
-            "browse",
-            "list",
-            json!({"sourceId":"manhwa18cc.en","page":1}),
-        ),
-        ("details", "details", json!({"id":"/webtoon/clockwork"})),
-        ("chapters", "details", json!({"id":"/webtoon/clockwork"})),
-        (
-            "pages",
-            "pages",
-            json!({"id":"/webtoon/clockwork/chapter-2.5"}),
-        ),
-    ] {
-        let fixture = std::fs::read_to_string(root.join(format!(
-            "../../examples/addons/manhwa18cc/tests/fixtures/{file}.html"
-        )))
-        .unwrap();
-        let transport = Arc::new(FixtureTransport {
-            body: fixture,
-            status: 200,
-            seen: Mutex::new(vec![]),
-        });
-        let source = registry
-            .source("manhwa18cc")
-            .unwrap()
-            .with_transport(transport);
-        let value = source.call(op, &request).unwrap();
-        match op {
-            "browse" => assert!(!value["items"].as_array().unwrap().is_empty()),
-            "details" => assert_eq!(value["title"], "Clockwork"),
-            "chapters" => {
-                assert_eq!(value["chapters"][0]["number"], "2.5");
-                assert_eq!(value["chapters"][1]["number"], Value::Null);
-            }
-            "pages" => assert_eq!(value["pages"].as_array().unwrap().len(), 3),
-            _ => unreachable!(),
-        }
-    }
-    for (status, code) in [
-        (401, "authentication"),
-        (403, "challenge"),
-        (429, "rate limited"),
-    ] {
-        let source = registry
-            .source("manhwa18cc")
-            .unwrap()
-            .with_transport(Arc::new(FixtureTransport {
-                body: "".into(),
-                status,
-                seen: Mutex::new(vec![]),
-            }));
-        assert!(
-            source
-                .call("browse", &json!({}))
-                .unwrap_err()
-                .to_string()
-                .contains(code)
-        );
-    }
-    let source = registry
-        .source("manhwa18cc")
-        .unwrap()
-        .with_transport(Arc::new(FixtureTransport {
-            body: "<div>changed</div>".into(),
-            status: 200,
-            seen: Mutex::new(vec![]),
-        }));
-    assert!(matches!(
-        source.call("browse", &json!({})),
-        Err(SourceError::ParseChanged(_))
-    ));
-}
 
 #[test]
 fn script_cancellation_interrupts_runaway_and_image_statuses_remain_typed() {
@@ -655,7 +575,7 @@ fn addon_icons_are_optional_verified_bounded_and_available_while_disabled() {
     let mut m = manifest();
     m["assets"] = json!(["icon.png"]);
     m["icon"] = json!("icon.png");
-    let icon = include_bytes!("../../../examples/addons/mangafire/icon.png");
+    let icon = include_bytes!("fixtures/neutral-icon.png");
     let bundle = |m: &Value, icon: &[u8]| {
         archive(vec![
             ("manifest.json".into(), serde_json::to_vec(m).unwrap()),

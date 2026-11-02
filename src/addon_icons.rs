@@ -68,7 +68,7 @@ pub fn image(id: &str) -> Image {
 mod tests {
     #[test]
     fn malformed_icon_pixels_fail_without_affecting_source_metadata() {
-        let bytes = include_bytes!("../examples/addons/mangafire/icon.png");
+        let bytes = include_bytes!("../crates/reader-sources/tests/fixtures/neutral-icon.png");
         let image = reader_engine::decode_display_image(
             bytes,
             reader_engine::DecodeLimits::default(),

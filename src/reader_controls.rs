@@ -4,6 +4,81 @@ use crate::reader_settings::{self, Background, ReaderSettings, Rotation};
 use std::cell::Cell;
 
 thread_local! { static PRE_READER_FULLSCREEN: Cell<Option<bool>> = const { Cell::new(None) }; }
+const MIN_ZOOM: f32 = 0.5;
+const MAX_ZOOM: f32 = 8.;
+
+/// Keep the same source point beneath the cursor/fingers, including contained
+/// image margins. A moving pinch midpoint also translates that point before
+/// the bounds are clamped. All dimensions come from the mounted reader frame.
+fn apply_zoom_transform(ui: &AppWindow, zoom: f32, from: (f32, f32), to: (f32, f32)) -> bool {
+    if ![zoom, from.0, from.1, to.0, to.1]
+        .into_iter()
+        .all(f32::is_finite)
+    {
+        return false;
+    }
+    let viewport_width = ui.get_reader_viewport_width().max(1.);
+    let viewport_height = ui.get_reader_viewport_height().max(1.);
+    let from = (
+        from.0.clamp(0., 1.) * viewport_width,
+        from.1.clamp(0., 1.) * viewport_height,
+    );
+    let to = (
+        to.0.clamp(0., 1.) * viewport_width,
+        to.1.clamp(0., 1.) * viewport_height,
+    );
+    let paged = ui.get_reading_mode() != 0;
+    let width = if paged {
+        ui.get_reader_paged_width()
+    } else {
+        ui.get_reader_width()
+    }
+    .max(1.);
+    let height = if paged {
+        ui.get_reader_paged_height()
+    } else {
+        width
+    }
+    .max(1.);
+    let vertical_margin = |height: f32| {
+        if !paged || ui.get_reader_split_page() {
+            0.
+        } else {
+            (viewport_height - height).max(0.) / 2.
+        }
+    };
+    let source = (
+        (from.0 - ui.get_scroll_x() - (viewport_width - width).max(0.) / 2.) / width,
+        (from.1 - ui.get_scroll_y() - vertical_margin(height)) / height,
+    );
+    ui.set_zoom(zoom.clamp(MIN_ZOOM, MAX_ZOOM));
+    let width = if paged {
+        ui.get_reader_paged_width()
+    } else {
+        ui.get_reader_width()
+    }
+    .max(1.);
+    let height = if paged {
+        ui.get_reader_paged_height()
+    } else {
+        width
+    }
+    .max(1.);
+    ui.set_scroll_x(
+        -((viewport_width - width).max(0.) / 2. + source.0 * width - to.0)
+            .clamp(0., (width - viewport_width).max(0.)),
+    );
+    let content_height = if paged {
+        height
+    } else {
+        ui.get_total_ratio() * width
+    };
+    ui.set_scroll_y(
+        -(vertical_margin(height) + source.1 * height - to.1)
+            .clamp(0., (content_height - viewport_height).max(0.)),
+    );
+    true
+}
 
 pub(super) fn mode_label(mode: ReadingMode, gaps: bool) -> &'static str {
     match mode {
@@ -172,6 +247,24 @@ pub(super) fn wire(app: &Arc<Controller>, ui: &AppWindow) {
             }
         }
     });
+    ui.on_reader_zoom_by({
+        let app = app.clone();
+        let weak = ui.as_weak();
+        move |factor, x, y| {
+            if let Some(ui) = weak.upgrade() {
+                app.reader_transform(&ui, factor, (x, y), (x, y));
+            }
+        }
+    });
+    ui.on_reader_transform({
+        let app = app.clone();
+        let weak = ui.as_weak();
+        move |factor, from_x, from_y, to_x, to_y| {
+            if let Some(ui) = weak.upgrade() {
+                app.reader_transform(&ui, factor, (from_x, from_y), (to_x, to_y));
+            }
+        }
+    });
     ui.on_immersive_changed({
         let weak = ui.as_weak();
         move |_| {
@@ -210,7 +303,8 @@ impl Controller {
             prefs.paged
         };
         let options = display_options(&prefs, reader.mode);
-        if options != reader.display_options {
+        let options_changed = options != reader.display_options;
+        if options_changed {
             reader.display_options = options;
             // Keep visible buffers until their replacements arrive. Empty
             // quality markers demand a new display recipe without a refetch.
@@ -246,6 +340,18 @@ impl Controller {
                 .unwrap_or(slint::Color::from_rgb_u8(0, 0, 0)),
         };
         drop(view);
+        if options_changed {
+            let rows = ui.get_pages();
+            for index in 0..rows.row_count() {
+                if let Some(mut row) = rows
+                    .row_data(index)
+                    .filter(|row| row.preview && !row.loaded)
+                {
+                    super::reader_progressive::clear_preview(&mut row);
+                    rows.set_row_data(index, row);
+                }
+            }
+        }
         crate::reader_settings_ui::apply(ui, &prefs);
         ui.set_reader_mode_choice(choice.selection());
         ui.set_reading_mode(mode_index(mode));
@@ -407,6 +513,11 @@ impl Controller {
         let Some(reader) = &view.reader else {
             return;
         };
+        if ui.get_zoom() > 1.01 {
+            drop(view);
+            ui.set_reader_osd(!ui.get_reader_osd());
+            return;
+        }
         let prefs = reader_settings::effective(&reader.chapter.series);
         let layout = if reader.mode == ReadingMode::Webtoon {
             prefs.webtoon
@@ -431,57 +542,18 @@ impl Controller {
     }
 
     pub(super) fn reader_zoom(&self, ui: &AppWindow, zoom: f32, x: f32, y: f32) {
-        if !zoom.is_finite() {
+        if apply_zoom_transform(ui, zoom, (x, y), (x, y)) && ui.get_reading_mode() != 0 {
+            self.reflow(ui, ui.get_reader_width(), ui.get_reader_viewport_height());
+        }
+    }
+
+    fn reader_transform(&self, ui: &AppWindow, factor: f32, from: (f32, f32), to: (f32, f32)) {
+        if !factor.is_finite() || factor <= 0. {
             return;
         }
-        if ui.get_reading_mode() != 0 {
-            let viewport_width = ui.get_reader_viewport_width().max(1.);
-            let viewport_height = ui.get_reader_viewport_height().max(1.);
-            let local_x = x.clamp(0., 1.) * viewport_width;
-            let local_y = y.clamp(0., 1.) * viewport_height;
-            let old_width = ui.get_reader_paged_width().max(1.);
-            let old_height = ui.get_reader_paged_height().max(1.);
-            let source_x =
-                (local_x - ui.get_scroll_x() - (viewport_width - old_width).max(0.) / 2.)
-                    / old_width;
-            let vertical_margin = |height: f32| {
-                if ui.get_reader_split_page() {
-                    0.
-                } else {
-                    (viewport_height - height).max(0.) / 2.
-                }
-            };
-            let source_y = (local_y - ui.get_scroll_y() - vertical_margin(old_height)) / old_height;
-            ui.set_zoom(zoom.clamp(0.5, 3.));
-            let width = ui.get_reader_paged_width().max(1.);
-            let height = ui.get_reader_paged_height().max(1.);
-            ui.set_scroll_x(
-                -((viewport_width - width).max(0.) / 2. + source_x * width - local_x)
-                    .clamp(0., (width - viewport_width).max(0.)),
-            );
-            ui.set_scroll_y(
-                -(vertical_margin(height) + source_y * height - local_y)
-                    .clamp(0., (height - viewport_height).max(0.)),
-            );
-            self.reflow(ui, ui.get_reader_width(), viewport_height);
-            return;
-        }
-        let old_width = ui.get_reader_width().max(1.);
-        let local_y = y.clamp(0., 1.) * ui.get_reader_viewport_height();
-        let old_y = (-ui.get_scroll_y() + local_y) / old_width;
-        let old_x =
-            (-ui.get_scroll_x() + x.clamp(0., 1.) * ui.get_reader_canvas_width()) / old_width;
-        ui.set_zoom(zoom.clamp(0.5, 3.));
-        let width = ui.get_reader_width();
-        ui.set_scroll_x(
-            -(old_x * width - x.clamp(0., 1.) * ui.get_reader_canvas_width())
-                .clamp(0., (width - ui.get_reader_canvas_width()).max(0.)),
-        );
-        if ui.get_reading_mode() == 0 {
-            ui.set_scroll_y(-(old_y * width - local_y).clamp(
-                0.,
-                (ui.get_total_ratio() * width - ui.get_reader_viewport_height()).max(0.),
-            ));
+        if apply_zoom_transform(ui, ui.get_zoom() * factor, from, to) && ui.get_reading_mode() != 0
+        {
+            self.reflow(ui, ui.get_reader_width(), ui.get_reader_viewport_height());
         }
     }
 
@@ -495,7 +567,7 @@ impl Controller {
             "fit-width" => self.reader_zoom(ui, 1., 0.5, 0.5),
             "zoom" => self.reader_zoom(
                 ui,
-                if ui.get_zoom() >= 2.9 {
+                if ui.get_zoom() >= MAX_ZOOM - 0.1 {
                     1.
                 } else {
                     ui.get_zoom() + 0.25
@@ -567,5 +639,362 @@ impl Controller {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use i_slint_backend_testing::{AccessibleRole, ElementHandle, mock_elapsed_time};
+    use i_slint_core::{input::TouchPhase, lengths::LogicalPoint, platform::InternalEvent};
+    use slint::platform::{Key, PointerEventButton, WindowEvent};
+    use slint::{LogicalPosition, LogicalSize, VecModel};
+    use std::{cell::RefCell, rc::Rc, time::Duration};
+
+    fn advance(ms: u64) {
+        for _ in 0..ms / 10 {
+            mock_elapsed_time(Duration::from_millis(10));
+        }
+    }
+    fn touch(ui: &AppWindow, id: i32, x: f32, y: f32, phase: TouchPhase) {
+        ui.window()
+            .dispatch_event(WindowEvent::internal(InternalEvent::Touch {
+                id,
+                position: LogicalPoint::new(x, y),
+                phase,
+            }));
+    }
+    fn tap(ui: &AppWindow, touchscreen: bool, x: f32, y: f32) {
+        if touchscreen {
+            touch(ui, 1, x, y, TouchPhase::Started);
+            advance(50);
+            touch(ui, 1, x, y, TouchPhase::Ended);
+        } else {
+            ui.window().dispatch_event(WindowEvent::PointerPressed {
+                position: LogicalPosition::new(x, y),
+                button: PointerEventButton::Left,
+            });
+            ui.window().dispatch_event(WindowEvent::PointerReleased {
+                position: LogicalPosition::new(x, y),
+                button: PointerEventButton::Left,
+            });
+        }
+        advance(300);
+    }
+    fn wheel(ui: &AppWindow, x: f32, y: f32, delta: f32, control: bool) {
+        if control {
+            ui.window().dispatch_event(WindowEvent::KeyPressed {
+                text: Key::Control.into(),
+            });
+        }
+        ui.window().dispatch_event(WindowEvent::PointerScrolled {
+            position: LogicalPosition::new(x, y),
+            delta_x: 0.,
+            delta_y: delta,
+        });
+        if control {
+            ui.window().dispatch_event(WindowEvent::KeyReleased {
+                text: Key::Control.into(),
+            });
+        }
+        advance(50);
+    }
+    fn source_at(ui: &AppWindow, x: f32, y: f32) -> (f32, f32) {
+        let image = ElementHandle::find_by_accessible_label(ui, "Page 2 image")
+            .find(|e| e.accessible_role() == Some(AccessibleRole::Button))
+            .unwrap();
+        let origin = image.absolute_position();
+        let size = image.size();
+        ((x - origin.x) / size.width, (y - origin.y) / size.height)
+    }
+
+    #[test]
+    fn native_zoom_and_zoomed_taps_use_production_controller() {
+        const CHILD: &str = "READER_ZOOM_CONTROL_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "app::reader_controls::tests::native_zoom_and_zoomed_taps_use_production_controller", "--nocapture"])
+                .env(CHILD, "1").status().unwrap();
+            assert!(status.success());
+            return;
+        }
+        i_slint_backend_testing::init_no_event_loop();
+        let directory = tempfile::tempdir().unwrap();
+        nova_storage::init_at(directory.path());
+        reader_settings::init().unwrap();
+        reader_settings::update("fullscreen", 0).unwrap();
+        reader_settings::update("keep_awake", 0).unwrap();
+        let ui = AppWindow::new().unwrap();
+        let services = Services::open(&directory.path().join("reader")).unwrap();
+        let mut reader = super::super::tests::tall_reader();
+        reader.pages = (0..3)
+            .map(|index| PageInput::Local {
+                path: PathBuf::new(),
+                id: format!("page-{index}"),
+            })
+            .collect();
+        reader.ratios = vec![1.5; 3];
+        reader.anchor = ResumeAnchor::new("page-1", 1, 0.).unwrap();
+        reader.retained = (0..3).collect();
+        reader.requested = (0..3).collect();
+        let series = reader.chapter.series.clone();
+        let (images, _receiver) = mpsc::channel();
+        let app = Arc::new(Controller {
+            progress_checkpoint: crate::progress_checkpoint::ProgressWriter::new(
+                services.domain.clone(),
+            )
+            .unwrap(),
+            artwork: crate::artwork::ArtworkLoader::new(
+                services.clone(),
+                ui.as_weak(),
+                directory.path().join("posters"),
+            ),
+            services,
+            chapter_cache: Arc::new(crate::chapter_cache::ChapterCache::new(
+                directory.path().join("cache"),
+            )),
+            image_worker_live: AtomicBool::new(true),
+            view: Mutex::new(View {
+                section: 6,
+                reader: Some(reader),
+                ..View::default()
+            }),
+            generation: AtomicU64::new(1),
+            cancel: Mutex::new(CancelToken::default()),
+            images,
+            download_serial: Mutex::new(()),
+            active_image: Mutex::new(None),
+            metadata_refresh: Arc::default(),
+        });
+        wire(&app, &ui);
+        let steps = Rc::new(RefCell::new(Vec::new()));
+        ui.on_page_step({
+            let steps = steps.clone();
+            move |step| steps.borrow_mut().push(step)
+        });
+        ui.set_pages(ModelRc::new(VecModel::from(
+            (0..3)
+                .map(|index| PageRow {
+                    page_id: format!("page-{index}").into(),
+                    position: index as f32 * 1.5,
+                    ratio: 1.5,
+                    loaded: true,
+                    tiles: ModelRc::new(VecModel::from(vec![TileRow {
+                        image: slint::Image::from_rgb8(slint::SharedPixelBuffer::new(200, 300)),
+                        fraction: 1.,
+                        ..Default::default()
+                    }])),
+                    ..Default::default()
+                })
+                .collect::<Vec<_>>(),
+        )));
+        ui.set_total_ratio(4.5);
+        ui.set_section(6);
+        ui.set_current_page(1);
+        ui.show().unwrap();
+        advance(100);
+
+        for (width, height) in [(390., 844.), (1280., 800.)] {
+            ui.window().set_size(LogicalSize::new(width, height));
+            advance(100);
+            for (mode, native_mode) in [
+                (0, ReadingMode::Webtoon),
+                (1, ReadingMode::LeftToRight),
+                (2, ReadingMode::RightToLeft),
+                (3, ReadingMode::Vertical),
+            ] {
+                app.view().reader.as_mut().unwrap().mode = native_mode;
+                ui.set_reading_mode(mode);
+                ui.set_current_page(1);
+                ui.set_reader_platform_android(false);
+                if mode == 0 && width > 1100. {
+                    app.reader_zoom(&ui, 1., 0.5, 0.5);
+                    ui.set_scroll_x(0.);
+                    ui.set_scroll_y(-1.5 * ui.get_reader_width());
+                    advance(100);
+                    let point = (width * 0.55, height * 0.45);
+                    let before = source_at(&ui, point.0, point.1);
+                    wheel(&ui, point.0, point.1, 120., true);
+                    let after = source_at(&ui, point.0, point.1);
+                    assert!(
+                        (before.0 - after.0).abs() < 0.003 && (before.1 - after.1).abs() < 0.003,
+                        "Webtoon cursor anchor accounts for the centered 1100px fit column"
+                    );
+                }
+                // A contained image has no pan range on a still-fitted axis.
+                // Begin this strict off-center check with room on both axes.
+                let initial_zoom = if mode == 0 { 2. } else { 4. };
+                app.reader_zoom(&ui, initial_zoom, 0.5, 0.5);
+                ui.set_scroll_x(-(ui.get_reader_paged_width() - width).max(0.) / 2.);
+                ui.set_scroll_y(if mode == 0 {
+                    -1.5 * ui.get_reader_width()
+                } else {
+                    -(ui.get_reader_paged_height() - height).max(0.) / 2.
+                });
+                advance(100);
+                let (x, y) = (width * 0.55, height * 0.45);
+                let before = source_at(&ui, x, y);
+                let page_steps = steps.borrow().len();
+                wheel(&ui, x, y, 120., true);
+                assert!(
+                    (ui.get_zoom() - initial_zoom * 1.2).abs() < 0.001,
+                    "Ctrl+wheel zooms mode {mode}"
+                );
+                let after = source_at(&ui, x, y);
+                assert!(
+                    (before.0 - after.0).abs() < 0.003 && (before.1 - after.1).abs() < 0.003,
+                    "cursor source anchor at mode {mode}: {before:?} -> {after:?}"
+                );
+                assert_eq!(steps.borrow().len(), page_steps, "Ctrl wheel never pages");
+                wheel(&ui, x, y, -120., true);
+                assert!((ui.get_zoom() - initial_zoom).abs() < 0.001);
+                for _ in 0..12 {
+                    wheel(&ui, x, y, 120., true);
+                }
+                assert_eq!(ui.get_zoom(), MAX_ZOOM);
+                assert!(
+                    ui.get_reader_width() > 1100.,
+                    "desktop magnification exceeds fit-width cap"
+                );
+                for _ in 0..24 {
+                    wheel(&ui, x, y, -120., true);
+                }
+                assert_eq!(ui.get_zoom(), MIN_ZOOM);
+
+                // Every zone/inversion is bypassed while magnified. These are
+                // native presses reaching the real reader_tap handler above.
+                for zone in [0, 1, 2, 3, 4] {
+                    for inversion in [0, 1, 2, 3] {
+                        let prefix = if mode == 0 { "webtoon" } else { "paged" };
+                        reader_settings::update_series(
+                            &series,
+                            &format!("{prefix}_tap_zones"),
+                            zone,
+                        )
+                        .unwrap();
+                        reader_settings::update_series(
+                            &series,
+                            &format!("{prefix}_invert_taps"),
+                            inversion,
+                        )
+                        .unwrap();
+                        for zoom in [2., 4.] {
+                            app.reader_zoom(&ui, zoom, 0.5, 0.5);
+                            ui.set_reader_double_tap_enabled(false);
+                            for touchscreen in [false, true] {
+                                for fraction in [0.1, 0.5, 0.9] {
+                                    ui.set_reader_osd(false);
+                                    tap(&ui, touchscreen, width * fraction, height * 0.4);
+                                    assert!(
+                                        ui.get_reader_osd(),
+                                        "zoomed tap toggles controls: mode {mode}, zone {zone}, inversion {inversion}"
+                                    );
+                                    assert_eq!(
+                                        app.view().reader.as_ref().unwrap().anchor.page_index,
+                                        1
+                                    );
+                                    assert_eq!(ui.get_current_page(), 1);
+                                }
+                            }
+                        }
+                    }
+                }
+                ui.set_reader_osd(false);
+                ui.set_reader_double_tap_enabled(true);
+                app.reader_zoom(&ui, 1., 0.5, 0.5);
+                ui.set_scroll_x(0.);
+                ui.set_scroll_y(if mode == 0 {
+                    -ui.get_reader_width() * 1.5
+                } else {
+                    0.
+                });
+                ui.set_reader_platform_android(true);
+                advance(100);
+                let (cx, cy) = (width / 2., height * 0.4);
+                for expected in [2., 1.] {
+                    ui.set_reader_osd(false);
+                    touch(&ui, 1, cx, cy, TouchPhase::Started);
+                    advance(30);
+                    touch(&ui, 1, cx, cy, TouchPhase::Ended);
+                    advance(70);
+                    touch(&ui, 1, cx + 2., cy, TouchPhase::Started);
+                    advance(30);
+                    touch(&ui, 1, cx + 2., cy, TouchPhase::Ended);
+                    advance(300);
+                    assert!(
+                        (ui.get_zoom() - expected).abs() < 0.001,
+                        "double tap remains fit/2x in mode {mode}"
+                    );
+                    assert!(!ui.get_reader_osd());
+                }
+                let page_steps = steps.borrow().len();
+                touch(&ui, 11, cx - 20., cy, TouchPhase::Started);
+                advance(50);
+                touch(&ui, 22, cx + 20., cy, TouchPhase::Started);
+                advance(800);
+                assert!(
+                    !ui.get_reader_osd() && !ui.get_reader_context_visible(),
+                    "second finger cancels taps/hold before pinch threshold"
+                );
+                touch(&ui, 11, cx - 30., cy, TouchPhase::Moved);
+                advance(20);
+                for (right, expected) in [
+                    (45., 1.5),
+                    (70., 2.),
+                    (20., 1.),
+                    (45., 1.5),
+                    (170., 4.),
+                    (-30., 0.5),
+                    (20., 1.),
+                    (70., 2.),
+                    (20., 1.),
+                ] {
+                    touch(&ui, 22, cx + right, cy, TouchPhase::Moved);
+                    advance(20);
+                    assert!(
+                        (ui.get_zoom() - expected).abs() < 0.005,
+                        "raw finger distance gives exact scale {expected} in mode {mode}, got {}",
+                        ui.get_zoom()
+                    );
+                }
+                touch(&ui, 11, cx - 30., cy, TouchPhase::Ended);
+                advance(800);
+                touch(&ui, 22, cx + 20., cy, TouchPhase::Ended);
+                advance(400);
+                assert_eq!(steps.borrow().len(), page_steps);
+                assert!(
+                    !ui.get_reader_osd() && !ui.get_reader_context_visible(),
+                    "remaining finger is consumed through release"
+                );
+                assert_eq!(ui.get_current_page(), 1);
+                ui.set_reader_double_tap_enabled(false);
+                for lifted in [11, 22] {
+                    for phase in [TouchPhase::Ended, TouchPhase::Cancelled] {
+                        touch(&ui, 11, cx - 20., cy, TouchPhase::Started);
+                        advance(50);
+                        touch(&ui, 22, cx + 20., cy, TouchPhase::Started);
+                        advance(800);
+                        touch(&ui, lifted, cx, cy, phase);
+                        advance(800);
+                        let remaining = if lifted == 11 { 22 } else { 11 };
+                        touch(&ui, remaining, cx + 5., cy, TouchPhase::Moved);
+                        touch(&ui, remaining, cx + 5., cy, TouchPhase::Ended);
+                        advance(400);
+                        assert!(
+                            !ui.get_reader_osd() && !ui.get_reader_context_visible(),
+                            "unrecognized two-finger input never becomes a tap/hold"
+                        );
+                        assert_eq!(steps.borrow().len(), page_steps);
+                        tap(&ui, true, cx, cy);
+                        assert!(
+                            ui.get_reader_osd(),
+                            "fresh independent contact works after both fingers release"
+                        );
+                        ui.set_reader_osd(false);
+                    }
+                }
+            }
+        }
+        app.invalidate();
     }
 }

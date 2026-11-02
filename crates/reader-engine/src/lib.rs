@@ -37,6 +37,7 @@ impl From<nova_image::Error> for Error {
             nova_image::Error::Limit => Self::Limit,
             nova_image::Error::Avif(message) => Self::Avif(message),
             nova_image::Error::Jxl(message) => Self::Jxl(message),
+            nova_image::Error::JxlUnsupported(message) => Self::Jxl(message.into()),
         }
     }
 }

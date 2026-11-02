@@ -472,8 +472,12 @@ mod tests {
         let ui = AppWindow::new().unwrap();
         ui.window().set_size(slint::LogicalSize::new(100., 100.));
         ui.set_section(6);
-        ui.set_zoom(0.1);
+        // Use a real fit-width zoom. The source fixture below is expressed in
+        // a 100px chapter column; magnification now scales the fitted column
+        // directly rather than relying on the old post-zoom 100px floor.
+        ui.set_zoom(1.);
         ui.set_reading_mode(0);
+        assert_eq!(ui.get_reader_width(), 100.);
         ui.set_reader_capture_viewport(crate::ReaderCaptureViewport {
             x: 0.,
             y: 0.,
@@ -631,7 +635,8 @@ mod tests {
         // The editor uses the frozen request even if the live model reflows.
         ui.set_zoom(8.);
         assert_eq!(capture.pages[1].rect.width, 100.);
-        ui.set_zoom(0.1);
+        ui.set_zoom(1.);
+        assert_eq!(ui.get_reader_width(), 100.);
         let state = wire(&app, &ui);
         for copy in [false, true] {
             freeze(&state, &app, &ui, 0);

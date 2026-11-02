@@ -107,6 +107,13 @@ is disabled until chapter rows are available. Opening a different series resets
 the detail viewport and synopsis; returning from its reader restores the retained
 scroll offset and expanded/collapsed synopsis.
 
+New poster pixels reach their visible card or hero before optional disk-cache
+recompression and writes. The single artwork worker waits for that UI publication
+acknowledgment, then processes at most one original of at most 8 MiB; encoded
+originals never enter UI closures, image handles or the decoded LRU. Deferred
+writes recheck navigation cancellation, source access, request scope and the
+cache generation, so clearing or revoking artwork cannot publish stale files.
+
 The supplied Mihon references define the compact chapter and dated activity
 structure: unread dot, chapter/date/scanlator, trailing download/options, and
 Continue chapter X; History/Updates use covers, date groups and remove/download actions.
@@ -132,7 +139,15 @@ resizing the reading viewport; a drag remains a scroll gesture. The
 normal-zoom paged reader follows gallery drags in its reading direction, with
 adjacent-page artwork and a settling transition. Zoomed artwork pans within its
 own page; short or cross-axis drags do not change pages. The page's contained
-size scales with zoom and keeps physical-pixel detail on dense displays. On
+size scales with zoom and keeps physical-pixel detail on dense displays. Desktop
+Ctrl+mouse wheel and native two-finger pinch on Android zoom from 0.5×
+to 8×, preserving the source point beneath the cursor or moving finger midpoint.
+The 1100px fitted-width limit applies before magnification. Once zoomed above
+1.01×, single taps anywhere only toggle the OSD; navigation tap regions and
+their inversions are bypassed. Double tap retains its fit/2× toggle, while image
+context actions remain available. Starting a pinch cancels pending taps, holds
+and gallery motion; lifting a finger cannot turn the remaining contact into an
+action. On
 Android the status bar follows OSD visibility and its desired state survives recreation and
 focus changes. Status-bar navigation does not alter the navigation bar. Host
 API 29/35 regressions verify Java/JNI transitions separately from device testing.
@@ -251,3 +266,16 @@ Nova typography/spacing. Icons are bundled package assets, fully decoded on a
 worker and retained on the UI thread; language variants share the same image.
 Multiple source filters reuse Nova setting switches and Any/Include/Exclude
 dropdowns. No new palette or platform navigation is introduced.
+
+JPEG XL pages can show provisional pixels while their HTTP body is still arriving.
+Only the current page with an identity pixel recipe participates; crop, spread
+splitting, rotation/reversal, grayscale, inversion and active color filters use
+the ordinary strict full-image path. RTL alone remains eligible. The source
+header fixes the full logical aspect ratio before the first preview, so replacing
+its lower-resolution pixels does not change pan/zoom coordinates or page layout.
+Previews stay separate from loaded/retained state, completion and cache/download
+publication. A 200 ms throttle and one queued mailbox constrain each frame to
+2 MiB and all provisional copies to 8 MiB within the existing model/headroom
+budgets. EOF/container validation and dropping the incremental native decoder
+precede final display allocation; only strict final decode publishes loaded pages.
+Cancellation/error cleanup uses a job nonce and preserves genuine final pixels.

@@ -9,30 +9,20 @@ Nova and this project's code are GPL-3.0-or-later; the full GPL text is in LICEN
 
 Shared storage, caching, codecs and UI utilities are consumed from
 [nova-kit](https://github.com/misobarisic/nova-kit), pinned in Cargo.toml/Cargo.lock
-to `b5cb50325bf1e359811dc73aa85f641687e4ecd3`, the shared cache and codec revision.
+to `f2b7ebe26329afa752e8eb447e0e00ba025cc72e`, the shared cache and codec revision.
 Kit retains its own GPL-3.0-or-later notices.
 Generic addon extraction and the Nova compatibility gate remain pending.
 
-The Manhwa18.cc/YiiMadara JavaScript port derives from Keiyoushi
-extensions-source revision `0d83f6be79e12b0a8b6c6f20a500c0e9456c222a` under
-Apache-2.0. Exact source paths, modifications and omissions are recorded in
-`examples/addons/manhwa18cc/NOTICE.md`; its full applicable license is retained
-alongside it. Keiyoushi catalogue schema/data provenance and live-index extraction
-are recorded in `docs/catalogues.md` and `crates/reader-catalogue/fixtures`.
-Those upstream IDs/version numbers do not imply executable APK/JAR compatibility.
-The newly authored neutral source and generated geometric PNGs are CC0-1.0;
-see `examples/addons/neutral-fixture/NOTICE.md`.
-
-The MangaFire reference JavaScript port derives from the same Keiyoushi
-extensions-source revision `0d83f6be79e12b0a8b6c6f20a500c0e9456c222a` under
-Apache-2.0. Its JSON API adapter and VRF request signer, modifications, scoped
-CDN permissions and verification limits are recorded in
-`examples/addons/mangafire/NOTICE.md`; the full license ships inside its addon ZIP.
-
-Kagane and the bundled Kagane/Manhwa18cc/MangaFire icons derive from Keiyoushi
-extensions-source revision `1dfd0bcf25b48cb5bd42d9191918a29072c67a61` under
-Apache-2.0. Exact paths, modifications and verification limits are recorded in
-`examples/addons/kagane/NOTICE.md` and each addon's own notice/license files.
+Real site addon implementations, icons, source-specific tests and ZIPs are
+maintained exclusively in [nova-addons](https://github.com/misobarisic/nova-addons).
+Their upstream notices and licenses travel with those separate packages; they
+are not bundled in Reader. Keiyoushi catalogue schema/data provenance and
+live-index extraction remain documented in `docs/catalogues.md` and
+`crates/reader-catalogue/fixtures`. Upstream IDs/version numbers do not imply
+executable APK/JAR compatibility.
+The newly authored neutral source, neutral test icon and generated geometric
+PNGs are CC0-1.0; see `examples/addons/neutral-fixture/NOTICE.md` and
+`crates/reader-sources/tests/fixtures/README.md`.
 
 JPEG XL still-page decoding uses jxl-oxide 0.12.6 (MIT OR Apache-2.0), with Rayon
 and native CMS dependencies disabled. Its associated pure Rust crates and full

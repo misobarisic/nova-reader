@@ -6,6 +6,10 @@ pub fn tr(message: &str) -> String {
 pub fn page_position(page: usize, count: usize) -> String {
     format!("{} / {count}", page + 1)
 }
+pub fn download_progress(chapters: usize, completed: usize, total: usize) -> String {
+    let label = if chapters == 1 { "chapter" } else { "chapters" };
+    format!("{chapters} {label} · {completed} / {total} pages")
+}
 pub fn chapter_count(unread: usize, total: usize) -> String {
     format!("{unread} unread · {total} chapters")
 }

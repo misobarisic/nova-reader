@@ -6,7 +6,7 @@ reader-downloads, reader-catalogue and UI crates are GPL-3.0-or-later.
 Application/build/UI foundations derive from Nova revision
 b69a1e5765ecc65ac3b00acdfe2f16e2f46a5dda. nova-storage, nova-ui-base,
 nova-cache and nova-image are
-consumed from nova-kit revision b5cb50325bf1e359811dc73aa85f641687e4ecd3.
+consumed from nova-kit revision f2b7ebe26329afa752e8eb447e0e00ba025cc72e.
 The generated Cargo catalog lists runtime crates for the actual target and
 features; the complete project license and third-party notices follow.
 
@@ -31,12 +31,12 @@ Reader mode classification adapts TachiyomiJ2K revision
 b83defe42b2ac9f460667bda3a42fdd9d12e767e under Apache-2.0. The full applicable
 notice and license are in the appended THIRD_PARTY_NOTICES.md.
 
-REFERENCE ADDONS AND CATALOGUE METADATA
-Keiyoushi-derived source ports and catalogue schema retain their Apache-2.0
-provenance. Executable addon packages are independent installs; their own
-NOTICES/LICENSE files travel inside their ZIPs. The included neutral geometric
-fixture material is CC0-1.0. Upstream APK/JAR metadata does not grant Reader
-runtime compatibility or native package trust.
+CATALOGUE METADATA AND NEUTRAL FIXTURES
+Keiyoushi catalogue schema metadata retains its Apache-2.0 provenance.
+Real source implementations, icons and installable packages live exclusively
+in nova-addons; their notices and licenses are maintained there. The included
+neutral geometric fixture material and neutral test icon are CC0-1.0. Upstream
+APK/JAR metadata does not grant Reader runtime compatibility or package trust.
 
 MIHON TAP NAVIGATION
 Tap region data and direction semantics port Mihon v0.21.3 revision
@@ -47,3 +47,15 @@ license accompany THIRD_PARTY_NOTICES.md.
 NOVA READER CONTROLS AND IDLE WORKER
 Reader OSD layout and desktop idle-worker mailbox adapt Nova revision
 ac1c981955b812e4766202646aa45bb61321aaf4 under GPL-3.0-or-later.
+
+SLINT NATIVE PINCH INPUT
+i-slint-core 1.18.0 is vendored from its exact published registry archive, with
+relative pinch scaling and aborted two-finger input corrections documented in
+vendor/i-slint-core/NOVA_PATCH.md. Original source attribution and LICENSES
+are retained; the generated Cargo catalogue selects GPL-3.0-only.
+
+NOVA ANDROID DOWNLOAD SERVICE
+The foreground service and notification permission method derive from Nova
+revision ee3877808764d70362a6e0b442e79e5128317abf under GPL-3.0-or-later,
+with Reader application identities and the native integration documented in
+docs/project-structure.md.

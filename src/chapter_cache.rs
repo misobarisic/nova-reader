@@ -325,6 +325,15 @@ impl ChapterCache {
         })
     }
     pub fn read(&self, request: &Request) -> Result<Read> {
+        self.read_with_chunks(request, &mut |_| {})
+    }
+    /// Observe only newly fetched source bytes. Disk hits are already complete
+    /// responses and deliberately produce no progressive notifications.
+    pub fn read_with_chunks(
+        &self,
+        request: &Request,
+        on_chunk: &mut dyn FnMut(&[u8]),
+    ) -> Result<Read> {
         request.validate_active()?;
         let enabled = self.usable && (self.policy)().enabled;
         if enabled
@@ -341,7 +350,12 @@ impl ChapterCache {
         }
         let bytes = request
             .source
-            .fetch_page(&request.page.url, &request.page.headers, &request.cancel)
+            .fetch_page_with_chunks(
+                &request.page.url,
+                &request.page.headers,
+                &request.cancel,
+                on_chunk,
+            )
             .map_err(|e| e.to_string())?;
         request.validate_active()?;
         inspect(&bytes)?;

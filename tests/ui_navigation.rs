@@ -30,6 +30,7 @@ fn responsive_navigation_and_virtual_reader_models() {
                 ratio: 1.5,
                 position: i as f32 * 1.5,
                 loaded: false,
+                preview: false,
                 error: "".into(),
             })
             .collect::<Vec<_>>(),

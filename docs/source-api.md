@@ -104,6 +104,18 @@ bounded. Images stay out of JavaScript; `fetch_page(url,headers,cancel)` streams
 with cancellation checks into a separate 32 MiB encoded-byte limit. Manifest-listed
 assets can be read using `addon://<source-id>/<asset-path>` (neutral fixtures).
 
+Native callers may use `Source::fetch_page_with_chunks` to observe successful
+page body bytes during transfer. Its synchronous observer receives ordered slices
+of at most 16 KiB; HTTP error bodies never reach it, including before a
+`resolvePage` retry. Observations are provisional: cancellation, revocation,
+oversized bodies or transfer failure still return an error, and only the complete
+successful byte vector may enter durable caches or final image decoding. Existing
+`fetch_page` callers retain the same complete-byte behavior. Custom transports
+inherit a bounded full-response fallback; no streaming capability is exposed to
+JavaScript or added to manifest permissions. Source revocation, cancellation and
+settings-owned session revision are checked before and after each observer call
+and before returning completed bytes.
+
 Metadata and images use the same explicit domain allowlist, HTTPS-only/default-port
 policy, safe header whitelist, manual redirect checks and source/profile cookie jar.
 Cookie/Host/hop-by-hop headers are host-owned. The narrow `x-integrity-token`

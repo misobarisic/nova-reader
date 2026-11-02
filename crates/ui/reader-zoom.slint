@@ -1,0 +1,54 @@
+// Native Slint recognizes Android's two-finger input, and owns the gesture
+// before the reader Flickable or gallery can interpret it as a pan/page turn.
+export component ReaderZoomGesture inherits ScaleRotateGestureHandler {
+    in property <float> zoom: 1;
+    out property <bool> blocking: root.active || root.recovering;
+    callback transform(float, float, float, float, float);
+    callback began;
+    private property <float> start-zoom: 1;
+    private property <length> previous-x;
+    private property <length> previous-y;
+    private property <bool> recovering;
+
+    started => {
+        root.start-zoom = root.zoom;
+        root.previous-x = root.center.x;
+        root.previous-y = root.center.y;
+        root.began();
+    }
+    updated => {
+        // Anchor the whole gesture to its starting zoom. Incrementally scaling
+        // an already clamped value would jump after fingers meet or hit a limit.
+        let target-zoom = clamp(root.start-zoom * root.scale, 0.5, 8);
+        let factor = target-zoom / max(0.5, root.zoom);
+        if abs(factor - 1) > 0.00001 || abs(root.center.x - root.previous-x) + abs(root.center.y - root.previous-y) > 0.01px {
+            root.transform(factor, root.previous-x / max(1px, root.width), root.previous-y / max(1px, root.height),
+                root.center.x / max(1px, root.width), root.center.y / max(1px, root.height));
+        }
+        root.previous-x = root.center.x;
+        root.previous-y = root.center.y;
+    }
+    ended => { root.recovering = true; recovery-idle.restart(); }
+    cancelled => { root.recovering = true; recovery-idle.restart(); }
+
+    @children
+
+    // Slint resumes the remaining finger after a pinch. Consume that same
+    // contact through its release so it cannot become a tap, hold or page drag.
+    remainder := TouchArea {
+        width: 100%; height: 100%; enabled: root.recovering;
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel { root.recovering = false; }
+        }
+        scroll-event(event) => { accept }
+    }
+    recovery-idle := Timer {
+        interval: 1ms; running: false;
+        triggered => {
+            self.stop();
+            // Trackpads/cancellation need no remaining-finger guard. A real
+            // synthetic press arrives synchronously before this timer runs.
+            if !remainder.pressed { root.recovering = false; }
+        }
+    }
+}

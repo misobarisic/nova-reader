@@ -38,7 +38,7 @@ The package is `eu.kanade.tachiyomi.extension.all.manhwa18cc`, version
 
 The MangaFire port adds seven exact language mappings and its byte-preserved
 `keiyoushi-mangafire.pb.gz` record. Source IDs, index hash and the native port's
-capabilities and live-test limits are recorded in [MangaFire](mangafire.md).
+capabilities and live-test limits are recorded in [nova-addons MangaFire documentation](https://github.com/misobarisic/nova-addons/blob/main/docs/reader/mangafire.md).
 
 IDs and upstream version codes are decimal strings at JSON boundaries, including
 negative/extreme signed int64 values. The checked-in mapping requires the exact

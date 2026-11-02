@@ -81,6 +81,13 @@ pub struct OfflineChapter {
     pub chapter: ChapterId,
     pub pages: Vec<PathBuf>,
 }
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DownloadProgress {
+    pub queued: usize,
+    pub running: usize,
+    pub completed_pages: usize,
+    pub total_pages: usize,
+}
 struct Inner {
     root: PathBuf,
     quota: u64,
@@ -101,6 +108,74 @@ fn chapter_key(chapter: &ChapterId) -> String {
 }
 fn page_name(index: usize, id: &str) -> String {
     format!("{index:06}-{}.page", hash(id.as_bytes()))
+}
+fn is_job_key(name: &std::ffi::OsStr) -> bool {
+    name.to_str().is_some_and(|name| {
+        name.len() == 64
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
+fn is_page_file(name: &str, extension: &str) -> bool {
+    let Some(stem) = name.strip_suffix(extension) else {
+        return false;
+    };
+    stem.len() == 71
+        && stem.as_bytes()[..6].iter().all(u8::is_ascii_digit)
+        && stem.as_bytes()[6] == b'-'
+        && is_job_key(std::ffi::OsStr::new(&stem[7..]))
+}
+fn owned_directories(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut directories = Vec::new();
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let kind = match entry.file_type() {
+            Ok(kind) => kind,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        if is_job_key(&entry.file_name()) && kind.is_dir() {
+            directories.push(entry.path());
+        }
+    }
+    Ok(directories)
+}
+/// Only generated files in a hash-named job directory belong to the store.
+/// Never recursively delete an unknown directory or a user's unrelated files.
+fn clean_job_files(directory: &Path, retained: &BTreeSet<String>) -> Result<()> {
+    if fs::symlink_metadata(directory)?.file_type().is_symlink() {
+        return Err(Error::Invalid(
+            "download directory cannot be a symlink".into(),
+        ));
+    }
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if name != "manifest.pending"
+            && !is_page_file(name, ".pending")
+            && !(is_page_file(name, ".page") && !retained.contains(name))
+        {
+            continue;
+        }
+        if !entry.file_type()?.is_file() {
+            return Err(Error::Invalid(
+                "generated download file is not a regular file".into(),
+            ));
+        }
+        fs::remove_file(entry.path())?;
+    }
+    Ok(())
+}
+fn clean_uncommitted_directory(directory: &Path) -> Result<()> {
+    clean_job_files(directory, &BTreeSet::new())?;
+    if fs::read_dir(directory)?.next().is_none() {
+        fs::remove_dir(directory)?;
+        #[cfg(unix)]
+        File::open(directory.parent().unwrap())?.sync_all()?;
+    }
+    Ok(())
 }
 fn private_directory(path: &Path) -> Result<()> {
     let mut builder = fs::DirBuilder::new();
@@ -155,7 +230,16 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
-    let result = (|| {
+    // Cleanup also runs if a writer unwinds. A killed process is reconciled by
+    // recover(), which recognizes the same generated pending filenames.
+    struct PendingFile(PathBuf);
+    impl Drop for PendingFile {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+    let _pending = PendingFile(temporary.clone());
+    (|| {
         let mut options = File::options();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -171,11 +255,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
         #[cfg(unix)]
         File::open(path.parent().unwrap())?.sync_all()?;
         Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
+    })()
 }
 fn save(root: &Path, job: &ChapterDownload) -> Result<()> {
     let bytes = serde_json::to_vec(job)?;
@@ -188,6 +268,11 @@ fn save(root: &Path, job: &ChapterDownload) -> Result<()> {
     )
 }
 fn load_manifest(path: &Path) -> Result<ChapterDownload> {
+    if !fs::symlink_metadata(path)?.is_file() {
+        return Err(Error::Invalid(
+            "download manifest is not a regular file".into(),
+        ));
+    }
     let file = File::open(path)?;
     if file.metadata()?.len() > 16 * 1024 * 1024 {
         return Err(Error::Invalid("oversized download manifest".into()));
@@ -207,7 +292,14 @@ fn load_manifest(path: &Path) -> Result<ChapterDownload> {
     Ok(job)
 }
 fn load(root: &Path, chapter: &ChapterId) -> Result<ChapterDownload> {
-    let job = load_manifest(&root.join(chapter_key(chapter)).join("manifest.json"))?;
+    let directory = root.join(chapter_key(chapter));
+    let kind = fs::symlink_metadata(&directory)?.file_type();
+    if !kind.is_dir() || kind.is_symlink() {
+        return Err(Error::Invalid(
+            "download directory is not a regular directory".into(),
+        ));
+    }
+    let job = load_manifest(&directory.join("manifest.json"))?;
     if &job.chapter != chapter {
         return Err(Error::Invalid("invalid download manifest".into()));
     }
@@ -240,15 +332,20 @@ fn verify(path: &Path, page: &DownloadedPage) -> Result<bool> {
 fn checked_job(root: &Path, chapter: &ChapterId) -> Result<ChapterDownload> {
     let mut job = load(root, chapter)?;
     let mut changed = false;
+    let directory = root.join(chapter_key(chapter));
+    let mut retained = BTreeSet::new();
     for page in &mut job.pages {
-        if page.sha256.is_some()
-            && !verify(&root.join(chapter_key(chapter)).join(&page.filename), page)?
-        {
+        if verify(&directory.join(&page.filename), page)? {
+            retained.insert(page.filename.clone());
+        } else if page.sha256.is_some() || page.bytes != 0 {
             page.sha256 = None;
             page.bytes = 0;
             changed = true;
         }
     }
+    // Includes corrupt tracked bytes, renamed pages whose manifest commit was
+    // interrupted, and partial writes. Only verified committed pages survive.
+    clean_job_files(&directory, &retained)?;
     if job.status == JobStatus::Complete && job.pages.iter().any(|p| p.sha256.is_none()) {
         job.status = JobStatus::Queued;
         job.error = Some("missing or corrupt downloaded page".into());
@@ -261,18 +358,13 @@ fn checked_job(root: &Path, chapter: &ChapterId) -> Result<ChapterDownload> {
 }
 fn usage(root: &Path) -> Result<u64> {
     let mut bytes = 0u64;
-    for entry in fs::read_dir(root)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        for page in fs::read_dir(entry.path())? {
+    for directory in owned_directories(root)? {
+        for page in fs::read_dir(directory)? {
             let page = page?;
             if page.file_type()?.is_file()
-                && page
-                    .path()
-                    .extension()
-                    .is_some_and(|x| x == "page" || x == "pending")
+                && page.file_name().to_str().is_some_and(|name| {
+                    is_page_file(name, ".page") || is_page_file(name, ".pending")
+                })
             {
                 bytes = bytes
                     .checked_add(page.metadata()?.len())
@@ -281,6 +373,36 @@ fn usage(root: &Path) -> Result<u64> {
         }
     }
     Ok(bytes)
+}
+/// Releases admission and reconciles interrupted writes on both returned errors
+/// and unwinding callbacks. Process termination is handled by startup recovery.
+struct ActiveRun {
+    store: DownloadStore,
+    chapter: ChapterId,
+    finished: bool,
+}
+impl ActiveRun {
+    fn finish(&mut self, error: Option<String>) -> Result<()> {
+        let mut inner = self.store.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.active.remove(&chapter_key(&self.chapter));
+        self.finished = true;
+        let mut job = checked_job(&inner.root, &self.chapter)?;
+        if job.status == JobStatus::Running
+            && let Some(error) = error
+        {
+            job.status = JobStatus::Failed;
+            job.error = Some(error);
+            save(&inner.root, &job)?;
+        }
+        Ok(())
+    }
+}
+impl Drop for ActiveRun {
+    fn drop(&mut self) {
+        if !self.finished {
+            let _ = self.finish(Some("download worker interrupted".into()));
+        }
+    }
 }
 impl DownloadStore {
     pub fn open(root: impl AsRef<Path>, quota: u64) -> Result<Self> {
@@ -328,7 +450,6 @@ impl DownloadStore {
             return Err(Error::Invalid("chapter already running".into()));
         }
         let directory = inner.root.join(key);
-        private_directory(&directory)?;
         if directory.join("manifest.json").exists() {
             return Err(Error::Invalid(
                 "chapter already queued; retry existing job or cancel first".into(),
@@ -348,7 +469,8 @@ impl DownloadStore {
         let next = order
             .checked_add(1)
             .ok_or_else(|| Error::Invalid("download queue sequence exhausted".into()))?;
-        save(
+        private_directory(&directory)?;
+        let result = save(
             &inner.root,
             &ChapterDownload {
                 schema_version: 1,
@@ -358,7 +480,11 @@ impl DownloadStore {
                 status: JobStatus::Queued,
                 error: None,
             },
-        )?;
+        );
+        if result.is_err() && !directory.join("manifest.json").exists() {
+            clean_uncommitted_directory(&directory)?;
+        }
+        result?;
         inner.next_order = next;
         Ok(())
     }
@@ -369,20 +495,15 @@ impl DownloadStore {
     pub fn jobs(&self) -> Result<Vec<ChapterDownload>> {
         let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let mut jobs = Vec::new();
-        for directory in fs::read_dir(&inner.root)? {
-            let directory = directory?;
-            if !directory.file_type()?.is_dir() {
-                continue;
+        for directory in owned_directories(&inner.root)? {
+            let job = match load_manifest(&directory.join("manifest.json")) {
+                Ok(job) => job,
+                Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            if directory.file_name() != Some(std::ffi::OsStr::new(&chapter_key(&job.chapter))) {
+                return Err(Error::Invalid("invalid download directory identity".into()));
             }
-            let path = directory.path().join("manifest.json");
-            if !path.exists() {
-                continue;
-            }
-            let file = File::open(path)?;
-            if file.metadata()?.len() > 16 * 1024 * 1024 {
-                return Err(Error::Invalid("oversized manifest".into()));
-            }
-            let job: ChapterDownload = serde_json::from_reader(file)?;
             jobs.push(checked_job(&inner.root, &job.chapter)?);
         }
         jobs.sort_by_key(|job| job.queue_order);
@@ -399,27 +520,53 @@ impl DownloadStore {
             .root
             .clone();
         let mut statuses = BTreeMap::new();
-        for directory in fs::read_dir(&root)? {
-            let directory = directory?;
-            let kind = match directory.file_type() {
-                Ok(kind) => kind,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(error.into()),
-            };
-            if !kind.is_dir() {
-                continue;
-            }
-            let job = match load_manifest(&directory.path().join("manifest.json")) {
+        for directory in owned_directories(&root)? {
+            let job = match load_manifest(&directory.join("manifest.json")) {
                 Ok(job) => job,
                 Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(error) => return Err(error),
             };
-            if directory.file_name() != std::ffi::OsStr::new(&chapter_key(&job.chapter)) {
+            if directory.file_name() != Some(std::ffi::OsStr::new(&chapter_key(&job.chapter))) {
                 return Err(Error::Invalid("invalid download directory identity".into()));
             }
             statuses.insert(job.chapter, job.status);
         }
         Ok(statuses)
+    }
+    /// Metadata-only foreground-service progress. Inactive jobs are excluded;
+    /// completed page counts describe committed hashes, without opening payloads.
+    pub fn progress(&self) -> Result<DownloadProgress> {
+        let root = self
+            .inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .root
+            .clone();
+        let mut progress = DownloadProgress::default();
+        for directory in owned_directories(&root)? {
+            let job = match load_manifest(&directory.join("manifest.json")) {
+                Ok(job) => job,
+                Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            if directory.file_name() != Some(std::ffi::OsStr::new(&chapter_key(&job.chapter))) {
+                return Err(Error::Invalid("invalid download directory identity".into()));
+            }
+            match job.status {
+                JobStatus::Queued => progress.queued += 1,
+                JobStatus::Running => progress.running += 1,
+                _ => continue,
+            }
+            progress.completed_pages = progress
+                .completed_pages
+                .checked_add(job.completed_pages())
+                .ok_or_else(|| Error::Invalid("download progress overflow".into()))?;
+            progress.total_pages = progress
+                .total_pages
+                .checked_add(job.pages.len())
+                .ok_or_else(|| Error::Invalid("download progress overflow".into()))?;
+        }
+        Ok(progress)
     }
     fn status(&self, chapter: &ChapterId, status: JobStatus) -> Result<()> {
         let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -514,17 +661,13 @@ impl DownloadStore {
                 .active
                 .insert(key.clone(), chapter.series.source_id.clone());
         }
+        let mut active = ActiveRun {
+            store: self.clone(),
+            chapter: chapter.clone(),
+            finished: false,
+        };
         let result = self.run_pages(chapter, &mut fetch);
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        inner.active.remove(&key);
-        if let Err(error) = &result {
-            let mut job = load(&inner.root, chapter)?;
-            if job.status == JobStatus::Running {
-                job.status = JobStatus::Failed;
-                job.error = Some(error.to_string());
-                save(&inner.root, &job)?;
-            }
-        }
+        active.finish(result.as_ref().err().map(ToString::to_string))?;
         result
     }
     fn run_pages(
@@ -618,41 +761,37 @@ impl DownloadStore {
         })
     }
     pub fn recover(&self) -> Result<()> {
-        let jobs = self.jobs()?;
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if !inner.active.is_empty() {
             return Err(Error::Invalid("cannot recover active downloads".into()));
         }
-        inner.next_order = jobs
-            .iter()
-            .map(|job| job.queue_order)
-            .max()
-            .unwrap_or(0)
+        let mut highest_order = 0;
+        for directory in owned_directories(&inner.root)? {
+            let manifest = match load_manifest(&directory.join("manifest.json")) {
+                Ok(job) => job,
+                Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                    // An initial enqueue may have died before its first atomic
+                    // manifest publication. No committed pages exist to retain.
+                    clean_uncommitted_directory(&directory)?;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            if directory.file_name() != Some(std::ffi::OsStr::new(&chapter_key(&manifest.chapter)))
+            {
+                return Err(Error::Invalid("invalid download directory identity".into()));
+            }
+            let mut job = checked_job(&inner.root, &manifest.chapter)?;
+            highest_order = highest_order.max(job.queue_order);
+            if job.status == JobStatus::Running {
+                job.status = JobStatus::Queued;
+                job.error = None;
+                save(&inner.root, &job)?;
+            }
+        }
+        inner.next_order = highest_order
             .checked_add(1)
             .ok_or_else(|| Error::Invalid("download queue sequence exhausted".into()))?;
-        for mut job in jobs {
-            let directory = inner.root.join(chapter_key(&job.chapter));
-            for entry in fs::read_dir(&directory)? {
-                let entry = entry?;
-                if entry.file_type()?.is_file()
-                    && entry.path().extension().is_some_and(|x| x == "pending")
-                {
-                    fs::remove_file(entry.path())?;
-                }
-            }
-            let mut missing = false;
-            for page in &mut job.pages {
-                if !verify(&directory.join(&page.filename), page)? {
-                    page.bytes = 0;
-                    page.sha256 = None;
-                    missing = true;
-                }
-            }
-            if job.status == JobStatus::Running || (job.status == JobStatus::Complete && missing) {
-                job.status = JobStatus::Queued;
-            }
-            save(&inner.root, &job)?;
-        }
         Ok(())
     }
     pub fn import_folder(&self, chapter: ChapterId, folder: impl AsRef<Path>) -> Result<()> {
@@ -902,7 +1041,8 @@ mod tests {
                 inner
                     .root
                     .join(chapter_key(&chapter))
-                    .join("orphan.pending"),
+                    .join(page_name(0, "0"))
+                    .with_extension("pending"),
                 b"partial",
             )
             .unwrap();
@@ -918,6 +1058,319 @@ mod tests {
         assert!(queue[0].queue_order < queue[1].queue_order);
         store.run(&chapter, |_| Ok(png())).unwrap();
         assert!(store.offline(&chapter).is_ok());
+    }
+    #[test]
+    fn cancelled_and_panicking_workers_keep_verified_pages_without_leaking_admission() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DownloadStore::open(directory.path(), 1_000_000).unwrap();
+        let chapter = chapter();
+        store.enqueue(chapter.clone(), pages()).unwrap();
+        let mut fetched = 0;
+        store
+            .run(&chapter, |_| {
+                fetched += 1;
+                if fetched == 2 {
+                    store.cancel(&chapter).unwrap();
+                }
+                Ok(png())
+            })
+            .unwrap();
+        let job = store.job(&chapter).unwrap();
+        assert_eq!(job.status, JobStatus::Cancelled);
+        assert_eq!(job.completed_pages(), 1);
+        assert!(store.inner.lock().unwrap().active.is_empty());
+        assert_eq!(
+            fs::read_dir(directory.path().join(chapter_key(&chapter)))
+                .unwrap()
+                .count(),
+            2
+        );
+        store.recover().unwrap();
+        assert_eq!(store.job(&chapter).unwrap().status, JobStatus::Cancelled);
+        store.resume(&chapter).unwrap();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            store.run(&chapter, |_| -> std::result::Result<Vec<u8>, String> {
+                panic!("synthetic worker panic");
+            })
+        }));
+        assert!(result.is_err());
+        assert!(store.inner.lock().unwrap().active.is_empty());
+        assert_eq!(store.job(&chapter).unwrap().status, JobStatus::Failed);
+        assert_eq!(store.job(&chapter).unwrap().completed_pages(), 1);
+        store.retry(&chapter).unwrap();
+        let mut resumed = 0;
+        store
+            .run(&chapter, |_| {
+                resumed += 1;
+                Ok(png())
+            })
+            .unwrap();
+        assert_eq!(resumed, 2);
+        assert!(store.offline(&chapter).is_ok());
+    }
+    #[test]
+    fn recovery_removes_only_generated_uncommitted_or_corrupt_bytes_and_frees_quota() {
+        let directory = tempfile::tempdir().unwrap();
+        let bytes = png();
+        let store = DownloadStore::open(directory.path(), bytes.len() as u64 * 3).unwrap();
+        let chapter = chapter();
+        store.enqueue(chapter.clone(), pages()).unwrap();
+        let bundle = directory.path().join(chapter_key(&chapter));
+        {
+            let inner = store.inner.lock().unwrap();
+            let mut job = load(&inner.root, &chapter).unwrap();
+            fs::write(bundle.join(&job.pages[0].filename), &bytes).unwrap();
+            job.pages[0].sha256 = Some(hash(&bytes));
+            job.pages[0].bytes = bytes.len() as u64;
+            fs::write(bundle.join(&job.pages[1].filename), b"corrupt").unwrap();
+            job.pages[1].sha256 = Some(hash(&bytes));
+            job.pages[1].bytes = bytes.len() as u64;
+            job.status = JobStatus::Running;
+            save(&inner.root, &job).unwrap();
+            // Rename completed, but the manifest still has no hash for page 3.
+            atomic_write(&bundle.join(&job.pages[2].filename), &bytes).unwrap();
+            fs::write(bundle.join("manifest.pending"), b"unfinished JSON").unwrap();
+            fs::write(bundle.join(page_name(50, "orphan")), b"orphan").unwrap();
+            fs::write(
+                bundle
+                    .join(page_name(51, "orphan"))
+                    .with_extension("pending"),
+                b"partial",
+            )
+            .unwrap();
+            fs::write(bundle.join("notes.page"), b"unrelated file").unwrap();
+        }
+        let unowned = directory.path().join("personal-notes");
+        fs::create_dir(&unowned).unwrap();
+        fs::write(unowned.join("notes.pending"), b"unrelated directory").unwrap();
+        // A copied manifest in an unrelated folder must not become a duplicate job.
+        fs::copy(bundle.join("manifest.json"), unowned.join("manifest.json")).unwrap();
+        drop(store);
+        let store = DownloadStore::open(directory.path(), bytes.len() as u64 * 3).unwrap();
+        let job = store.job(&chapter).unwrap();
+        assert_eq!(job.status, JobStatus::Queued);
+        assert_eq!(job.completed_pages(), 1);
+        assert_eq!(job.downloaded_bytes(), bytes.len() as u64);
+        assert_eq!(usage(directory.path()).unwrap(), bytes.len() as u64);
+        assert_eq!(store.jobs().unwrap().len(), 1);
+        assert!(!bundle.join(&job.pages[1].filename).exists());
+        assert!(!bundle.join(&job.pages[2].filename).exists());
+        assert!(!bundle.join("manifest.pending").exists());
+        assert_eq!(
+            fs::read(bundle.join("notes.page")).unwrap(),
+            b"unrelated file"
+        );
+        assert_eq!(
+            fs::read(unowned.join("notes.pending")).unwrap(),
+            b"unrelated directory"
+        );
+        let mut fetched = 0;
+        store
+            .run(&chapter, |_| {
+                fetched += 1;
+                Ok(bytes.clone())
+            })
+            .unwrap();
+        assert_eq!(fetched, 2);
+        assert_eq!(usage(directory.path()).unwrap(), bytes.len() as u64 * 3);
+    }
+    #[test]
+    fn metadata_progress_never_reads_or_repairs_payloads_and_excludes_inactive_jobs() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DownloadStore::open(directory.path(), 1_000_000).unwrap();
+        let chapter = chapter();
+        store.enqueue(chapter.clone(), pages()).unwrap();
+        let other = ChapterId::new(chapter.series.clone(), "other");
+        store.enqueue(other.clone(), pages()).unwrap();
+        store.pause(&other).unwrap();
+        let complete = ChapterId::new(chapter.series.clone(), "complete");
+        store.enqueue(complete.clone(), pages()).unwrap();
+        store.run(&complete, |_| Ok(png())).unwrap();
+        let bundle = directory.path().join(chapter_key(&chapter));
+        {
+            let inner = store.inner.lock().unwrap();
+            let mut job = load(&inner.root, &chapter).unwrap();
+            job.status = JobStatus::Running;
+            for page in job.pages.iter_mut().take(2) {
+                page.bytes = 123;
+                page.sha256 = Some(hash(b"committed before corruption"));
+            }
+            save(&inner.root, &job).unwrap();
+            // A directory instead of a page would make payload verification or
+            // cleanup fail, proving this path reads only the published manifest.
+            fs::create_dir(bundle.join(&job.pages[0].filename)).unwrap();
+            fs::write(bundle.join(&job.pages[1].filename), b"corrupt").unwrap();
+        }
+        assert_eq!(
+            store.progress().unwrap(),
+            DownloadProgress {
+                queued: 0,
+                running: 1,
+                completed_pages: 2,
+                total_pages: 3,
+            }
+        );
+        assert_eq!(
+            fs::read(bundle.join(page_name(1, "1"))).unwrap(),
+            b"corrupt"
+        );
+        fs::remove_dir(bundle.join(page_name(0, "0"))).unwrap();
+        let queued = ChapterId::new(chapter.series.clone(), "queued");
+        store.enqueue(queued, pages()).unwrap();
+        assert_eq!(
+            store.progress().unwrap(),
+            DownloadProgress {
+                queued: 1,
+                running: 1,
+                completed_pages: 2,
+                total_pages: 6,
+            }
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn recovery_refuses_symlinks_without_touching_external_payloads() {
+        use std::os::unix::fs::symlink;
+        let directory = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let store = DownloadStore::open(directory.path(), 1_000_000).unwrap();
+        let chapter = chapter();
+        store.enqueue(chapter.clone(), pages()).unwrap();
+        let target = outside.path().join("payload");
+        fs::write(&target, b"unrelated bytes").unwrap();
+        let link = directory
+            .path()
+            .join(chapter_key(&chapter))
+            .join(page_name(0, "0"));
+        symlink(&target, &link).unwrap();
+        assert!(store.recover().is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"unrelated bytes");
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        drop(store);
+        assert!(DownloadStore::open(directory.path(), 1_000_000).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"unrelated bytes");
+    }
+    #[test]
+    #[ignore = "invoked only by killed_writer_recovery via a subprocess"]
+    fn crash_writer_child() {
+        let Some(root) = std::env::var_os("NOVA_DOWNLOAD_CRASH_ROOT") else {
+            return;
+        };
+        let ready = std::env::var_os("NOVA_DOWNLOAD_CRASH_READY").unwrap();
+        let root = PathBuf::from(root);
+        let store = DownloadStore::open(&root, 1_000_000).unwrap();
+        let chapter = chapter();
+        store.enqueue(chapter.clone(), pages()).unwrap();
+        let mut fetched = 0;
+        store
+            .run(&chapter, |_| {
+                fetched += 1;
+                if fetched == 2 {
+                    let inner = store.inner.lock().unwrap();
+                    let job = load(&inner.root, &chapter).unwrap();
+                    let bundle = root.join(chapter_key(&chapter));
+                    // Inject the precise crash windows using the production writer:
+                    // a renamed page before its hash commit, and a partial page write.
+                    atomic_write(&bundle.join(&job.pages[1].filename), &png()).unwrap();
+                    fs::write(
+                        bundle
+                            .join(&job.pages[2].filename)
+                            .with_extension("pending"),
+                        b"torn write",
+                    )
+                    .unwrap();
+                    let initial = root.join(chapter_key(&ChapterId::new(
+                        chapter.series.clone(),
+                        "initial-enqueue",
+                    )));
+                    private_directory(&initial).unwrap();
+                    fs::write(initial.join("manifest.pending"), b"{\"schema_version\":1").unwrap();
+                    drop(inner);
+                    fs::write(&ready, b"ready").unwrap();
+                    loop {
+                        std::thread::park();
+                    }
+                }
+                Ok(png())
+            })
+            .unwrap();
+    }
+    #[test]
+    fn killed_writer_recovery_keeps_committed_pages_and_removes_crash_artifacts() {
+        use std::{
+            process::{Child, Command},
+            time::{Duration, Instant},
+        };
+        struct KillOnDrop(Child);
+        impl Drop for KillOnDrop {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("downloads");
+        let ready = directory.path().join("child-ready");
+        let mut child = KillOnDrop(
+            Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::crash_writer_child",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("NOVA_DOWNLOAD_CRASH_ROOT", &root)
+                .env("NOVA_DOWNLOAD_CRASH_READY", &ready)
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !ready.exists() {
+            assert!(
+                child.0.try_wait().unwrap().is_none(),
+                "crash fixture exited before its injected write"
+            );
+            assert!(
+                Instant::now() < deadline,
+                "crash fixture did not reach its injected write"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        child.0.kill().unwrap();
+        child.0.wait().unwrap();
+        let store = DownloadStore::open(&root, png().len() as u64 * 3).unwrap();
+        let chapter = chapter();
+        assert_eq!(store.job(&chapter).unwrap().completed_pages(), 1);
+        assert_eq!(store.job(&chapter).unwrap().status, JobStatus::Queued);
+        assert_eq!(
+            fs::read_dir(root.join(chapter_key(&chapter)))
+                .unwrap()
+                .count(),
+            2
+        );
+        assert!(
+            !root
+                .join(chapter_key(&ChapterId::new(
+                    chapter.series.clone(),
+                    "initial-enqueue"
+                )))
+                .exists()
+        );
+        let mut fetched = 0;
+        store
+            .run(&chapter, |_| {
+                fetched += 1;
+                Ok(png())
+            })
+            .unwrap();
+        assert_eq!(fetched, 2);
+        assert!(store.offline(&chapter).is_ok());
+        assert_eq!(usage(&root).unwrap(), png().len() as u64 * 3);
     }
     #[test]
     fn pause_during_fetch_refresh_and_atomic_replacement() {

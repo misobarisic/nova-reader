@@ -5,6 +5,8 @@ mod addon_icons;
 #[cfg(target_os = "android")]
 pub mod android_documents;
 #[cfg(target_os = "android")]
+mod android_downloads;
+#[cfg(target_os = "android")]
 pub mod android_sync;
 mod app;
 pub mod appearance;
@@ -16,6 +18,7 @@ mod chapter_capture;
 mod cli;
 #[cfg(not(target_os = "android"))]
 mod desktop_dialogs;
+mod download_background;
 pub mod export_names;
 pub mod image_storage;
 mod metadata_refresh;
@@ -55,6 +58,7 @@ fn android_main(app: slint::android::AndroidApp) {
         let _ = paths::ANDROID_DATA.set(path.join("nova-reader"));
     }
     crate::android_sync::initialize_foreground_context(app.vm_as_ptr(), app.activity_as_ptr());
+    crate::android_downloads::initialize_foreground_context(app.vm_as_ptr(), app.activity_as_ptr());
     slint::android::init_with_event_listener(app, |event| {
         use slint::android::android_activity::{MainEvent, PollEvent};
         match event {

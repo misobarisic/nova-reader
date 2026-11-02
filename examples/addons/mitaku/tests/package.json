@@ -1,1 +1,0 @@
-{"private":true,"type":"module","scripts":{"test":"node parser.test.mjs"},"devDependencies":{"linkedom":"0.18.12"}}

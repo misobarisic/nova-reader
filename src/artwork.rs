@@ -144,6 +144,7 @@ impl Shared {
     }
 }
 
+#[derive(Clone)]
 struct Task {
     key: String,
     source_id: String,
@@ -239,10 +240,17 @@ impl ArtworkLoader {
                     if !worker_shared.current(&task) {
                         continue;
                     }
-                    let result = load(&services, &worker_encoded, &worker_shared, &task);
+                    let (result, deferred) =
+                        match load(&services, &worker_encoded, &worker_shared, &task) {
+                            Ok((loaded, deferred)) => (Ok(loaded), deferred),
+                            Err(error) => (Err(error), None),
+                        };
                     if !worker_shared.current(&task) {
                         continue;
                     }
+                    // The original stays on this one worker, never in the UI
+                    // closure, decoded LRU or retained Slint image handles.
+                    let write_task = task.clone();
                     let shared = worker_shared.clone();
                     let (acknowledge, receipt) = mpsc::sync_channel(1);
                     // Keep pending entries until publication so queued event-loop
@@ -258,16 +266,13 @@ impl ArtworkLoader {
                         let Ok(loaded) = result else { return };
                         admit(&ui, id, &shared, &task.key, loaded);
                     });
-                    // Do not pile up decoded closures while the UI is busy.
-                    loop {
-                        match receipt.recv_timeout(Duration::from_millis(100)) {
-                            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                            Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    // Display the decoded pixels before optional recompression
+                    // or disk work; large originals must not delay first paint.
+                    after_publication(receipt, &worker_shared, &write_task, || {
+                        if let Some(deferred) = deferred {
+                            deferred.write(&worker_encoded, &worker_shared, &write_task);
                         }
-                        if worker_shared.shutdown.load(Ordering::Acquire) {
-                            break;
-                        }
-                    }
+                    });
                 }
             })
             .is_ok();
@@ -443,6 +448,29 @@ impl Drop for Completion {
     }
 }
 
+/// Keep only one decoded completion and one bounded original on the worker.
+/// A disconnected UI is not an acknowledgment and cannot trigger cache work.
+fn after_publication(
+    receipt: mpsc::Receiver<()>,
+    shared: &Shared,
+    task: &Task,
+    optional_work: impl FnOnce(),
+) {
+    let acknowledged = loop {
+        match receipt.recv_timeout(Duration::from_millis(100)) {
+            Ok(()) => break true,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break false,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+        if shared.shutdown.load(Ordering::Acquire) {
+            break false;
+        }
+    };
+    if acknowledged && shared.current(task) && !shared.shutdown.load(Ordering::Acquire) {
+        optional_work();
+    }
+}
+
 fn cached_image(shared: &Shared, id: u64, key: &str, source_id: &str) -> Option<Image> {
     if shared.clearing.load(Ordering::Acquire) {
         return None;
@@ -602,6 +630,37 @@ impl RequestProof {
     }
 }
 
+/// Worker-owned only: never attach this to Loaded or the UI completion closure.
+struct DeferredCacheWrite {
+    key: String,
+    epoch: u64,
+    bytes: Vec<u8>,
+    compression: crate::image_storage::ImageCompression,
+    max_side: Option<u32>,
+    access: SourceAvailability,
+    proof: RequestProof,
+}
+impl DeferredCacheWrite {
+    fn write(self, encoded: &nova_cache::blob::Cache, shared: &Shared, task: &Task) {
+        let still_current =
+            || shared.current(task) && self.access.is_available() && self.proof.current();
+        if encoded.generation() != self.epoch || !still_current() {
+            return;
+        }
+        write_fetched(
+            encoded,
+            &self.key,
+            self.epoch,
+            &self.bytes,
+            self.compression,
+            self.max_side,
+            still_current,
+        );
+    }
+}
+
+type LoadResult = Result<(Loaded, Option<DeferredCacheWrite>), String>;
+
 struct Loaded {
     pixels: Pixels,
     source_id: String,
@@ -754,7 +813,7 @@ fn load(
     encoded: &nova_cache::blob::Cache,
     shared: &Shared,
     task: &Task,
-) -> Result<Loaded, String> {
+) -> LoadResult {
     task.cancel.check().map_err(|e| e.to_string())?;
     // Cached artwork must still respect source availability/adult/profile gates.
     let source = services.source(&task.source_id)?;
@@ -766,7 +825,7 @@ fn load_source(
     encoded: &nova_cache::blob::Cache,
     shared: &Shared,
     task: &Task,
-) -> Result<Loaded, String> {
+) -> LoadResult {
     task.cancel.check().map_err(|e| e.to_string())?;
     let proof = RequestProof::new(&source, &task.url)?;
     let encoded_key = proof.encoded_key(&task.key);
@@ -793,12 +852,15 @@ fn load_source(
             if let Some(key) = &encoded_key {
                 encoded.touch(key);
             }
-            return Ok(Loaded {
-                pixels,
-                source_id: task.source_id.clone(),
-                access,
-                proof: Some(proof),
-            });
+            return Ok((
+                Loaded {
+                    pixels,
+                    source_id: task.source_id.clone(),
+                    access,
+                    proof: Some(proof),
+                },
+                None,
+            ));
         }
     }
     let settings = crate::image_storage::settings_snapshot();
@@ -808,12 +870,15 @@ fn load_source(
         && let Some(pixels) = read_cached_pixels(encoded, encoded_key)
     {
         task.cancel.check().map_err(|e| e.to_string())?;
-        return Ok(Loaded {
-            pixels,
-            source_id: task.source_id.clone(),
-            access,
-            proof: Some(proof),
-        });
+        return Ok((
+            Loaded {
+                pixels,
+                source_id: task.source_id.clone(),
+                access,
+                proof: Some(proof),
+            },
+            None,
+        ));
     }
     let bytes = source
         .fetch_page(&task.url, &BTreeMap::new(), &task.cancel)
@@ -824,25 +889,28 @@ fn load_source(
     if !proof.current() {
         return Err("Artwork authorization context changed".into());
     }
-    if settings.policy.disk_enabled
-        && let Some(encoded_key) = &encoded_key
-    {
-        write_fetched(
-            encoded,
-            encoded_key,
+    let deferred = if settings.policy.disk_enabled && bytes.len() <= ENCODED_LIMIT {
+        encoded_key.map(|key| DeferredCacheWrite {
+            key,
             epoch,
-            &bytes,
-            settings.cache,
-            settings.policy.poster_max_side,
-            || shared.current(task) && access.is_available() && proof.current(),
-        );
-    }
-    Ok(Loaded {
-        pixels,
-        source_id: task.source_id.clone(),
-        access,
-        proof: Some(proof),
-    })
+            bytes,
+            compression: settings.cache,
+            max_side: settings.policy.poster_max_side,
+            access: access.clone(),
+            proof: proof.clone(),
+        })
+    } else {
+        None
+    };
+    Ok((
+        Loaded {
+            pixels,
+            source_id: task.source_id.clone(),
+            access,
+            proof: Some(proof),
+        },
+        deferred,
+    ))
 }
 
 fn read_cached_pixels(cache: &nova_cache::blob::Cache, key: &str) -> Option<Pixels> {
@@ -1758,7 +1826,11 @@ mod tests {
             generation: 0,
             cancel: CancelToken::default(),
         };
-        let current = load_source(other, &cache, &shared, &task).unwrap();
+        let (current, deferred) = load_source(other, &cache, &shared, &task).unwrap();
+        assert!(
+            deferred.is_none(),
+            "a disk hit must not schedule another write"
+        );
         assert_eq!(&current.pixels.as_bytes()[..4], &[210, 210, 210, 255]);
     }
 
@@ -2179,5 +2251,320 @@ mod tests {
             .write_image(&vec![0; 8193 * 4], 8193, 1, image::ExtendedColorType::Rgba8)
             .unwrap();
         assert!(decode(&too_wide).is_err());
+    }
+    // Authored source package: exercises the real JS host without depending on
+    // any website implementation, captured response, or network service.
+    fn poster_package() -> Vec<u8> {
+        use std::io::{Cursor, Write};
+        let manifest = serde_json::json!({
+            "formatVersion": 2, "contract": "nova-reader1", "api": "^1.0",
+            "id": "poster-fixture", "name": "Neutral poster fixture", "version": "1.0.0",
+            "language": "en", "entry": "main.js",
+            "permissions": {"domains": ["example.test"]},
+            "capabilities": ["browse", "details"]
+        });
+        let script = br#"
+            globalThis.novaProvider = {handle(request) {
+                const operation = request.op || request.operation;
+                const path = operation === 'browse' ? '/catalogue.json' : '/details.json';
+                const response = JSON.parse(nova.http.get('https://example.test' + path,
+                    JSON.stringify({Origin: 'https://example.test'})));
+                return JSON.parse(response.body);
+            }};
+        "#;
+        let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for (name, bytes) in [
+            ("manifest.json", serde_json::to_vec(&manifest).unwrap()),
+            ("main.js", script.to_vec()),
+        ] {
+            archive
+                .start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            archive.write_all(&bytes).unwrap();
+        }
+        archive.finish().unwrap().into_inner()
+    }
+
+    fn poster_source(
+        directory: &Path,
+        transport: Arc<dyn reader_sources::SourceTransport>,
+    ) -> (reader_sources::SourceRegistry, reader_sources::Source) {
+        let registry = reader_sources::SourceRegistry::open(directory).unwrap();
+        registry.install_zip(&poster_package()).unwrap();
+        registry.set_enabled("poster-fixture", true).unwrap();
+        let source = registry
+            .source("poster-fixture")
+            .unwrap()
+            .with_transport(transport);
+        (registry, source)
+    }
+
+    /// Exercise Source DTOs, queue admission, request authorization, native
+    /// decoding, retained permits and the actual Slint row publication together.
+    fn check_poster_pipeline(source: reader_sources::Source, directory: &Path, mode: &str) {
+        use slint::{ModelRc, VecModel};
+        let ui = AppWindow::new().unwrap();
+        let catalogue = source
+            .browse(&serde_json::json!({"catalogue":mode}))
+            .unwrap();
+        let entry = catalogue.items.first().expect("neutral catalogue is empty");
+        for label in ["catalogue", "details"] {
+            // The first pass must be untouched Browse: do not fetch any post
+            // details before its poster request.
+            let dto = if label == "catalogue" {
+                entry.clone()
+            } else {
+                source.details(&serde_json::json!({"id":entry.id})).unwrap()
+            };
+            let item = series(
+                "poster-fixture",
+                &dto.id,
+                dto.cover_url.as_deref().expect("poster URL missing"),
+            );
+            let shared = Arc::new(Shared::default());
+            let (sender, receiver) = mpsc::sync_channel(MAX_REQUESTS);
+            let loader = ArtworkLoader {
+                sender,
+                shared: shared.clone(),
+                ui: ui.as_weak(),
+                id: NEXT_LOADER.fetch_add(1, Ordering::Relaxed),
+                encoded: nova_cache::blob::Cache::new(directory.join(label), ENCODED_LIMIT as u64),
+            };
+            ui.set_items(ModelRc::new(VecModel::from(vec![crate::ItemRow {
+                artwork_key: key(&item).into(),
+                ..crate::ItemRow::default()
+            }])));
+            assert_eq!(ui.get_items().row_data(0).unwrap().poster.size().width, 0);
+            loader.request(&item);
+            let task = receiver
+                .try_recv()
+                .expect("visible poster was not scheduled");
+            let (loaded, deferred) = load_source(source.clone(), &loader.encoded, &shared, &task)
+                .unwrap_or_else(|error| panic!("{label} poster load failed: {error}"));
+            assert!(
+                loaded.is_current(),
+                "poster authorization was revoked before publication"
+            );
+            shared.finish(&task, false);
+            admit(&ui, loader.id, &shared, &task.key, loaded);
+            let image = ui.get_items().row_data(0).unwrap().poster;
+            let (acknowledge, receipt) = mpsc::sync_channel(1);
+            acknowledge.send(()).unwrap();
+            after_publication(receipt, &shared, &task, || {
+                if let Some(deferred) = deferred {
+                    deferred.write(&loader.encoded, &shared, &task);
+                }
+            });
+            assert!(
+                image.size().width > 0 && image.size().height > 0,
+                "{label} decoded poster never reached its Slint row"
+            );
+            assert!(image.size().width <= 460 && image.size().height <= 690);
+            assert!(loader.cached_image(&item).is_some());
+            assert!(shared.requests.lock().unwrap().failed.is_empty());
+            eprintln!(
+                "{mode} {label} poster decoded and published: {}x{}",
+                image.size().width,
+                image.size().height
+            );
+        }
+    }
+
+    struct NeutralPosters;
+    impl reader_sources::SourceTransport for NeutralPosters {
+        fn page_cache_partition(&self, _: &str) -> Option<String> {
+            Some("neutral-posters".into())
+        }
+        fn request(
+            &self,
+            request: &reader_sources::HttpRequest,
+            cap: usize,
+            cancel: &CancelToken,
+        ) -> reader_sources::Result<reader_sources::HttpResponse> {
+            cancel.check()?;
+            let url = url::Url::parse(&request.url).unwrap();
+            assert_eq!(url.host_str(), Some("example.test"));
+            let body = if url.path().ends_with(".png") {
+                // Artwork supplies no addon-defined Page headers. Prove that
+                // the same path works for catalogue and fresh details posters.
+                assert!(request.headers.is_empty());
+                png(120, 180, [20, 100, 160, 255])
+            } else {
+                assert_eq!(
+                    request.headers.get("Origin").map(String::as_str),
+                    Some("https://example.test")
+                );
+                let mut entry = serde_json::json!({
+                    "id": "shapes", "title": "Neutral shapes",
+                    "url": "https://example.test/series/shapes",
+                    "coverUrl": "https://example.test/images/catalogue.png"
+                });
+                let response = match url.path() {
+                    "/catalogue.json" => {
+                        serde_json::json!({"items": [entry], "hasNextPage": false})
+                    }
+                    "/details.json" => {
+                        entry["coverUrl"] =
+                            serde_json::json!("https://example.test/images/details.png");
+                        entry
+                    }
+                    path => panic!("unexpected neutral fixture request: {path}"),
+                };
+                serde_json::to_vec(&response).unwrap()
+            };
+            assert!(body.len() <= cap);
+            Ok(reader_sources::HttpResponse {
+                status: 200,
+                url: request.url.clone(),
+                headers: BTreeMap::new(),
+                body,
+            })
+        }
+    }
+
+    #[test]
+    fn catalogue_and_details_posters_reach_the_ui_through_native_pipeline() {
+        i_slint_backend_testing::init_no_event_loop();
+        let directory = tempfile::tempdir().unwrap();
+        let (_registry, source) =
+            poster_source(&directory.path().join("sources"), Arc::new(NeutralPosters));
+        check_poster_pipeline(source, &directory.path().join("posters"), "popular");
+    }
+
+    #[test]
+    fn decoded_poster_is_visible_while_optional_cache_work_is_gated() {
+        use slint::{ModelRc, VecModel};
+        i_slint_backend_testing::init_no_event_loop();
+        let directory = tempfile::tempdir().unwrap();
+        let (_registry, source) =
+            poster_source(&directory.path().join("sources"), Arc::new(NeutralPosters));
+        let dto = source
+            .browse(&serde_json::json!({}))
+            .unwrap()
+            .items
+            .remove(0);
+        let item = series("poster-fixture", &dto.id, dto.cover_url.as_deref().unwrap());
+        let shared = Arc::new(Shared::default());
+        let task = Task {
+            key: key(&item),
+            source_id: "poster-fixture".into(),
+            url: item.cover_url.unwrap(),
+            generation: 0,
+            cancel: CancelToken::default(),
+        };
+        let cache =
+            nova_cache::blob::Cache::new(directory.path().join("posters"), ENCODED_LIMIT as u64);
+        let (loaded, deferred) = load_source(source, &cache, &shared, &task).unwrap();
+        let deferred = deferred.expect("a new reusable poster must defer its optional cache write");
+        assert!(deferred.bytes.len() <= ENCODED_LIMIT);
+        let encoded_key = deferred.key.clone();
+        assert!(
+            cache.get(&encoded_key, inspect).unwrap().is_none(),
+            "loading pixels must not recompress or publish the disk variant"
+        );
+        let ui = AppWindow::new().unwrap();
+        let id = NEXT_LOADER.fetch_add(1, Ordering::Relaxed);
+        ui.set_items(ModelRc::new(VecModel::from(vec![crate::ItemRow {
+            artwork_key: task.key.clone().into(),
+            ..crate::ItemRow::default()
+        }])));
+        let (acknowledge, receipt) = mpsc::sync_channel(1);
+        let (cache_entered, entered) = mpsc::sync_channel(1);
+        let (cache_release, release) = mpsc::sync_channel(1);
+        let worker_shared = shared.clone();
+        let worker_cache = cache.clone();
+        let worker_task = task.clone();
+        let worker = std::thread::spawn(move || {
+            after_publication(receipt, &worker_shared, &worker_task, || {
+                cache_entered.send(()).unwrap();
+                release.recv_timeout(Duration::from_secs(5)).unwrap();
+                deferred.write(&worker_cache, &worker_shared, &worker_task);
+            });
+        });
+        admit(&ui, id, &shared, &task.key, loaded);
+        drop(Completion(acknowledge));
+        entered.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(ui.get_items().row_data(0).unwrap().poster.size().width, 120);
+        assert!(
+            cache.get(&encoded_key, inspect).unwrap().is_none(),
+            "poster must already be visible while cache work is blocked"
+        );
+        cache_release.send(()).unwrap();
+        worker.join().unwrap();
+        assert!(cache.get(&encoded_key, inspect).unwrap().is_some());
+        UI_IMAGES.with(|images| {
+            images.borrow_mut().remove(&id);
+        });
+    }
+
+    #[test]
+    fn deferred_poster_cache_writes_keep_cancellation_source_and_epoch_guards() {
+        struct MutableScope(AtomicU64);
+        impl reader_sources::SourceTransport for MutableScope {
+            fn page_cache_partition(&self, _: &str) -> Option<String> {
+                Some(self.0.load(Ordering::Acquire).to_string())
+            }
+            fn request(
+                &self,
+                request: &reader_sources::HttpRequest,
+                cap: usize,
+                cancel: &CancelToken,
+            ) -> reader_sources::Result<reader_sources::HttpResponse> {
+                reader_sources::SourceTransport::request(&NeutralPosters, request, cap, cancel)
+            }
+        }
+        for action in [
+            "cancel",
+            "generation",
+            "source",
+            "scope",
+            "epoch",
+            "disconnected",
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let transport = Arc::new(MutableScope(AtomicU64::new(0)));
+            let (registry, source) =
+                poster_source(&directory.path().join("sources"), transport.clone());
+            let shared = Shared::default();
+            let cache = nova_cache::blob::Cache::new(
+                directory.path().join("posters"),
+                ENCODED_LIMIT as u64,
+            );
+            let task = Task {
+                key: "poster".into(),
+                source_id: "poster-fixture".into(),
+                url: "https://example.test/images/cover.png".into(),
+                generation: 0,
+                cancel: CancelToken::default(),
+            };
+            let (_loaded, deferred) = load_source(source, &cache, &shared, &task).unwrap();
+            let deferred = deferred.unwrap();
+            let encoded_key = deferred.key.clone();
+            match action {
+                "cancel" => task.cancel.cancel(),
+                "generation" => shared.invalidate(),
+                "source" => registry.disable("poster-fixture").unwrap(),
+                "scope" => {
+                    transport.0.fetch_add(1, Ordering::AcqRel);
+                }
+                "epoch" => {
+                    cache.clear();
+                }
+                "disconnected" => {}
+                _ => unreachable!(),
+            }
+            let (acknowledge, receipt) = mpsc::sync_channel(1);
+            if action != "disconnected" {
+                acknowledge.send(()).unwrap();
+            }
+            drop(acknowledge);
+            after_publication(receipt, &shared, &task, || {
+                deferred.write(&cache, &shared, &task)
+            });
+            assert!(
+                cache.get(&encoded_key, inspect).unwrap().is_none(),
+                "{action} must reject the deferred optional write"
+            );
+        }
     }
 }

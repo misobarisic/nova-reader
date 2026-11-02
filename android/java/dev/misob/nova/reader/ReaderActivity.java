@@ -20,6 +20,7 @@ import android.provider.OpenableColumns;
 import android.provider.MediaStore;
 import android.content.ContentValues;
 import android.content.pm.ActivityInfo;
+import android.content.pm.PackageManager;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowManager;
@@ -54,6 +55,22 @@ public final class ReaderActivity extends NativeActivity {
     private static Request active;
     private static long lastCancelledId;
     private static volatile WeakReference<ReaderActivity> foreground = new WeakReference<>(null);
+    // Permission UI is owned only by a resumed Activity. Document requests have
+    // their separate host lifetime and may survive an Activity pause/recreation.
+    private static volatile WeakReference<ReaderActivity> notificationForeground = new WeakReference<>(null);
+
+    public static void requestNotificationPermission(int requestCode) {
+        if (Build.VERSION.SDK_INT < 33) return;
+        new Handler(Looper.getMainLooper()).post(() -> {
+            ReaderActivity activity = notificationForeground.get();
+            if (activity == null || activity.isFinishing() || activity.isDestroyed()) return;
+            if (activity.checkSelfPermission("android.permission.POST_NOTIFICATIONS")
+                    != PackageManager.PERMISSION_GRANTED) {
+                activity.requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, requestCode);
+            }
+        });
+    }
+
     private static final class ReaderPresentation {
         final boolean reading,immersive,keepAwake,cutout;
         final int rotation;
@@ -727,6 +744,7 @@ public final class ReaderActivity extends NativeActivity {
     }
     @Override protected void onResume() {
         super.onResume();
+        notificationForeground=new WeakReference<>(this);
         activityResumed=true;
         if (normalWakePending && !readerPresentation.reading) {
             if (normalKeepAwake) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
@@ -736,6 +754,7 @@ public final class ReaderActivity extends NativeActivity {
         normalWakePending=false;
     }
     @Override protected void onPause() {
+        if(notificationForeground.get()==this)notificationForeground=new WeakReference<>(null);
         if (!readerWindowActive) normalKeepAwake=(getWindow().getAttributes().flags&WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)!=0;
         normalWakePending=true;
         activityResumed=false;
@@ -743,6 +762,7 @@ public final class ReaderActivity extends NativeActivity {
         super.onPause();
     }
     @Override protected void onDestroy() {
+        if(notificationForeground.get()==this)notificationForeground=new WeakReference<>(null);
         activityResumed=false;
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         if(foreground.get()==this)foreground=new WeakReference<>(null);

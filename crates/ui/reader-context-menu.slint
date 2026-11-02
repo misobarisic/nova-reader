@@ -9,6 +9,8 @@ export component ReaderImageInteraction inherits ControlTouchArea {
     in property <bool> long-press-enabled: true;
     in property <bool> double-tap-enabled: false;
     in property <bool> page-drag-enabled: false;
+    in property <bool> wheel-zoom-enabled: false;
+    callback zoom-requested(float, length, length);
     callback page-drag-moved(length, length);
     callback page-drag-ended(length, length);
     callback page-drag-cancelled;
@@ -21,17 +23,24 @@ export component ReaderImageInteraction inherits ControlTouchArea {
     private property <bool> dragged;
     private property <bool> primary-press;
     private property <bool> pending-tap;
+    private property <bool> click-pending;
+    private property <int> press-finger-id;
     private property <length> pending-window-x;
     private property <length> pending-window-y;
     private property <length> press-window-x;
     private property <length> press-window-y;
     mouse-cursor: pointer;
     function cancel-pending() { single-tap.stop(); root.pending-tap = false; }
+    public function cancel-gesture() {
+        hold.stop(); root.cancel-pending(); root.click-pending = false;
+        root.dragged = true; root.suppress-tap = true; root.primary-press = false;
+        root.page-drag-cancelled();
+    }
     function emit-single(x: length, y: length) {
         root.tapped();
         root.positioned-tap(x, y);
     }
-    clicked => {
+    function emit-click() {
         if root.suppress-tap || root.dragged { return; }
         let x = root.absolute-position.x + root.mouse-x;
         let y = root.absolute-position.y + root.mouse-y;
@@ -50,10 +59,15 @@ export component ReaderImageInteraction inherits ControlTouchArea {
             single-tap.start();
         }
     }
+    // TouchArea emits clicked before pointer-up. Wait for the matching finger
+    // so Slint's synthetic second-finger release never triggers a single tap.
+    clicked => { root.click-pending = true; }
     pointer-event(event) => {
         if event.kind == PointerEventKind.down {
             root.dragged = false;
             root.primary-press = event.button == PointerEventButton.left;
+            root.press-finger-id = event.touch-finger-id;
+            root.click-pending = false;
             root.suppress-tap = event.button != PointerEventButton.left;
             root.press-window-x = root.absolute-position.x + root.mouse-x;
             root.press-window-y = root.absolute-position.y + root.mouse-y;
@@ -65,6 +79,10 @@ export component ReaderImageInteraction inherits ControlTouchArea {
             if event.button == PointerEventButton.left && root.context-enabled && root.long-press-enabled { hold.start(); }
         } else if event.kind == PointerEventKind.up {
             hold.stop();
+            if root.press-finger-id != 0 && event.touch-finger-id != 0 && root.press-finger-id != event.touch-finger-id {
+                root.cancel-gesture(); return;
+            }
+            if root.click-pending { root.click-pending = false; root.emit-click(); }
             if event.button == PointerEventButton.left && root.dragged && root.page-drag-enabled {
                 root.page-drag-ended(root.absolute-position.x + root.mouse-x - root.press-window-x, root.absolute-position.y + root.mouse-y - root.press-window-y);
             }
@@ -82,10 +100,7 @@ export component ReaderImageInteraction inherits ControlTouchArea {
                 root.cancel-pending();
             }
         } else if event.kind == PointerEventKind.cancel {
-            hold.stop(); root.cancel-pending();
-            root.dragged = true; root.suppress-tap = true;
-            root.primary-press = false;
-            root.page-drag-cancelled();
+            root.cancel-gesture();
         }
     }
     moved => {
@@ -99,13 +114,22 @@ export component ReaderImageInteraction inherits ControlTouchArea {
         }
     }
     scroll-event(event) => {
+        if root.wheel-zoom-enabled && event.modifiers.control {
+            root.cancel-gesture();
+            if event.delta-y != 0px {
+                let amount = min(4, abs(event.delta-y) / 600px);
+                root.zoom-requested(event.delta-y > 0px ? 1 + amount : 1 / (1 + amount),
+                    root.absolute-position.x + root.mouse-x, root.absolute-position.y + root.mouse-y);
+            }
+            return accept;
+        }
         if root.page-drag-enabled {
             root.page-scrolled(event.delta-x, event.delta-y);
             return accept;
         }
         return reject;
     }
-    changed enabled => { if !root.enabled { hold.stop(); root.cancel-pending(); } }
+    changed enabled => { if !root.enabled { root.cancel-gesture(); } }
     changed double-tap-enabled => { root.cancel-pending(); }
     changed long-press-enabled => { if !root.long-press-enabled { hold.stop(); } }
     changed context-enabled => { if !root.context-enabled { hold.stop(); } }

@@ -28,12 +28,15 @@ capture actions; it defaults on. Turning it off leaves selection mode available.
 These device preferences are saved separately from library backups.
 Browse groups sources by last used, pins and language; Extensions manages installed
 packages. Sources and Extensions show bundled addon icons, with a fallback for
-older packages. [Installable addons](addons/README.md) include Manhwa18cc,
-MangaFire, Kagane, Toonily (English), Mitaku and CosplayTele. Toonily's optional
-mature-content cookie requires Reader 0.1.26; its setting defaults off. Mitaku and
-CosplayTele represent each image gallery as one chapter and reject video-only
-posts explicitly. Kagane supports its 18 upstream language variants and
-JPEG XL chapter pages. Chapters open with controls hidden; tap or click to show them.
+older packages. [Installable addons](https://github.com/misobarisic/nova-addons#nova-reader-chapter-and-page-sources)
+are maintained exclusively in nova-addons, including their source code, tests,
+licenses and installable ZIPs. Reader retains its host/runtime, catalogue compatibility metadata and neutral
+offline addon fixtures. JPEG XL chapter pages are supported. Chapters open with controls hidden;
+tap or click to show them.
+Compatible JPEG XL pages show bounded previews as bytes arrive, then replace them
+with the completed image. Previews never count as completed pages or enter caches.
+Ctrl+wheel on desktop and pinch on Android zoom up to 8×. While zoomed in, taps
+show or hide controls without turning pages; double tap still switches fit/2×.
 Automatic reading mode follows [TachiyomiJ2K's genre/source rules](docs/reader-modes.md).
 A manual choice is saved for that series across chapters and restarts.
 Right-click or hold an image to save/copy its original or a selected screencap.
@@ -91,19 +94,19 @@ and vertical paging. Download a chapter before going offline. Restarting retains
 the logical page and intra-page position; completed downloads remain readable
 when their source is removed. Queued transfers resume on launch; paused and
 cancelled jobs wait for an explicit action. Transfers run serially in the app.
+On Android, active transfers use Nova's foreground download service, wake lock
+and progress notification. Android time limits and force-stop still apply;
+interrupted queues resume when Reader opens again. Failed writes and interrupted
+transfers are reconciled without leaving uncommitted page files behind.
 
 Browse installs local addon ZIPs and selects source/language variants. A newly
 selected ZIP is explicitly enabled by the application. Permission-expanding
 updates require re-enabling. Source Settings renders declared boolean, text,
 select and secret fields; values are stored per source/profile outside backups. Adult sources are hidden until **Show adult sources**
 is selected; that choice and each series’ chapter order survive restarts. The
-reference [Manhwa18.cc package](docs/manhwa18.md) is explicitly NSFW and exposes English, Korean and all-language variants. Its parser has
-synthetic fixtures; live website operation has not been verified. Browser
-challenge handoff is not implemented.
-
-The [MangaFire port](docs/mangafire.md) provides seven languages, search/filters,
-chapter and volume listings through a separately installable native addon.
-It is marked as a mixed/adult source and defaults to Safe content.
+source implementations and their live-site limits are documented in
+[nova-addons](https://github.com/misobarisic/nova-addons). Browser challenge
+handoff is not implemented by Reader.
 
 Library search reveals a live filter. Long-press or right-click a library title,
 or use the detail toolbar menu, for that title’s categories and library actions.
@@ -156,14 +159,12 @@ cargo test --locked --test reading_journey
 cargo test --locked --test ui_navigation
 cargo test --locked --test mobile_layout
 node examples/addons/neutral-fixture/tests/fixture.test.mjs
-npm ci --ignore-scripts --prefix examples/addons/manhwa18cc/tests
-npm test --prefix examples/addons/manhwa18cc/tests
-node examples/addons/mangafire/tests/parser.test.mjs
 python3 -B -m unittest discover -s .github/scripts -p 'test_package_*.py'
 ```
 
 `make check` includes formatting, Clippy, workspace check/tests, addon tests and
-packaging regressions. These are verification commands, not a claim that a
+neutral-fixture packaging regressions. Real source parser and native host tests
+run in nova-addons. These are verification commands, not a claim that a
 particular checkout or platform passed. See [packaging](docs/packaging.md) for
 cross checks, Android signing, artifact names and release workflow. Release
 configuration targets Android ARM64/ARMv7/x86_64/universal APKs, Linux Debian and

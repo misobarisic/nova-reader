@@ -46,7 +46,7 @@ linux-run:
 linux-run-release:
 	cargo run --profile $(RELEASE_PROFILE)
 
-.PHONY: check check-addons check-android-java
+.PHONY: check check-addons check-android-java check-android-background
 
 check: check-addons
 	cargo fmt --all -- --check
@@ -57,17 +57,10 @@ check: check-addons
 
 check-addons:
 	node examples/addons/neutral-fixture/tests/fixture.test.mjs
-	npm ci --ignore-scripts --prefix examples/addons/manhwa18cc/tests
-	npm test --prefix examples/addons/manhwa18cc/tests
-	node examples/addons/mangafire/tests/parser.test.mjs
-	node examples/addons/kagane/tests/request.test.mjs
-	npm ci --ignore-scripts --prefix examples/addons/toonily/tests
-	npm test --prefix examples/addons/toonily/tests
-	npm ci --ignore-scripts --prefix examples/addons/mitaku/tests
-	npm test --prefix examples/addons/mitaku/tests
-	npm ci --ignore-scripts --prefix examples/addons/cosplaytele/tests
-	npm test --prefix examples/addons/cosplaytele/tests
 
 check-android-java:
 	mkdir -p target/android-java-check
 	javac -source 8 -target 8 -Xlint:-options -cp "$(ANDROID_HOME)/platforms/android-35/android.jar" -d target/android-java-check android/java/dev/misob/nova/reader/*.java
+
+check-android-background:
+	python3 tools/test-android-background.py --android-jar "$(ANDROID_HOME)/platforms/android-35/android.jar" --jni --clippy

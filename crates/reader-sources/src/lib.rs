@@ -11,6 +11,7 @@ pub use settings::{SettingField, SettingKind};
 use std::{collections::BTreeMap, sync::Arc};
 
 pub type Result<T> = std::result::Result<T, SourceError>;
+type PageChunkObserver<'a> = &'a mut dyn FnMut(&[u8]);
 #[derive(Debug, thiserror::Error)]
 pub enum SourceError {
     #[error("invalid reader package: {0}")]
@@ -127,7 +128,44 @@ impl Source {
         headers: &BTreeMap<String, String>,
         cancel: &CancelToken,
     ) -> Result<Vec<u8>> {
-        self.fetch_page_attempt(url, headers, cancel, true)
+        self.fetch_page_attempt(url, headers, cancel, true, &mut None)
+    }
+    /// Observe native page bytes as they arrive, while retaining the same
+    /// authoritative full-byte result and policy as `fetch_page`. Chunks are
+    /// provisional, ordered, at most 16 KiB, and never emitted for HTTP errors.
+    /// The observer runs synchronously and should treat preview failures as
+    /// best-effort; only the final returned bytes may enter durable caches.
+    pub fn fetch_page_with_chunks(
+        &self,
+        url: &str,
+        headers: &BTreeMap<String, String>,
+        cancel: &CancelToken,
+        on_chunk: &mut dyn FnMut(&[u8]),
+    ) -> Result<Vec<u8>> {
+        self.fetch_page_attempt(url, headers, cancel, true, &mut Some(on_chunk))
+    }
+    fn observe_page_chunk(
+        &self,
+        chunk: &[u8],
+        cancel: &CancelToken,
+        session_revision: Option<u64>,
+        on_chunk: &mut dyn FnMut(&[u8]),
+    ) -> Result<()> {
+        for chunk in chunk.chunks(network::BODY_CHUNK_BYTES) {
+            self.check_page_work(cancel, session_revision)?;
+            on_chunk(chunk);
+            self.check_page_work(cancel, session_revision)?;
+        }
+        Ok(())
+    }
+    fn check_page_work(&self, cancel: &CancelToken, session_revision: Option<u64>) -> Result<()> {
+        cancel.check()?;
+        if !self.active.load(std::sync::atomic::Ordering::Acquire)
+            || self.transport.session_revision() != session_revision
+        {
+            return Err(SourceError::Cancelled);
+        }
+        Ok(())
     }
     fn fetch_page_attempt(
         &self,
@@ -135,31 +173,43 @@ impl Source {
         headers: &BTreeMap<String, String>,
         cancel: &CancelToken,
         refresh: bool,
+        on_chunk: &mut Option<PageChunkObserver<'_>>,
     ) -> Result<Vec<u8>> {
         self.validate_page_request(url, headers)?;
-        if let Some(path) = url.strip_prefix(&format!("addon://{}/", self.manifest.id)) {
-            cancel.check()?;
-            return package::asset(&self.archive, &self.manifest, path);
-        }
         let transport = {
             let _settings = self.settings.lock().unwrap();
             self.transport
                 .snapshot()
                 .unwrap_or_else(|| self.transport.clone())
         };
-        let response = transport.request(
-            &HttpRequest {
-                url: url.into(),
-                headers: headers.clone(),
-                ..Default::default()
-            },
-            32 * 1024 * 1024,
-            cancel,
-        )?;
-        cancel.check()?;
-        if !self.active.load(std::sync::atomic::Ordering::Acquire) {
-            return Err(SourceError::Cancelled);
+        let session_revision = transport.session_revision();
+        self.check_page_work(cancel, session_revision)?;
+        if let Some(path) = url.strip_prefix(&format!("addon://{}/", self.manifest.id)) {
+            let body = package::asset(&self.archive, &self.manifest, path)?;
+            if let Some(observer) = on_chunk.as_mut() {
+                self.observe_page_chunk(&body, cancel, session_revision, observer)?;
+            }
+            self.check_page_work(cancel, session_revision)?;
+            return Ok(body);
         }
+        let request = HttpRequest {
+            url: url.into(),
+            headers: headers.clone(),
+            ..Default::default()
+        };
+        let response = if let Some(observer) = on_chunk.as_mut() {
+            let mut observed = 0usize;
+            transport.request_with_chunks(&request, 32 * 1024 * 1024, cancel, &mut |chunk| {
+                if chunk.len() > (32 * 1024 * 1024usize).saturating_sub(observed) {
+                    return Err(SourceError::Network("image byte limit".into()));
+                }
+                observed += chunk.len();
+                self.observe_page_chunk(chunk, cancel, session_revision, observer)
+            })?
+        } else {
+            transport.request(&request, 32 * 1024 * 1024, cancel)?
+        };
+        self.check_page_work(cancel, session_revision)?;
         if response.body.len() > 32 * 1024 * 1024 {
             return Err(SourceError::Network("image byte limit".into()));
         }
@@ -181,7 +231,7 @@ impl Source {
                 ));
             }
             let page = &pages.pages[0];
-            return self.fetch_page_attempt(&page.url, &page.headers, cancel, false);
+            return self.fetch_page_attempt(&page.url, &page.headers, cancel, false, on_chunk);
         }
         network::check_status(response.status)?;
         Ok(response.body)
@@ -504,5 +554,111 @@ mod cache_tests {
                 .as_bool()
                 .unwrap()
         );
+    }
+    #[test]
+    fn streaming_checks_live_owner_revision_after_a_barrier_without_rejecting_cookie_updates() {
+        use std::sync::Barrier;
+        struct PausedTransport {
+            native: Arc<dyn SourceTransport>,
+            entered: Arc<Barrier>,
+            release: Arc<Barrier>,
+        }
+        impl SourceTransport for PausedTransport {
+            fn session_revision(&self) -> Option<u64> {
+                self.native.session_revision()
+            }
+            fn snapshot(&self) -> Option<Arc<dyn SourceTransport>> {
+                Some(Arc::new(Self {
+                    native: self.native.snapshot().unwrap(),
+                    entered: self.entered.clone(),
+                    release: self.release.clone(),
+                }))
+            }
+            fn request(&self, _: &HttpRequest, _: usize, _: &CancelToken) -> Result<HttpResponse> {
+                panic!("streaming must use the incremental transport method")
+            }
+            fn request_with_chunks(
+                &self,
+                request: &HttpRequest,
+                _: usize,
+                _: &CancelToken,
+                observer: &mut dyn FnMut(&[u8]) -> Result<()>,
+            ) -> Result<HttpResponse> {
+                observer(b"first")?;
+                self.entered.wait();
+                self.release.wait();
+                observer(b"second")?;
+                Ok(HttpResponse {
+                    status: 200,
+                    url: request.url.clone(),
+                    body: b"firstsecond".to_vec(),
+                    ..Default::default()
+                })
+            }
+        }
+        for reset in [false, true] {
+            let mut manifest: Manifest = serde_json::from_str(include_str!(
+                "../../../examples/addons/neutral-fixture/manifest.json"
+            ))
+            .unwrap();
+            manifest.permissions.domains = vec!["example.com".into()];
+            manifest.permissions.cookies = vec![CookiePermission {
+                origin: "https://example.com".into(),
+                names: vec!["mature".into()],
+            }];
+            let native = Arc::new(network::NetworkTransport::new(manifest.permissions.clone()));
+            let entered = Arc::new(Barrier::new(2));
+            let release = Arc::new(Barrier::new(2));
+            let source = Source {
+                manifest,
+                settings: Arc::new(std::sync::Mutex::new(serde_json::json!({}))),
+                script: Arc::new(String::new()),
+                archive: Arc::new(vec![]),
+                transport: Arc::new(PausedTransport {
+                    native: native.clone(),
+                    entered: entered.clone(),
+                    release: release.clone(),
+                }),
+                active: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            };
+            let worker = std::thread::spawn(move || {
+                let mut chunks = Vec::new();
+                let result = source.fetch_page_with_chunks(
+                    "https://example.com/page",
+                    &BTreeMap::new(),
+                    &CancelToken::default(),
+                    &mut |chunk| chunks.extend_from_slice(chunk),
+                );
+                (result, chunks)
+            });
+            entered.wait();
+            if reset {
+                native.reset_session();
+            } else {
+                native
+                    .set_cookie(
+                        "https://example.com",
+                        "mature",
+                        "1",
+                        &CancelToken::default(),
+                    )
+                    .unwrap();
+            }
+            release.wait();
+            let (result, chunks) = worker.join().unwrap();
+            if reset {
+                assert!(matches!(result, Err(SourceError::Cancelled)));
+                assert_eq!(
+                    chunks, b"first",
+                    "a stale snapshot must not publish the next chunk"
+                );
+            } else {
+                assert_eq!(result.unwrap(), b"firstsecond");
+                assert_eq!(
+                    chunks, b"firstsecond",
+                    "cookie value changes keep the same session generation"
+                );
+            }
+        }
     }
 }

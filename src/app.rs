@@ -30,6 +30,8 @@ mod reader_controls;
 #[cfg(test)]
 #[path = "reader_preview.rs"]
 mod reader_preview;
+#[path = "reader_progressive.rs"]
+mod reader_progressive;
 #[cfg(target_os = "android")]
 pub fn flush_lifecycle() {
     if let Some(app) = LIFECYCLE.get().and_then(Weak::upgrade) {
@@ -126,6 +128,7 @@ struct Reader {
     // Weak identity never extends the encoded-response memory cache budget.
     decoded_responses: BTreeMap<usize, Weak<Vec<u8>>>,
     native_dimensions: BTreeMap<usize, reader_engine::PageDimensions>,
+    progressive_job: Option<(usize, u64)>,
     presentations: BTreeMap<usize, reader_engine::PagePresentation>,
     display_options: reader_engine::DisplayOptions,
     gap_pixels: f32,
@@ -429,6 +432,16 @@ impl EncodedPages {
         fetch: impl FnOnce() -> Result<Vec<u8>>,
     ) -> Result<Arc<Vec<u8>>> {
         self.read_scoped(generation, index, "", fetch)
+    }
+    fn discard(&mut self, generation: u64, index: usize) {
+        if self.generation != generation {
+            return;
+        }
+        if let Some(bytes) = self.pages.remove(&index) {
+            self.bytes = self.bytes.saturating_sub(bytes.len());
+        }
+        self.order.retain(|i| *i != index);
+        self.contexts.remove(&index);
     }
     fn read_scoped(
         &mut self,
@@ -1933,6 +1946,7 @@ impl Controller {
                         decoded_windows: BTreeMap::new(),
                         decoded_responses: BTreeMap::new(),
                         native_dimensions: BTreeMap::new(),
+                        progressive_job: None,
                         presentations: BTreeMap::new(),
                         display_options: reader_engine::DisplayOptions::default(),
                         gap_pixels: 0.,
@@ -1987,6 +2001,7 @@ impl Controller {
                         decoded_windows: BTreeMap::new(),
                         decoded_responses: BTreeMap::new(),
                         native_dimensions: BTreeMap::new(),
+                        progressive_job: None,
                         presentations: BTreeMap::new(),
                         display_options: reader_engine::DisplayOptions::default(),
                         gap_pixels: 0.,
@@ -2087,6 +2102,7 @@ impl Controller {
                 ratio: *ratio,
                 position: reader.page_position(i),
                 loaded: false,
+                preview: false,
                 error: "".into(),
             })
             .collect::<Vec<_>>();
@@ -2304,6 +2320,15 @@ impl Controller {
             cancel.cancel();
         }
         let model = ui.get_pages();
+        for old in 0..model.row_count() {
+            if old != index
+                && let Some(mut row) = model.row_data(old)
+                && row.preview
+            {
+                reader_progressive::clear_preview(&mut row);
+                model.set_row_data(old, row);
+            }
+        }
         for old in reader
             .retained
             .difference(&keep)
@@ -2429,6 +2454,7 @@ impl Controller {
             if app.generation.load(Ordering::Acquire) != task.generation {
                 cancel.cancel();
             }
+            let mut progressive = None;
             let result: Result<_> = (|| {
                 let mut pending_write = None;
                 let mut cache_request = None;
@@ -2452,11 +2478,28 @@ impl Controller {
                                 })
                             }),
                         )?;
+                        progressive = reader_progressive::Stream::new(
+                            &app,
+                            ui.clone(),
+                            &task,
+                            cancel.clone(),
+                            request.clone(),
+                        );
                         let mut fetched = false;
                         let mut reused = false;
                         let mut load = || {
                             fetched = true;
-                            let read = app.chapter_cache.read(&request)?;
+                            let read =
+                                app.chapter_cache.read_with_chunks(&request, &mut |chunk| {
+                                    if let Some(stream) = progressive.as_mut() {
+                                        stream.feed(chunk, || decoded.clear());
+                                    }
+                                })?;
+                            // Validate streaming EOF before EncodedPages can
+                            // retain a complete-looking but truncated response.
+                            if let Some(stream) = progressive.as_mut() {
+                                stream.finish()?;
+                            }
                             reused = read.from_cache;
                             pending_write = read.pending;
                             Ok(read.bytes)
@@ -2470,7 +2513,22 @@ impl Controller {
                             reused = true;
                         }
                         if !fetched && request.validate_scope().is_err() {
-                            let read = app.chapter_cache.read(&request)?;
+                            if let Some(stream) = progressive.as_mut() {
+                                stream.finish()?;
+                            }
+                            progressive = reader_progressive::Stream::new(
+                                &app,
+                                ui.clone(),
+                                &task,
+                                cancel.clone(),
+                                request.clone(),
+                            );
+                            let read =
+                                app.chapter_cache.read_with_chunks(&request, &mut |chunk| {
+                                    if let Some(stream) = progressive.as_mut() {
+                                        stream.feed(chunk, || decoded.clear());
+                                    }
+                                })?;
                             reused = read.from_cache;
                             pending_write = read.pending;
                             bytes = Arc::new(read.bytes);
@@ -2481,6 +2539,9 @@ impl Controller {
                         bytes
                     }
                 };
+                if let Some(stream) = progressive.as_mut() {
+                    stream.finish()?;
+                }
                 cancel.check().map_err(error)?;
                 let source_dimensions =
                     reader_engine::inspect_image(&bytes, reader_engine::DecodeLimits::default())
@@ -2574,6 +2635,14 @@ impl Controller {
                     presentation,
                 ))
             })();
+            let preview_cleanup = progressive
+                .as_ref()
+                .map(reader_progressive::Stream::cleanup);
+            drop(progressive);
+            if result.is_err() {
+                encoded.discard(task.generation, task.index);
+                decoded.clear();
+            }
             let pending = Arc::new(Mutex::new(Some(result)));
             let handed = pending.clone();
             let (finished, ack) = mpsc::sync_channel(1);
@@ -2718,6 +2787,13 @@ impl Controller {
                         }
                         row.tiles = tiles;
                         row.loaded = true;
+                        row.preview = false;
+                        if reader
+                            .progressive_job
+                            .is_some_and(|(index, _)| index == task.index)
+                        {
+                            reader.progressive_job = None;
+                        }
                         row.error = "".into();
                         reader.retained.insert(task.index);
                         if parent_changed {
@@ -2744,6 +2820,8 @@ impl Controller {
                         }
                     }
                     Err(error) => {
+                        reader_progressive::clear_preview(&mut row);
+                        model.set_row_data(task.index, row.clone());
                         if cancel.is_cancelled() {
                             let current = reader.anchor.page_index;
                             drop(view);
@@ -2796,6 +2874,9 @@ impl Controller {
             }) {
                 decoded.clear();
                 encoded = EncodedPages::default();
+            }
+            if let Some(cleanup) = preview_cleanup {
+                cleanup.clear();
             }
         }
     }
@@ -2925,7 +3006,9 @@ impl Controller {
         );
         let app = self.clone();
         let weak = ui.as_weak();
+        let download_lease = crate::download_background::begin(&self.services.downloads);
         std::thread::spawn(move || {
+            let _download_lease = download_lease;
             let result = (|| {
                 let cancel = CancelToken::default();
                 app.services.prepare_download(&chapter, &cancel)?;
@@ -4979,7 +5062,7 @@ mod tests {
             ),
             (
                 "icon.png",
-                include_bytes!("../examples/addons/mangafire/icon.png").to_vec(),
+                include_bytes!("../crates/reader-sources/tests/fixtures/neutral-icon.png").to_vec(),
             ),
         ] {
             archive
@@ -5123,6 +5206,7 @@ mod tests {
             decoded_windows: BTreeMap::new(),
             decoded_responses: BTreeMap::new(),
             native_dimensions: BTreeMap::new(),
+            progressive_job: None,
             presentations: BTreeMap::new(),
             display_options: reader_engine::DisplayOptions::default(),
             gap_pixels: 0.,
@@ -6039,6 +6123,7 @@ mod tests {
             decoded_windows: BTreeMap::new(),
             decoded_responses: BTreeMap::new(),
             native_dimensions: BTreeMap::new(),
+            progressive_job: None,
             presentations: BTreeMap::new(),
             display_options: reader_engine::DisplayOptions::default(),
             gap_pixels: 0.,

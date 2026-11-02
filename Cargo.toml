@@ -1,22 +1,23 @@
 [workspace]
 members = ["crates/reader-capture", "crates/reader-domain", "crates/reader-sources", "crates/reader-engine", "crates/reader-downloads", "crates/reader-catalogue", "crates/ui"]
+exclude = ["vendor/i-slint-core"]
 resolver = "3"
 
 [workspace.package]
 license = "GPL-3.0-or-later"
 
 [workspace.dependencies]
-nova-storage = { git = "https://github.com/misobarisic/nova-kit", rev = "01cd5ab098d836faf5138d91e538946439c656f2" }
-nova-ui-base = { git = "https://github.com/misobarisic/nova-kit", rev = "01cd5ab098d836faf5138d91e538946439c656f2" }
-nova-cache = { git = "https://github.com/misobarisic/nova-kit", rev = "01cd5ab098d836faf5138d91e538946439c656f2" }
-nova-image = { git = "https://github.com/misobarisic/nova-kit", rev = "01cd5ab098d836faf5138d91e538946439c656f2" }
-nova-sync = { git = "https://github.com/misobarisic/nova-kit", rev = "01cd5ab098d836faf5138d91e538946439c656f2", default-features = false }
+nova-storage = { git = "https://github.com/misobarisic/nova-kit", rev = "f2b7ebe26329afa752e8eb447e0e00ba025cc72e" }
+nova-ui-base = { git = "https://github.com/misobarisic/nova-kit", rev = "f2b7ebe26329afa752e8eb447e0e00ba025cc72e" }
+nova-cache = { git = "https://github.com/misobarisic/nova-kit", rev = "f2b7ebe26329afa752e8eb447e0e00ba025cc72e" }
+nova-image = { git = "https://github.com/misobarisic/nova-kit", rev = "f2b7ebe26329afa752e8eb447e0e00ba025cc72e" }
+nova-sync = { git = "https://github.com/misobarisic/nova-kit", rev = "f2b7ebe26329afa752e8eb447e0e00ba025cc72e", default-features = false }
 slint = { version = "=1.18.0", default-features = false, features = ["std", "compat-1-2", "accessibility"] }
 slint-build = "=1.18.0"
 
 [package]
 name = "nova-reader"
-version = "0.1.27"
+version = "0.1.28"
 edition = "2024"
 license.workspace = true
 description = "A source-based manga and webtoon reader for desktop and Android"
@@ -139,6 +140,23 @@ categories = ["android.intent.category.LAUNCHER"]
 min_sdk_version = 26
 target_sdk_version = 35
 
+# Nova's dataSync foreground service keeps active download workers alive.
+[[package.metadata.android.application.service]]
+name = "dev.misob.nova.reader.ReaderBackgroundService"
+foreground_service_type = "dataSync"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.FOREGROUND_SERVICE"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.FOREGROUND_SERVICE_DATA_SYNC"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.WAKE_LOCK"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.POST_NOTIFICATIONS"
+
 [[package.metadata.android.uses_permission]]
 name = "android.permission.INTERNET"
 
@@ -184,3 +202,8 @@ keystore_password = "android"
 [package.metadata.android.signing.cd-release]
 path = "android/keystore/debug.keystore"
 keystore_password = "android"
+
+# Slint 1.18 raw touch deltas must use the gesture handler's relative scale
+# contract. See the vendored provenance note and native finger-distance test.
+[patch.crates-io]
+i-slint-core = { path = "vendor/i-slint-core" }

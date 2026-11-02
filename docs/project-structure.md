@@ -9,14 +9,16 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `build.rs`, `about.toml` | Nova’s copied current-target license/source catalogue generation, zstd-22 embedding recipe and final Android cdylib 16 KiB ELF alignment |
 | `src/main.rs`, `src/lib.rs` | Desktop entry, Android entry/lifecycle, CLI routing |
 | `src/app.rs` | Worker orchestration, navigation, source/settings selection, visible-page loading, display tiles, lifecycle progress flush |
+| `src/reader_progressive.rs` | Current-page JPEG XL streaming feed, provisional source geometry/tiles, bounded preview mailbox, EOF validation and nonce-guarded cleanup; final loading/progress/cache remain owned by the ordinary image worker |
 | `src/services.rs` | Shared UI/test services: install, validated source/date conversion, library, downloads and local import |
 | `src/cli.rs`, `src/paths.rs` | Commands, bounded file input, independent data and platform cache directories |
 | `src/android_documents.rs`, `android/java/dev/misob/nova/reader/ReaderActivity.java` | Application-context JNI, current-activity SAF and reader status-bar visibility/lifecycle on Java main |
+| `src/android_downloads.rs`, `src/download_background.rs`, `android/java/dev/misob/nova/reader/ReaderBackgroundService.java` | Nova's copied download foreground service and JNI adapter; Reader queue leases, independent notification progress, wake lock, resumed-only permission prompt and error-safe native calls |
 | `src/addon_icons.rs`, `crates/ui/addon-icon.slint` | Verified bundled addon PNGs decoded on workers, retained UI-thread image handles shared by language variants, Sources/Extensions decoration and Kit fallback |
-| `src/artwork.rs` | Kit decoded-poster LRU and encoded variants, synchronous cross-page hits, source permits, UI handles, bounded worker and legacy artwork migration |
+| `src/artwork.rs` | Kit decoded-poster LRU and encoded variants, synchronous cross-page hits, source permits, UI handles, bounded worker, poster publication before optional cache encoding, and legacy artwork migration |
 | `src/chapter_cache.rs` | Kit-backed disposable viewed pages, authorization scopes, chapter-group eviction/active leases and bounded background encoding |
 | `src/reader_settings.rs`, `src/reader_settings_ui.rs` | Durable global reader defaults, source-local series layout/orientation overrides, cached effective snapshots and fallible UI rollback |
-| `src/reader_controls.rs`, `src/reader_navigation.rs` | Nova-style OSD actions, source-anchored seek/zoom, Mihon tap maps, mode inheritance and Android/desktop preference projection |
+| `src/reader_controls.rs`, `src/reader_navigation.rs` | Nova-style OSD actions, source-anchored 0.5×–8× zoom/seek, zoomed tap-zone bypass, Mihon tap maps, mode inheritance and Android/desktop preference projection |
 | `src/reader_continuity.rs` | Near-boundary chapter preparation, per-chapter source ownership and canonical progress, stable in-place page growth and bounded three-chapter retention |
 | `src/reader_desktop.rs` | Nova-derived latest-state native keep-awake worker; Linux portal/screensaver, Windows execution state and macOS caffeinate lifetime |
 | `crates/ui/reader-osd.slint`, `crates/ui/reader-settings.slint` | Responsive bottom OSD with fixed 44px chapter buttons and a single expanding bottom progress slider, aligned compact actions labeled with the effective mode, one More action per layout, animated phone-sheet/desktop-panel controls and shared global settings form under More → Settings → Reader |
@@ -52,12 +54,14 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `crates/ui/timeline.slint`, `crates/ui/source-list.slint`, `crates/ui/extensions.slint`, `crates/ui/source-filters.slint` | Dated History/Updates, grouped sources with bundled icons, extension management and actual source-defined browse filters |
 | `crates/ui/reader-context-menu.slint` | Normal selection save/copy plus optional `(simple)` viewport actions, stationary-hold/right-click handling, clamping, keyboard navigation and export feedback |
 | `crates/ui/reader-pager.slint`, `tests/reader_pager.rs` | Touch/mouse gallery dragging and wheel paging in reading order, adjacent-page motion and bounded settling; zoomed artwork yields to image panning |
+| `crates/ui/reader-zoom.slint` | Native pinch scale/moving-midpoint lifecycle and remaining-finger guard; `app.slint` forwards `reader-zoom-by` and `reader-transform` into reader controls, while image interactions consume actual Ctrl+wheel modifiers |
 | `crates/ui/navigation.slint` | Nova’s 64px icon rail, flat five-tab bottom bar, icon feedback and keyboard navigation |
 | `crates/ui/controls.slint`, `crates/ui/page-header.slint` | Thin Nova Kit control adapters and Nova’s PageHeader; shared palette, typography and accessibility |
 | `crates/ui/more.slint` | Retained Nova-style More/Settings landings, nested slide/fade layers, scroll/focus restoration and local import/categories/data/About pages |
 | `crates/ui/about.slint`, `crates/ui/about-models.slint`, `crates/ui/about-controls.slint` | Nova’s copied About/source/license viewer with Reader shell routing and shared header adapter |
 | `crates/ui/appearance.slint`, `crates/ui/theme-settings.slint`, `crates/ui/settings-row.slint`, `crates/ui/src/appearance.rs` | Nova theme/motion settings controls, responsive setting rows and adapted Nova palette derivation |
 | `crates/ui/build.rs` | Kit source aliases, embedded resources, debug layout metadata and narrow Kit dropdown/segmented keyboard/accessibility adaptations |
+| `vendor/i-slint-core`, `vendor/i-slint-core/NOVA_PATCH.md` | Exact Slint 1.18.0 registry source with a relative raw-pinch-delta fix, coincident-finger scale floor, source regression and retained upstream licenses; selected through the root Cargo patch |
 | `assets/fonts` | Nova’s bundled Roboto faces and Apache notices; More/settings artwork comes directly from Kit |
 | `assets/open_source_*.hbs`, `assets/open_source_project_sources.tsv`, `assets/open_source_vendors.txt` | Nova catalogue templates and Reader-specific source/vendor attribution; full local notices are appended by `build.rs` |
 | `assets/icons/navigation` | Embedded SVG navigation and reader controls, independent of system font glyph coverage |
@@ -69,15 +73,11 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `crates/reader-engine/src/display.rs`, `crates/reader-engine/src/avif.rs` | Width-preserving visible-row display admission/resampling and one-original worker reuse; thin boundary to Kit `nova-image` AVIF/JPEG XL with independent Reader fixture/display/admission regressions |
 | `crates/reader-engine/examples/tall_scroll.rs`, `docs/tall-scroll-performance.md` | Deterministic 720×25,000 CPU scroll profile and actual Mihon stable/main rendering comparison |
 | Kit `crates/image`, `vendor/ferri-pdf-rav1d` | Shared bounded AVIF/JPEG XL codecs and published 1.1.2 portable decoder; Reader retains only thin adapters, fixture attribution and distribution licenses |
-| `crates/reader-downloads` | Durable queue, checksummed page bundles, recovery, quota, source-free offline lookup, local folder/CBZ import, bundle removal and manifest-only status hints |
+| `crates/reader-downloads` | Durable queue, checksummed page bundles, owned-file crash recovery, panic-safe active admission, quota, source-free offline lookup, local folder/CBZ import, bundle removal and manifest-only status/progress hints |
 | `crates/reader-catalogue` | Bounded Keiyoushi protobuf discovery, exact port mappings, signed native catalogue verification and availability states |
-| `examples/addons/kagane`, `crates/reader-sources/tests/kagane.rs` | Keiyoushi Kagane native port with v39 request compatibility, 18 languages, canonical-host settings migration, Origin headers, compact chapter index, typed filters/settings, public token/one-retry flow, bundled icon and synthetic QuickJS host regressions |
-| `examples/addons/manhwa18cc` | Thin Manhwa18 configuration, reusable YiiMadara helper, Apache license/provenance and synthetic parser fixtures |
-| `examples/addons/mangafire`, `crates/reader-sources/tests/mangafire.rs` | MangaFire JSON/VRF port, seven languages and typed filters/settings, deterministic parser and actual QuickJS host fixtures; scoped CDN permissions and Apache provenance |
-| `examples/addons/toonily`, `crates/reader-sources/tests/toonily.rs` | English Madara/NoAjax port, `/serie/` routes, chapter POST, mature preference cookie, scoped CDNs and neutral Node/QuickJS fixtures |
-| `examples/addons/mitaku`, `examples/addons/cosplaytele`, matching `crates/reader-sources/tests/*.rs` | NSFW galleries, one chapter per post, source-specific filters/pagination, full-size ordered images and explicit video-only/markup errors |
-| `addons/` | Versioned, installable native addon ZIP downloads with source links and checksums |
+| `addons/README.md` | Installation instructions and external nova-addons link; no real site sources or ZIPs are bundled |
 | `examples/addons/neutral-fixture` | Installable network-free fixture, bundled geometric PNGs and 320-page chapter |
+| External `nova-addons/reader-addons`, `reader-tests`, `reader-packages` | Real site implementations, parser/QuickJS tests, licensing and immutable installable ZIPs; intentionally absent from Reader |
 | `tests/reading_journey.rs` | Process-boundary install/read/progress/interrupted download/recovery/source-removal/offline journey |
 | `tests/ui_navigation.rs`, `tests/mobile_layout.rs` | Headless reader models, phone/landscape/tablet/desktop control bounds, tab taps, accessible activation and back navigation |
 | `tests/appearance.rs` | Process-boundary appearance persistence, palette application, invalid edits and theme reset preserving motion preferences |
@@ -242,6 +242,27 @@ existing-store permission repair on open. Durable queued jobs resume at launch;
 paused/cancelled jobs remain stopped. The app serializes chapter transfers; the
 store retains a two-active-jobs-per-source admission cap.
 
+Android downloads acquire Nova's `dataSync` foreground service before metadata
+work begins. A process-local queue lease survives navigation and Activity
+replacement; an independent one-second worker updates generic chapter/page
+progress without depending on Slint frames. Last-lease completion, failure or
+unwinding stops the service and releases its wake lock. The Java service and
+notification-permission method are byte-equivalent to Nova at
+`ee3877808764d70362a6e0b442e79e5128317abf` after Reader identity renaming.
+The JNI port additionally clears Java exceptions and retries failed promotion
+on the next active update. Android 15's data-sync timeout remains in force;
+force-stop/process death still requires reopening Reader to resume the queue.
+
+Recovery removes only generated pending/uncommitted/corrupt page names inside
+owned hash-named job directories. It preserves verified resumable pages and
+unrelated files, rejects symlink trees, and keeps quota accounting aligned with
+remaining payloads. Interrupted initial-manifest publication and page-rename /
+manifest-commit crash windows are covered by real killed-process tests.
+`DownloadStore::progress` reads bounded atomic manifests without hashing pages.
+The service Java/API/JNI regressions live in `tools/test-android-background.py`
+and `tests/android-background/`; default packaging checks also verify its pinned
+Nova provenance and required manifest permissions without an Android SDK.
+
 Workers fetch metadata and images and decode admitted images. Only the Slint
 event loop updates UI models. Download status hints come from bounded manifests
 on a coalesced worker and are cached in the view; rendering never hashes page
@@ -288,25 +309,32 @@ memory remain unmeasured.
 The reader source runtime currently belongs to this repository. Moving its
 generic envelope/runtime into nova-kit requires shared API design and Nova v1
 consumer regressions; this workspace does not claim that extraction is complete.
-Reader keeps reviewable source examples and fixtures; independently published
-package sources live in `nova-addons/reader-addons/`.
+Reader retains only its neutral executable addon fixture; catalogue compatibility
+metadata and its host regressions remain in `reader-catalogue`. Real site implementations,
+source-specific Node/native tests, notices and immutable ZIPs live exclusively
+in `nova-addons/reader-addons/`, `nova-addons/reader-tests/` and
+`nova-addons/reader-packages/`; Reader does not depend on a sibling checkout.
 
 ## Where to look
 
 - Nova design reuse and destination behavior: [UI design](ui-design.md).
 - Delete a downloaded chapter: `src/app.rs` (`delete-download`), `crates/reader-downloads/src/lib.rs` (`remove`), chapter actions and More → Downloads. Local imports are protected.
+- Background download service, notifications and interruption cleanup: `src/android_downloads.rs`, `src/download_background.rs`, `crates/reader-downloads/src/lib.rs`, `tools/test-android-background.py`.
 - Viewed chapter cache, grouped eviction and pins: `src/chapter_cache.rs`, `src/app.rs`, Kit `nova-cache::gc`/`blob`.
 - Cache quotas, disk master switch and worker snapshots: `src/image_storage.rs`, `crates/ui/image-storage-settings.slint`, `tests/image_storage.rs`.
 - Shared Nova settings controls: Kit `slint/cache-settings-controls.slint`; Nova keeps SettingsRow/search/sync/keyboard wrappers.
 - Cover cache placement, immediate reuse and source revocation: `src/paths.rs`, `src/artwork.rs`, More → Settings → Cache.
+- Real site addons, their tests and immutable ZIPs: [nova-addons](https://github.com/misobarisic/nova-addons). Reader keeps only `examples/addons/neutral-fixture`.
+- Progressive JPEG XL reader previews and strict final handoff: `src/reader_progressive.rs`, `src/app.rs::image_worker`, `src/chapter_cache.rs::read_with_chunks`; neutral streamed-EOF regressions live with the progressive module.
 - Addon icons and source filters: `src/addon_icons.rs`, `crates/ui/addon-icon.slint`, `src/source_filters.rs`, `crates/reader-sources/src/package.rs`; optional `manifest.icon` must name a declared PNG asset. Multiple/include/exclude groups use existing Nova setting rows with typed JSON output.
-- Kagane port and JPEG XL pages: `examples/addons/kagane`, `crates/reader-sources/tests/kagane.rs`, `crates/reader-engine/src/jxl.rs`.
 - Shared cache implementation/settings: Kit `crates/cache` and `crates/ui-base/slint/cache-settings-controls.slint`; Reader `src/chapter_cache.rs`, `src/image_storage.rs` and `tests/image_storage.rs`.
 - Library search, retained details and per-title actions: `crates/ui/library-search.slint`, `crates/ui/entry-menu.slint`, `src/app.rs`, `tests/library_navigation.rs`, `tests/entry_menu.rs`.
 - Automatic source paging and Retry: `src/app.rs` (`browse`/`complete_browse`), `crates/ui/app.slint`, `tests/source_paging.rs`.
 - Automatic/manual reader mode and per-series overrides: `src/reader_modes.rs`, `docs/reader-modes.md`, `tests/reader_modes.rs`.
 - Effective-direction chapter/page controls and progress slider: `crates/ui/reader-osd.slint`, `tests/reader_mode_controls.rs`.
 - Paged gallery dragging, zoom/pan and fitted image geometry: `crates/ui/reader-pager.slint`, `crates/ui/app.slint`, `src/reader_controls.rs`, `tests/reader_pager.rs`.
+- Desktop Ctrl+wheel, Android pinch, source-point anchoring and magnified tap behavior: `crates/ui/reader-zoom.slint`, `crates/ui/reader-context-menu.slint`, `src/reader_controls.rs` (native production-controller regression).
+- Pinned Slint raw pinch scale correction and provenance: `vendor/i-slint-core/NOVA_PATCH.md`, `vendor/i-slint-core/input.rs`.
 - Unfinished chapter page labels and manual read/unread History behavior: `src/app.rs` (`render`, `toggle_chapter_read`), `tests/reader_design.rs` and app unit tests.
 - Adult visibility and per-series chapter order: `src/reading_preferences.rs`, `tests/reading_preferences.rs`.
 - AVIF image admission/encoding: `crates/reader-engine/src/avif.rs`, `src/reader_export.rs`, `src/image_storage.rs`.
@@ -327,9 +355,6 @@ package sources live in `nova-addons/reader-addons/`.
 - Run/build/install and CLI: [README](../README.md), [packaging](packaging.md).
 - Source manifest, HTTP permissions, limits and error contract: [source API](source-api.md).
 - Cookie grants and session isolation: `crates/reader-sources/src/package.rs`, `crates/reader-sources/src/network.rs`, `crates/reader-sources/tests/cookies.rs`, `src/sync_addons.rs`.
-- Toonily, Mitaku and CosplayTele ports, notices and parser fixtures: `examples/addons/toonily`, `examples/addons/mitaku`, `examples/addons/cosplaytele`; matching `crates/reader-sources/tests/*.rs`.
-- Manhwa routes, languages, parser tests and upstream license: [reference source](manhwa18.md).
-- MangaFire VRF/JSON API, seven languages, filters and upstream provenance: [MangaFire source](mangafire.md).
 - Discovery, actual upstream IDs and signing trust API: [catalogues](catalogues.md).
 - Implemented behavior versus outstanding plan gates: [implementation status](implementation-status.md).
 
@@ -425,6 +450,14 @@ to the live reader frame, including its initial mount. Paged zoom scales the con
 after fitting and requests matching physical-pixel detail. At normal zoom,
 horizontal dragging follows LTR/RTL order and vertical paging follows vertical
 drags; zoomed dragging pans artwork without turning pages.
+Ctrl+wheel on desktop and native two-finger pinch on Android zoom from 0.5× to
+8×. The fitted-width cap applies before magnification; source coordinates stay
+anchored beneath the cursor or moving pinch midpoint, using the mounted frame's
+real dimensions and contained-image margins. The display/decode budgets remain
+unchanged. Above 1.01×, single taps only toggle controls, bypassing all tap zones
+and inversion choices; double tap still toggles fit/2× and long press opens the
+image menu. Pinch entry cancels pending taps/holds/gallery motion, and its
+remaining finger is consumed through release.
 Per-page chapter/source ownership keeps caches, export filenames and progress
 canonical; old segments are pruned in place to retain previous/current/next,
 with a fresh generation rejecting old indexed tasks. A small boundary row names
