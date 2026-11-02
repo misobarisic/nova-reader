@@ -10,14 +10,17 @@ MangaFire and Kagane default to Safe content in their source settings.
 | --- | --- | --- | --- |
 | Manhwa18cc 1.0.1 | [ZIP](manhwa18cc-1.0.1.zip) | 0.1.17 | [Source](../examples/addons/manhwa18cc) |
 | MangaFire 1.0.1 | [ZIP](mangafire-1.0.1.zip) | 0.1.17 | [Source](../examples/addons/mangafire) |
-| Kagane 1.0.0 | [ZIP](kagane-1.0.0.zip) | 0.1.17 | [Source](../examples/addons/kagane) |
+| Kagane 1.0.1 | [ZIP](kagane-1.0.1.zip) | 0.1.17 | [Source](../examples/addons/kagane) |
 | Toonily (English) 1.0.0 | [ZIP](toonily-1.0.0.zip) | 0.1.26 | [Source](../examples/addons/toonily) |
 | Mitaku 1.0.0 | [ZIP](mitaku-1.0.0.zip) | 0.1.26 | [Source](../examples/addons/mitaku) |
 | CosplayTele 1.0.0 | [ZIP](cosplaytele-1.0.0.zip) | 0.1.26 | [Source](../examples/addons/cosplaytele) |
 
 Each includes the upstream icon, Apache-2.0 license and pinned-source notices.
-Kagane has 18 language variants and a configurable upstream mirror. Reader's
-JPEG XL decoder supports its current page format.
+Kagane has 18 language variants. Version 1.0.1 adds the site's required Origin
+header, fixing image-host HTTP 404 responses, and migrates retired `.cx`/`.net`
+mirror settings to `kagane.moe` without resetting other settings. Reimport the
+new ZIP to update an existing installation; no Reader update or permission
+expansion is required. Reader's JPEG XL decoder supports its current page format.
 
 Toonily defaults **Show mature content** to off. It sets only the explicitly
 granted `toonily-mature` cookie on `https://toonily.com` through Reader's isolated
@@ -41,7 +44,7 @@ with Reader 0.1.26; existing downloads retain their previous compatibility.
 Rebuild deterministically, for example:
 
 ```sh
-python3 tools/package-addon.py examples/addons/kagane addons/kagane-1.0.0.zip
+python3 tools/package-addon.py examples/addons/kagane addons/kagane-1.0.1.zip
 ```
 
 SHA-256:
@@ -50,6 +53,7 @@ SHA-256:
 9052373c938281bf99d51adb99fe01d11449da482db8811b182cddd003d22261  manhwa18cc-1.0.1.zip
 d649274c7c2891df86eb6fc9abc28eb9ac285740f53dd82ada5a48f2853a62fb  mangafire-1.0.1.zip
 28ff94cc3b6c1720c9235f03a1410702fd8c056c341d0365f91dc45f07f17212  kagane-1.0.0.zip
+aed5e88e43c42e461b200c0eb4a8f558ac31523f5dd0b04031fdc87017e6d1b6  kagane-1.0.1.zip
 5de8447e16860d409d2e2b6d440314c1c3afbb246bb1525f1585ad9f9aad5d8d  toonily-1.0.0.zip
 9f2b1069db96dfe840e76b64494f4a16d49ef102f706fba314183909df9a8674  mitaku-1.0.0.zip
 fca6428f39d2671eadcaf84a342a39b82efa1a568a996cb0b6d6e26f251f6375  cosplaytele-1.0.0.zip
@@ -58,6 +62,8 @@ fca6428f39d2671eadcaf84a342a39b82efa1a568a996cb0b6d6e26f251f6375  cosplaytele-1.
 The older [MangaFire 1.0.0](mangafire-1.0.0.zip) remains available for older Reader
 versions without addon icons (SHA-256
 `db2bebbcc3363ac2e7b521e53f8524f4aaaf0b277044b84bd459774838999797`).
+The original [Kagane 1.0.0](kagane-1.0.0.zip) also remains byte-identical for
+existing links; use 1.0.1 for the current site.
 
 The shared [Nova addons repository](https://github.com/misobarisic/nova-addons)
 also publishes these packages from `reader-addons/` as `nova-reader-…zip` release

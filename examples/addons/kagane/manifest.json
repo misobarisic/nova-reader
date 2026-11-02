@@ -4,7 +4,7 @@
   "api": "^1.0",
   "id": "kagane",
   "name": "Kagane",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "language": "all",
   "nsfw": true,
   "entry": "main.js",
@@ -37,13 +37,11 @@
   "configuration": [
     {
       "key": "mirror",
-      "name": "Mirror",
+      "name": "Site (canonical host)",
       "kind": "select",
       "default": "kagane.moe",
       "options": [
-        "kagane.moe",
-        "kagane.cx",
-        "kagane.net"
+        "kagane.moe"
       ]
     },
     {

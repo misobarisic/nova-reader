@@ -54,6 +54,20 @@ impl SourceTransport for Fixture {
         self.requests.lock().unwrap().push(r.clone());
         let u = url::Url::parse(&r.url).unwrap();
         let mode = self.mode.lock().unwrap().clone();
+        // Reproduce the live image edge's 404 when Origin is absent. Metadata
+        // remains available without Origin, as it did on the proxy used to probe
+        // the site; the flow test separately checks upstream's XHR metadata rule.
+        if (u.host_str() == Some("kstatic.to")
+            && r.headers.get("Origin").map(String::as_str) != Some("https://kagane.moe"))
+            || (mode == "not_found" && u.path() != "/")
+        {
+            return Ok(HttpResponse {
+                status: 404,
+                url: r.url.clone(),
+                headers: BTreeMap::new(),
+                body: b"{\"error\":\"not found\"}".to_vec(),
+            });
+        }
         let mut status = 200;
         let body = if u.host_str() == Some("kstatic.to") {
             let mut rejected = self.reject_pages.load(Ordering::SeqCst);
@@ -184,6 +198,8 @@ fn kagane_native_flow_tokens_filters_and_complete_identity() {
     let pages = source.pages(&json!({"chapterId":uid(3)})).unwrap();
     assert_eq!(pages.pages[0].id, uid(5));
     assert!(pages.pages[0].url.contains(".jxl?token="));
+    assert_eq!(pages.pages[0].headers["Origin"], "https://kagane.moe");
+    assert_eq!(pages.pages[0].headers["Referer"], "https://kagane.moe/");
     t.reject_pages.store(1, Ordering::SeqCst);
     assert_eq!(
         source
@@ -231,6 +247,105 @@ fn kagane_native_flow_tokens_filters_and_complete_identity() {
         json!(["Safe", "FifteenPlus", "EighteenPlus"])
     );
     assert!(body.get("is_pornographic").is_none());
+    assert!(t.requests.lock().unwrap().iter().all(|request| {
+        request.headers.get("Origin").map(String::as_str) == Some("https://kagane.moe")
+    }));
+}
+
+#[test]
+fn old_package_404_regression_and_retired_mirror_settings_migrate_on_upgrade() {
+    let old_zip = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../addons/kagane-1.0.0.zip");
+    let old_bytes = std::fs::read(old_zip).unwrap();
+    for retired in ["kagane.cx", "kagane.net"] {
+        let directory = tempfile::tempdir().unwrap();
+        let registry = SourceRegistry::open(directory.path()).unwrap();
+        registry.install_zip(&old_bytes).unwrap();
+        registry.set_enabled("kagane", true).unwrap();
+        let transport = Arc::new(Fixture::default());
+        let old_source = registry
+            .source("kagane")
+            .unwrap()
+            .with_transport(transport.clone());
+        old_source.browse(&json!({})).unwrap();
+        let old_pages = old_source.pages(&json!({"chapterId":uid(3)})).unwrap();
+        assert!(matches!(
+            old_source.fetch_page(
+                &old_pages.pages[0].url,
+                &old_pages.pages[0].headers,
+                &CancelToken::default()
+            ),
+            Err(SourceError::NotFound)
+        ));
+        registry
+            .set_settings(
+                "kagane",
+                json!({"mirror":retired,"dataSaver":true,"cleanTitle":true}),
+            )
+            .unwrap();
+        transport.requests.lock().unwrap().clear();
+
+        let descriptor = registry.install_zip(&archive()).unwrap();
+        assert!(
+            descriptor.enabled,
+            "unchanged domain grants must retain activation"
+        );
+        assert!(matches!(
+            old_source.browse(&json!({})),
+            Err(SourceError::Unavailable)
+        ));
+        let settings = registry.settings("kagane").unwrap();
+        assert_eq!(settings["mirror"], "kagane.moe");
+        assert_eq!(settings["dataSaver"], true);
+        assert_eq!(settings["cleanTitle"], true);
+        let source = registry
+            .source("kagane")
+            .unwrap()
+            .with_transport(transport.clone());
+        let listing = source.browse(&json!({})).unwrap();
+        assert_eq!(listing.items[0].title, "Clockmaker");
+        source.search(&json!({"query":"Clock"})).unwrap();
+        source.filters(&json!({})).unwrap();
+        source.details(&json!({"seriesId":uid(1)})).unwrap();
+        source.chapters(&json!({"seriesId":uid(1)})).unwrap();
+        let pages = source.pages(&json!({"chapterId":uid(3)})).unwrap();
+        assert!(pages.pages[0].url.contains("/page/datasaver/"));
+        assert_eq!(pages.pages[0].headers["Origin"], "https://kagane.moe");
+        let requests = transport.requests.lock().unwrap();
+        assert!(requests.iter().all(|r| {
+            let url = url::Url::parse(&r.url).unwrap();
+            url.host_str() == Some("kagane.moe")
+        }));
+        assert!(!requests.iter().any(|r| r.url.contains(retired)));
+    }
+}
+
+#[test]
+fn fixed_endpoint_404_reports_protocol_change_but_missing_series_remains_not_found() {
+    let directory = tempfile::tempdir().unwrap();
+    let registry = SourceRegistry::open(directory.path()).unwrap();
+    registry.install_zip(&archive()).unwrap();
+    registry.set_enabled("kagane", true).unwrap();
+    let transport = Arc::new(Fixture::default());
+    *transport.mode.lock().unwrap() = "not_found".into();
+    let source = registry.source("kagane").unwrap().with_transport(transport);
+    for op in ["browse", "search", "filters", "pages"] {
+        assert!(
+            matches!(
+                source.call(op, &json!({"chapterId":uid(3)})),
+                Err(SourceError::ParseChanged(_))
+            ),
+            "{op}"
+        );
+    }
+    for op in ["details", "chapters"] {
+        assert!(
+            matches!(
+                source.call(op, &json!({"seriesId":uid(1)})),
+                Err(SourceError::NotFound)
+            ),
+            "{op}"
+        );
+    }
 }
 
 #[test]

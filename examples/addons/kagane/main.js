@@ -1,9 +1,11 @@
-/* Apache-2.0. Modified Keiyoushi Kagane v37 port; see NOTICE.md. */
+/* Apache-2.0. Modified Keiyoushi Kagane v39 port; see NOTICE.md. */
 (function () {
   'use strict';
   const languages = ['en','ja','ko','zh','es','es-419','fr','de','pt','pt-BR','ru','it','id','vi','th','pl','hi','ar'];
   const operations = ['browse','search','filters','details','chapters','pages','resolvePage'];
-  const mirrors = ['kagane.moe','kagane.cx','kagane.net'];
+  // Former mirror hosts now redirect to .moe. POSTs must start at the canonical
+  // origin because the host correctly rejects cross-origin POST redirects.
+  const mirrors = ['kagane.moe'];
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const sorts = ['', 'total_views','avg_views','avg_views_today','avg_views_week','avg_views_month','updated_at','current_books','created_at'];
   const sortLabels = ['Relevance','Popular (total)','Popular (average)','Popular (today)','Popular (week)','Popular (month)','Latest','Chapter count','Created'];
@@ -20,14 +22,21 @@
     expect(match && uuid.test(match[1]), 'Invalid Kagane series identity'); return match[1];
   }
   function request(path, body, extra) {
-    const headers = Object.assign({Accept:'application/json', Referer:base + '/'}, extra || {});
+    // Current upstream sends every API call as Fetch.XHR; its image-host note
+    // documents HTTP 404 when the site's Origin is missing. Keep the same
+    // request origin throughout metadata, integrity and page-descriptor flows.
+    const headers = Object.assign({Accept:'application/json', Referer:base + '/', Origin:base}, extra || {});
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     const r = JSON.parse(nova.http.request(JSON.stringify({url:base + path, method:body === undefined ? 'GET' : 'POST', headers, body:body === undefined ? null : typeof body === 'string' ? body : JSON.stringify(body)})));
     if (r.error) fail(r.error.code || 'Network', r.error.message || 'Kagane request failed');
     if (r.status === 429) fail('RateLimited', 'Kagane rate limit; retry later');
     if (r.status === 401) fail('AuthenticationRequired', 'Kagane authentication required');
     if (r.status === 403 || r.status === 507) fail('ChallengeRequired', 'Kagane requires a fresh session; reopen the chapter');
-    if (r.status === 404) fail('NotFound', 'Kagane resource not found');
+    if (r.status === 404) {
+      // These are collection/session endpoints, not missing series/chapter IDs.
+      if (/^\/api\/(?:integrity$|v2\/(?:search\/series|genres\/list|tags\/list|sources\/list)(?:\?|$))/.test(path)) fail('ParseChanged', 'Kagane API endpoint returned HTTP 404; its request requirements or endpoint may have changed');
+      fail('NotFound', 'Kagane resource not found');
+    }
     if (r.status < 200 || r.status >= 300) fail('Network', 'Kagane HTTP ' + r.status);
     // GET / primes the scoped cookie jar; its HTML never enters the parser.
     if (path === '/') {
@@ -193,7 +202,7 @@
       const pid = id(p.page_id), ext = p.ext || 'jxl';
       expect(['jxl','jpg','jpeg','png','webp','avif'].includes(ext),'Unsupported Kagane image format');
       expect(Number.isInteger(p.page_no) && p.page_no >= 0 && !ordinals.has(p.page_no) && !seen.has(pid),'Duplicate or invalid page identity');ordinals.add(p.page_no);seen.add(pid);
-      return {id:pid,ordinal:p.page_no,url:cache+'/api/v2/books/page/'+(settings.dataSaver ? 'datasaver/' : '')+book+'/'+pid+'.'+ext+'?token='+encodeURIComponent(access),headers:{Referer:base+'/'}};
+      return {id:pid,ordinal:p.page_no,url:cache+'/api/v2/books/page/'+(settings.dataSaver ? 'datasaver/' : '')+book+'/'+pid+'.'+ext+'?token='+encodeURIComponent(access),headers:{Referer:base+'/',Origin:base}};
     }).sort((a,b)=>a.ordinal-b.ordinal);
     if (r.op === 'resolvePage') {const page=pages.find(p=>p.id === r.pageId);expect(page,'Page disappeared from refreshed manifest');return {pages:[page]};}
     return {pages};

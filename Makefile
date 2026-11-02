@@ -60,6 +60,7 @@ check-addons:
 	npm ci --ignore-scripts --prefix examples/addons/manhwa18cc/tests
 	npm test --prefix examples/addons/manhwa18cc/tests
 	node examples/addons/mangafire/tests/parser.test.mjs
+	node examples/addons/kagane/tests/request.test.mjs
 	npm ci --ignore-scripts --prefix examples/addons/toonily/tests
 	npm test --prefix examples/addons/toonily/tests
 	npm ci --ignore-scripts --prefix examples/addons/mitaku/tests
