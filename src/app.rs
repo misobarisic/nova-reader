@@ -21,6 +21,8 @@ use std::{
 };
 
 static LIFECYCLE: OnceLock<Weak<Controller>> = OnceLock::new();
+#[path = "reader_capture_editor.rs"]
+mod reader_capture_editor;
 #[path = "reader_continuity.rs"]
 mod reader_continuity;
 #[path = "reader_controls.rs"]
@@ -1217,10 +1219,8 @@ impl Controller {
                     let downloaded = download == Some(&reader_downloads::JobStatus::Complete);
                     let series = snapshot.series.iter().find(|s| s.id == c.id.series);
                     let key = series.map(crate::artwork::key).unwrap_or_default();
-                    let read = snapshot
-                        .progress
-                        .iter()
-                        .any(|p| p.chapter == c.id && p.completed);
+                    let progress = snapshot.progress.iter().find(|p| p.chapter == c.id);
+                    let read = progress.is_some_and(|p| p.completed);
                     let stamp = if view.section == 2 {
                         clock.history(
                             snapshot
@@ -1236,6 +1236,20 @@ impl Controller {
                     let mut meta = Vec::new();
                     if c.uploaded_at.is_some() {
                         meta.push(clock.release_date(c.uploaded_at));
+                    }
+                    if view.section == 5
+                        && let Some(progress) = progress.filter(|p| {
+                            !p.completed
+                                && (p.anchor.page_index > 0
+                                    || p.anchor.offset_millionths > 0
+                                    || snapshot.history.iter().any(|h| h.chapter == c.id))
+                        })
+                    {
+                        meta.push(format!(
+                            "{}: {}",
+                            text::tr("Page"),
+                            progress.anchor.page_index.saturating_add(1)
+                        ));
                     }
                     if let Some(scanlator) = &c.scanlator {
                         meta.push(scanlator.clone());
@@ -3061,26 +3075,7 @@ impl Controller {
             "read" => self
                 .services
                 .domain
-                .update_manual_progress(|state| {
-                    let completed = !state
-                        .progress
-                        .iter()
-                        .any(|p| p.chapter == chapter && p.completed);
-                    let anchor = state
-                        .progress
-                        .iter()
-                        .find(|p| p.chapter == chapter)
-                        .map(|p| p.anchor.clone())
-                        .unwrap_or(ResumeAnchor::new("0", 0, 0.0)?);
-                    state.set_progress(ReadingProgress {
-                        chapter,
-                        anchor,
-                        mode: state.preferences.mode,
-                        last_read_at: now(),
-                        completed,
-                    });
-                    Ok(())
-                })
+                .update_manual_progress(|state| toggle_chapter_read(state, chapter, now()))
                 .map_err(error),
             _ => return,
         };
@@ -3243,6 +3238,28 @@ impl Controller {
             },
         );
     }
+}
+/// Explicit completion is separate from reading activity. Only real reader
+/// checkpoints call ReaderState::set_progress, which also records History.
+fn toggle_chapter_read(
+    state: &mut reader_domain::ReaderState,
+    chapter: ChapterId,
+    at: i64,
+) -> reader_domain::Result<()> {
+    let prior = state.progress.iter().find(|p| p.chapter == chapter);
+    let completed = !prior.is_some_and(|p| p.completed);
+    let anchor = prior
+        .map(|p| p.anchor.clone())
+        .unwrap_or(ResumeAnchor::new("0", 0, 0.)?);
+    state.progress.retain(|p| p.chapter != chapter);
+    state.progress.push(ReadingProgress {
+        chapter,
+        anchor,
+        mode: state.preferences.mode,
+        last_read_at: at,
+        completed,
+    });
+    Ok(())
 }
 // Texture dimensions stay bounded while logical progress continues to refer
 // to the original page. Full decode admission remains the engine's responsibility.
@@ -3441,6 +3458,7 @@ enum FrozenScreencap {
     Device(ReaderScreencap),
     Chapter(Box<ChapterScreencap>),
 }
+#[derive(Clone)]
 struct ChapterScreencap {
     viewport: crate::chapter_capture::Rect,
     reference: usize,
@@ -3448,12 +3466,20 @@ struct ChapterScreencap {
     inputs: BTreeMap<usize, (PageInput, Option<Source>)>,
     options: reader_engine::DisplayOptions,
     brightness: u8,
+    device_scale: f64,
+    output_scale: Option<f64>,
+    known_dimensions: BTreeSet<usize>,
+    layout_anchor: usize,
+    layout_gaps: Vec<f64>,
+    paged_fit: Option<(f64, f64, f64)>,
+    naming: BTreeMap<usize, (ChapterId, usize)>,
     background: [u8; 4],
 }
 fn capture_chapter_request(
     app: &Controller,
     ui: &AppWindow,
     reference: i32,
+    advanced: bool,
 ) -> Result<ChapterScreencap> {
     use crate::chapter_capture::{PageRect, Rect};
     let frame = ui.get_reader_capture_viewport();
@@ -3473,11 +3499,21 @@ fn capture_chapter_request(
     let model = ui.get_pages();
     let mut pages = Vec::new();
     let mut inputs = BTreeMap::new();
+    let mut naming = BTreeMap::new();
+    if reference >= reader.pages.len() {
+        return Err(text::tr("Chapter image is unavailable"));
+    }
+    let owner = reader.owner(reference).clone();
     for index in 0..model.row_count() {
-        let Some(row) = model.row_data(index).filter(|row| row.loaded) else {
+        if index >= reader.pages.len() {
+            continue;
+        }
+        let Some(row) = model.row_data(index).filter(|row| advanced || row.loaded) else {
             continue;
         };
-        if ui.get_reading_mode() != 0 && index != ui.get_current_page() as usize {
+        if (advanced && reader.owner(index) != &owner)
+            || (!advanced && ui.get_reading_mode() != 0 && index != ui.get_current_page() as usize)
+        {
             continue;
         }
         let rect = chapter_capture_rect_with_split(
@@ -3488,16 +3524,46 @@ fn capture_chapter_request(
             (reader.mode != ReadingMode::Webtoon && reader.is_split(index))
                 .then_some(ui.get_reader_split_half()),
         );
-        if rect.x < viewport.x + viewport.width
-            && rect.x + rect.width > viewport.x
-            && rect.y < viewport.y + viewport.height
-            && rect.y + rect.height > viewport.y
+        if (advanced
+            || (rect.x < viewport.x + viewport.width
+                && rect.x + rect.width > viewport.x
+                && rect.y < viewport.y + viewport.height
+                && rect.y + rect.height > viewport.y))
             && let Some(input) = reader.pages.get(index)
         {
             pages.push(PageRect { index, rect });
             inputs.insert(index, (input.clone(), reader.source_for(index)));
+            naming.insert(
+                index,
+                (reader.owner(index).clone(), reader.local_index(index) + 1),
+            );
         }
     }
+    // Paged layouts have one painted page. Lay out adjacent source pages in a
+    // frozen vertical strip anchored to that page, retaining each contain fit.
+    if advanced && ui.get_reading_mode() != 0 {
+        let current = reference;
+        let anchor = pages
+            .iter()
+            .position(|p| p.index == current)
+            .ok_or_else(|| text::tr("Capture geometry unavailable"))?;
+        for i in (0..anchor).rev() {
+            pages[i].rect.y = pages[i + 1].rect.y - pages[i].rect.height;
+        }
+        for i in anchor + 1..pages.len() {
+            pages[i].rect.y = pages[i - 1].rect.y + pages[i - 1].rect.height;
+        }
+    }
+    let layout_gaps = pages
+        .windows(2)
+        .map(|pair| pair[1].rect.y - pair[0].rect.bottom())
+        .collect();
+    let known_dimensions = reader
+        .native_dimensions
+        .keys()
+        .chain(reader.presentations.keys())
+        .copied()
+        .collect();
     let color = ui.get_reader_capture_background();
     Ok(ChapterScreencap {
         viewport,
@@ -3505,6 +3571,17 @@ fn capture_chapter_request(
         pages,
         inputs,
         options: reader.display_options,
+        device_scale: f64::from(ui.window().scale_factor()),
+        output_scale: None,
+        known_dimensions,
+        layout_anchor: reference,
+        layout_gaps,
+        paged_fit: (ui.get_reading_mode() != 0).then_some((
+            f64::from(frame.x + frame.content_x) + (viewport.width.max(width) - width) / 2.,
+            width,
+            viewport.height,
+        )),
+        naming,
         brightness: if crate::reader_settings::snapshot().custom_brightness {
             crate::reader_settings::snapshot().brightness
         } else {
@@ -3565,10 +3642,34 @@ fn capture_reader(ui: &AppWindow) -> Result<ReaderScreencap> {
     // Called before the context menu becomes visible. FemtoVG renders the
     // current scene offscreen, so neither the menu nor hidden OSD is captured.
     let image = ui.window().take_snapshot().map_err(error)?;
+    let frame = ui.get_reader_capture_viewport();
+    let scale = f64::from(ui.window().scale_factor());
+    let left = (f64::from(frame.x) * scale)
+        .floor()
+        .clamp(0., f64::from(image.width())) as u32;
+    let top = (f64::from(frame.y) * scale)
+        .floor()
+        .clamp(0., f64::from(image.height())) as u32;
+    let right = (f64::from(frame.x + frame.width) * scale)
+        .ceil()
+        .clamp(f64::from(left), f64::from(image.width())) as u32;
+    let bottom = (f64::from(frame.y + frame.height) * scale)
+        .ceil()
+        .clamp(f64::from(top), f64::from(image.height())) as u32;
+    let width = right - left;
+    let height = bottom - top;
+    if width == 0 || height == 0 {
+        return Err(text::tr("Reader screencap is unavailable"));
+    }
+    let mut pixels = Vec::with_capacity(width as usize * height as usize * 4);
+    for row in top..bottom {
+        let start = (u64::from(row) * u64::from(image.width()) + u64::from(left)) as usize * 4;
+        pixels.extend_from_slice(&image.as_bytes()[start..start + width as usize * 4]);
+    }
     Ok(ReaderScreencap {
-        width: image.width(),
-        height: image.height(),
-        pixels: image.as_bytes().to_vec(),
+        width,
+        height,
+        pixels,
     })
 }
 #[derive(Clone)]
@@ -3634,7 +3735,21 @@ fn export_name_position(
             .get(&page)
             .map(|dimensions| dimensions.height)
             .ok_or_else(|| text::tr("Chapter image dimensions are unavailable"))?;
-        let source_y = export_source_row(rect.y, rect.height, f64::from(viewport.y), height);
+        let source_y = if let Some(presentation) = reader.presentations.get(&page) {
+            let x = ((f64::from(viewport.x).max(rect.x) - rect.x) / rect.width
+                * f64::from(presentation.effective.width))
+            .clamp(0., f64::from(presentation.effective.width - 1));
+            let y = ((f64::from(viewport.y).max(rect.y) - rect.y) / rect.height
+                * f64::from(presentation.effective.height))
+            .clamp(0., f64::from(presentation.effective.height - 1));
+            presentation
+                .source_coordinate(x, y)
+                .1
+                .round()
+                .clamp(0., f64::from(height.saturating_sub(1))) as u32
+        } else {
+            export_source_row(rect.y, rect.height, f64::from(viewport.y), height)
+        };
         return Ok(FrozenExportName {
             chapter: reader.owner(page).clone(),
             page: reader.local_index(page) + 1,
@@ -3647,6 +3762,7 @@ fn export_name_position(
 fn wire_reader_context(app: &Arc<Controller>, ui: &AppWindow) {
     use std::{cell::RefCell, rc::Rc};
     let screencap = Rc::new(RefCell::new(None));
+    let editor = reader_capture_editor::wire(app, ui);
     let exporting = Arc::new(AtomicBool::new(false));
     type PendingConflict = Option<(crate::reader_export::ExportCurrent, ReplyOnDrop)>;
     let conflict = Arc::new(Mutex::new(PendingConflict::None));
@@ -3715,10 +3831,14 @@ fn wire_reader_context(app: &Arc<Controller>, ui: &AppWindow) {
             let weak = ui.as_weak();
             let owner = Arc::downgrade(app);
             let conflict = conflict.clone();
+            let editor = editor.clone();
             move || {
                 let Some(ui) = weak.upgrade() else {
                     return;
                 };
+                if let Some(app) = owner.upgrade() {
+                    reader_capture_editor::stale(&editor, &app, &ui);
+                }
                 let mut pending = conflict.lock().unwrap_or_else(|e| e.into_inner());
                 let stale = pending.as_ref().is_some_and(|(current, _)| {
                     !current()
@@ -3740,12 +3860,14 @@ fn wire_reader_context(app: &Arc<Controller>, ui: &AppWindow) {
         let app = app.clone();
         let weak = ui.as_weak();
         let screencap = screencap.clone();
+        let editor = editor.clone();
         move |index| {
             if let Some(ui) = weak.upgrade() {
+                reader_capture_editor::freeze(&editor, &app, &ui, index);
                 let capture = if crate::capture_settings::preferences(&ui).resolution
                     == crate::capture_settings::CaptureResolution::Chapter
                 {
-                    capture_chapter_request(&app, &ui, index)
+                    capture_chapter_request(&app, &ui, index, false)
                         .map(|capture| FrozenScreencap::Chapter(Box::new(capture)))
                 } else {
                     capture_reader(&ui).map(FrozenScreencap::Device)
@@ -3758,7 +3880,9 @@ fn wire_reader_context(app: &Arc<Controller>, ui: &AppWindow) {
     });
     ui.on_reader_context_closed({
         let screencap = screencap.clone();
+        let editor = editor.clone();
         move || {
+            reader_capture_editor::clear_frozen(&editor);
             screencap.borrow_mut().take();
         }
     });
@@ -3770,14 +3894,39 @@ fn wire_reader_context(app: &Arc<Controller>, ui: &AppWindow) {
             let Some(ui) = weak.upgrade() else { return };
             let (screen, clipboard) = match action.as_str() {
                 "save-image" => (false, false),
-                "save-screencap" => (true, false),
+                "save-screencap" | "save-screencap-simple" | "save-screencap-selection" => {
+                    (true, false)
+                }
                 "copy-image" => (false, true),
-                "copy-screencap" => (true, true),
+                "copy-screencap" | "copy-screencap-simple" | "copy-screencap-selection" => {
+                    (true, true)
+                }
                 _ => return,
             };
+            if exporting.load(Ordering::Acquire) {
+                ui.set_reader_context_status(text::tr("Another image action is active").into());
+                return;
+            }
+            if action == "save-screencap" || action == "copy-screencap" {
+                reader_capture_editor::open(&editor, &app, &ui, clipboard);
+                return;
+            }
+            let selection = if action.ends_with("-selection") {
+                let selected = reader_capture_editor::export(&editor, &ui);
+                if selected.is_none() {
+                    return;
+                }
+                selected
+            } else {
+                None
+            };
+            let selection_ticket = selection.as_ref().map(|(_, _, ticket)| ticket.clone());
             if exporting.swap(true, Ordering::AcqRel) {
                 ui.set_reader_context_status(text::tr("Another image action is active").into());
                 return;
+            }
+            if selection.is_some() {
+                ui.set_capture_editor_busy(true);
             }
             ui.set_reader_context_busy(true);
             ui.set_reader_context_status(text::tr("Preparing image…").into());
@@ -3807,10 +3956,29 @@ fn wire_reader_context(app: &Arc<Controller>, ui: &AppWindow) {
                 let weak = weak.clone();
                 let exporting = exporting.clone();
                 let app = app.clone();
+                let selection_ticket = selection_ticket.clone();
                 move |result: Result<()>| {
                     exporting.store(false, Ordering::Release);
                     let _ = weak.upgrade_in_event_loop(move |ui| {
                         ui.set_reader_context_busy(false);
+                        if selection_ticket
+                            .as_ref()
+                            .is_some_and(|ticket| !ticket.current())
+                        {
+                            return;
+                        }
+                        if selection_ticket.is_some() {
+                            ui.set_capture_editor_busy(false);
+                            match &result {
+                                Ok(()) => {
+                                    ui.set_capture_editor_visible(false);
+                                    ui.set_capture_editor_image(slint::Image::default());
+                                }
+                                Err(message) => {
+                                    ui.set_capture_editor_error(text::tr(message).into())
+                                }
+                            }
+                        }
                         if app.generation.load(Ordering::Acquire) == generation
                             && ui.get_section() == 6
                         {
@@ -3835,7 +4003,16 @@ fn wire_reader_context(app: &Arc<Controller>, ui: &AppWindow) {
                     cancel.check().map_err(error)?;
                     if screen {
                         let (captured_generation, capture, naming) =
-                            snapshot.ok_or_else(|| text::tr("Reader screencap is unavailable"))?;
+                            if let Some((generation, capture, _)) = selection {
+                                (
+                                    generation,
+                                    Ok(FrozenScreencap::Chapter(Box::new(capture))),
+                                    Err(text::tr("Capture naming unavailable")),
+                                )
+                            } else {
+                                snapshot
+                                    .ok_or_else(|| text::tr("Reader screencap is unavailable"))?
+                            };
                         final_naming = Some(naming);
                         if captured_generation != generation {
                             return Err(text::tr("Image action cancelled"));
@@ -3843,36 +4020,13 @@ fn wire_reader_context(app: &Arc<Controller>, ui: &AppWindow) {
                         let capture = match capture? {
                             FrozenScreencap::Device(capture) => capture,
                             FrozenScreencap::Chapter(capture) => {
-                                let mut rendered = crate::chapter_capture::capture_with_options(
-                                    capture.viewport,
-                                    capture.reference,
-                                    &capture.pages,
-                                    capture.background,
-                                    capture.options,
-                                    |index| {
-                                        cancel.check().map_err(error)?;
-                                        let (input, source) =
-                                            capture.inputs.get(&index).ok_or_else(|| {
-                                                text::tr("Chapter image is unavailable")
-                                            })?;
-                                        input.read(source.as_ref(), &cancel)
-                                    },
+                                let (rendered, naming) = reader_capture_editor::render_capture(
+                                    &capture,
+                                    &cancel,
+                                    selection_ticket.as_ref(),
                                 )?;
-                                if capture.brightness < 100 {
-                                    for pixel in rendered.pixels.as_chunks_mut::<4>().0 {
-                                        for channel in &mut pixel[..3] {
-                                            *channel = (u16::from(*channel)
-                                                * u16::from(capture.brightness)
-                                                / 100)
-                                                as u8;
-                                        }
-                                    }
-                                }
-                                ReaderScreencap {
-                                    width: rendered.width,
-                                    height: rendered.height,
-                                    pixels: rendered.pixels,
-                                }
+                                final_naming = Some(Ok(naming));
+                                rendered
                             }
                         };
                         crate::reader_export::ExportImage::from_rgba_with_preferences(
@@ -3895,6 +4049,9 @@ fn wire_reader_context(app: &Arc<Controller>, ui: &AppWindow) {
                     Ok(image) if !cancel.is_cancelled() => {
                         let current: crate::reader_export::ExportCurrent = Arc::new(move || {
                             !cancel.is_cancelled()
+                                && selection_ticket
+                                    .as_ref()
+                                    .is_none_or(|ticket| ticket.current())
                                 && owner.upgrade().is_some_and(|app| {
                                     app.image_worker_live.load(Ordering::Acquire)
                                         && app.generation.load(Ordering::Acquire) == generation
@@ -4680,6 +4837,44 @@ pub fn run(services: Services) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn manual_read_flags_preserve_actual_history_and_resume_without_creating_visits() {
+        let series = reader_domain::SeriesId::new("fixture", "series");
+        let unopened = ChapterId::new(series.clone(), "unopened");
+        let visited = ChapterId::new(series, "visited");
+        let mut state = reader_domain::ReaderState::default();
+        toggle_chapter_read(&mut state, unopened.clone(), 100).unwrap();
+        assert!(state.history.is_empty());
+        assert!(state.progress[0].completed);
+        toggle_chapter_read(&mut state, unopened, 101).unwrap();
+        assert!(state.history.is_empty());
+        assert!(!state.progress[0].completed);
+        let anchor = ResumeAnchor::new("source-page-3", 2, 0.4).unwrap();
+        state.set_progress(ReadingProgress {
+            chapter: visited.clone(),
+            anchor: anchor.clone(),
+            mode: ReadingMode::Webtoon,
+            last_read_at: 42,
+            completed: false,
+        });
+        let actual_history = state.history.clone();
+        for at in [102, 103] {
+            toggle_chapter_read(&mut state, visited.clone(), at).unwrap();
+            assert_eq!(
+                state.history, actual_history,
+                "manual flags cannot reorder actual visits"
+            );
+            assert_eq!(
+                state
+                    .progress
+                    .iter()
+                    .find(|p| p.chapter == visited)
+                    .unwrap()
+                    .anchor,
+                anchor
+            );
+        }
+    }
     #[test]
     fn installed_adult_source_is_visible_without_toggling() {
         let status = std::process::Command::new(std::env::current_exe().unwrap())

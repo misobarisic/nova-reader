@@ -650,6 +650,31 @@ fn image_export_and_clipboard_have_real_readable_bytes(env: &mut JNIEnv<'_>) {
         JValue::Bool(0),
     )
     .unwrap();
+    // The editor can be cancelled after Java has staged its encoded image but
+    // before the queued main-thread clipboard write. Preserve the old clip.
+    let previous_clip = fixture_text(env, "clipboardUri");
+    let current = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let check = current.clone();
+    let (send, receive) = std::sync::mpsc::channel();
+    copy_image_current(
+        staged.clone(),
+        "image/png",
+        Arc::new(move || check.load(Ordering::Acquire)),
+        move |result| {
+            let _ = send.send(result);
+        },
+    );
+    fixture_run(env, "drain");
+    fixture_run(env, "awaitCopies");
+    current.store(false, Ordering::Release);
+    fixture_run(env, "drain");
+    assert!(
+        receive
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap()
+            .is_err()
+    );
+    assert_eq!(fixture_text(env, "clipboardUri"), previous_clip);
     let (send, receive) = std::sync::mpsc::channel();
     copy_image(staged.clone(), "image/png", move |result| {
         let _ = send.send(result);

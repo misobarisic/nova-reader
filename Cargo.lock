@@ -4931,7 +4931,7 @@ dependencies = [
 
 [[package]]
 name = "nova-reader"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "anyhow",
  "arboard",
@@ -4947,6 +4947,7 @@ dependencies = [
  "nova-storage",
  "nova-sync",
  "qrcode",
+ "reader-capture",
  "reader-catalogue",
  "reader-domain",
  "reader-downloads",
@@ -6439,6 +6440,14 @@ dependencies = [
  "bytemuck",
  "font-types",
  "once_cell",
+]
+
+[[package]]
+name = "reader-capture"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "reader-engine",
 ]
 
 [[package]]

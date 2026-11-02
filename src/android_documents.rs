@@ -238,6 +238,25 @@ fn image_action(
     series_folder: Option<&str>,
     callback: impl FnOnce(Result<(), String>) + Send + 'static,
 ) {
+    image_action_current(
+        kind,
+        staged,
+        suggested_name,
+        mime,
+        series_folder,
+        None,
+        callback,
+    );
+}
+fn image_action_current(
+    kind: i32,
+    staged: PathBuf,
+    suggested_name: &str,
+    mime: &str,
+    series_folder: Option<&str>,
+    current: Option<ImageExportCurrent>,
+    callback: impl FnOnce(Result<(), String>) + Send + 'static,
+) {
     let id = match reserve(Callback::Export(Box::new(callback))) {
         Ok(id) => id,
         Err((callback, message)) => {
@@ -245,6 +264,14 @@ fn image_action(
             return;
         }
     };
+    if let Some(pending) = PENDING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_mut()
+        .filter(|pending| pending.id == id)
+    {
+        pending.image_current = current;
+    }
     let result = with_context(|env, _, class| {
         let path = env.new_string(staged.to_string_lossy())?;
         let name = env.new_string(suggested_name)?;
@@ -386,6 +413,24 @@ pub fn copy_image(
     callback: impl FnOnce(Result<(), String>) + Send + 'static,
 ) {
     image_action(6, staged, "Reader image", mime, None, callback);
+}
+/// Recheck reader/selection ownership on Java's actual clipboard dispatch,
+/// after its asynchronous staging and main-thread handoff.
+pub fn copy_image_current(
+    staged: PathBuf,
+    mime: &str,
+    current: ImageExportCurrent,
+    callback: impl FnOnce(Result<(), String>) + Send + 'static,
+) {
+    image_action_current(
+        6,
+        staged,
+        "Reader image",
+        mime,
+        None,
+        Some(current),
+        callback,
+    );
 }
 /// Open a source/license link in the system browser, following Nova's link
 /// intent policy. The Application context needs NEW_TASK and never retains an Activity.

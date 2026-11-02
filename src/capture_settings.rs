@@ -108,6 +108,7 @@ pub struct CapturePreferences {
     pub avif_quality: u8,
     pub jxl_quality: u8,
     pub series_folders: bool,
+    pub simple_screencaps: bool,
     pub conflict: ConflictPolicy,
 }
 
@@ -121,6 +122,7 @@ impl Default for CapturePreferences {
             avif_quality: 85,
             jxl_quality: 85,
             series_folders: false,
+            simple_screencaps: true,
             conflict: ConflictPolicy::Ask,
         }
     }
@@ -143,6 +145,7 @@ impl CapturePreferences {
         settings.set_avif_quality(f32::from(self.avif_quality));
         settings.set_jxl_quality(f32::from(self.jxl_quality));
         settings.set_series_folders(self.series_folders);
+        settings.set_simple_screencaps(self.simple_screencaps);
         settings.set_conflict_policy(self.conflict.into());
     }
 
@@ -164,6 +167,7 @@ impl CapturePreferences {
             "webp_quality" if (1..=100).contains(&value) => self.webp_quality = value as u8,
             "avif_quality" if (1..=100).contains(&value) => self.avif_quality = value as u8,
             "jxl_quality" if (1..=100).contains(&value) => self.jxl_quality = value as u8,
+            "simple_screencaps" if value == 0 || value == 1 => self.simple_screencaps = value == 1,
             "series_folders" if value == 0 || value == 1 => self.series_folders = value == 1,
             _ => return false,
         }
@@ -190,6 +194,7 @@ pub fn preferences(ui: &AppWindow) -> CapturePreferences {
         avif_quality: quality(settings.get_avif_quality()),
         jxl_quality: quality(settings.get_jxl_quality()),
         series_folders: settings.get_series_folders(),
+        simple_screencaps: settings.get_simple_screencaps(),
         conflict: ConflictPolicy::try_from(settings.get_conflict_policy()).unwrap_or_default(),
     }
 }
@@ -271,6 +276,7 @@ mod tests {
         let loaded: CapturePreferences = serde_json::from_str(old).unwrap();
         assert_eq!(loaded.conflict, ConflictPolicy::Ask);
         assert_eq!(loaded.jxl_quality, 85);
+        assert!(loaded.simple_screencaps);
         for policy in [
             ConflictPolicy::Ask,
             ConflictPolicy::Overwrite,

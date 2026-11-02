@@ -21,6 +21,8 @@ import { SettingsCard } from "@NovaUiBase/settings-controls.slint";
 import { SourceFilterPanel } from "source-filters.slint";
 import { TimelineList } from "timeline.slint";
 import { ReaderContextMenu, ReaderImageInteraction } from "reader-context-menu.slint";
+import { CaptureEditor, CaptureCropRect } from "capture-editor.slint";
+export { CaptureCropRect } from "capture-editor.slint";
 import { ReaderOsd } from "reader-osd.slint";
 import { ReaderSettings, ReaderSettingsPanel } from "reader-settings.slint";
 export { ReaderSettings } from "reader-settings.slint";
@@ -40,6 +42,7 @@ import { LicenseSource } from "about-models.slint";
 export { LicenseSource } from "about-models.slint";
 export { Appearance } from "appearance.slint";
 export { CaptureSettings } from "capture-settings.slint";
+import { CaptureSettings } from "capture-settings.slint";
 export { ImageStorageSettings } from "image-storage-settings.slint";
 export { Theme, Anim } from "@NovaUiShared";
 import "../../assets/fonts/Roboto-Regular.ttf";
@@ -277,6 +280,36 @@ export component AppWindow inherits Window {
     private property <bool> reader-context-toast-open;
     callback reader-context-opening(int);
     in-out property <ReaderCaptureViewport> reader-capture-viewport;
+    // The actual Flickable and every capture entry use this same live frame.
+    // page-content exists outside the conditional reader scene, so its actual
+    // window origin remains available to keyboard entry points too.
+    private property <length> reader-frame-x: (page-content.width - root.reader-canvas-width) / 2 + (ReaderSettings.cutout ? 0px : root.safe-area-insets.left);
+    private property <length> reader-frame-y: (page-content.height - root.reader-canvas-height) / 2 + (ReaderSettings.cutout ? 0px : root.safe-area-insets.top);
+    private property <length> reader-frame-width: max(1px, root.reader-canvas-width - (ReaderSettings.cutout ? 0px : root.safe-area-insets.left + root.safe-area-insets.right));
+    private property <length> reader-frame-height: max(1px, root.reader-canvas-height - (ReaderSettings.cutout ? 0px : root.safe-area-insets.top + root.safe-area-insets.bottom));
+    private property <ReaderCaptureViewport> reader-live-capture-viewport: {
+        x: (page-content.absolute-position.x + root.reader-frame-x) / 1px,
+        y: (page-content.absolute-position.y + root.reader-frame-y) / 1px,
+        width: root.reader-frame-width / 1px, height: root.reader-frame-height / 1px,
+        content-x: root.scroll-x / 1px, content-y: root.scroll-y / 1px,
+    };
+    in-out property <bool> capture-editor-visible;
+    in-out property <image> capture-editor-image;
+    in-out property <CaptureCropRect> capture-editor-crop;
+    in-out property <bool> capture-editor-busy;
+    in-out property <string> capture-editor-error;
+    in-out property <bool> capture-editor-preview-mode;
+    in-out property <bool> capture-editor-copy;
+    in-out property <bool> capture-editor-can-extend-above;
+    in-out property <bool> capture-editor-can-extend-below;
+    callback capture-editor-selection-changed(CaptureCropRect);
+    callback capture-editor-action(string);
+    changed capture-editor-visible => {
+        if root.capture-editor-visible {
+            root.reader-osd = false; root.show-reader-options = false;
+            root.reader-context-toast-open = false;
+        } else { keyboard.focus(); }
+    }
     out property <color> reader-capture-background: root.reader-background;
     callback reader-context-action(int, string);
     callback reader-context-closed;
@@ -290,6 +323,9 @@ export component AppWindow inherits Window {
         root.reader-context-page = page;
         root.reader-context-page-id = root.pages[page].page-id;
         root.reader-context-x = x; root.reader-context-y = y;
+        // Every entry point (including Menu and Shift+F10) freezes current
+        // geometry before the backend captures source and device pixels.
+        root.reader-capture-viewport = root.reader-live-capture-viewport;
         // The renderer snapshots synchronously here, before either the menu or
         // export feedback can enter the captured chapter viewport.
         root.reader-context-capturing = true;
@@ -397,6 +433,10 @@ export component AppWindow inherits Window {
     callback flush-progress;
 
     public function go-back() {
+        if root.export-conflict-open { root.resolve-export-conflict(2); return; }
+        if root.capture-editor-visible {
+            root.capture-editor-action(root.capture-editor-preview-mode ? "adjust" : "cancel"); return;
+        }
         if ReaderSettingsSync.open { ReaderSettingsSync.open = false; return; }
         if SyncContent.sync_remove_prompt_visible {
             SyncContent.sync_remove_prompt_visible = false;
@@ -409,7 +449,6 @@ export component AppWindow inherits Window {
         }
         if root.section == 6 && root.show-reader-options { root.show-reader-options = false; return; }
         if root.section == 6 && root.reader-osd { root.reader-osd = false; return; }
-        if root.export-conflict-open { root.resolve-export-conflict(2); return; }
         if root.section == 13 { root.about-back-request += 1; return; }
         if root.entry-menu-visible { root.close-entry-menu(); return; }
         if root.reader-context-visible { root.close-reader-context(); return; }
@@ -420,6 +459,7 @@ export component AppWindow inherits Window {
     }
 
     changed section => {
+        if root.capture-editor-visible { root.capture-editor-action("cancel"); }
         if root.section == 5 { root.begin-detail-entry(); }
         else {
             detail-enter-timer.stop();
@@ -808,15 +848,13 @@ export component AppWindow inherits Window {
                             reader := Flickable {
                                 private property <length> physical-pixel: 1phx;
                                 changed physical-pixel => {root.reader-reflow(root.reader-width / 1px,self.height / 1px);}
-                                x: (parent.width - root.reader-canvas-width) / 2 + (ReaderSettings.cutout ? 0px : root.safe-area-insets.left);
-                                y: (parent.height - root.reader-canvas-height) / 2 + (ReaderSettings.cutout ? 0px : root.safe-area-insets.top);
-                                width: max(1px,root.reader-canvas-width - (ReaderSettings.cutout ? 0px : root.safe-area-insets.left + root.safe-area-insets.right));
-                                height: max(1px,root.reader-canvas-height - (ReaderSettings.cutout ? 0px : root.safe-area-insets.top + root.safe-area-insets.bottom));
+                                x: root.reader-frame-x; y: root.reader-frame-y;
+                                width: root.reader-frame-width; height: root.reader-frame-height;
                                 content-y <=> root.scroll-y;
                                 content-x <=> root.scroll-x;
                                 changed content-y => {if root.reading-mode==0{root.reader-position(-self.content-y / 1px,root.reader-width / 1px,self.height / 1px);}}
                                 changed height => {root.reader-viewport-height=self.height;root.reader-reflow(root.reader-width / 1px,self.height / 1px);}
-                                interactive: root.reading-mode == 0 || root.zoom > 1;
+                                interactive: !root.capture-editor-visible && (root.reading-mode == 0 || root.zoom > 1);
                                 content-width: max(self.width, root.reader-width);
                                 content-height: root.reading-mode == 0 ? max(self.height, root.reader-height) : self.height;
                                 ReaderImageInteraction {
@@ -884,7 +922,6 @@ export component AppWindow inherits Window {
                                             accessible-role: button; accessible-label: @tr("Page {} image", index + 1);
                                             accessible-action-default => {
                                                 SettingsStyle.keyboard-mode = true;
-                                                root.reader-capture-viewport = { x: reader.absolute-position.x / 1px, y: reader.absolute-position.y / 1px, width: reader.width / 1px, height: reader.height / 1px, content-x: reader.content-x / 1px, content-y: reader.content-y / 1px };
                                                 root.open-reader-context(index, self.absolute-position.x + self.width / 2, reader.absolute-position.y + reader.height / 2);
                                             }
                                             double-tap-enabled: root.reader-double-tap-enabled;
@@ -892,7 +929,6 @@ export component AppWindow inherits Window {
                                     positioned-tap(x,y) => { root.reader-tap((x - reader.absolute-position.x) / max(1px,reader.width),(y - reader.absolute-position.y) / max(1px,reader.height)); }
                                     double-tapped(x,y) => { root.reader-double-tap((x - reader.absolute-position.x) / max(1px,reader.width),(y - reader.absolute-position.y) / max(1px,reader.height)); }
                                             context-requested(x,y) => {
-                                                root.reader-capture-viewport = { x: reader.absolute-position.x / 1px, y: reader.absolute-position.y / 1px, width: reader.width / 1px, height: reader.height / 1px, content-x: reader.content-x / 1px, content-y: reader.content-y / 1px };
                                                 root.open-reader-context(index,x,y);
                                             }
                                         }
@@ -922,7 +958,7 @@ export component AppWindow inherits Window {
                                 width: 100%; height: 100%; compact: root.mobile-ui;
                                 title: root.series-title; chapter-title: root.reader-chapter-title;
                                 page: root.reader-local-page; page-count: root.reader-page-count;
-                                progress: root.reader-progress; mode-label: root.reader-mode-label;
+                                progress: root.reader-progress; mode-label: root.reader-mode-label; reading-mode: root.reading-mode;
                                 zoom-percent: round(root.zoom * 100); fit-width: root.zoom == 1;
                                 fullscreen: root.reader-window-fullscreen; bookmarked: root.reader-bookmarked;
                                 previous-chapter-enabled: root.can-previous; next-chapter-enabled: root.can-next;
@@ -933,7 +969,6 @@ export component AppWindow inherits Window {
                                 action(action) => {
                                     if action == "settings" || action == "mode" { root.reader-settings-tab = 0; root.show-reader-options = !root.show-reader-options; }
                                     else if action == "more" || action == "screencap" {
-                                        root.reader-capture-viewport = { x: reader.absolute-position.x / 1px, y: reader.absolute-position.y / 1px, width: reader.width / 1px, height: reader.height / 1px, content-x: reader.content-x / 1px, content-y: reader.content-y / 1px };
                                         root.open-reader-context(root.current-page,root.width - 24px,root.height - 180px);
                                         if action == "screencap" { root.reader-context-picked("save-screencap"); }
                                     }
@@ -1027,6 +1062,12 @@ export component AppWindow inherits Window {
                 if event.text == Key.Escape || event.text == Key.Back || event.text == Key.Backspace { root.resolve-export-conflict(2); }
                 return accept;
             }
+            if root.capture-editor-visible {
+                if event.text == Key.Escape || event.text == Key.Back || event.text == Key.Backspace {
+                    root.capture-editor-action(root.capture-editor-preview-mode ? "adjust" : "cancel");
+                }
+                return accept;
+            }
             if root.section == 0 && event.modifiers.control && (event.text == "f" || event.text == "F") {
                 if !event.repeat { root.focus-library-search(); }
                 return accept;
@@ -1054,7 +1095,7 @@ export component AppWindow inherits Window {
             return reject;
         }
     }
-    if root.section == 6 && !root.reader-context-visible && !root.reader-context-capturing && (root.reader-context-busy || root.reader-context-toast-open): reader-context-toast := Rectangle {
+    if root.section == 6 && !root.capture-editor-visible && !root.reader-context-visible && !root.reader-context-capturing && (root.reader-context-busy || root.reader-context-toast-open): reader-context-toast := Rectangle {
         width: min(440px, max(1px, root.width - root.safe-area-insets.left - root.safe-area-insets.right - 32px));
         height: max(48px, toast-message.preferred-height + 24px);
         x: root.safe-area-insets.left + (root.width - root.safe-area-insets.left - root.safe-area-insets.right - self.width) / 2;
@@ -1081,8 +1122,21 @@ export component AppWindow inherits Window {
         viewport-height: root.height - root.safe-area-insets.top - root.safe-area-insets.bottom;
         anchor-x: root.reader-context-x; anchor-y: root.reader-context-y;
         busy: root.reader-context-busy;
+        simple-screencaps: CaptureSettings.simple-screencaps;
         picked(action) => { root.reader-context-picked(action); }
         dismissed => { root.close-reader-context(); }
+    }
+    if root.section == 6 && root.capture-editor-visible: CaptureEditor {
+        width: root.width; height: root.height;
+        safe-top: root.safe-area-insets.top; safe-bottom: root.safe-area-insets.bottom;
+        safe-left: root.safe-area-insets.left; safe-right: root.safe-area-insets.right;
+        source: root.capture-editor-image; crop <=> root.capture-editor-crop;
+        busy: root.capture-editor-busy; error: root.capture-editor-error;
+        preview-mode: root.capture-editor-preview-mode; copy: root.capture-editor-copy;
+        can-extend-above: root.capture-editor-can-extend-above;
+        can-extend-below: root.capture-editor-can-extend-below;
+        selection-changed(crop) => { root.capture-editor-selection-changed(crop); }
+        action(action) => { root.capture-editor-action(action); }
     }
     if root.entry-menu-visible: EntryMenu {
         width: root.width; height: root.height;

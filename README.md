@@ -21,15 +21,27 @@ PNG/WebP inputs when encoding to WebP or JPEG XL. AVIF encoding remains lossy.
 Existing files stay unchanged. **Screenshots** controls capture format (including
 AVIF and JPEG XL lossless/lossy), quality, screencap resolution, optional series folders and duplicate handling. Screencaps can
 use device pixels or the original chapter image's pixel scale for the visible area.
+Normal **Save screencap** and **Copy screencap** open a selection editor with
+draggable edges/corners, **Extend above / Extend below**, preview and confirmation.
+The **Show simple screencap actions** switch also offers immediate viewport
+capture actions; it defaults on. Turning it off leaves selection mode available.
 These device preferences are saved separately from library backups.
 Browse groups sources by last used, pins and language; Extensions manages installed
 packages. Sources and Extensions show bundled addon icons, with a fallback for
 older packages. [Installable addons](addons/README.md) include Manhwa18cc,
-MangaFire and Kagane. Kagane supports its 18 upstream language variants and
+MangaFire, Kagane, Toonily (English), Mitaku and CosplayTele. Toonily's optional
+mature-content cookie requires Reader 0.1.26; its setting defaults off. Mitaku and
+CosplayTele represent each image gallery as one chapter and reject video-only
+posts explicitly. Kagane supports its 18 upstream language variants and
 JPEG XL chapter pages. Chapters open with controls hidden; tap or click to show them.
 Automatic reading mode follows [TachiyomiJ2K's genre/source rules](docs/reader-modes.md).
 A manual choice is saved for that series across chapters and restarts.
-Right-click or hold an image to save/copy its original or the visible screencap.
+Right-click or hold an image to save/copy its original or a selected screencap.
+Reader chapter/page controls and progress follow the effective reading direction:
+Webtoon/LTR/vertical use Next on the right, RTL uses Next on the left.
+Unfinished chapter rows show the last saved page beside the date. Marking a
+chapter read/unread through its menu changes completion without creating a
+History visit or replacing an actual visit's timestamp.
 Chapter artwork fills the hidden status-bar area; showing the OSD restores the
 bar and keeps controls clear of cutouts. Delete remote chapter downloads from
 the chapter actions or Downloads; reading progress stays intact.

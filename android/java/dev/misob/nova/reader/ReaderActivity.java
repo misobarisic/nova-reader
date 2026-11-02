@@ -105,7 +105,7 @@ public final class ReaderActivity extends NativeActivity {
             this.requestCode=(int)id;
         }
         void check() throws IOException {
-            if (cancelled.get() || ((kind==7 || kind==8) && !nativeImageSaveCurrent(id))) throw new IOException("Image action cancelled");
+            if (cancelled.get() || ((kind==6 || kind==7 || kind==8) && !nativeImageSaveCurrent(id))) throw new IOException("Image action cancelled");
         }
     }
     private static final class ImageDocument {

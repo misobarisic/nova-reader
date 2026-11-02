@@ -135,11 +135,11 @@ API 29/35 regressions verify Java/JNI transitions separately from device testing
 
 `reader-context-menu.slint` adds the floating image menu: right-click or a
 stationary 600ms press on a loaded page offers Save image, Save screencap, Copy
-image to clipboard and Copy screencap to clipboard. Its slate panel, lavender
+image to clipboard and Copy screencap. Its slate panel, lavender
 line icons, rounded corners, divider and focus/hover colors use Nova tokens.
 Dragging cancels the hold and continues scrolling; a completed hold consumes
 its release so it cannot reveal reader controls. Context Menu / Shift+F10 targets
-the current visible page; arrows/Tab and Enter operate the four actions. Outside
+the current visible page; arrows/Tab and Enter operate the available actions. Outside
 click, Escape, Back and navigation dismiss it. The panel clamps to safe viewport
 bounds and scrolls within unusually short viewports.
 
@@ -147,15 +147,31 @@ Before showing the menu, the UI hides the OSD and export feedback, then calls
 `reader-context-opening(page)` synchronously so the backend can capture a clean
 viewport. An action hides the menu, calls `reader-context-action(page, action)`,
 then calls `reader-context-closed()` to release the cached capture. Cancellation
-also calls the close callback. Export work disables the four actions and exposes
+also calls the close callback. Export work disables the actions and exposes
 progress; success/error feedback appears in a reader toast for four seconds.
 More → Settings → Screenshots is a retained settings leaf with Nova rows and
 controls for format, encoding quality, screencap resolution and separate series folders. Its
 `CaptureSettings` global publishes validated device preferences; they persist
 under `reader:captures`, independently of library backups and chapter bytes.
-Device resolution remains the default. Chapter resolution captures the same
-visible chapter area at the clicked page's source-pixel scale, using original
-images and frozen viewer geometry. This applies to save and clipboard actions,
+Normal screencap actions open `capture-editor.slint`, with a dimmed crop canvas,
+eight drag handles, edge scrolling, independent above/below extension and
+Preview/Adjust plus Save or Copy. The `simple_screencaps` preference defaults on
+and adds immediate viewport save/copy actions; disabling it hides both simple
+entries. The clean live viewport snapshot is centralized before every context
+open, including keyboard invocation after scrolling or zooming. Controls and
+dimming never enter the worker-rendered export.
+
+The OSD consumes the effective mode: RTL swaps chapter/page semantic actions and
+enabled states while arrows keep their physical direction. Its progress adapter
+uses a right-origin fill and reversed pointer/keyboard direction in RTL, while
+accessible progress stays logically increasing. Webtoon/LTR/vertical use Next
+on the right. Chapter detail metadata adds the saved page for unfinished reading;
+manual completion flags preserve real History without manufacturing visits.
+Device resolution remains the default. Selected Chapter captures use the first
+intersecting page's source-pixel scale, original images and frozen viewer
+geometry. Simple Chapter captures use the visible area and clicked page's
+scale. Selection Device exports use the frozen device scale.
+This applies to save and clipboard actions,
 supports scrolling, panning and paged letterboxing, and retains the eight-million-
 pixel export limit. A capture above that limit reports an error rather than
 silently reducing the selected source resolution.

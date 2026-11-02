@@ -1,0 +1,9 @@
+[package]
+name = "reader-capture"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+reader-engine = { path = "../reader-engine" }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }

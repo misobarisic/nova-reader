@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/reader-domain", "crates/reader-sources", "crates/reader-engine", "crates/reader-downloads", "crates/reader-catalogue", "crates/ui"]
+members = ["crates/reader-capture", "crates/reader-domain", "crates/reader-sources", "crates/reader-engine", "crates/reader-downloads", "crates/reader-catalogue", "crates/ui"]
 resolver = "3"
 
 [workspace.package]
@@ -16,7 +16,7 @@ slint-build = "=1.18.0"
 
 [package]
 name = "nova-reader"
-version = "0.1.25"
+version = "0.1.26"
 edition = "2024"
 license.workspace = true
 description = "A source-based manga and webtoon reader for desktop and Android"
@@ -48,6 +48,7 @@ nova-reader-ui = { path = "crates/ui" }
 reader-domain = { path = "crates/reader-domain" }
 reader-sources = { path = "crates/reader-sources" }
 reader-engine = { path = "crates/reader-engine" }
+reader-capture = { path = "crates/reader-capture" }
 reader-downloads = { path = "crates/reader-downloads" }
 reader-catalogue = { path = "crates/reader-catalogue" }
 serde = { version = "1", features = ["derive"] }

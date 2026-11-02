@@ -21,11 +21,12 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `src/reader_desktop.rs` | Nova-derived latest-state native keep-awake worker; Linux portal/screensaver, Windows execution state and macOS caffeinate lifetime |
 | `crates/ui/reader-osd.slint`, `crates/ui/reader-settings.slint` | Responsive bottom OSD with fixed 44px chapter buttons and a single expanding bottom progress slider, aligned compact actions labeled with the effective mode, one More action per layout, animated phone-sheet/desktop-panel controls and shared global settings form under More → Settings → Reader |
 | `src/progress_checkpoint.rs` | One background checkpoint writer, latest offsets coalesced per chapter, failure retry and ordered durable navigation/lifecycle barriers; the 600 ms UI timer only queues progress |
-| `src/reader_export.rs` | Original-image validation, screencap encoding, bounded platform save/clipboard delivery and persistent desktop clipboard ownership; `src/app.rs` captures the clean pre-menu viewport with an 8-million-pixel limit and fetches source page bytes |
+| `src/reader_export.rs` | Original-image validation, screencap encoding, bounded platform delivery and persistent desktop clipboard ownership; reader/selection guards extend through actual Android clipboard dispatch |
 | `src/export_names.rs` | Portable UTF-8 series folders and bounded title/chapter/page/vertical-position filenames, including duplicate numbering |
 | `crates/ui/save-conflict-sheet.slint` | Retained modal Overwrite/Add number/Cancel sheet; `app.slint` owns name/open/choice properties and callbacks |
-| `src/chapter_capture.rs` | Bounded source-resolution compositor for visible chapter areas; captures original pixels rather than enlarging a device snapshot |
-| `src/capture_settings.rs`, `crates/ui/capture-settings.slint` | Validated device capture preferences and retained More → Settings → Screenshots controls for format (including JPEG XL lossless/lossy), adjacent quality, Device/Chapter screencap resolution, per-series folders and duplicate policy |
+| `crates/reader-capture`, `src/chapter_capture.rs` | Leaf bounded source compositor and source-coordinate selection/revision tickets; app re-export supports Chapter or frozen Device scale |
+| `src/reader_capture_editor.rs`, `crates/ui/capture-editor.slint` | Source-anchored crop handles, independent above/below extension, bounded worker previews, Preview/Adjust/Save/Copy, stale-result guards and selected-position naming |
+| `src/capture_settings.rs`, `crates/ui/capture-settings.slint` | Capture format/quality, Device/Chapter resolution, folders, duplicates and optional immediate simple save/copy context actions |
 | `src/image_storage.rs`, `crates/ui/image-storage-settings.slint` | Durable cache policy, unified codecs and independent input-aware lossless WebP/JXL cache/download compression; shared Kit cache controls with chapter-first maintenance and separate artwork settings |
 | `src/source_catalogs.rs` | Host-owned per-addon catalogue switches under `reader:disabled-catalogs:<JSON package ID>`; filters Browse while preserving direct/history/offline access |
 | `src/reading_preferences.rs` | Fallible Nova KV persistence for adult-source visibility and chapter order keyed by full source-local series identity |
@@ -49,7 +50,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `crates/ui/entry-menu.slint`, `crates/ui/status-menu.slint` | Per-title Kit action sheet/anchored desktop menu, copied Nova Change status picker, stable-identity category editing and library/refresh actions |
 | `crates/ui/detail-hero.slint`, `crates/ui/title-artwork.slint`, `crates/ui/chapter-row.slint` | Nova detail artwork/title/metadata/actions, retained synopsis state, chapter-ready Continue gating, compact chapter rows and accessible action popup |
 | `crates/ui/timeline.slint`, `crates/ui/source-list.slint`, `crates/ui/extensions.slint`, `crates/ui/source-filters.slint` | Dated History/Updates, grouped sources with bundled icons, extension management and actual source-defined browse filters |
-| `crates/ui/reader-context-menu.slint` | Custom four-action image/screencap menu, stationary-hold/right-click handling, viewport clamping and keyboard navigation; `app.slint` owns capture/action/close callbacks and reader export feedback |
+| `crates/ui/reader-context-menu.slint` | Normal selection save/copy plus optional `(simple)` viewport actions, stationary-hold/right-click handling, clamping, keyboard navigation and export feedback |
 | `crates/ui/navigation.slint` | Nova’s 64px icon rail, flat five-tab bottom bar, icon feedback and keyboard navigation |
 | `crates/ui/controls.slint`, `crates/ui/page-header.slint` | Thin Nova Kit control adapters and Nova’s PageHeader; shared palette, typography and accessibility |
 | `crates/ui/more.slint` | Retained Nova-style More/Settings landings, nested slide/fade layers, scroll/focus restoration and local import/categories/data/About pages |
@@ -61,7 +62,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `assets/icons/navigation` | Embedded SVG navigation and reader controls, independent of system font glyph coverage |
 | `crates/reader-domain` | Source-local identities, schema-1 state, library/categories, publication/reading status in `src/library_status.rs`, progress/history/bookmarks, backup/restore and serialized atomic persistence hook |
 | `src/sync.rs` | Reader per-identity adapter on Kit `nova-sync`: default `reader` namespace, metadata, library, category memberships, resume, manual reading actions, history and bookmarks; atomic `reader:state`/record/baseline persistence and remote echo guard |
-| `crates/reader-sources` | Reader v2 ZIP validation, durable registry, typed profile settings, QuickJS host, HTML/URL capabilities and checked source HTTP; verified archive export and parse-only inspection for peer package transfer |
+| `crates/reader-sources` | Reader v2 registry, profile settings, QuickJS and checked HTTP; exact-origin/name cookie permissions, isolated session generations/cache scopes, verified peer archives and parse-only native validation |
 | `crates/reader-engine` | Dimension probing, bounded PNG/JPEG/WebP decode and shared Kit AVIF delegation, display geometry, resume anchors and decoded cache utility |
 | `crates/reader-engine/src/jxl.rs`, `crates/reader-engine/tests/jpeg_xl.rs` | Thin adapter to Kit JPEG XL probing/decoding; Reader retains synthetic RGB/alpha integration fixtures while Kit owns metadata admission, auxiliary-box skipping, tracked grid budget and native row conversion |
 | `crates/reader-engine/src/display.rs`, `crates/reader-engine/src/avif.rs` | Width-preserving visible-row display admission/resampling and one-original worker reuse; thin boundary to Kit `nova-image` AVIF/JPEG XL with independent Reader fixture/display/admission regressions |
@@ -72,6 +73,8 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `examples/addons/kagane`, `crates/reader-sources/tests/kagane.rs` | Keiyoushi Kagane v37 native port, 18 languages, compact chapter index, typed filters/settings, public token/one-retry flow, bundled icon and synthetic QuickJS host regressions |
 | `examples/addons/manhwa18cc` | Thin Manhwa18 configuration, reusable YiiMadara helper, Apache license/provenance and synthetic parser fixtures |
 | `examples/addons/mangafire`, `crates/reader-sources/tests/mangafire.rs` | MangaFire JSON/VRF port, seven languages and typed filters/settings, deterministic parser and actual QuickJS host fixtures; scoped CDN permissions and Apache provenance |
+| `examples/addons/toonily`, `crates/reader-sources/tests/toonily.rs` | English Madara/NoAjax port, `/serie/` routes, chapter POST, mature preference cookie, scoped CDNs and neutral Node/QuickJS fixtures |
+| `examples/addons/mitaku`, `examples/addons/cosplaytele`, matching `crates/reader-sources/tests/*.rs` | NSFW galleries, one chapter per post, source-specific filters/pagination, full-size ordered images and explicit video-only/markup errors |
 | `addons/` | Versioned, installable native addon ZIP downloads with source links and checksums |
 | `examples/addons/neutral-fixture` | Installable network-free fixture, bundled geometric PNGs and 320-page chapter |
 | `tests/reading_journey.rs` | Process-boundary install/read/progress/interrupted download/recovery/source-removal/offline journey |
@@ -80,6 +83,9 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `tests/reader_insets.rs` | Real Window safe-area injection verifies edge-to-edge chapter/detail artwork, safe controls/chapter rows, normal-page restoration and stable OSD geometry; uses the already pinned Slint core as a dev dependency |
 | `tests/reader_design.rs` | Responsive poster/list/timeline/chapter layouts, source/pin/extension actions, retained catalogue scroll, download-delete actions, tap-versus-pan reader OSD and image-menu targeting, hold cancellation, clamping, keyboard/busy/lifecycle behavior |
 | `tests/capture_settings.rs`, `tests/image_storage.rs` | Process-boundary capture/compression persistence, corruption recovery, independent policies and accessible settings controls |
+| `tests/reader_capture_editor.rs`, `crates/reader-capture/src/selection.rs` | Phone/desktop handle, keyboard, edge-extension, menu visibility and source-selection/epoch regressions; ignored native screenshot harness |
+| `tests/reader_mode_controls.rs` | Effective-mode chapter/page actions, RTL progress pointer/keyboard/accessibility behavior and right-origin progress rendering |
+| `crates/reader-sources/tests/cookies.rs`, `.github/scripts/test_package_cookie_permissions.py` | Cookie permissions, isolated/concurrent sessions, cache identity, update re-enabling and native/Python manifest parity |
 | `tests/reader_settings.rs`, `tests/reader_gestures.rs`, `src/reader_preview.rs` | Process-restart defaults/overrides and validation, actual touch gesture cancellation, and optional production phone/desktop raster previews |
 | `tests/reader_modes.rs` | Per-series mode restart persistence, explicit Automatic/legacy migration, source identity isolation and accessible short-viewport mode options |
 | `tests/library_navigation.rs`, `tests/source_paging.rs` | Search reveal/focus and retained detail context; automatic viewport paging, short-page fill, Retry and saved catalogue scroll |
@@ -129,14 +135,23 @@ Nova Reader/series children. Provider overwrites retain a bounded original backu
 for rollback; a failed recovery reports an error and retains one private recovery
 file rather than accepting further overwrites.
 Saved names start with the series title, then padded chapter/page numbers.
-Screencaps append the first visible loaded page's original-pixel Y offset.
+Screencaps append an original-pixel Y offset. Selection exports use the first
+exported source row on the first intersecting page; simple Device captures use
+the first visible loaded page's offset.
 Filename components are limited to 160 UTF-8 bytes (including duplicate suffix),
 series folders to 96 bytes, preserving chapter/page/position suffixes.
-Device-resolution screencaps retain the clean pre-menu window snapshot. Chapter
-resolution freezes the reader viewport, scroll/pan, displayed page rectangles
-and source inputs before opening the menu, then composites visible source pixels
-on a worker. The clicked page defines the native pixel scale. Both resolution
-modes keep the eight-million-pixel export limit and apply to save and clipboard.
+Normal screencap save/copy opens the selection editor. `simple_screencaps` in
+`reader:captures` defaults true and exposes immediate `(simple)` viewport actions;
+turning it off leaves normal selection actions. Simple Device captures retain
+the clean pre-menu viewport snapshot. The editor freezes chapter identity,
+scroll/pan, display transforms and logical rectangles, including unloaded pages,
+before selection. Handles and above/below buttons edit source-anchored bounds
+across the current chapter. Previews serialize decoding and retain at most one
+million pixels; controls never enter exports. Advanced Device exports recompose
+source pixels at frozen logical DPR; Chapter resolution uses native source scale.
+Save and clipboard retain eight-million-pixel output/128 MiB working limits.
+Preview/selection revisions and reader generations guard delayed publication;
+filenames use the first intersecting page and actual selected vertical offset.
 `reader:image-storage` stores independent cache/download compression switches,
 formats, quality and separate `lossless_inputs` policies for new writes, plus backward-compatible cache budgets:
 disk caching, separate chapter/artwork limits, decoded artwork memory and future
@@ -209,6 +224,14 @@ metadata backups. Boolean/text/select/secret values are schema-validated; on Uni
 settings directories use 0700 and atomic settings files use 0600. The settings UI
 masks secrets. These file permissions do not imply encryption at rest.
 
+`permissions.cookies` grants exact canonical HTTPS origins and individual cookie
+names. `nova.cookies.set` constructs Secure, host-only, Path=/ cookies in Rust;
+scripts cannot read jars or Set-Cookie headers, and raw Cookie headers stay
+blocked. Settings changes rotate in-memory session generations while invocations
+retain their matching settings/session snapshots. Old requests cannot write into
+the new jar or reuse its image-cache partition. Cookie permission expansion
+requires re-enabling locally and never grants execution through sync.
+
 `chapters/` holds queue state and ordered chapter bundles. Verified page files
 and atomically published completion metadata determine offline availability.
 Incomplete work remains incomplete across restart; source removal does not remove
@@ -264,7 +287,8 @@ memory remain unmeasured.
 The reader source runtime currently belongs to this repository. Moving its
 generic envelope/runtime into nova-kit requires shared API design and Nova v1
 consumer regressions; this workspace does not claim that extraction is complete.
-Source examples are intended for independent future publication in nova-addons.
+Reader keeps reviewable source examples and fixtures; independently published
+package sources live in `nova-addons/reader-addons/`.
 
 ## Where to look
 
@@ -280,6 +304,8 @@ Source examples are intended for independent future publication in nova-addons.
 - Library search, retained details and per-title actions: `crates/ui/library-search.slint`, `crates/ui/entry-menu.slint`, `src/app.rs`, `tests/library_navigation.rs`, `tests/entry_menu.rs`.
 - Automatic source paging and Retry: `src/app.rs` (`browse`/`complete_browse`), `crates/ui/app.slint`, `tests/source_paging.rs`.
 - Automatic/manual reader mode and per-series overrides: `src/reader_modes.rs`, `docs/reader-modes.md`, `tests/reader_modes.rs`.
+- Effective-direction chapter/page controls and progress slider: `crates/ui/reader-osd.slint`, `tests/reader_mode_controls.rs`.
+- Unfinished chapter page labels and manual read/unread History behavior: `src/app.rs` (`render`, `toggle_chapter_read`), `tests/reader_design.rs` and app unit tests.
 - Adult visibility and per-series chapter order: `src/reading_preferences.rs`, `tests/reading_preferences.rs`.
 - AVIF image admission/encoding: `crates/reader-engine/src/avif.rs`, `src/reader_export.rs`, `src/image_storage.rs`.
 - Stable ARMv7 AVIF build fix and provenance: Kit `vendor/ferri-pdf-rav1d/PATCHES.md`; AppImage download pins: `docs/packaging.md`.
@@ -289,7 +315,7 @@ Source examples are intended for independent future publication in nova-addons.
 - Series/chapter layouts, timeline/source groups and reader controls: `crates/ui/library-cards.slint`, `crates/ui/detail-hero.slint`, `crates/ui/timeline.slint`, `crates/ui/source-list.slint`, `tests/reader_design.rs`.
 - Left-anchored library reading progress: `crates/ui/library-cards.slint`, `tests/library_progress.rs`.
 - Image filenames and duplicate handling: `src/export_names.rs`, `src/reader_export.rs`, `src/android_documents.rs`, `crates/ui/save-conflict-sheet.slint`.
-- Reader image/screencap actions and export settings: `crates/ui/reader-context-menu.slint`, `src/reader_export.rs`, `src/chapter_capture.rs`, `src/capture_settings.rs`, More → Settings → Screenshots.
+- Reader image/screencap actions and export settings: `crates/ui/reader-context-menu.slint`, `crates/ui/capture-editor.slint`, `src/reader_capture_editor.rs`, `src/reader_export.rs`, `crates/reader-capture`, `src/capture_settings.rs`, More → Settings → Screenshots.
 - New cache/download image compression and independent input-aware lossless policies: `src/image_storage.rs`, `crates/ui/image-storage-settings.slint`, More → Settings → Cache.
 - Appearance controls, palette and device persistence: `crates/ui/theme-settings.slint`, `crates/ui/src/appearance.rs`, `src/appearance.rs`.
 - Android picker context, callbacks and host JVM regression: [Android documents](android-documents.md).
@@ -298,6 +324,8 @@ Source examples are intended for independent future publication in nova-addons.
 - About license/source viewer: `src/about.rs`, `crates/ui/about.slint`, `tests/about.rs`.
 - Run/build/install and CLI: [README](../README.md), [packaging](packaging.md).
 - Source manifest, HTTP permissions, limits and error contract: [source API](source-api.md).
+- Cookie grants and session isolation: `crates/reader-sources/src/package.rs`, `crates/reader-sources/src/network.rs`, `crates/reader-sources/tests/cookies.rs`, `src/sync_addons.rs`.
+- Toonily, Mitaku and CosplayTele ports, notices and parser fixtures: `examples/addons/toonily`, `examples/addons/mitaku`, `examples/addons/cosplaytele`; matching `crates/reader-sources/tests/*.rs`.
 - Manhwa routes, languages, parser tests and upstream license: [reference source](manhwa18.md).
 - MangaFire VRF/JSON API, seven languages, filters and upstream provenance: [MangaFire source](mangafire.md).
 - Discovery, actual upstream IDs and signing trust API: [catalogues](catalogues.md).

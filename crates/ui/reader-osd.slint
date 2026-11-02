@@ -56,6 +56,38 @@ component OsdAction inherits Rectangle {
     forward-focus: button;
 }
 
+// Kit supplies the slider's complete pointer/keyboard painting and gestures.
+// RTL reverses its physical position, while assistive actions still expose
+// chapter progress in its original increasing 0..1 coordinates.
+component ReaderProgressSlider inherits MiniSlider {
+    in property <bool> reversed;
+    in property <float> progress;
+    callback scrub(float);
+    name: @tr("Chapter progress"); minimum: 0; maximum: 1; step: 0.001;
+    value: root.reversed ? 1 - root.progress : root.progress;
+    accessible-value: root.progress;
+    accessible-action-set-value(v) => { if root.enabled && v.is-float() { root.scrub(Math.clamp(v.to-float(), 0, 1)); } }
+    accessible-action-increment => { if root.enabled { root.scrub(min(1, root.progress + root.step)); } }
+    accessible-action-decrement => { if root.enabled { root.scrub(max(0, root.progress - root.step)); } }
+    changed(v) => { root.scrub(root.reversed ? 1 - v : v); }
+    // MiniSlider paints a left-origin fill. Cover that paint for RTL while
+    // leaving its actual slider target, focus scope and gesture owner intact.
+    if root.reversed: Rectangle {
+        x: 0px; y: (root.height - 4px) / 2; width: root.width; height: 4px;
+        border-radius: 2px; background: Theme.current.slider_track;
+        Rectangle {
+            x: (1 - Math.clamp(root.progress, 0, 1)) * parent.width;
+            width: Math.clamp(root.progress, 0, 1) * parent.width; height: 100%;
+            border-radius: 2px; background: Theme.current.accent_soft;
+        }
+    }
+    if root.reversed: Rectangle {
+        x: (1 - Math.clamp(root.progress, 0, 1)) * max(0px, root.width - 14px);
+        y: (root.height - 14px) / 2; width: 14px; height: 14px;
+        border-radius: 7px; background: Theme.current.accent_soft;
+    }
+}
+
 export component ReaderOsd inherits Rectangle {
     in property <bool> compact: root.width < 700px;
     in property <string> title;
@@ -64,6 +96,7 @@ export component ReaderOsd inherits Rectangle {
     in property <int> page-count: 0;
     in property <float> progress: 0;
     in property <string> mode-label;
+    in property <int> reading-mode;
     in property <int> zoom-percent: 100;
     in property <bool> fit-width: true;
     in property <bool> fullscreen: false;
@@ -80,6 +113,7 @@ export component ReaderOsd inherits Rectangle {
     callback scrub(float);
     private property <length> gutter: root.compact ? 12px : 18px;
     private property <length> rail-height: root.compact ? 190px : 170px;
+    private property <bool> rtl: root.reading-mode == 2;
     Rectangle {
         x: 0px; y: 0px;
         width: 100%; height: min(parent.height, root.safe-top + 96px);
@@ -121,18 +155,18 @@ export component ReaderOsd inherits Rectangle {
         }
         if root.compact: HorizontalLayout {
             x: 0px; y: 52px; width: 100%; height: 44px; spacing: 8px;
-            OsdAction { width: 44px; horizontal-stretch: 0; label: @tr("Previous chapter"); glyph: "previous-chapter"; show-label: false; enabled: root.previous-chapter-enabled; clicked => { root.action("previous-chapter"); } }
-            MiniSlider {
+            OsdAction { width: 44px; horizontal-stretch: 0; label: root.rtl ? @tr("Next chapter") : @tr("Previous chapter"); glyph: "previous-chapter"; show-label: false; enabled: root.rtl ? root.next-chapter-enabled : root.previous-chapter-enabled; clicked => { root.action(root.rtl ? "next-chapter" : "previous-chapter"); } }
+            ReaderProgressSlider {
                 min-width: 0px; horizontal-stretch: 1;
-                name: @tr("Chapter progress"); value: root.progress; minimum: 0; maximum: 1; step: 0.001;
-                changed(v) => { root.scrub(v); }
+                progress: root.progress; reversed: root.rtl;
+                scrub(v) => { root.scrub(v); }
             }
-            OsdAction { width: 44px; horizontal-stretch: 0; label: @tr("Next chapter"); glyph: "next-chapter"; show-label: false; enabled: root.next-chapter-enabled; clicked => { root.action("next-chapter"); } }
+            OsdAction { width: 44px; horizontal-stretch: 0; label: root.rtl ? @tr("Previous chapter") : @tr("Next chapter"); glyph: "next-chapter"; show-label: false; enabled: root.rtl ? root.previous-chapter-enabled : root.next-chapter-enabled; clicked => { root.action(root.rtl ? "previous-chapter" : "next-chapter"); } }
         }
-        if !root.compact: MiniSlider {
+        if !root.compact: ReaderProgressSlider {
             x: 8px; y: 48px; width: max(0px, parent.width - 16px);
-            name: @tr("Chapter progress"); value: root.progress; minimum: 0; maximum: 1; step: 0.001;
-            changed(v) => { root.scrub(v); }
+            progress: root.progress; reversed: root.rtl;
+            scrub(v) => { root.scrub(v); }
         }
         if root.compact: HorizontalLayout {
             x: 0px; y: 100px; width: 100%; height: 66px; spacing: 0px;
@@ -145,11 +179,11 @@ export component ReaderOsd inherits Rectangle {
             x: 0px; y: 92px; width: 100%; height: 66px; spacing: 0px;
             HorizontalLayout {
                 alignment: start; spacing: 0px; vertical-stretch: 0;
-                OsdAction { label: @tr("Previous chapter"); glyph: "previous-chapter"; show-label: false; enabled: root.previous-chapter-enabled; clicked => { root.action("previous-chapter"); } }
-                OsdAction { label: @tr("Previous page"); glyph: "previous-page"; show-label: false; enabled: root.previous-page-enabled; clicked => { root.action("previous-page"); } }
+                OsdAction { label: root.rtl ? @tr("Next chapter") : @tr("Previous chapter"); glyph: "previous-chapter"; show-label: false; enabled: root.rtl ? root.next-chapter-enabled : root.previous-chapter-enabled; clicked => { root.action(root.rtl ? "next-chapter" : "previous-chapter"); } }
+                OsdAction { label: root.rtl ? @tr("Next page") : @tr("Previous page"); glyph: "previous-page"; show-label: false; enabled: root.rtl ? root.next-page-enabled : root.previous-page-enabled; clicked => { root.action(root.rtl ? "next-page" : "previous-page"); } }
                 Text { min-width: 56px; preferred-width: 70px; height: 44px; text: root.page + " / " + root.page-count; horizontal-alignment: center; vertical-alignment: center; color: Theme.current.text_player_caption; font-size: 14px; }
-                OsdAction { label: @tr("Next page"); glyph: "next-page"; show-label: false; enabled: root.next-page-enabled; clicked => { root.action("next-page"); } }
-                OsdAction { label: @tr("Next chapter"); glyph: "next-chapter"; show-label: false; enabled: root.next-chapter-enabled; clicked => { root.action("next-chapter"); } }
+                OsdAction { label: root.rtl ? @tr("Previous page") : @tr("Next page"); glyph: "next-page"; show-label: false; enabled: root.rtl ? root.previous-page-enabled : root.next-page-enabled; clicked => { root.action(root.rtl ? "previous-page" : "next-page"); } }
+                OsdAction { label: root.rtl ? @tr("Previous chapter") : @tr("Next chapter"); glyph: "next-chapter"; show-label: false; enabled: root.rtl ? root.previous-chapter-enabled : root.next-chapter-enabled; clicked => { root.action(root.rtl ? "previous-chapter" : "next-chapter"); } }
             }
             Rectangle { min-width: 0px; horizontal-stretch: 1; }
             OsdAction { label: @tr("Fit width"); glyph: "fit-width"; active: root.fit-width; clicked => { root.action("fit-width"); } }

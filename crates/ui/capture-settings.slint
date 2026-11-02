@@ -1,6 +1,6 @@
 // Nova's screenshot settings and NumericSetting geometry, using Kit controls.
 import { InterfaceStyle } from "@NovaUiShared";
-import { SettingsCard, SectionHeader, PillButton, MiniSlider, ValueBox } from "@NovaUiBase/settings-controls.slint";
+import { SettingsCard, SectionHeader, PillButton, MiniSlider, ValueBox, ToggleSwitch } from "@NovaUiBase/settings-controls.slint";
 import { ReaderSelect } from "controls.slint";
 import { Segmented } from "@ReaderSegmented";
 import { SettingsRow } from "settings-row.slint";
@@ -14,6 +14,7 @@ export global CaptureSettings {
     in-out property <float> avif-quality: 85;
     in-out property <float> jxl-quality: 85;
     in-out property <bool> series-folders: false;
+    in-out property <bool> simple-screencaps: true;
     callback settings-changed(string, int);
 }
 
@@ -130,7 +131,7 @@ export component CaptureSettingsPage inherits VerticalLayout {
         }
         SettingsRow { setting-key: "reader:captures/resolution";
             row-title: @tr("Screencap resolution");
-            row-desc: @tr("Capture the visible chapter area using device pixels or the chapter's original pixels.");
+            row-desc: @tr("Capture your selection using device pixels or the chapter's original pixels.");
             accessible-label: @tr("Screencap resolution");
             ReaderSelect {
                 width: Math.min(252px, Math.max(0px, root.width - 32px));
@@ -139,6 +140,16 @@ export component CaptureSettingsPage inherits VerticalLayout {
                 model: [@tr("Device resolution"), @tr("Chapter resolution")];
                 current-index <=> CaptureSettings.resolution-index;
                 selected(_) => { CaptureSettings.settings-changed("resolution", self.current-index); }
+            }
+        }
+        SettingsRow { setting-key: "reader:captures/simple_screencaps";
+            row-title: @tr("Show simple screencap actions");
+            row-desc: @tr("Add Save screencap (simple) and Copy screencap (simple) to capture the visible area immediately. Standard screencap actions open the selection editor.");
+            ToggleSwitch {
+                name: @tr("Show simple screencap actions"); enabled: root.interactive;
+                checked <=> CaptureSettings.simple-screencaps;
+                accessible-action-default => { if self.enabled { self.checked = !self.checked; CaptureSettings.settings-changed("simple_screencaps", self.checked ? 1 : 0); } }
+                toggled => { CaptureSettings.settings-changed("simple_screencaps", self.checked ? 1 : 0); }
             }
         }
         SettingsRow { setting-key: "reader:captures/series_folders";

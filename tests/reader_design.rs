@@ -106,7 +106,7 @@ fn reader_context_menu_targets_images_and_preserves_reader_gestures() {
         "Save image",
         "Save screencap",
         "Copy image to clipboard",
-        "Copy screencap to clipboard",
+        "Copy screencap",
     ] {
         button(&ui, label);
     }
@@ -229,7 +229,7 @@ fn reader_context_menu_targets_images_and_preserves_reader_gestures() {
             .is_some()
     );
     ui.set_reader_context_busy(false);
-    button(&ui, "Copy screencap to clipboard").mock_single_click(PointerEventButton::Left);
+    button(&ui, "Copy screencap").mock_single_click(PointerEventButton::Left);
     settle();
     assert_eq!(
         lifecycle.borrow().iter().rev().nth(1).unwrap(),
@@ -845,4 +845,114 @@ fn android_scrolls_do_not_lift_cards_or_open_titles_while_desktop_hover_remains(
             }
         }
     }
+}
+
+#[test]
+fn keyboard_capture_freezes_current_viewport_before_first_and_after_pointer_open() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().unwrap();
+    let image = slint::Image::from_rgb8(slint::SharedPixelBuffer::new(20, 160));
+    ui.set_pages(ModelRc::new(VecModel::from(vec![PageRow {
+        tiles: ModelRc::new(VecModel::from(vec![TileRow {
+            image,
+            offset: 0.,
+            fraction: 1.,
+            ..Default::default()
+        }])),
+        ratio: 8.,
+        position: 0.,
+        loaded: true,
+        page_id: "keyboard-capture-page".into(),
+        ..Default::default()
+    }])));
+    ui.set_total_ratio(8.);
+    ui.set_current_page(0);
+    ui.set_reading_mode(0);
+    ui.set_section(6);
+    let captured = Rc::new(RefCell::new(Vec::new()));
+    ui.on_reader_context_opening({
+        let weak = ui.as_weak();
+        let captured = captured.clone();
+        move |page| {
+            let ui = weak.unwrap();
+            assert_eq!(page, 0);
+            assert!(!ui.get_reader_context_visible());
+            assert!(!ui.get_reader_osd());
+            let frame = ui.get_reader_capture_viewport();
+            let reader = ElementHandle::find_by_element_id(&ui, "AppWindow::reader")
+                .next()
+                .unwrap();
+            let origin = reader.absolute_position();
+            let size = reader.size();
+            for (actual, expected) in [
+                (frame.x, origin.x),
+                (frame.y, origin.y),
+                (frame.width, size.width),
+                (frame.height, size.height),
+                (frame.content_x, ui.get_scroll_x()),
+                (frame.content_y, ui.get_scroll_y()),
+            ] {
+                assert!((actual - expected).abs() < 0.01, "{actual} != {expected}");
+            }
+            assert!(frame.width > 0. && frame.height > 0.);
+            captured.borrow_mut().push(frame);
+        }
+    });
+    ui.show().unwrap();
+    ui.window().set_size(LogicalSize::new(390., 844.));
+    ui.set_zoom(1.25);
+    ui.set_scroll_x(-35.);
+    ui.set_scroll_y(-410.);
+    settle();
+
+    // First entry is entirely keyboard-driven: no pointer action has had an
+    // opportunity to initialize the capture viewport.
+    key(&ui, Key::Menu);
+    assert!(ui.get_reader_context_visible());
+    assert_eq!(captured.borrow().len(), 1);
+    key(&ui, Key::Escape);
+
+    let reader = ElementHandle::find_by_element_id(&ui, "AppWindow::reader")
+        .next()
+        .unwrap();
+    let origin = reader.absolute_position();
+    let size = reader.size();
+    let position =
+        slint::LogicalPosition::new(origin.x + size.width / 2., origin.y + size.height / 2.);
+    ui.window().dispatch_event(WindowEvent::PointerPressed {
+        position,
+        button: PointerEventButton::Right,
+    });
+    ui.window().dispatch_event(WindowEvent::PointerReleased {
+        position,
+        button: PointerEventButton::Right,
+    });
+    settle();
+    assert!(ui.get_reader_context_visible());
+    assert_eq!(captured.borrow().len(), 2);
+    key(&ui, Key::Escape);
+    let prior_pointer = captured.borrow()[1].clone();
+
+    // A subsequent keyboard entry must replace every prior pointer transform
+    // after layout, pan, zoom and vertical position have all changed.
+    ui.window().set_size(LogicalSize::new(740., 500.));
+    ui.set_zoom(1.8);
+    ui.set_scroll_x(-110.);
+    ui.set_scroll_y(-900.);
+    settle();
+    ui.window().dispatch_event(WindowEvent::KeyPressed {
+        text: Key::Shift.into(),
+    });
+    key(&ui, Key::F10);
+    ui.window().dispatch_event(WindowEvent::KeyReleased {
+        text: Key::Shift.into(),
+    });
+    assert!(ui.get_reader_context_visible());
+    assert_eq!(captured.borrow().len(), 3);
+    let frames = captured.borrow();
+    let keyboard = &frames[2];
+    assert!((keyboard.width - prior_pointer.width).abs() > 1.);
+    assert!((keyboard.height - prior_pointer.height).abs() > 1.);
+    assert!((keyboard.content_x - prior_pointer.content_x).abs() > 1.);
+    assert!((keyboard.content_y - prior_pointer.content_y).abs() > 1.);
 }

@@ -347,6 +347,10 @@ pub fn deliver_with_context(
     context: SaveContext,
     callback: impl FnOnce(Result<(), String>) + Send + 'static,
 ) {
+    if !(context.current)() {
+        callback(Err("Image action cancelled".into()));
+        return;
+    }
     if !matches!(
         image.mime.as_str(),
         "image/png" | "image/jpeg" | "image/webp" | "image/avif" | "image/jxl"
@@ -558,7 +562,7 @@ mod platform {
                     while let Ok(job) = receiver.recv() {
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             if job.clipboard {
-                                copy(&job.image, &mut clipboard)
+                                copy(&job.image, &job.context, &mut clipboard)
                             } else {
                                 save(&job.image, &job.context)
                             }
@@ -609,7 +613,14 @@ mod platform {
         super::publish_file(&pictures.join("Nova Reader"), image, context).map(|_| ())
     }
 
-    fn copy(image: &ExportImage, clipboard: &mut Option<arboard::Clipboard>) -> Result<(), String> {
+    fn copy(
+        image: &ExportImage,
+        context: &SaveContext,
+        clipboard: &mut Option<arboard::Clipboard>,
+    ) -> Result<(), String> {
+        if !(context.current)() {
+            return Err("Image action cancelled".into());
+        }
         let rgba = reader_engine::decode_image(
             &image.bytes,
             reader_engine::DecodeLimits {
@@ -625,6 +636,9 @@ mod platform {
                 arboard::Clipboard::new()
                     .map_err(|error| format!("Cannot access image clipboard: {error}"))?,
             );
+        }
+        if !(context.current)() {
+            return Err("Image action cancelled".into());
         }
         clipboard
             .as_mut()
@@ -751,7 +765,7 @@ mod platform {
                     finish(completion, result);
                 };
                 if clipboard {
-                    crate::android_documents::copy_image(path, &image.mime, finished);
+                    crate::android_documents::copy_image_current(path, &image.mime, context.current.clone(), finished);
                 } else {
                     let policy=match context.policy {
                         ConflictPolicy::Ask=>crate::android_documents::ImageConflictPolicy::Ask,
@@ -799,6 +813,37 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancelled_selection_never_enters_save_or_clipboard_delivery() {
+        let revision = reader_capture::selection::Revision::default();
+        for clipboard in [false, true] {
+            let ticket = revision.advance();
+            let current: ExportCurrent = Arc::new(move || ticket.current());
+            let context = SaveContext::new(
+                "cancelled.png".into(),
+                "",
+                &CapturePreferences::default(),
+                Arc::new(|_, _, _| panic!("cancelled selection cannot prompt")),
+                current,
+            );
+            revision.advance();
+            let (sender, receiver) = std::sync::mpsc::channel();
+            deliver_with_context(
+                ExportImage::from_rgba(1, 1, &[1, 2, 3, 255]).unwrap(),
+                clipboard,
+                context,
+                move |result| sender.send(result).unwrap(),
+            );
+            assert!(
+                receiver
+                    .recv_timeout(std::time::Duration::from_secs(1))
+                    .unwrap()
+                    .unwrap_err()
+                    .contains("cancelled")
+            );
+        }
+    }
 
     #[test]
     fn screenshot_png_preserves_physical_pixels_and_alpha() {

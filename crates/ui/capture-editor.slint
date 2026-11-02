@@ -1,0 +1,329 @@
+// Source pixels stay in the capture backend. This canvas only edits normalized
+// bounds, so neither the dimming nor the controls can enter the exported image.
+import { Theme, SettingsStyle } from "@NovaUiShared";
+import { ControlTouchArea } from "@NovaUiBase/control-input.slint";
+import { PillButton } from "@NovaUiBase/settings-controls.slint";
+import { BackButton } from "controls.slint";
+import { Spinner } from "std-widgets.slint";
+
+export struct CaptureCropRect { x: float, y: float, width: float, height: float }
+struct HandlePosition { horizontal: int, vertical: int, label: string }
+
+component CropHandle inherits Rectangle {
+    in property <int> horizontal;
+    in property <int> vertical;
+    in property <string> label;
+    in property <bool> enabled: true;
+    in property <bool> focused;
+    callback began(length, length);
+    callback dragged(length, length);
+    callback ended;
+    callback activated;
+    width: 44px; height: 44px;
+    accessible-role: button; accessible-label: root.label;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.activated(); } }
+    Rectangle {
+        width: root.horizontal == 0 ? 28px : root.vertical == 0 ? 10px : 14px;
+        height: root.vertical == 0 ? 28px : root.horizontal == 0 ? 10px : 14px;
+        x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+        border-radius: 5px;
+        background: Theme.current.accent_soft;
+        border-width: root.focused ? 3px : 1px;
+        border-color: root.focused ? Theme.current.focus_ring : Theme.current.artwork_canvas;
+    }
+    touch := ControlTouchArea {
+        enabled: root.enabled; mouse-cursor: pointer;
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+                root.began(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            } else if event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel {
+                root.ended();
+            }
+        }
+        moved => { if self.pressed { root.dragged(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y); } }
+        changed enabled => { if !self.enabled { root.ended(); } }
+    }
+}
+
+export component CaptureEditor inherits Rectangle {
+    in property <image> source;
+    in-out property <CaptureCropRect> crop;
+    in property <bool> busy;
+    in property <string> error;
+    in property <bool> preview-mode;
+    in property <bool> copy;
+    in property <bool> can-extend-above;
+    in property <bool> can-extend-below;
+    in property <length> safe-top;
+    in property <length> safe-bottom;
+    in property <length> safe-left;
+    in property <length> safe-right;
+    callback selection-changed(CaptureCropRect);
+    callback action(string);
+    background: Theme.current.artwork_canvas;
+    accessible-role: groupbox; accessible-label: @tr("Screencap selection editor");
+    private property <float> initial-ratio: 0;
+    private property <int> focused-control: 2;
+    private property <bool> dragging;
+    private property <int> drag-horizontal;
+    private property <int> drag-vertical;
+    private property <length> pointer-x;
+    private property <length> pointer-y;
+    private property <length> drag-offset-x;
+    private property <length> drag-offset-y;
+    private property <int> extension-direction;
+    private property <bool> extension-wait;
+    private property <[HandlePosition]> handles: [
+        { horizontal: -1, vertical: -1, label: @tr("Resize selection top left") },
+        { horizontal: 0, vertical: -1, label: @tr("Resize selection top") },
+        { horizontal: 1, vertical: -1, label: @tr("Resize selection top right") },
+        { horizontal: 1, vertical: 0, label: @tr("Resize selection right") },
+        { horizontal: 1, vertical: 1, label: @tr("Resize selection bottom right") },
+        { horizontal: 0, vertical: 1, label: @tr("Resize selection bottom") },
+        { horizontal: -1, vertical: 1, label: @tr("Resize selection bottom left") },
+        { horizontal: -1, vertical: 0, label: @tr("Resize selection left") },
+    ];
+    private property <bool> has-image: root.source.width > 0 && root.source.height > 0;
+    init => {
+        if root.has-image { root.initial-ratio = root.source.height / max(1, root.source.width); }
+        scope.focus();
+    }
+    changed source => {
+        if root.initial-ratio == 0 && root.has-image && !root.preview-mode {
+            root.initial-ratio = root.source.height / max(1, root.source.width);
+        }
+        if root.extension-direction != 0 { reveal-extension.restart(); }
+    }
+    changed preview-mode => { root.dragging = false; canvas-scroll.content-y = 0px; root.focused-control = 1; }
+    changed busy => { if !root.busy { root.extension-wait = false; } }
+    function handle-x(side: int) -> float { return root.crop.x + root.crop.width * (side + 1) / 2; }
+    function handle-y(side: int) -> float { return root.crop.y + root.crop.height * (side + 1) / 2; }
+    function extend(direction: int) {
+        if root.busy || root.extension-wait || root.preview-mode { return; }
+        if (direction < 0 && !root.can-extend-above) || (direction > 0 && !root.can-extend-below) { return; }
+        root.extension-direction = direction;
+        root.extension-wait = true;
+        extension-delay.restart();
+        root.action(direction < 0 ? "extend-above" : "extend-below");
+    }
+    function resize(horizontal: int, vertical: int, x: float, y: float) {
+        let min-width = min(1, 24px / max(1px, image-content.width));
+        let min-height = min(1, 24px / max(1px, image-content.height));
+        let left = horizontal < 0 ? Math.clamp(x, 0, root.crop.x + root.crop.width - min-width) : root.crop.x;
+        let right = horizontal > 0 ? Math.clamp(x, root.crop.x + min-width, 1) : root.crop.x + root.crop.width;
+        let top = vertical < 0 ? Math.clamp(y, 0, root.crop.y + root.crop.height - min-height) : root.crop.y;
+        let bottom = vertical > 0 ? Math.clamp(y, root.crop.y + min-height, 1) : root.crop.y + root.crop.height;
+        root.crop = { x: left, y: top, width: right - left, height: bottom - top };
+        root.selection-changed(root.crop);
+    }
+    function drag-to(x: length, y: length) {
+        root.pointer-x = x; root.pointer-y = y;
+        root.resize(root.drag-horizontal, root.drag-vertical,
+            (x - root.drag-offset-x - image-content.absolute-position.x) / max(1px, image-content.width),
+            (y - root.drag-offset-y - image-content.absolute-position.y) / max(1px, image-content.height));
+    }
+    function activate(index: int) {
+        if index == 0 { root.action("cancel"); }
+        else if root.busy || !root.has-image { return; }
+        else if index == 1 { root.action(root.preview-mode ? "adjust" : "preview"); }
+        else if index == 2 { root.action("confirm"); }
+        else if index == 3 { root.extend(-1); }
+        else if index == 4 { root.extend(1); }
+    }
+    // The overlay owns input. The reader below never receives scroll, taps or
+    // keys while selecting; handles are siblings of Flickable, so touch drags
+    // cannot be mistaken for chapter or canvas pans.
+    TouchArea { width: 100%; height: 100%; scroll-event(event) => { accept } }
+    header := Rectangle {
+        x: root.safe-left; y: root.safe-top;
+        width: root.width - root.safe-left - root.safe-right; height: 60px;
+        background: Theme.current.popup;
+        BackButton { x: 8px; y: 8px; clicked => { root.action("cancel"); } }
+        Text {
+            x: 60px; width: parent.width - 76px; height: 100%;
+            text: root.preview-mode ? @tr("Screencap preview") : @tr("Select screencap");
+            color: Theme.current.text_bright; font-size: 18px; font-weight: 600;
+            vertical-alignment: center; overflow: elide;
+        }
+    }
+    canvas := Rectangle {
+        x: root.safe-left; y: header.y + header.height;
+        width: root.width - root.safe-left - root.safe-right;
+        height: max(1px, footer.y - self.y); clip: true;
+        canvas-scroll := Flickable {
+            width: 100%; height: 100%;
+            interactive: !root.dragging;
+            content-width: self.width;
+            content-height: max(self.height, image-content.height + (root.preview-mode ? 48px : 144px));
+            image-content := Rectangle {
+                width: root.preview-mode ? min(max(1px, canvas.width - 48px), max(1px, canvas.height - 48px) * max(1, root.source.width) / max(1, root.source.height))
+                    : min(max(1px, canvas.width - 48px), max(1px, canvas.height - 144px) / max(0.1, root.initial-ratio));
+                height: root.has-image ? self.width * root.source.height / max(1, root.source.width) : max(1px, canvas.height - 56px);
+                x: (canvas.width - self.width) / 2;
+                y: max(root.preview-mode ? 24px : 72px, (canvas.height - self.height) / 2);
+                Image { source: root.source; width: 100%; height: 100%; image-fit: fill; }
+                if !root.preview-mode && root.has-image: Rectangle {
+                    x: 0px; y: 0px; width: 100%; height: root.crop.y * parent.height; background: #00000099;
+                }
+                if !root.preview-mode && root.has-image: Rectangle {
+                    x: 0px; y: (root.crop.y + root.crop.height) * parent.height; width: 100%; height: max(0px, parent.height - self.y); background: #00000099;
+                }
+                if !root.preview-mode && root.has-image: Rectangle {
+                    x: 0px; y: root.crop.y * parent.height; width: root.crop.x * parent.width; height: root.crop.height * parent.height; background: #00000099;
+                }
+                if !root.preview-mode && root.has-image: Rectangle {
+                    x: (root.crop.x + root.crop.width) * parent.width; y: root.crop.y * parent.height;
+                    width: max(0px, parent.width - self.x); height: root.crop.height * parent.height; background: #00000099;
+                }
+                if !root.preview-mode && root.has-image: Rectangle {
+                    x: root.crop.x * parent.width; y: root.crop.y * parent.height;
+                    width: root.crop.width * parent.width; height: root.crop.height * parent.height;
+                    background: transparent; border-width: 2px; border-color: Theme.current.accent_soft;
+                }
+            }
+        }
+        if !root.preview-mode && root.has-image: Rectangle {
+          width: 100%; height: 100%;
+          for handle[index] in root.handles: CropHandle {
+            enabled: !root.busy;
+            horizontal: handle.horizontal; vertical: handle.vertical; label: handle.label;
+            x: image-content.x + root.handle-x(handle.horizontal) * image-content.width - self.width / 2;
+            y: canvas-scroll.content-y + image-content.y + root.handle-y(handle.vertical) * image-content.height - self.height / 2;
+            focused: scope.has-focus && SettingsStyle.keyboard-mode && root.focused-control == index + 5;
+            activated => { root.focused-control = index + 5; SettingsStyle.keyboard-mode = true; scope.focus(); }
+            began(x,y) => {
+                root.focused-control = index + 5; SettingsStyle.keyboard-mode = false; scope.focus();
+                root.drag-horizontal = handle.horizontal; root.drag-vertical = handle.vertical;
+                root.drag-offset-x = x - image-content.absolute-position.x - root.handle-x(handle.horizontal) * image-content.width;
+                root.drag-offset-y = y - image-content.absolute-position.y - root.handle-y(handle.vertical) * image-content.height;
+                root.pointer-x = x; root.pointer-y = y; root.dragging = true;
+            }
+            dragged(x,y) => { if root.dragging { root.drag-to(x,y); } }
+            ended => { root.dragging = false; }
+          }
+        }
+        if !root.preview-mode: PillButton {
+            x: (canvas.width - self.width) / 2; y: 8px;
+            label: @tr("Extend above"); compact: true;
+            enabled: !root.busy && root.has-image && root.can-extend-above;
+            focused: scope.has-focus && SettingsStyle.keyboard-mode && root.focused-control == 3;
+            accessible-action-default => { root.extend(-1); }
+            clicked => { root.extend(-1); }
+        }
+        if !root.preview-mode: PillButton {
+            x: (canvas.width - self.width) / 2; y: max(8px, canvas.height - self.height - 8px);
+            label: @tr("Extend below"); compact: true;
+            enabled: !root.busy && root.has-image && root.can-extend-below;
+            focused: scope.has-focus && SettingsStyle.keyboard-mode && root.focused-control == 4;
+            accessible-action-default => { root.extend(1); }
+            clicked => { root.extend(1); }
+        }
+        if root.busy || !root.has-image: Rectangle {
+            x: (parent.width - 180px) / 2; y: (parent.height - 56px) / 2;
+            width: 180px; height: 56px; background: Theme.current.popup; border-radius: Theme.card_corner_radius;
+            HorizontalLayout {
+                padding: 12px; spacing: 10px;
+                Spinner { width: 20px; height: 20px; }
+                Text { text: @tr("Preparing selection…"); color: Theme.current.text_bright; vertical-alignment: center; }
+            }
+        }
+    }
+    footer := Rectangle {
+        x: root.safe-left; width: root.width - root.safe-left - root.safe-right;
+        height: 76px + (root.error != "" ? error-text.preferred-height + 12px : 0px);
+        y: root.height - root.safe-bottom - self.height;
+        background: Theme.current.popup;
+        error-text := Text {
+            x: 16px; y: 10px; width: max(1px, parent.width - 32px);
+            visible: root.error != ""; text: root.error; wrap: word-wrap;
+            color: Theme.current.text_bright; font-size: 13px;
+            accessible-role: text; accessible-label: root.error;
+        }
+        HorizontalLayout {
+            width: min(560px, max(1px, parent.width - 24px)); height: 48px;
+            x: (parent.width - self.width) / 2; y: parent.height - 62px; spacing: 10px;
+            PillButton {
+                width: (min(560px, max(1px, footer.width - 24px)) - 20px) / 3; height: 48px;
+                label: @tr("Cancel"); compact: true; wrap-label: true;
+                focused: scope.has-focus && SettingsStyle.keyboard-mode && root.focused-control == 0;
+                accessible-action-default => { root.action("cancel"); }
+                clicked => { root.action("cancel"); }
+            }
+            PillButton {
+                width: (min(560px, max(1px, footer.width - 24px)) - 20px) / 3; height: 48px;
+                label: root.preview-mode ? @tr("Adjust selection") : @tr("Preview"); compact: true; wrap-label: true;
+                enabled: root.has-image && !root.busy;
+                focused: scope.has-focus && SettingsStyle.keyboard-mode && root.focused-control == 1;
+                accessible-action-default => { root.activate(1); }
+                clicked => { root.activate(1); }
+            }
+            PillButton {
+                width: (min(560px, max(1px, footer.width - 24px)) - 20px) / 3; height: 48px;
+                label: root.copy ? @tr("Copy") : @tr("Save"); primary: true; compact: true; wrap-label: true;
+                enabled: root.has-image && !root.busy;
+                focused: scope.has-focus && SettingsStyle.keyboard-mode && root.focused-control == 2;
+                accessible-action-default => { root.activate(2); }
+                clicked => { root.activate(2); }
+            }
+        }
+    }
+    extension-delay := Timer { interval: 400ms; running: false; triggered => { self.stop(); if !root.busy { root.extension-wait = false; } } }
+    reveal-extension := Timer {
+        interval: 1ms; running: false;
+        triggered => {
+            self.stop();
+            canvas-scroll.content-y = root.extension-direction < 0 ? 0px : min(0px, canvas.height - canvas-scroll.content-height);
+            root.extension-direction = 0;
+        }
+    }
+    auto-scroll := Timer {
+        interval: 24ms; running: root.dragging && !root.busy;
+        triggered => {
+            let y = root.pointer-y - canvas.absolute-position.y;
+            let delta = y < 72px ? 14px : y > canvas.height - 72px ? -14px : 0px;
+            let next = Math.clamp(canvas-scroll.content-y + delta, min(0px, canvas.height - canvas-scroll.content-height), 0px);
+            if next != canvas-scroll.content-y {
+                canvas-scroll.content-y = next;
+                root.drag-to(root.pointer-x, root.pointer-y);
+            } else if root.drag-vertical < 0 && y < 72px { root.extend(-1); }
+            else if root.drag-vertical > 0 && y > canvas.height - 72px { root.extend(1); }
+        }
+    }
+    scope := FocusScope {
+        width: 0px; height: 0px;
+        key-pressed(event) => {
+            SettingsStyle.keyboard-mode = true;
+            if event.text == Key.Escape || event.text == Key.Back || event.text == Key.Backspace {
+                root.action(root.preview-mode ? "adjust" : "cancel"); return accept;
+            }
+            if event.text == Key.Tab {
+                root.focused-control = Math.mod(root.focused-control + (event.modifiers.shift ? (root.preview-mode ? 2 : 12) : 1), root.preview-mode ? 3 : 13);
+                if root.focused-control >= 5 {
+                    let handle = root.handles[root.focused-control - 5];
+                    let y = image-content.y + root.handle-y(handle.vertical) * image-content.height;
+                    canvas-scroll.content-y = Math.clamp(canvas.height / 2 - y, min(0px, canvas.height - canvas-scroll.content-height), 0px);
+                }
+                return accept;
+            }
+            if event.text == Key.Return || event.text == " " {
+                if !event.repeat { root.activate(root.focused-control); } return accept;
+            }
+            if root.focused-control >= 5 && !root.preview-mode && !root.busy {
+                let handle = root.handles[root.focused-control - 5];
+                let step = event.modifiers.shift ? 0.05 : 0.01;
+                if event.text == Key.LeftArrow || event.text == Key.RightArrow || event.text == Key.UpArrow || event.text == Key.DownArrow {
+                    root.resize(handle.horizontal, handle.vertical,
+                        root.handle-x(handle.horizontal) + (event.text == Key.LeftArrow ? -step : event.text == Key.RightArrow ? step : 0),
+                        root.handle-y(handle.vertical) + (event.text == Key.UpArrow ? -step : event.text == Key.DownArrow ? step : 0));
+                    return accept;
+                }
+            }
+            if event.text == Key.PageUp || event.text == Key.PageDown {
+                canvas-scroll.content-y = Math.clamp(canvas-scroll.content-y + (event.text == Key.PageUp ? canvas.height * 0.8 : -canvas.height * 0.8), min(0px, canvas.height - canvas-scroll.content-height), 0px);
+            }
+            return accept;
+        }
+    }
+    forward-focus: scope;
+}
