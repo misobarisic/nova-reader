@@ -1,6 +1,6 @@
 // Addon-scoped compression using the same Nova Kit controls as global settings.
 import { Dropdown } from "@NovaUiBase/dropdown.slint";
-import { InterfaceStyle } from "@NovaUiShared";
+import { Theme, InterfaceStyle } from "@NovaUiShared";
 import { SettingsCard, SectionHeader } from "@NovaUiBase/settings-controls.slint";
 import { CacheCompressionToggle, CacheQualityControl } from "@NovaUiBase/cache-settings-controls.slint";
 import { SettingsRow } from "settings-row.slint";
@@ -145,4 +145,8 @@ export component SourceCompressionSettingsPanel inherits VerticalLayout {
             }
         }
     }    }
+    Text {
+        text: @tr("Explicit compression choices sync with this addon when sync is enabled. Global compression follows the effective Cache settings on each device; storage budgets always stay local.");
+        color: Theme.current.text_settings; wrap: word-wrap; min-width: 0px;
+    }
 }

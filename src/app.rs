@@ -3834,6 +3834,16 @@ fn capture_chapter_request(
         .chain(reader.presentations.keys())
         .copied()
         .collect();
+    // Keep the page geometry tied to the original frame, but export only the
+    // visible loaded artwork on desktop (not its centered letterbox gutters).
+    let viewport = media_capture_viewport(
+        viewport,
+        pages
+            .iter()
+            .filter(|page| model.row_data(page.index).is_some_and(|row| row.loaded))
+            .map(|page| page.rect),
+        ui.get_reader_platform_android(),
+    )?;
     let color = ui.get_reader_capture_background();
     let originals = app
         .capture_originals
@@ -3923,6 +3933,30 @@ fn paged_capture_rect(
         height: image_height,
     }
 }
+/// Clip only exterior viewport space, never trim black pixels from the source
+/// itself. Internal gaps between visible pages remain part of their composition.
+fn media_capture_viewport(
+    viewport: crate::chapter_capture::Rect,
+    media: impl Iterator<Item = crate::chapter_capture::Rect>,
+    preserve_frame: bool,
+) -> Result<crate::chapter_capture::Rect> {
+    if preserve_frame {
+        return Ok(viewport);
+    }
+    media
+        .filter_map(|rect| rect.intersection(viewport))
+        .reduce(|a, b| {
+            let x = a.x.min(b.x);
+            let y = a.y.min(b.y);
+            crate::chapter_capture::Rect {
+                x,
+                y,
+                width: a.right().max(b.right()) - x,
+                height: a.bottom().max(b.bottom()) - y,
+            }
+        })
+        .ok_or_else(|| text::tr("No artwork in the selected area."))
+}
 fn capture_reader(ui: &AppWindow) -> Result<ReaderScreencap> {
     let size = ui.window().size();
     if u64::from(size.width) * u64::from(size.height) > 8_000_000 {
@@ -3932,17 +3966,40 @@ fn capture_reader(ui: &AppWindow) -> Result<ReaderScreencap> {
     // current scene offscreen, so neither the menu nor hidden OSD is captured.
     let image = ui.window().take_snapshot().map_err(error)?;
     let frame = ui.get_reader_capture_viewport();
+    let viewport = crate::chapter_capture::Rect {
+        x: f64::from(frame.x),
+        y: f64::from(frame.y),
+        width: f64::from(frame.width),
+        height: f64::from(frame.height),
+    };
+    let model = ui.get_pages();
+    let media = (0..model.row_count()).filter_map(|index| {
+        let row = model.row_data(index).filter(|row| row.loaded)?;
+        if ui.get_reading_mode() != 0 && index != ui.get_current_page() as usize {
+            return None;
+        }
+        Some(chapter_capture_rect_with_split(
+            &frame,
+            f64::from(ui.get_reader_width()),
+            ui.get_reading_mode(),
+            &row,
+            (ui.get_reading_mode() != 0 && ui.get_reader_split_page())
+                .then_some(ui.get_reader_split_half()),
+            f64::from(ui.get_zoom()),
+        ))
+    });
+    let bounds = media_capture_viewport(viewport, media, ui.get_reader_platform_android())?;
     let scale = f64::from(ui.window().scale_factor());
-    let left = (f64::from(frame.x) * scale)
+    let left = (bounds.x * scale)
         .floor()
         .clamp(0., f64::from(image.width())) as u32;
-    let top = (f64::from(frame.y) * scale)
+    let top = (bounds.y * scale)
         .floor()
         .clamp(0., f64::from(image.height())) as u32;
-    let right = (f64::from(frame.x + frame.width) * scale)
+    let right = (bounds.right() * scale)
         .ceil()
         .clamp(f64::from(left), f64::from(image.width())) as u32;
-    let bottom = (f64::from(frame.y + frame.height) * scale)
+    let bottom = (bounds.bottom() * scale)
         .ceil()
         .clamp(f64::from(top), f64::from(image.height())) as u32;
     let width = right - left;
@@ -4495,6 +4552,7 @@ pub fn run(services: Services) -> Result<()> {
     let reapply = Arc::downgrade(&app);
     crate::sync_settings::install_reapply(move |ui| {
         if let Some(app) = reapply.upgrade() {
+            app.reload_synced_reader_mode();
             app.apply_reader_preferences(ui);
         }
     });
@@ -6849,6 +6907,81 @@ mod tests {
         assert_eq!(rect.width, 780.);
         assert_eq!(rect.height, 3120.);
         assert_eq!(rect.y, 24. - 163. - 1560.);
+    }
+
+    #[test]
+    fn desktop_screencaps_bound_visible_media_without_exterior_gutters() {
+        use crate::chapter_capture::Rect;
+        let viewport = Rect {
+            x: 10.,
+            y: 24.,
+            width: 1000.,
+            height: 600.,
+        };
+        let strip = Rect {
+            x: 150.,
+            y: -200.,
+            width: 720.,
+            height: 2000.,
+        };
+        let clipped = media_capture_viewport(viewport, [strip].into_iter(), false).unwrap();
+        assert_eq!(
+            clipped,
+            Rect {
+                x: 150.,
+                y: 24.,
+                width: 720.,
+                height: 600.
+            }
+        );
+        let page = Rect {
+            x: 210.,
+            y: 124.,
+            width: 600.,
+            height: 400.,
+        };
+        assert_eq!(
+            media_capture_viewport(viewport, [page].into_iter(), false).unwrap(),
+            page
+        );
+        let zoomed = Rect {
+            x: -100.,
+            y: -50.,
+            width: 1500.,
+            height: 2000.,
+        };
+        assert_eq!(
+            media_capture_viewport(viewport, [zoomed].into_iter(), false).unwrap(),
+            viewport
+        );
+        // Keep internal page gaps, but exclude offscreen/unloaded geometry.
+        let pages = [
+            Rect {
+                y: -100.,
+                height: 300.,
+                ..strip
+            },
+            Rect {
+                y: 216.,
+                height: 100.,
+                ..strip
+            },
+        ];
+        assert_eq!(
+            media_capture_viewport(viewport, pages.into_iter(), false).unwrap(),
+            Rect {
+                x: 150.,
+                y: 24.,
+                width: 720.,
+                height: 292.
+            }
+        );
+        assert_eq!(
+            media_capture_viewport(viewport, [page].into_iter(), true).unwrap(),
+            viewport,
+            "Android retains its existing framing"
+        );
+        assert!(media_capture_viewport(viewport, std::iter::empty(), false).is_err());
     }
 
     #[test]

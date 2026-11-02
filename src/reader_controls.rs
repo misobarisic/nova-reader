@@ -353,6 +353,14 @@ pub(super) fn wire(app: &Arc<Controller>, ui: &AppWindow) {
 }
 
 impl Controller {
+    pub(super) fn reload_synced_reader_mode(&self) {
+        let mut view = self.view();
+        if let Some(reader) = view.reader.as_mut()
+            && let Ok(choice) = crate::reader_modes::load(&reader.chapter.series, None)
+        {
+            reader.mode_choice = choice;
+        }
+    }
     pub(super) fn apply_reader_preferences(&self, ui: &AppWindow) {
         crate::reader_settings_ui::apply(ui, &reader_settings::snapshot());
         if ui.get_section() != 6 {
@@ -365,6 +373,12 @@ impl Controller {
             platform(ui);
             return;
         };
+        ui.global::<crate::ReaderSettings>()
+            .set_series_settings_key(
+                reader_settings::series_sync_key(&reader.chapter.series).into(),
+            );
+        ui.global::<crate::ReaderSettings>()
+            .set_series_mode_key(crate::reader_modes::sync_key(&reader.chapter.series).into());
         let mut prefs = reader_settings::effective(&reader.chapter.series);
         let previous_mode = reader.mode;
         if reader.collection && reader.mode_choice == ModeChoice::Default {
@@ -460,6 +474,9 @@ impl Controller {
         }
         self.publish_reader_controls(ui);
         self.request_images(ui, index);
+        if let Err(error) = crate::sync_settings::refresh_metadata(ui) {
+            ui.set_status(error.into());
+        }
         platform(ui);
     }
 
@@ -916,13 +933,15 @@ mod tests {
                     ui.set_scroll_x(0.);
                     ui.set_scroll_y(-1.5 * ui.get_reader_width());
                     advance(100);
-                    let point = (width * 0.55, height * 0.45);
+                    // The narrower desktop column remains fitted at 1.2x;
+                    // a fitted axis stays centered and has no horizontal pan.
+                    let point = (width * 0.5, height * 0.45);
                     let before = source_at(&ui, point.0, point.1);
                     wheel(&ui, point.0, point.1, 120., true);
                     let after = source_at(&ui, point.0, point.1);
                     assert!(
                         (before.0 - after.0).abs() < 0.003 && (before.1 - after.1).abs() < 0.003,
-                        "Webtoon cursor anchor accounts for the centered 1100px fit column"
+                        "Webtoon cursor anchor accounts for the centered desktop fit column"
                     );
                 }
                 // A contained image has no pan range on a still-fitted axis.
@@ -1005,6 +1024,9 @@ mod tests {
                 }
                 ui.set_reader_osd(false);
                 ui.set_reader_double_tap_enabled(true);
+                // Switch the simulated platform before computing the anchor;
+                // Android and desktop now have different fitted strip widths.
+                ui.set_reader_platform_android(true);
                 app.reader_zoom(&ui, 1., 0.5, 0.5);
                 ui.set_scroll_x(0.);
                 ui.set_scroll_y(if mode == 0 {
@@ -1012,7 +1034,6 @@ mod tests {
                 } else {
                     0.
                 });
-                ui.set_reader_platform_android(true);
                 advance(100);
                 let (cx, cy) = (width / 2., height * 0.4);
                 // Exercise the production frame callbacks before native double

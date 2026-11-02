@@ -88,6 +88,8 @@ impl LayoutPreferences {
 pub struct ReaderSettings {
     pub default_mode: ModeChoice,
     pub rotation: Rotation,
+    /// Device-local logical-pixel column cap; ignored on Android and in paged modes.
+    pub desktop_webtoon_width: u16,
     pub paged: LayoutPreferences,
     pub webtoon: LayoutPreferences,
     pub background: Background,
@@ -118,6 +120,7 @@ impl Default for ReaderSettings {
         Self {
             default_mode: ModeChoice::Automatic,
             rotation: Rotation::System,
+            desktop_webtoon_width: 720,
             paged: LayoutPreferences::default(),
             webtoon: LayoutPreferences::default(),
             background: Background::Black,
@@ -147,6 +150,12 @@ impl ReaderSettings {
         if self.default_mode == ModeChoice::Default {
             return Err("the global reading mode cannot inherit itself".into());
         }
+        bounded(
+            i32::from(self.desktop_webtoon_width),
+            320,
+            1600,
+            "desktop_webtoon_width",
+        )?;
         self.paged.validate()?;
         self.webtoon.validate()?;
         bounded(i32::from(self.navigator_modes), 0, 31, "navigator_modes")?;
@@ -187,6 +196,9 @@ impl ReaderSettings {
                 self.default_mode = mode;
             }
             "rotation" => self.rotation = value.try_into()?,
+            "desktop_webtoon_width" => {
+                self.desktop_webtoon_width = bounded(value, 320, 1600, key)? as u16
+            }
             "background" => self.background = value.try_into()?,
             "show_page_number" => self.show_page_number = boolean(value)?,
             "navigator_modes" => self.navigator_modes = bounded(value, 0, 31, key)? as u8,
@@ -356,19 +368,11 @@ struct Cache {
 }
 static CACHE: LazyLock<Mutex<Cache>> = LazyLock::new(|| Mutex::new(Cache::default()));
 
-fn series_key(series: &SeriesId) -> String {
+pub fn series_sync_key(series: &SeriesId) -> String {
     format!(
         "{SERIES_PREFIX}{}",
         serde_json::to_string(series).expect("SeriesId serializes")
     )
-}
-fn persist<T: Serialize>(key: &str, value: &T) -> Result<(), String> {
-    let raw = serde_json::to_string(&Record {
-        schema_version: 1,
-        preferences: value,
-    })
-    .map_err(|e| e.to_string())?;
-    nova_storage::try_set_str(key, &raw).map_err(|e| e.to_string())
 }
 fn read<T: serde::de::DeserializeOwned + Default>(
     key: &str,
@@ -398,11 +402,27 @@ pub fn init() -> Result<(), String> {
     cache.series.clear();
     Ok(())
 }
-/// Refresh synced global defaults without discarding this process's already
-/// loaded source-local series overrides or changing their inheritance policy.
+/// Reload defaults and already-opened series after remote projection. Read from
+/// durable storage before taking the snapshot lock; rotation remains device-local.
 pub fn reload_global() -> Result<(), String> {
     let loaded = read(SETTINGS_KEY, ReaderSettings::validate)?;
-    CACHE.lock().unwrap_or_else(|e| e.into_inner()).global = loaded;
+    let series = CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .series
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    let refreshed = series
+        .into_iter()
+        .map(|id| {
+            let value = read(&series_sync_key(&id), SeriesOverrides::validate)?;
+            Ok((id, value))
+        })
+        .collect::<Result<HashMap<_, _>, String>>()?;
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    cache.global = loaded;
+    cache.series = refreshed;
     Ok(())
 }
 /// An owned snapshot is safe to retain on workers; this never accesses storage.
@@ -426,7 +446,7 @@ pub fn load_series(series: &SeriesId) -> Result<SeriesOverrides, String> {
     }
     // Storage reads cannot hold up UI preference snapshots. A concurrent edit
     // that has already published its value wins over this first-load result.
-    let value = read(&series_key(series), SeriesOverrides::validate)?;
+    let value = read(&series_sync_key(series), SeriesOverrides::validate)?;
     let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     Ok(cache.series.entry(series.clone()).or_insert(value).clone())
 }
@@ -479,26 +499,29 @@ fn commit_series(
     cache: &mut Cache,
     series: &SeriesId,
     next: SeriesOverrides,
-    write: impl FnOnce(&SeriesOverrides) -> Result<(), String>,
+    write: impl FnOnce(&SeriesOverrides) -> Result<SeriesOverrides, String>,
 ) -> Result<SeriesOverrides, String> {
     next.validate()?;
-    write(&next)?;
+    let next = write(&next)?;
     cache.series.insert(series.clone(), next.clone());
     Ok(next)
 }
 pub fn update_series(series: &SeriesId, key: &str, value: i32) -> Result<SeriesOverrides, String> {
     load_series(series)?;
     let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    let mut next = cache.series.get(series).cloned().unwrap_or_default();
+    let previous = cache.series.get(series).cloned().unwrap_or_default();
+    let mut next = previous.clone();
     next.change(key, value)?;
     commit_series(&mut cache, series, next, |value| {
-        persist(&series_key(series), value)
+        crate::sync_settings::persist_preferences(&series_sync_key(series), &previous, value)
     })
 }
 pub fn reset_series(series: &SeriesId) -> Result<SeriesOverrides, String> {
+    load_series(series)?;
     let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let previous = cache.series.get(series).cloned().unwrap_or_default();
     commit_series(&mut cache, series, SeriesOverrides::default(), |value| {
-        persist(&series_key(series), value)
+        crate::sync_settings::persist_preferences(&series_sync_key(series), &previous, value)
     })
 }
 
@@ -511,6 +534,8 @@ mod tests {
         for (key, value) in [
             ("default_mode", 6),
             ("rotation", 7),
+            ("desktop_webtoon_width", 319),
+            ("desktop_webtoon_width", 1601),
             ("paged_side_padding", 26),
             ("navigator_modes", 32),
             ("navigator_height", 19),
@@ -587,8 +612,8 @@ mod tests {
         series.change("paged_crop_borders", -1).unwrap();
         assert_eq!(series.apply(settings.clone()), settings);
         assert_ne!(
-            series_key(&SeriesId::new("a:b", "c")),
-            series_key(&SeriesId::new("a", "b:c"))
+            series_sync_key(&SeriesId::new("a:b", "c")),
+            series_sync_key(&SeriesId::new("a", "b:c"))
         );
     }
 }

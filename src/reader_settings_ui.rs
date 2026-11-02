@@ -8,6 +8,8 @@ pub(crate) fn apply(ui: &AppWindow, preferences: &Preferences) {
     let settings = ui.global::<ReaderSettings>();
     settings.set_default_mode(preferences.default_mode.selection());
     settings.set_rotation(preferences.rotation.into());
+    settings.set_platform_android(cfg!(target_os = "android"));
+    settings.set_desktop_webtoon_width(i32::from(preferences.desktop_webtoon_width));
     settings.set_paged_tap_zones(preferences.paged.tap_zones.into());
     settings.set_paged_invert_taps(preferences.paged.invert_taps.into());
     settings.set_paged_side_padding(i32::from(preferences.paged.side_padding));

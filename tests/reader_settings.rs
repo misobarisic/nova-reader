@@ -41,6 +41,7 @@ fn defaults_overrides_legacy_modes_and_failed_edits_survive_process_boundaries()
                 reader_settings::update("paged_side_padding", 12).unwrap();
                 reader_settings::update("webtoon_crop_borders", 1).unwrap();
                 reader_settings::update("filter_color", 0x4a719b).unwrap();
+                reader_settings::update("desktop_webtoon_width", 640).unwrap();
                 reader_settings::update_series(&a, "rotation", 1).unwrap();
                 reader_settings::update_series(&a, "paged_side_padding", 0).unwrap();
                 reader_settings::update_series(&b, "rotation", 2).unwrap();
@@ -64,6 +65,7 @@ fn defaults_overrides_legacy_modes_and_failed_edits_survive_process_boundaries()
                     ModeChoice::Manual(ReadingMode::RightToLeft)
                 );
                 assert_eq!(reader_settings::snapshot().filter_color, 0x4a719b);
+                assert_eq!(reader_settings::snapshot().desktop_webtoon_width, 640);
                 assert_eq!(
                     reader_modes::load(&missing, None)
                         .unwrap()
@@ -269,5 +271,79 @@ fn settings_controls_follow_saved_values_after_edit_and_reset() {
         slider.accessible_value().as_deref(),
         Some("100"),
         "numeric control follows a reset after editing"
+    );
+}
+
+#[test]
+fn desktop_webtoon_column_padding_and_mobile_sizing_are_independent_of_zoom() {
+    use nova_reader::{AppWindow, ReaderSettings};
+    use slint::{ComponentHandle, LogicalSize};
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().unwrap();
+    ui.set_section(6);
+    ui.set_reading_mode(0);
+    ui.set_zoom(1.);
+    ui.show().unwrap();
+    ui.window().set_size(LogicalSize::new(2560., 1440.));
+    let settings = ui.global::<ReaderSettings>();
+    assert_eq!(ui.get_reader_fit_width(), 720.);
+    ui.set_reader_side_padding(10);
+    assert_eq!(
+        ui.get_reader_fit_width(),
+        576.,
+        "padding must work even on wide monitors"
+    );
+    ui.set_reader_side_padding(25);
+    assert_eq!(ui.get_reader_fit_width(), 360.);
+    settings.set_desktop_webtoon_width(640);
+    assert_eq!(ui.get_reader_fit_width(), 320.);
+    ui.set_zoom(2.);
+    assert_eq!(
+        ui.get_reader_width(),
+        640.,
+        "zoom multiplies the configured column, not the window"
+    );
+    ui.set_zoom(1.);
+    ui.set_reader_side_padding(0);
+    ui.set_reading_mode(1);
+    assert_eq!(
+        ui.get_reader_fit_width(),
+        1100.,
+        "paged layout retains its own cap"
+    );
+    ui.set_reading_mode(0);
+    ui.set_reader_platform_android(true);
+    assert_eq!(
+        ui.get_reader_fit_width(),
+        1100.,
+        "Android ignores desktop sizing"
+    );
+    ui.window().set_size(LogicalSize::new(390., 844.));
+    assert_eq!(ui.get_reader_fit_width(), 390.);
+    ui.set_reader_platform_android(false);
+    assert_eq!(
+        ui.get_reader_fit_width(),
+        390.,
+        "small desktop windows never overflow"
+    );
+    ui.set_reader_side_padding(25);
+    assert_eq!(ui.get_reader_fit_width(), 195.);
+
+    // Android never offers a desktop-only sizing preference.
+    use i_slint_backend_testing::{AccessibleRole, ElementHandle};
+    ui.set_section(19);
+    settings.set_default_mode(0);
+    for _ in 0..24 {
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
+    }
+    assert!(
+        ElementHandle::find_by_accessible_label(&ui, "Desktop webtoon width")
+            .any(|element| element.accessible_role() == Some(AccessibleRole::Slider))
+    );
+    settings.set_platform_android(true);
+    assert!(
+        ElementHandle::find_by_accessible_label(&ui, "Desktop webtoon width")
+            .next()
+            .is_none()
     );
 }

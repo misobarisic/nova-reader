@@ -34,6 +34,8 @@ fn geometry(element: &ElementHandle) -> (f32, f32, f32, f32) {
 fn reader_art_reaches_status_area_while_controls_and_normal_pages_respect_insets() {
     i_slint_backend_testing::init_no_event_loop();
     let ui = AppWindow::new().unwrap();
+    // Exercise Android cutouts, not the desktop-only webtoon column cap.
+    ui.set_reader_platform_android(true);
     ui.set_pages(ModelRc::new(VecModel::from(vec![PageRow {
         page_id: "first".into(),
         loaded: true,

@@ -613,6 +613,28 @@ mod tests {
             2,
             "logical placeholders belong to frozen chapter geometry"
         );
+        let frozen_frame = ui.get_reader_capture_viewport();
+        ui.window().set_size(slint::LogicalSize::new(1000., 600.));
+        ui.set_reader_capture_viewport(crate::ReaderCaptureViewport {
+            width: 1000.,
+            height: 600.,
+            content_y: -100.,
+            ..Default::default()
+        });
+        let mut desktop_strip = capture_chapter_request(&app, &ui, 0, true).unwrap();
+        assert_eq!(
+            (
+                desktop_strip.viewport.x,
+                desktop_strip.viewport.width,
+                desktop_strip.viewport.height
+            ),
+            (140., 720., 600.)
+        );
+        desktop_strip.output_scale = Some(1.);
+        let (strip, _) = render_capture(&desktop_strip, &CancelToken::default(), None).unwrap();
+        assert_eq!((strip.width, strip.height), (720, 600));
+        ui.window().set_size(slint::LogicalSize::new(100., 100.));
+        ui.set_reader_capture_viewport(frozen_frame);
         let selection = Selection::new(capture.viewport, &capture.pages).unwrap();
         assert!(selection.can_extend(true) && selection.can_extend(false));
         capture.viewport = crate::chapter_capture::Rect {
@@ -734,6 +756,8 @@ mod tests {
         ui: &AppWindow,
         directory: &std::path::Path,
     ) {
+        // The existing frame/extension matrix documents Android behavior.
+        ui.set_reader_platform_android(true);
         let colors = [[210, 30, 50, 255], [30, 80, 220, 255]];
         let mut rows = Vec::new();
         {
@@ -827,6 +851,27 @@ mod tests {
                         ui.set_pages(ModelRc::new(VecModel::from(rows.clone())));
                         advance();
                         let native = capture_reader(ui).unwrap();
+                        if known {
+                            ui.set_reader_platform_android(false);
+                            let mut desktop =
+                                capture_chapter_request(app, ui, reference, advanced).unwrap();
+                            desktop.output_scale = Some(1.);
+                            let selected = capture_selection(&desktop).unwrap();
+                            assert_eq!(selected.crop, desktop.viewport);
+                            let native_media = capture_reader(ui).unwrap();
+                            let (media, _) =
+                                render_capture(&desktop, &CancelToken::default(), None).unwrap();
+                            assert_eq!((media.width, media.height), (320, 160));
+                            assert_eq!((native_media.width, native_media.height), (320, 160));
+                            assert_eq!(media.pixels, native_media.pixels);
+                            assert!(
+                                media
+                                    .pixels
+                                    .chunks_exact(4)
+                                    .all(|pixel| pixel == colors[reference as usize])
+                            );
+                            ui.set_reader_platform_android(true);
+                        }
                         let (rendered, naming) =
                             render_capture(&capture, &CancelToken::default(), None).unwrap();
                         assert_eq!((rendered.width, rendered.height), (320, 240));

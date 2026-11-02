@@ -64,9 +64,9 @@ cannot revive on a later open.
 Changes publish only after the fallible durable write succeeds. On failure the
 current mode and saved selection remain unchanged. Chapter-open completion
 reloads the latest choice to respect a manual change made while source metadata
-was loading. Image work cannot modify the choice. These records are app-local
-metadata, like chapter order; they are not included in the current domain-only
-native backup schema.
+was loading. Image work cannot modify the choice. These records synchronize as
+source-scoped portable settings, including Default resets; they remain outside
+the current domain-only native backup schema. Chapter ordering stays local.
 
 Unreadable or future-version preference records remain untouched and use
 Default for the current session, allowing the reader to open and a deliberate
@@ -76,13 +76,20 @@ reading. Explicit user writes remain fallible and never publish on failure.
 
 ## Reader settings
 
-`src/reader_settings.rs` keeps device defaults under `reader:reader-settings` and
+`src/reader_settings.rs` keeps global defaults under `reader:reader-settings` and
 series overrides under `reader:reader-settings-series:<JSON SeriesId>`. Both
 source and local series ID participate. The UI uses cached snapshots while
 scrolling; edits publish only after storage succeeds. Layout and orientation
 changes in the in-reader panel belong to that series; the Reader page in More
 edits global defaults. The per-series reset restores layout/orientation
-inheritance without changing the selected reading mode.
+inheritance without changing the selected reading mode. Reading mode and each
+paged/Webtoon layout field synchronize independently, preserving explicit false,
+zero and `null` (follow-global) decisions. Orientation is deliberately device-local.
+The scope badge opens the same shared-value/device-override controls in More and
+inside the reader. General and Filters edit global defaults even from the reader;
+brightness and hardware/power policy remain local, while portable appearance and
+filter preferences synchronize. Incoming changes refresh loaded series and the
+active reading mode without publishing received fields back to peers.
 
 Tap regions port Mihon v0.21.3 at
 `feadad5e1e2bf638be6e2ca317d11657b09d4596` under Apache-2.0. Pager/Webtoon
@@ -99,3 +106,51 @@ idle inhibition runs on a coalescing worker and releases on leaving the reader.
 Display crop/split/rotation and tint/grayscale/inversion operate on bounded
 windows from the immutable source. Source-resolution screencaps use the same
 geometry/filter mappings; saving an original page preserves original bytes.
+
+
+## Desktop webtoon sizing
+
+Webtoon and Long strip with gaps use a centered column capped at **720 logical
+pixels** on desktop by default. **Desktop webtoon width** in the Webtoon layout
+form adjusts this to 320–1600 logical pixels, independently of transient zoom.
+It is a global, device-local preference even when changed inside a series: a
+laptop's comfortable column should not narrow an Android phone's reader.
+Android keeps its screen-width fit; narrow desktop windows are also respected.
+Side padding (0–25% on each side) is applied **after** the column cap. Previously
+it was applied to the window before the 1100px cap, making padding edits
+ineffective on sufficiently wide windows. Zoom then multiplies the fitted width.
+Paged modes retain their own 1100px cap and fit-to-screen-height behavior.
+
+## Suwayomi WebUI comparison
+
+Source-level comparison against Suwayomi-WebUI revision
+[`29ff36a0d49120f42ef9195b999f356058e5f677`](https://github.com/Suwayomi/Suwayomi-WebUI/tree/29ff36a0d49120f42ef9195b999f356058e5f677),
+not a visual/browser review or a claim of full feature parity. No upstream UI
+code is copied for this change.
+
+| Area | Suwayomi WebUI | Nova Reader |
+| --- | --- | --- |
+| Layout modes | Single page, double page, continuous vertical, continuous horizontal, Webtoon | LTR/RTL/vertical paged, seamless Webtoon, long strip with gaps |
+| Direction | Separate LTR/RTL setting | Direction is part of the paged mode choice |
+| Automatic/default | Auto-Webtoon option and layout profiles; per-series default flags | Metadata-driven Automatic plus explicit Default inheritance |
+| Scaling | Width, height, screen, original, plus stretch | Paged contain-fit; Webtoon width-fit; source-anchored zoom |
+| Width/gaps | Optional 10–100% reader width; configurable page gap | Persistent desktop pixel column cap plus 0–25% side padding; seamless or fixed-gap strips |
+| Desktop quick UI | Mode, spread offset, scale, direction, auto-scroll, Settings | Bottom OSD with mode, chapter/progress/navigation actions and a More settings panel |
+| Settings UI | Tabbed dialog, per-setting reset/default controls | Shared global/in-reader form with Reading mode, General and Filters tabs; per-series layout/orientation reset |
+| Storage scope | Server/global and manga metadata, active-device prefixes and layout profiles | Peer-sync field records for portable preferences; explicit device-local controls for hardware/layout-specific choices |
+
+Suwayomi's useful distinction is **layout versus scale versus direction**. Its
+double-page spreads and continuous-horizontal layout are not equivalent to
+Nova's wide-page splitting or LTR pager, and are not implemented by this sizing
+fix. Likewise, Nova's vertical pager is not Suwayomi's continuous-vertical
+scrolling mode. The focused improvement here is making desktop strips readable
+without browser/app zoom workarounds, not introducing additional renderers.
+
+References:
+
+- [Mode/scale enums and global/manga settings](https://github.com/Suwayomi/Suwayomi-WebUI/blob/29ff36a0d49120f42ef9195b999f356058e5f677/src/features/reader/Reader.types.ts)
+- [Width control and its 10–100% range](https://github.com/Suwayomi/Suwayomi-WebUI/blob/29ff36a0d49120f42ef9195b999f356058e5f677/src/features/reader/settings/layout/components/ReaderSettingWidth.tsx)
+- [Layout form and individual reset controls](https://github.com/Suwayomi/Suwayomi-WebUI/blob/29ff36a0d49120f42ef9195b999f356058e5f677/src/features/reader/settings/layout/ReaderLayoutSettings.tsx)
+- [Desktop quick settings](https://github.com/Suwayomi/Suwayomi-WebUI/blob/29ff36a0d49120f42ef9195b999f356058e5f677/src/features/reader/overlay/navigation/desktop/quick-settings/ReaderNavBarDesktopQuickSettings.tsx)
+- [Settings dialog](https://github.com/Suwayomi/Suwayomi-WebUI/blob/29ff36a0d49120f42ef9195b999f356058e5f677/src/features/reader/settings/screens/ReaderSettings.tsx)
+- [Metadata, inheritance flags and device prefixes](https://github.com/Suwayomi/Suwayomi-WebUI/blob/29ff36a0d49120f42ef9195b999f356058e5f677/src/features/reader/settings/ReaderSettingsMetadata.ts)

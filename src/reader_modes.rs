@@ -87,19 +87,19 @@ struct Record {
     schema_version: u32,
     choice: ModeChoice,
 }
-fn key(series: &SeriesId) -> String {
+pub fn sync_key(series: &SeriesId) -> String {
     format!(
         "{PREFIX}{}",
         serde_json::to_string(series).expect("SeriesId serializes")
     )
 }
 fn write(series: &SeriesId, choice: ModeChoice) -> Result<(), String> {
-    let raw = serde_json::to_string(&Record {
-        schema_version: 1,
-        choice,
-    })
-    .map_err(|e| e.to_string())?;
-    nova_storage::try_set_str(&key(series), &raw).map_err(|e| e.to_string())
+    let previous = nova_storage::try_get_str(&sync_key(series))
+        .map_err(|e| e.to_string())?
+        .and_then(|raw| serde_json::from_str::<Record>(&raw).ok())
+        .filter(|record| record.schema_version == 1)
+        .map_or(ModeChoice::Default, |record| record.choice);
+    crate::sync_settings::persist_preferences(&sync_key(series), &previous, &choice).map(|_| ())
 }
 pub fn save(series: &SeriesId, choice: ModeChoice) -> Result<(), String> {
     let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
@@ -110,7 +110,7 @@ pub fn save(series: &SeriesId, choice: ModeChoice) -> Result<(), String> {
 /// Explicit Automatic is a record (not deletion), so legacy data cannot revive.
 pub fn load(series: &SeriesId, legacy: Option<ReadingMode>) -> Result<ModeChoice, String> {
     let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(raw) = nova_storage::try_get_str(&key(series)).map_err(|e| e.to_string())? {
+    if let Some(raw) = nova_storage::try_get_str(&sync_key(series)).map_err(|e| e.to_string())? {
         return match serde_json::from_str::<Record>(&raw) {
             Ok(record) if record.schema_version == 1 => Ok(record.choice),
             _ => {
@@ -378,12 +378,12 @@ mod tests {
         assert_eq!(ModeChoice::from_selection(6), Some(ModeChoice::Default));
         assert!(ModeChoice::from_selection(7).is_none());
         assert_ne!(
-            key(&SeriesId::new("a", "b:c")),
-            key(&SeriesId::new("a:b", "c"))
+            sync_key(&SeriesId::new("a", "b:c")),
+            sync_key(&SeriesId::new("a:b", "c"))
         );
         assert_ne!(
-            key(&SeriesId::new("a", "same")),
-            key(&SeriesId::new("b", "same"))
+            sync_key(&SeriesId::new("a", "same")),
+            sync_key(&SeriesId::new("b", "same"))
         );
     }
     #[test]

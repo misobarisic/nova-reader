@@ -35,7 +35,7 @@ where
 {
     let previous = serde_json::to_value(previous).map_err(|e| e.to_string())?;
     let next_value = serde_json::to_value(next).map_err(|e| e.to_string())?;
-    if !templates().contains_key(key) {
+    if template(key).is_none() {
         let json = serde_json::to_string(next).map_err(|e| e.to_string())?;
         nova_storage::try_set_str(key, &json).map_err(|e| e.to_string())?;
         return Ok(next.clone());
@@ -47,9 +47,23 @@ where
         let mut store = owner.lock().unwrap_or_else(|e| e.into_inner());
         let before = store.clone();
         let result = (|| -> nova_sync::Result<T> {
+            // New series have no baseline yet. Their untouched None/Default
+            // values are inheritance, not edits with account authority.
+            if series_field(key).is_some() {
+                let prior = documents(&store)?
+                    .remove(key)
+                    .unwrap_or_else(|| previous.clone());
+                let mut baseline = read_map(&store, BASELINE)?;
+                for (field, value) in fields(&BTreeMap::from([(key.into(), prior)])) {
+                    baseline.entry(field).or_insert(value);
+                }
+                store.queue_extra(BASELINE, Some(serde_json::to_string(&baseline)?));
+            }
             let merged = merge_editor(&mut store, key, &previous, &next_value)?;
             let effective = serde_json::from_value(merged)?;
-            prepare(&mut store, dev, false, false)?;
+            let mut documents = documents(&store)?;
+            documents.insert(key.into(), serde_json::to_value(&effective)?);
+            prepare_documents(&mut store, dev, false, false, documents)?;
             store.save()?;
             Ok(effective)
         })();
@@ -67,9 +81,7 @@ where
         let mut current = raw
             .and_then(|raw| {
                 let mut document: Value = serde_json::from_str(&raw).ok()?;
-                if key == "reader:reader-settings" {
-                    document = document.get("preferences").cloned().unwrap_or(document);
-                }
+                document = unpack_document(key, document);
                 let typed: T = serde_json::from_value(document).ok()?;
                 serde_json::to_value(typed)
                     .ok()
@@ -125,7 +137,9 @@ fn merge_changes(pointer: &str, previous: &Value, next: &Value, current: &mut Va
     }
 }
 fn stored_document(key: &str, value: &Value) -> Value {
-    if key == "reader:reader-settings" {
+    if key.starts_with(MODE_PREFIX) {
+        serde_json::json!({"schema_version":1,"choice":value})
+    } else if key == "reader:reader-settings" || key.starts_with(SERIES_PREFIX) {
         serde_json::json!({"schema_version":1,"preferences":value})
     } else {
         value.clone()
@@ -139,6 +153,7 @@ fn merge_editor(
 ) -> nova_sync::Result<Value> {
     let mut current = documents(store)?
         .remove(key)
+        .or_else(|| template(key))
         .ok_or_else(|| std::io::Error::other("unknown settings document"))?;
     merge_changes("", previous, next, &mut current);
     if !validate(key, &current) {
@@ -151,6 +166,49 @@ fn merge_editor(
     Ok(current)
 }
 
+const SERIES_PREFIX: &str = "reader:reader-settings-series:";
+const MODE_PREFIX: &str = "reader:mode-choice:";
+
+/// Parse the serialized SeriesId, not '/' delimiters: source-local IDs can
+/// contain slashes, quotes and punctuation. Only a complete ID is a KV key.
+fn series_field(key: &str) -> Option<(&str, &str)> {
+    let prefix = [SERIES_PREFIX, MODE_PREFIX]
+        .into_iter()
+        .find(|p| key.starts_with(p))?;
+    let suffix = &key[prefix.len()..];
+    let mut stream =
+        serde_json::Deserializer::from_str(suffix).into_iter::<reader_domain::SeriesId>();
+    stream.next()?.ok()?;
+    let end = prefix.len() + stream.byte_offset();
+    Some((&key[..end], &key[end..]))
+}
+fn template(key: &str) -> Option<Value> {
+    if let Some(value) = templates().remove(key) {
+        return Some(value);
+    }
+    let (storage, pointer) = series_field(key)?;
+    if !pointer.is_empty() {
+        return None;
+    }
+    Some(if storage.starts_with(SERIES_PREFIX) {
+        serde_json::to_value(crate::reader_settings::SeriesOverrides::default()).unwrap()
+    } else {
+        serde_json::to_value(crate::reader_modes::ModeChoice::Default).unwrap()
+    })
+}
+fn unpack_document(key: &str, value: Value) -> Value {
+    if key.starts_with(MODE_PREFIX) {
+        value.get("choice").cloned().unwrap_or(value)
+    } else if key == "reader:reader-settings" || key.starts_with(SERIES_PREFIX) {
+        value.get("preferences").cloned().unwrap_or(value)
+    } else {
+        value
+    }
+}
+fn document_pointer<'a>(storage: &str, key: &'a str) -> Option<&'a str> {
+    key.strip_prefix(storage)
+        .filter(|pointer| pointer.is_empty() || pointer.starts_with('/'))
+}
 fn templates() -> BTreeMap<String, Value> {
     BTreeMap::from([
         (
@@ -191,12 +249,18 @@ fn portable(storage: &str, pointer: &str) -> bool {
                 | "/navigator_modes"
                 | "/navigator_left"
                 | "/navigator_height"
+                | "/desktop_webtoon_width"
         ),
+        _ if storage.starts_with(SERIES_PREFIX) => {
+            pointer.starts_with("/paged/") || pointer.starts_with("/webtoon/")
+        }
+        _ if storage.starts_with(MODE_PREFIX) => pointer.is_empty(),
         _ => false,
     }
 }
 fn flatten(storage: &str, pointer: &str, value: &Value, out: &mut Fields) {
     if pointer != "/default_mode"
+        && !storage.starts_with(MODE_PREFIX)
         && let Some(object) = value.as_object()
     {
         for (key, value) in object {
@@ -225,17 +289,34 @@ fn validate(storage: &str, value: &Value) -> bool {
                 .is_ok_and(|v| v.validate().is_ok())
         }
         "reader:show-adult" => value.is_boolean(),
+        _ if storage.starts_with(SERIES_PREFIX) => {
+            serde_json::from_value::<crate::reader_settings::SeriesOverrides>(value.clone())
+                .is_ok_and(|v| v.validate().is_ok())
+        }
+        _ if storage.starts_with(MODE_PREFIX) => {
+            serde_json::from_value::<crate::reader_modes::ModeChoice>(value.clone()).is_ok()
+        }
         _ => false,
     }
 }
 fn documents(store: &nova_sync::Store) -> nova_sync::Result<BTreeMap<String, Value>> {
     let mut documents = templates();
+    // Include legacy local decisions and remote identities not opened here yet.
+    for (key, _) in nova_storage::try_scan_prefixes(&[SERIES_PREFIX.into(), MODE_PREFIX.into()])? {
+        if let Some(value) = template(&key) {
+            documents.insert(key, value);
+        }
+    }
+    for (key, _) in store.records(&domain()) {
+        if let Some((storage, _)) = series_field(&key)
+            && let Some(value) = template(storage)
+        {
+            documents.insert(storage.into(), value);
+        }
+    }
     for (key, template) in &mut documents {
         if let Some(raw) = store.extra_value(key)? {
-            let mut value: Value = serde_json::from_str(&raw)?;
-            if key == "reader:reader-settings" {
-                value = value.get("preferences").cloned().unwrap_or(value);
-            }
+            let value = unpack_document(key, serde_json::from_str(&raw)?);
             // Deserialize and reserialize through each module's defaults so
             // preferences introduced after the last local edit participate.
             let normalized = match key.as_str() {
@@ -251,6 +332,11 @@ fn documents(store: &nova_sync::Store) -> nova_sync::Result<BTreeMap<String, Val
                 "reader:reader-settings" => serde_json::to_value(serde_json::from_value::<
                     crate::reader_settings::ReaderSettings,
                 >(value)?)?,
+                _ if key.starts_with(SERIES_PREFIX) => {
+                    serde_json::to_value(serde_json::from_value::<
+                        crate::reader_settings::SeriesOverrides,
+                    >(value)?)?
+                }
                 _ => value,
             };
             let normalized = normalize_document(key, normalized)?;
@@ -288,9 +374,14 @@ fn shared(store: &nova_sync::Store) -> Fields {
 /// Network policy and projection both use this check; unsupported future fields
 /// remain in the account store without replacing local preferences.
 pub fn supported(key: &str, value: &Value) -> bool {
-    let documents = templates();
+    let mut documents = templates();
+    if let Some((storage, _)) = series_field(key)
+        && let Some(value) = template(storage)
+    {
+        documents.insert(storage.into(), value);
+    }
     for (storage, mut document) in documents {
-        let Some(pointer) = key.strip_prefix(&storage) else {
+        let Some(pointer) = document_pointer(&storage, key) else {
             continue;
         };
         let known = fields(&BTreeMap::from([(storage.clone(), document.clone())]));
@@ -317,13 +408,27 @@ pub fn prepare(
     seed: bool,
 ) -> nova_sync::Result<bool> {
     let documents = documents(store)?;
+    prepare_documents(store, dev, projection, seed, documents)
+}
+fn prepare_documents(
+    store: &mut nova_sync::Store,
+    dev: u64,
+    projection: bool,
+    seed: bool,
+    documents: BTreeMap<String, Value>,
+) -> nova_sync::Result<bool> {
     let current = fields(&documents);
     // A document created by projection or serde defaults is not evidence of a
     // user edit. Bootstrap only persisted legacy choices that differ from the
     // canonical defaults; fresh-device defaults must never gain LWW authority.
     let mut legacy = Fields::new();
     if seed && !projection {
-        let defaults = fields(&templates());
+        let defaults = fields(
+            &documents
+                .keys()
+                .filter_map(|key| template(key).map(|value| (key.clone(), value)))
+                .collect(),
+        );
         for (storage, value) in &documents {
             if store.extra_value(storage)?.is_some() {
                 flatten(storage, "", value, &mut legacy);
@@ -362,7 +467,7 @@ fn project(documents: &mut BTreeMap<String, Value>, account: &Fields, overrides:
             continue;
         }
         for (storage, document) in documents.iter_mut() {
-            if let Some(pointer) = key.strip_prefix(storage.as_str()) {
+            if let Some(pointer) = document_pointer(storage, key) {
                 if pointer.is_empty() {
                     *document = value.clone();
                 } else if let Some(slot) = document.pointer_mut(pointer) {
@@ -382,7 +487,7 @@ fn project(documents: &mut BTreeMap<String, Value>, account: &Fields, overrides:
     for key in overrides.keys() {
         if let Some(value) = local.get(key) {
             for (storage, document) in documents.iter_mut() {
-                if let Some(pointer) = key.strip_prefix(storage.as_str()) {
+                if let Some(pointer) = document_pointer(storage, key) {
                     if pointer.is_empty() {
                         *document = value.clone();
                     } else if let Some(slot) = document.pointer_mut(pointer) {
@@ -399,11 +504,7 @@ fn queue_documents(
     documents: &BTreeMap<String, Value>,
 ) -> nova_sync::Result<()> {
     for (key, value) in documents {
-        let value = if key == "reader:reader-settings" {
-            serde_json::json!({"schema_version":1,"preferences":value})
-        } else {
-            value.clone()
-        };
+        let value = stored_document(key, value);
         store.queue_extra(key, Some(serde_json::to_string(&value)?));
     }
     Ok(())
@@ -427,6 +528,13 @@ pub fn set_override(
     enabled: bool,
 ) -> nova_sync::Result<()> {
     let mut documents = documents(store)?;
+    // An unedited series still offers the same override control as global
+    // defaults. Materialize its inheritance only when policy is deliberately set.
+    if let Some((storage, _)) = series_field(key)
+        && let Some(value) = template(storage)
+    {
+        documents.entry(storage.into()).or_insert(value);
+    }
     let current = fields(&documents);
     let mut overrides = read_map(store, OVERRIDES)?;
     let account = shared(store);
@@ -465,13 +573,20 @@ pub struct SettingInfo {
     pub has_shared: bool,
     pub shared_supported: bool,
 }
+#[cfg(test)]
 pub fn rows(store: &nova_sync::Store) -> nova_sync::Result<Vec<SettingInfo>> {
-    let documents = documents(store)?;
+    setting_rows(store, documents(store)?)
+}
+fn setting_rows(
+    store: &nova_sync::Store,
+    documents: BTreeMap<String, Value>,
+) -> nova_sync::Result<Vec<SettingInfo>> {
     let overrides = read_map(store, OVERRIDES)?;
     let account = shared(store);
     let mut all = Fields::new();
     fn all_fields(prefix: &str, value: &Value, out: &mut Fields) {
         if !prefix.ends_with("/default_mode")
+            && !prefix.starts_with(MODE_PREFIX)
             && let Some(object) = value.as_object()
         {
             for (key, value) in object {
@@ -511,7 +626,10 @@ pub fn rows(store: &nova_sync::Store) -> nova_sync::Result<Vec<SettingInfo>> {
         .collect())
 }
 fn setting_value(key: &str, value: &Value) -> String {
-    if key == "reader:reader-settings/default_mode"
+    if value.is_null() {
+        return nova_reader_ui::backend_text::tr("Follow global default");
+    }
+    if (key == "reader:reader-settings/default_mode" || key.starts_with(MODE_PREFIX))
         && let Ok(mode) = serde_json::from_value::<crate::reader_modes::ModeChoice>(value.clone())
     {
         return nova_reader_ui::backend_text::tr(
@@ -591,7 +709,28 @@ pub fn refresh_metadata(ui: &crate::AppWindow) -> Result<(), String> {
     use slint::ComponentHandle;
     let owner = nova_sync::local_store().map_err(|e| e.to_string())?;
     let store = owner.lock().unwrap_or_else(|e| e.into_inner());
-    let mut rows = rows(&store)
+    let mut documents = documents(&store).map_err(|e| e.to_string())?;
+    // Inspector-only device policy: never add these to portable templates or
+    // projection, even though their rows use the same scope badge/modal.
+    documents.insert(
+        "reader:image-limits".into(),
+        serde_json::to_value(crate::image_limits::Settings::load()).map_err(|e| e.to_string())?,
+    );
+    documents.insert(
+        "reader:download-cleanup".into(),
+        serde_json::to_value(crate::download_cleanup::Settings::load().unwrap_or_default())
+            .map_err(|e| e.to_string())?,
+    );
+    for key in [
+        ui.global::<crate::ReaderSettings>()
+            .get_series_settings_key(),
+        ui.global::<crate::ReaderSettings>().get_series_mode_key(),
+    ] {
+        if let Some(value) = template(&key) {
+            documents.entry(key.to_string()).or_insert(value);
+        }
+    }
+    let mut rows = setting_rows(&store, documents)
         .map_err(|e| e.to_string())?
         .into_iter()
         .map(|row| crate::SettingSyncInfo {
@@ -1159,6 +1298,199 @@ mod tests {
             durable["reader:appearance"]["background_style"],
             Value::from(2)
         );
+    }
+    #[test]
+    fn series_edits_sync_independently_preserve_local_rotation_and_reset_inheritance() {
+        const CHILD: &str = "READER_SERIES_SETTINGS_SYNC_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            for phase in ["write", "restart"] {
+                assert!(std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "sync_settings::tests::series_edits_sync_independently_preserve_local_rotation_and_reset_inheritance", "--nocapture"])
+                    .env(CHILD, phase).env("READER_SERIES_SETTINGS_SYNC_DIR", directory.path())
+                    .status().unwrap().success());
+            }
+            return;
+        }
+        nova_storage::init_at(std::path::Path::new(
+            &std::env::var("READER_SERIES_SETTINGS_SYNC_DIR").unwrap(),
+        ));
+        nova_sync::configure_protocol(nova_sync::ProtocolConfig::reader()).unwrap();
+        let series = reader_domain::SeriesId::new("source/with:punctuation", "series/\"quoted\"");
+        let other = reader_domain::SeriesId::new("another-source", &series.local_id);
+        let storage = crate::reader_settings::series_sync_key(&series);
+        let padding = format!("{storage}/paged/side_padding");
+        let crop = format!("{storage}/paged/crop_borders");
+        let rotation = format!("{storage}/rotation");
+        let mode = crate::reader_modes::sync_key(&series);
+        assert!(supported(&padding, &Value::Null));
+        assert!(supported(&padding, &Value::from(12)));
+        assert!(!supported(&padding, &Value::from(26)));
+        assert!(!supported(&rotation, &Value::from(3)));
+        assert!(!supported(
+            "reader:reader-settings/desktop_webtoon_width",
+            &Value::from(720)
+        ));
+        assert!(supported(
+            &mode,
+            &serde_json::json!({"Manual":"RightToLeft"})
+        ));
+        assert!(!supported(&mode, &serde_json::json!({"Manual":"unknown"})));
+        assert_ne!(storage, crate::reader_settings::series_sync_key(&other));
+        crate::reader_settings::init().unwrap();
+        crate::reader_settings::load_series(&series).unwrap();
+        let owner = nova_sync::local_store().unwrap();
+        if std::env::var(CHILD).unwrap() == "restart" {
+            assert_eq!(
+                crate::reader_settings::series_snapshot(&series),
+                crate::reader_settings::SeriesOverrides::default()
+            );
+            assert_eq!(
+                crate::reader_modes::load(&series, None).unwrap(),
+                crate::reader_modes::ModeChoice::Default
+            );
+            let mut store = owner.lock().unwrap();
+            assert_eq!(
+                store.record(&domain(), &padding).unwrap().value.as_deref(),
+                Some("null")
+            );
+            assert!(!prepare(&mut store, 1, false, false).unwrap());
+            return;
+        }
+        {
+            let mut store = owner.lock().unwrap();
+            prepare(&mut store, 1, false, true).unwrap();
+            store.save().unwrap();
+        }
+        install_publisher(|| {});
+        crate::reader_settings::update_series(&series, "paged_side_padding", 12).unwrap();
+        crate::reader_settings::update_series(&series, "rotation", 3).unwrap();
+        {
+            let store = owner.lock().unwrap();
+            assert_eq!(
+                store.records_with_prefix(&domain(), &storage).len(),
+                1,
+                "untouched inheritance must not be published"
+            );
+            assert!(store.record(&domain(), &rotation).is_none());
+        }
+        crate::reader_modes::save(&series, crate::reader_modes::ModeChoice::LongStripWithGaps)
+            .unwrap();
+        let remote_crop = {
+            let mut store = owner.lock().unwrap();
+            store.set(&domain(), &crop, Some("true".into()), 0, 2);
+            store.set(
+                &domain(),
+                &mode,
+                Some(serde_json::json!({"Manual":"RightToLeft"}).to_string()),
+                0,
+                2,
+            );
+            apply_remote(&mut store).unwrap();
+            store.save().unwrap();
+            store.record(&domain(), &crop).unwrap().clone()
+        };
+        // The mounted series cache is stale. A local padding edit must preserve
+        // the independently received crop value, not republish its stale None.
+        let effective =
+            crate::reader_settings::update_series(&series, "paged_side_padding", 15).unwrap();
+        assert_eq!(effective.paged.crop_borders, Some(true));
+        assert_eq!(effective.rotation_selection(), 3);
+        assert_eq!(
+            owner.lock().unwrap().record(&domain(), &crop),
+            Some(&remote_crop)
+        );
+        assert_eq!(
+            crate::reader_modes::load(&series, None)
+                .unwrap()
+                .selection(),
+            2
+        );
+        {
+            let mut store = owner.lock().unwrap();
+            set_override(&mut store, &padding, true).unwrap();
+        }
+        crate::reader_settings::update_series(&series, "paged_side_padding", 20).unwrap();
+        {
+            let mut store = owner.lock().unwrap();
+            assert_eq!(
+                store.record(&domain(), &padding).unwrap().value.as_deref(),
+                Some("15")
+            );
+            store.set(&domain(), &padding, Some("8".into()), 0, 2);
+            apply_remote(&mut store).unwrap();
+            store.save().unwrap();
+        }
+        crate::reader_settings::reload_global().unwrap();
+        assert_eq!(
+            crate::reader_settings::series_snapshot(&series)
+                .paged
+                .side_padding,
+            Some(20)
+        );
+        {
+            let mut store = owner.lock().unwrap();
+            set_override(&mut store, &padding, false).unwrap();
+        }
+        crate::reader_settings::reload_global().unwrap();
+        assert_eq!(
+            crate::reader_settings::series_snapshot(&series)
+                .paged
+                .side_padding,
+            Some(8)
+        );
+        assert_eq!(
+            crate::reader_settings::series_snapshot(&series).rotation_selection(),
+            3
+        );
+        // A peer which has never opened the series receives source-scoped fields
+        // without copying orientation, and projection never advances their clocks.
+        {
+            let store = owner.lock().unwrap();
+            let mut peer = nova_sync::Store::default();
+            peer.queue_extra(&storage, None);
+            peer.queue_extra(&mode, None);
+            peer.queue_extra(BASELINE, None);
+            peer.queue_extra(OVERRIDES, None);
+            for out in store.outbound(&peer.digest()) {
+                peer.apply(&out.domain, &out.key, out.record);
+            }
+            apply_remote(&mut peer).unwrap();
+            let projected = documents(&peer).unwrap();
+            assert_eq!(projected[&storage]["paged"]["side_padding"], Value::from(8));
+            assert_eq!(projected[&storage]["rotation"], Value::Null);
+            assert!(!prepare(&mut peer, 3, false, false).unwrap());
+        }
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = crate::AppWindow::new().unwrap();
+        use slint::{ComponentHandle, Model};
+        ui.global::<crate::ReaderSettings>()
+            .set_series_settings_key(storage.clone().into());
+        ui.global::<crate::ReaderSettings>()
+            .set_series_mode_key(mode.clone().into());
+        refresh_metadata(&ui).unwrap();
+        let rows = ui.global::<crate::ReaderSettingsSync>().get_rows();
+        assert!(
+            rows.iter()
+                .any(|row| row.key == padding && row.status == 1 && row.can_override)
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.key == rotation && row.status == 0 && !row.can_override)
+        );
+        assert!(rows.iter().any(|row| row.key == mode && row.status == 1));
+        crate::reader_settings::reset_series(&series).unwrap();
+        crate::reader_modes::save(&series, crate::reader_modes::ModeChoice::Default).unwrap();
+        let mut store = owner.lock().unwrap();
+        assert_eq!(
+            store.record(&domain(), &padding).unwrap().value.as_deref(),
+            Some("null")
+        );
+        assert_eq!(
+            store.record(&domain(), &crop).unwrap().value.as_deref(),
+            Some("null")
+        );
+        assert!(!prepare(&mut store, 1, false, false).unwrap());
     }
     #[test]
     fn failed_persistence_does_not_publish() {

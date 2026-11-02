@@ -13,7 +13,7 @@ export component DownloadCleanupSettingsPage inherits VerticalLayout {
     in property <bool> interactive: true;
     spacing: 18px; alignment: start;
     SectionHeader { label: @tr("Cleanup policy"); }
-    SettingsCard { SettingsRow {
+    SettingsCard { SettingsRow { setting-key: "reader:download-cleanup/enabled";
         row-title: @tr("Auto-delete read chapters");
         row-desc: @tr("Delete a downloaded chapter when you finish reading it or mark it read. Local imports are always kept. Applies to future read actions on this device.");
         ToggleSwitch {
@@ -25,7 +25,7 @@ export component DownloadCleanupSettingsPage inherits VerticalLayout {
         }
     } }
     SectionHeader { label: @tr("Excluded categories"); }
-    Text { text: @tr("Keep downloads for titles in any selected category."); color: Theme.current.text_settings; wrap: word-wrap; }
+    Text { text: @tr("Keep downloads for titles in any selected category. Exclusions apply only on this device."); color: Theme.current.text_settings; wrap: word-wrap; }
     if DownloadCleanupSettings.categories.length == 0: Text {
         text: @tr("Create categories in Settings → Categories, then select them here.");
         color: Theme.current.text_secondary; wrap: word-wrap;

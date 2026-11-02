@@ -473,7 +473,10 @@ export component AppWindow inherits Window {
         if !root.reader-osd { root.show-reader-options = false; }
         root.immersive-changed(root.section == 6 && ReaderSettings.fullscreen && !root.reader-osd);
     }
-    out property <length> reader-fit-width: min(1100px, max(100px, (root.reader-canvas-width - (root.section == 6 && ReaderSettings.cutout ? 0px : root.safe-area-insets.left + root.safe-area-insets.right)) * (1 - root.reader-side-padding / 50.0)));
+    // Cap the reading column before padding: otherwise wide desktop windows
+    // swallow padding edits until the padded viewport drops below the cap.
+    private property <length> reader-column-limit: root.reading-mode == 0 && !root.reader-platform-android ? ReaderSettings.desktop-webtoon-width * 1px : 1100px;
+    out property <length> reader-fit-width: max(1px, min(root.reader-column-limit, root.reader-frame-width) * (1 - root.reader-side-padding / 50.0));
     out property <length> reader-width: root.reader-fit-width * root.zoom;
     private property <float> reader-paged-ratio: max(0.001, root.pages[root.current-page].ratio / (root.reader-split-page ? 2 : 1));
     out property <length> reader-paged-width: min(root.reader-fit-width, root.reader-frame-height / root.reader-paged-ratio) * root.zoom;

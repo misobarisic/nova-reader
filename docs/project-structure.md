@@ -23,7 +23,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `src/page_overview.rs`, `src/gallery_presentation.rs` | Shared overview orchestration, reader anchor restoration, atomic focal gallery density changes, gallery-first entry/groups, explicit metadata and full-resolution selection; native controller regressions live beside these modules |
 | `src/page_thumbnails.rs`, `src/decode_admission.rs` | Lazy viewport-bounded thumbnail worker, mode-specific derivatives, adaptive gallery pixel leases/reflow recycling, direct progressive JXL prefixes and shared foreground-first heavy decode admission; service/admission regressions live beside the modules |
 | `src/thumbnail_cache_settings.rs` | Thumbnail usage/clear callbacks; invalidates live work and UI references while preserving originals and downloads |
-| `src/reader_settings.rs`, `src/reader_settings_ui.rs` | Durable global reader defaults, source-local series layout/orientation overrides, cached effective snapshots and fallible UI rollback |
+| `src/reader_settings.rs`, `src/reader_settings_ui.rs` | Durable global reader defaults, device-local desktop webtoon column width, source-local series layout/orientation overrides, cached effective snapshots and fallible UI rollback |
 | `src/reader_controls.rs`, `src/reader_navigation.rs` | Nova-style OSD actions, source-anchored 0.5×–8× zoom/seek, motion-setting-aware double-tap animation, zoomed tap-zone bypass, Mihon tap maps, mode inheritance and Android/desktop preference projection |
 | `src/reader_continuity.rs` | Near-boundary chapter preparation, per-chapter source ownership and canonical progress, stable in-place page growth and bounded three-chapter retention |
 | `src/reader_desktop.rs` | Nova-derived latest-state native keep-awake worker; Linux portal/screensaver, Windows execution state and macOS caffeinate lifetime |
@@ -50,7 +50,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `src/metadata_refresh.rs` | Nova-derived foreground metadata/chapter scheduler, bounded fair batches, persisted per-series deadlines and stale-result admission |
 | `src/about.rs` | Nova’s exact-size catalogue decompression, bounded text chunks and source-row ordering/fallbacks; publishes About models from a worker |
 | `src/browser.rs` | Nova’s desktop browser launching and Reader Android intent adapter for About source links |
-| `src/sync_settings.rs` | Field-level portable settings records, atomic persistence, durable device override baselines, actual Nova scope indicators/modal data and effective reader reapply |
+| `src/sync_settings.rs` | Field-level global/per-series portable settings records, atomic persistence, durable device override baselines, actual Nova scope indicators/modal data and effective reader reapply |
 | `src/sync_ui.rs`, `crates/ui/sync-bridge.slint`, `crates/ui/sync-settings.slint` | Shared Kit Settings → Sync page (section 20), worker-owned startup/shutdown/projection, pairing/invites/QR/peer status and chapter inspector; preserves the UI event-loop boundary |
 | `src/sync_addons.rs` | Per-package desired sync state, hash-verified paired-device addon transfers, nonsecret settings/catalogue switches and permission-confirmation state |
 | `src/android_sync.rs`, `android/java/dev/misob/nova/reader/ReaderSync*.java`, `QrScanActivity.java`, `tools/test-android-sync.py` | Android periodic/headless sync leases, generation-scoped cancellation, network recovery, clipboard and Camera2 invite scanning; Java/JNI regressions |
@@ -169,7 +169,13 @@ series folders to 96 bytes, preserving chapter/page/position suffixes.
 Normal screencap save/copy opens the selection editor. `simple_screencaps` in
 `reader:captures` defaults true and exposes immediate `(simple)` viewport actions;
 turning it off leaves normal selection actions. Simple Device captures retain
-the clean pre-menu viewport snapshot. The editor freezes chapter identity,
+the clean pre-menu viewport snapshot. Desktop simple and selection screencaps
+bound the initial export to visible loaded artwork, excluding exterior side/top/
+bottom gutters while retaining internal page gaps and source black pixels.
+Android retains its existing frame policy. Original-page saves stay unchanged;
+`src/app.rs::media_capture_viewport` and the native capture-editor regressions
+cover desktop strip/page cropping for Device and Chapter exports.
+The editor freezes chapter identity,
 scroll/pan, display transforms and logical rectangles, including unloaded pages,
 before selection. Crop borders and handles edit source-anchored bounds across
 the current chapter. The initial canvas reveals a bounded dimmed context margin
@@ -568,6 +574,15 @@ every task and rejects results for an old recipe. Engine presentation maps crop,
 RTL spread splitting, rotation/reverse and color filtering without modifying
 source/cache bytes or expanding the existing output/decode memory limits.
 
+Desktop Webtoon (including long strip with gaps) fits to a device-local
+`desktop_webtoon_width` cap in `reader:reader-settings` (720 logical px by default,
+320–1600 adjustable in the global and in-reader Webtoon layout form). Android
+ignores this cap. Side padding reduces the capped column, not the uncapped
+window, so every padding edit works on wide monitors; zoom scales the result.
+Paged modes retain their independent 1100px fit cap. Geometry/persistence
+regressions live in `tests/reader_settings.rs`; mode/UI comparison with Suwayomi
+is in `docs/reader-modes.md`.
+
 Continuous reading attaches prepared chapters to the same page model in Webtoon and paged modes.
 Paged frames use local image pan coordinates; Webtoon's chapter-stacked resume
 offset never translates a paged frame. Both viewport dimensions bind directly
@@ -609,9 +624,21 @@ opt-in; durable local changes are recorded without binding a network endpoint.
 `reader:sync-settings-baseline` stores shared field baselines and
 `reader:sync-settings-overrides` stores device-local override membership. The
 shared scope badge/modal compares local and shared values; releasing an override
-follows the current shared record immediately. Paths, credentials, cache quotas
-and device display/power policy stay local. Effective settings reload preserves
-per-series caches and reapplies the active reader’s layout/platform preferences.
+follows the current shared record immediately. The same `reader_settings` domain
+carries `reader:mode-choice:<JSON SeriesId>` mode records and individual
+`reader:reader-settings-series:<JSON SeriesId>/paged|webtoon/<field>` layout
+records, including series outside the library. `null` is an explicit shared reset
+to global inheritance, not record deletion. Serialized IDs are parsed before
+JSON-pointer suffixes, so slashes in IDs do not change identity. Legacy persisted
+nondefault choices seed once; untouched defaults/inheritance gain no authority.
+Paths, credentials, cache quotas, image admission/cleanup policies, orientation,
+brightness, fullscreen/cutout, keep-awake, page flash and desktop Webtoon width
+stay local. In-reader General/Filters edit global defaults; mode/layout edits
+are per-series. Their scope badges expose portable field overrides, while local
+safety settings are inspector-only. Addon settings/compression labels describe
+addon sync rather than claiming settings-domain device override controls.
+Effective reload refreshes loaded series caches and the active mode, then
+reapplies reader layout/platform preferences without echoing remote edits.
 Addon source permissions remain device-local; received executable packages pass
 Reader validation and wait for local approval when new permissions are needed.
 
