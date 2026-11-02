@@ -60,6 +60,11 @@ per-entry user preference takes precedence. Emit it consistently from browse,
 search and details. Older Readers ignore this additive field. It does not change
 series, chapter or zero-based page identities, and adds no source-wide capability.
 Chapter: `id,seriesId,title,number?:string,sourceOrder,url,language?,scanlator?,uploadedAt?`.
+`sourceOrder` increases in canonical reading order (chapter 1 → 2 → 3 → 10),
+regardless of the site's newest-first listing. Reader uses it for both previous/
+next navigation and continuous chapter preparation; titles, URLs and chapter
+number strings are not lexicographic navigation keys. The chapter-list display
+sort can be reversed without changing reading order.
 Page: `id,url,headers:{},width?,height?`. If `resolvePage` is declared, a rejected
 image request (401/403/507) calls it once with `{url}` and retries its single
 returned Page under the same permission, header and cancellation checks. This

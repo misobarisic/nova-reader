@@ -39,13 +39,14 @@ export component ChapterRow inherits Rectangle {
     }
     actions := PopupWindow {
         x: max(0px, root.width - self.width); y: root.height - 8px;
-        width: min(240px,root.width); height: root.chapter.local-import ? 108px : root.chapter.has-download && !root.chapter.downloaded ? 204px : 156px;
+        width: min(240px,root.width); height: root.chapter.local-import ? 160px : root.chapter.has-download && !root.chapter.downloaded ? 256px : 208px;
         Rectangle {
             background: Theme.current.popup; border-width: 1px; border-color: Theme.current.border_soft;
             border-radius: Theme.card_corner_radius;
             VerticalLayout {
                 padding: 8px; spacing: 4px;
                 ActionButton { text: @tr("Read / unread"); clicked => { actions.close(); root.action("read"); } }
+                ActionButton { text: @tr("Clear progress"); clicked => { actions.close(); root.action("clear-progress"); } }
                 ActionButton { text: root.chapter.bookmarked ? @tr("Unbookmark") : @tr("Bookmark"); clicked => { actions.close(); root.action("bookmark"); } }
                 if !root.chapter.local-import: ActionButton {
                     text: root.chapter.downloaded ? @tr("Delete download") : root.transfer-label;

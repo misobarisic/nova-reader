@@ -25,7 +25,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `src/thumbnail_cache_settings.rs` | Thumbnail usage/clear callbacks; invalidates live work and UI references while preserving originals and downloads |
 | `src/reader_settings.rs`, `src/reader_settings_ui.rs` | Durable global reader defaults, device-local desktop webtoon column width, source-local series layout/orientation overrides, cached effective snapshots and fallible UI rollback |
 | `src/reader_controls.rs`, `src/reader_navigation.rs` | Nova-style OSD actions, source-anchored 0.5×–8× zoom/seek, motion-setting-aware double-tap animation, zoomed tap-zone bypass, Mihon tap maps, mode inheritance and Android/desktop preference projection |
-| `src/reader_continuity.rs` | Near-boundary chapter preparation, per-chapter source ownership and canonical progress, stable in-place page growth and bounded three-chapter retention |
+| `src/reader_continuity.rs` | Bidirectional near-boundary chapter preparation, source-order navigation, per-chapter source ownership/progress, anchor-preserving append/prepend and bounded three-chapter retention |
 | `src/reader_desktop.rs` | Nova-derived latest-state native keep-awake worker; Linux portal/screensaver, Windows execution state and macOS caffeinate lifetime |
 | `crates/ui/reader-osd.slint`, `crates/ui/reader-settings.slint` | Responsive bottom OSD with fixed 44px chapter buttons and a single expanding bottom progress slider, aligned compact actions labeled with the effective mode, one More action per layout, animated phone-sheet/desktop-panel controls and shared global settings form under More → Settings → Reader |
 | `src/progress_checkpoint.rs` | One background checkpoint writer, latest offsets coalesced per chapter, failure retry and ordered durable navigation/lifecycle barriers; the 600 ms UI timer only queues progress |
@@ -61,7 +61,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `crates/ui/library-cards.slint`, `crates/ui/display-settings.slint` | Nova poster/list painting and left-anchored progress fill shown after a chapter is read, per-entry context gestures, viewport admission, grid/list switch and persisted display choices |
 | `../nova-kit/crates/cache`, `../nova-kit/crates/ui-base/slint/cache-settings-controls.slint` | Actual Nova cache/settings implementations and NumericSetting/cache controls shared by Nova and Reader; app persistence/search/sync adapters remain local |
 | `crates/ui/library-search.slint` | Retained Nova search reveal, deferred focus, live filtering and viewport-aware field exposure |
-| `crates/ui/entry-menu.slint`, `crates/ui/status-menu.slint` | Per-title Kit action sheet/anchored desktop menu, copied Nova Change status picker, stable-identity category editing, library/refresh actions, Default/Reader/Gallery presentation and collection Metadata/Download actions |
+| `crates/ui/entry-menu.slint`, `crates/ui/status-menu.slint` | Per-title Kit action sheet/anchored desktop menu, copied Nova Change status picker, stable-identity category editing, series mark-all read/unread, series clear-all chapter positions and library/refresh actions, Default/Reader/Gallery presentation and collection Metadata/Download actions |
 | `crates/ui/detail-hero.slint`, `crates/ui/title-artwork.slint`, `crates/ui/chapter-row.slint` | Nova detail artwork/title/metadata/actions, retained synopsis state, chapter-ready Continue gating, compact chapter rows and accessible action popup |
 | `crates/ui/timeline.slint`, `crates/ui/source-list.slint`, `crates/ui/extensions.slint`, `crates/ui/source-filters.slint` | Dated History/Updates, grouped sources with bundled icons, extension management and actual source-defined browse filters |
 | `crates/ui/reader-context-menu.slint` | Normal selection save/copy plus optional `(simple)` viewport actions, stationary-hold/right-click handling, clamping, keyboard navigation and export feedback |
@@ -420,6 +420,26 @@ Replacement model references are released before constructing new Slint buffers;
 the reserve covers a previous image still held by the renderer during replacement.
 Prefetch does not mark a chapter read. Resume stores logical page ID/index and
 intra-page offset, independent of row windows, texture tiles and reflow.
+Automatic in-place chapter crossings enter the destination's first image rather
+than restoring its old resume. Subsequent checkpoints and exit flush replace
+that previous saved position with this visit's position, even when earlier;
+resume is not a maximum/farthest-page register. Explicit chapter opens still
+restore the latest saved anchor.
+
+The existing library long-press/right-click and detail top-right title menus
+expose **Mark all read** / **Mark all unread**. The batch targets the full
+source-local series, preserves chapter anchors and actual History, and uses
+manual completion sync records; marking read respects device download cleanup.
+The same menus expose **Clear all chapter positions**: one durable local edit
+resets every saved resume in the series to image one, leaving read/unread state,
+History, bookmarks and other source-local identities untouched. It needs no
+chapter-list refresh because it only rewrites existing resume records; the
+changed resume values publish through the normal snapshot prepare.
+Chapter three-dot menus also expose **Clear progress**: pending checkpoints are
+drained before resetting resume to image one, preserving read status, History
+and bookmarks. The reset uses the existing resume sync record, not a new domain.
+Controller regressions live beside `src/reader_continuity.rs`; native menu
+reachability/dispatch lives in `tests/entry_menu.rs`.
 Retained previews upgrade when physical-pixel width grows without losing their
 logical anchor. Shared drawing edges snap in physical pixel coordinates;
 logical positions remain continuous. Device GPU overhead and peak total process
@@ -582,6 +602,24 @@ window, so every padding edit works on wide monitors; zoom scales the result.
 Paged modes retain their independent 1100px fit cap. Geometry/persistence
 regressions live in `tests/reader_settings.rs`; mode/UI comparison with Suwayomi
 is in `docs/reader-modes.md`.
+
+Continuous reading prepares the previous chapter near the active head and the
+next chapter near the active tail, including when opening a middle chapter
+from detail/History. Both directions follow ascending source-provided
+`source_order`, independently of newest/oldest-first chapter-list display.
+Prepending shifts the live anchor/model indices and scroll distance without
+resetting delegates or copying existing pixels; suffix pruning protects every
+visible page, just as forward prefix pruning does. Native regressions beside
+`src/reader_continuity.rs` open chapter 2 and exercise 2 → 1 and 2 → 3 in
+Webtoon/LTR/RTL/vertical modes with both display sort settings.
+
+Webtoon scroll admission in `src/app.rs::Reader::loaded_scroll_offset` stops at
+an unloaded page boundary instead of anchoring into its estimated height. The
+forward viewport may reveal a 48px loading edge; reverse scrolling waits at the
+start of loaded artwork. Real geometry/pixels release the boundary on the next
+scroll, without consuming a wheel/touch overshoot or moving past unread art.
+Terminal image errors remain visible and skippable. Explicit seek/resume anchors
+remain authoritative; no scroll hot path reads KV.
 
 Continuous reading attaches prepared chapters to the same page model in Webtoon and paged modes.
 Paged frames use local image pan coordinates; Webtoon's chapter-stacked resume

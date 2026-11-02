@@ -53,6 +53,30 @@ fn reader_first_content_fades_once_and_motion_settings_skip_the_fade() {
 }
 
 #[test]
+fn a_failed_first_webtoon_image_keeps_its_error_at_the_loading_edge() {
+    use i_slint_backend_testing::ElementHandle;
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().unwrap();
+    ui.set_section(6);
+    ui.set_reading_mode(0);
+    ui.set_total_ratio(50.);
+    ui.invoke_begin_reader_entry();
+    ui.set_pages(ModelRc::new(VecModel::from(vec![PageRow {
+        ratio: 50.,
+        error: "Image request failed".into(),
+        ..Default::default()
+    }])));
+    ui.show().unwrap();
+    ui.window().set_size(slint::LogicalSize::new(390., 844.));
+    advance(200);
+    let error = ElementHandle::find_by_accessible_label(&ui, "Image request failed")
+        .next()
+        .expect("errors remain visible before the first image is ready");
+    assert!(error.absolute_position().y >= 0.);
+    assert!(error.absolute_position().y + error.size().height <= 49.);
+}
+
+#[test]
 #[ignore = "opt-in native reader entry/ready/error renders"]
 fn render_reader_entry_previews() {
     use i_slint_backend_testing::{TestingBackend, TestingBackendOptions};

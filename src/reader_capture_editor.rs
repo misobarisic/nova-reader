@@ -867,8 +867,10 @@ mod tests {
                             assert!(
                                 media
                                     .pixels
-                                    .chunks_exact(4)
-                                    .all(|pixel| pixel == colors[reference as usize])
+                                    .as_chunks::<4>()
+                                    .0
+                                    .iter()
+                                    .all(|pixel| *pixel == colors[reference as usize])
                             );
                             ui.set_reader_platform_android(true);
                         }

@@ -1111,7 +1111,11 @@ export component AppWindow inherits Window {
                                             }
                                         }
                                     }
-                                    if !page.loaded && !page.preview && page.error != "": Text { text: page.error; color: Theme.current.text_secondary; wrap: word-wrap; horizontal-alignment: center; vertical-alignment: center; }
+                                    if root.reading-mode == 0 && (root.reader-entry-revealed || page.error != "") && !page.loaded: Rectangle {
+                                        x: 0px; y: 0px; width: parent.width; height: min(48px, parent.height);
+                                        Text { width: parent.width; height: parent.height; text: page.error != "" ? page.error : @tr("Loading page…"); accessible-role: text; accessible-label: self.text; color: Theme.current.text_secondary; wrap: word-wrap; horizontal-alignment: center; vertical-alignment: center; }
+                                    }
+                                    if root.reading-mode != 0 && !page.loaded && !page.preview && page.error != "": Text { text: page.error; color: Theme.current.text_secondary; wrap: word-wrap; horizontal-alignment: center; vertical-alignment: center; }
                                 }
                               }
                             }
@@ -1136,7 +1140,7 @@ export component AppWindow inherits Window {
                                 x: 12px; y: parent.height - root.safe-area-insets.bottom - self.height - (root.reader-osd ? 190px : 16px);
                                 width: max(1px,parent.width - 24px); height: 72px; border-radius: 12px; background: Theme.current.player_menu;
                                 HorizontalLayout { padding: 12px; spacing: 12px;
-                                    Text { min-width: 0px; text: @tr("Could not preload the next chapter"); color: Theme.current.text_bright; wrap: word-wrap; vertical-alignment: center; }
+                                    Text { min-width: 0px; text: root.reader-continuation-error; color: Theme.current.text_bright; wrap: word-wrap; vertical-alignment: center; }
                                     ActionButton { text: @tr("Retry"); clicked => { root.retry-continuation(); } }
                                 }
                             }

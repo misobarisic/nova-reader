@@ -232,6 +232,47 @@ impl Reader {
         ((physical / 128.).ceil() as u32 * 128).clamp(128, 16384)
     }
 
+    /// Do not let provisional page heights become a reading anchor. A small
+    /// loading edge may enter the viewport, but unread artwork stays ahead of
+    /// the reader until its real geometry/pixels have arrived. Explicit seeks
+    /// and restored anchors remain valid starting points.
+    fn loaded_scroll_offset(
+        &self,
+        requested: f32,
+        width: f32,
+        viewport: f32,
+        ready: impl Fn(usize) -> bool,
+    ) -> f32 {
+        let current = (self.page_position(self.anchor.page_index)
+            + self.ratios[self.anchor.page_index] * self.anchor.offset() as f32)
+            * width;
+        let requested = requested.max(0.);
+        let loading_edge = 48_f32.min(viewport.max(0.));
+        if requested > current {
+            for index in self.anchor.page_index..self.pages.len() {
+                if !ready(index) {
+                    let limit =
+                        (self.page_position(index) * width - viewport + loading_edge).max(current);
+                    return requested.min(limit);
+                }
+                if self.page_position(index) * width > requested + viewport {
+                    break;
+                }
+            }
+        } else if requested < current {
+            for index in (0..=self.anchor.page_index).rev() {
+                if !ready(index) {
+                    let limit = (self.page_position(index + 1) * width).min(current);
+                    return requested.max(limit);
+                }
+                if (self.page_position(index) + self.ratios[index]) * width < requested {
+                    break;
+                }
+            }
+        }
+        requested
+    }
+
     fn visible_end(&self) -> usize {
         let index = self.anchor.page_index.min(self.pages.len() - 1);
         let mut end = index;
@@ -2117,7 +2158,19 @@ impl Controller {
         reader.viewport_width = width;
         reader.viewport_height = viewport;
 
-        let mut remaining = offset.max(0.0) / width;
+        let rows = ui.get_pages();
+        let requested_offset = offset;
+        let offset = reader.loaded_scroll_offset(offset, width, viewport, |index| {
+            // A terminal failure remains skippable; only in-flight images block.
+            rows.row_data(index)
+                .is_some_and(|row| row.loaded || !row.error.is_empty())
+        });
+        // Keep Flickable itself at the admitted position, not just the durable
+        // anchor; otherwise loading would reveal content above a blank scroll.
+        if (offset - requested_offset).abs() > 0.5 {
+            ui.set_scroll_y(-offset);
+        }
+        let mut remaining = offset / width;
         let mut index = 0;
         while index + 1 < reader.pages.len()
             && remaining >= reader.ratios[index] + reader.gap_after(index) / width
@@ -3094,6 +3147,66 @@ impl Controller {
                 self.render(ui);
                 return Ok(());
             }
+            if matches!(
+                action,
+                "mark-all-read" | "mark-all-unread" | "clear-all-positions"
+            ) {
+                self.checkpoint_progress();
+                self.progress_checkpoint.flush(None)?;
+                if action == "clear-all-positions" {
+                    // Clear every saved page in one durable edit; read state,
+                    // History and bookmarks stay untouched.
+                    self.services
+                        .domain
+                        .update(|state| reset_series_positions(state, &id, now()).map(|_| ()))
+                        .map_err(error)?;
+                    self.render(ui);
+                    ui.set_status(text::tr("Chapter positions cleared.").into());
+                    return Ok(());
+                }
+                if !snapshot
+                    .chapters
+                    .iter()
+                    .any(|chapter| chapter.id.series == id)
+                {
+                    let target = key.to_owned();
+                    let action = action.to_owned();
+                    self.task(
+                        ui,
+                        move |app, cancel| app.services.details(&series, cancel),
+                        move |app, ui, (_, chapters)| {
+                            if chapters.is_empty() {
+                                ui.set_status(
+                                    text::tr("No chapters are available for this title.").into(),
+                                );
+                            } else {
+                                app.entry_action(ui, &target, &action);
+                            }
+                        },
+                    );
+                    return Ok(());
+                }
+                let mut newly_read = Vec::new();
+                self.services
+                    .domain
+                    .update_manual_progress(|state| {
+                        newly_read = set_series_read(state, &id, action == "mark-all-read", now())?;
+                        Ok(())
+                    })
+                    .map_err(error)?;
+                if !newly_read.is_empty() {
+                    let services = self.services.clone();
+                    std::thread::spawn(move || {
+                        crate::download_cleanup::after_read(
+                            &services.domain,
+                            &services.downloads,
+                            &newly_read,
+                        )
+                    });
+                }
+                self.render(ui);
+                return Ok(());
+            }
             if action == "details" {
                 self.gallery_details(ui, series);
                 return Ok(());
@@ -3252,6 +3365,23 @@ impl Controller {
                     Ok(())
                 })
                 .map_err(error),
+            "clear-progress" => {
+                self.checkpoint_progress();
+                self.progress_checkpoint.flush(None).and_then(|_| {
+                    self.services
+                        .domain
+                        .update(|state| {
+                            if let Some(progress) =
+                                state.progress.iter_mut().find(|p| p.chapter == chapter)
+                            {
+                                progress.anchor = ResumeAnchor::new("0", 0, 0.)?;
+                                progress.last_read_at = now();
+                            }
+                            Ok(())
+                        })
+                        .map_err(error)
+                })
+            }
             "read" => {
                 let mut newly_read = false;
                 let result = self
@@ -3459,6 +3589,67 @@ impl Controller {
         );
     }
 }
+/// Batch explicit series completion without fabricating visits or moving any
+/// saved page. Full source-local identities isolate equally named titles.
+fn set_series_read(
+    state: &mut reader_domain::ReaderState,
+    series: &reader_domain::SeriesId,
+    completed: bool,
+    at: i64,
+) -> reader_domain::Result<Vec<ChapterId>> {
+    let chapters = state
+        .chapters
+        .iter()
+        .filter(|chapter| &chapter.id.series == series)
+        .map(|chapter| chapter.id.clone())
+        .collect::<Vec<_>>();
+    let mut newly_read = Vec::new();
+    for chapter in chapters {
+        let prior = state
+            .progress
+            .iter()
+            .find(|progress| progress.chapter == chapter)
+            .cloned();
+        if completed && !prior.as_ref().is_some_and(|p| p.completed) {
+            newly_read.push(chapter.clone());
+        }
+        let mut progress = prior.unwrap_or(ReadingProgress {
+            chapter: chapter.clone(),
+            anchor: ResumeAnchor::new("0", 0, 0.)?,
+            mode: state.preferences.mode,
+            last_read_at: at,
+            completed,
+        });
+        progress.completed = completed;
+        progress.last_read_at = at;
+        state.progress.retain(|p| p.chapter != chapter);
+        state.progress.push(progress);
+    }
+    Ok(newly_read)
+}
+/// Reset saved resume positions for one series while preserving read/unread
+/// state, History and bookmarks. Chapters with no saved position need no entry.
+fn reset_series_positions(
+    state: &mut reader_domain::ReaderState,
+    series: &reader_domain::SeriesId,
+    at: i64,
+) -> reader_domain::Result<usize> {
+    let mut cleared = 0;
+    for progress in state
+        .progress
+        .iter_mut()
+        .filter(|progress| &progress.chapter.series == series)
+    {
+        if progress.anchor.page_index == 0 && progress.anchor.offset() == 0. {
+            continue;
+        }
+        progress.anchor = ResumeAnchor::new("0", 0, 0.)?;
+        progress.last_read_at = at;
+        cleared += 1;
+    }
+    Ok(cleared)
+}
+
 /// Explicit completion is separate from reading activity. Only real reader
 /// checkpoints call ReaderState::set_progress, which also records History.
 pub(crate) fn toggle_chapter_read(
@@ -5259,6 +5450,107 @@ mod tests {
         }
     }
     #[test]
+    fn series_read_flags_preserve_other_sources_history_and_resume() {
+        let series = reader_domain::SeriesId::new("a", "same");
+        let other = reader_domain::SeriesId::new("b", "same");
+        let chapter = |series: reader_domain::SeriesId, id: &str| Chapter {
+            id: ChapterId::new(series, id),
+            title: id.into(),
+            label: String::new(),
+            number: None,
+            volume: None,
+            source_order: 0,
+            language: None,
+            scanlator: None,
+            uploaded_at: None,
+        };
+        let mut state = reader_domain::ReaderState {
+            chapters: vec![
+                chapter(series.clone(), "one"),
+                chapter(series.clone(), "two"),
+                chapter(other.clone(), "one"),
+            ],
+            ..Default::default()
+        };
+        let anchor = ResumeAnchor::new("actual-page", 3, 0.4).unwrap();
+        for source in [&series, &other] {
+            state.set_progress(ReadingProgress {
+                chapter: ChapterId::new(source.clone(), "one"),
+                anchor: anchor.clone(),
+                mode: ReadingMode::RightToLeft,
+                last_read_at: 10,
+                completed: false,
+            });
+        }
+        let history = state.history.clone();
+        assert_eq!(
+            set_series_read(&mut state, &series, true, 20)
+                .unwrap()
+                .len(),
+            2
+        );
+        for completed in [true, false] {
+            set_series_read(&mut state, &series, completed, 21).unwrap();
+            assert_eq!(state.history, history);
+            for progress in &state.progress {
+                assert_eq!(
+                    progress.completed,
+                    progress.chapter.series == series && completed
+                );
+                if progress.chapter.local_id == "one" {
+                    assert_eq!(progress.anchor, anchor);
+                    assert_eq!(progress.mode, ReadingMode::RightToLeft);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn clearing_series_positions_preserves_read_state_history_and_other_sources() {
+        let series = reader_domain::SeriesId::new("a", "same");
+        let other = reader_domain::SeriesId::new("b", "same");
+        let mut state = reader_domain::ReaderState::default();
+        for (source, chapter, page, completed) in [
+            (&series, "one", 4, true),
+            (&series, "two", 2, false),
+            (&other, "one", 7, false),
+        ] {
+            state.set_progress(ReadingProgress {
+                chapter: ChapterId::new(source.clone(), chapter),
+                anchor: ResumeAnchor::new("page", page, 0.25).unwrap(),
+                mode: ReadingMode::Webtoon,
+                last_read_at: 10,
+                completed,
+            });
+        }
+        let history = state.history.clone();
+        assert_eq!(reset_series_positions(&mut state, &series, 20).unwrap(), 2);
+        for progress in &state.progress {
+            if progress.chapter.series == series {
+                assert_eq!(progress.anchor.page_index, 0);
+                assert_eq!(progress.anchor.offset(), 0.);
+                assert_eq!(progress.mode, ReadingMode::Webtoon);
+            } else {
+                assert_eq!(
+                    progress.anchor.page_index, 7,
+                    "equally named titles from another source stay untouched"
+                );
+            }
+        }
+        assert_eq!(
+            state
+                .progress
+                .iter()
+                .map(|p| (p.chapter.local_id.as_str(), p.completed))
+                .collect::<Vec<_>>(),
+            vec![("one", true), ("two", false), ("one", false)]
+        );
+        assert_eq!(state.history, history);
+        // Already-cleared anchors are a no-op rather than a redundant write.
+        assert_eq!(reset_series_positions(&mut state, &series, 21).unwrap(), 0);
+    }
+
+    #[test]
     fn installed_adult_source_is_visible_without_toggling() {
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
@@ -5490,6 +5782,45 @@ mod tests {
             completed: false,
         }
     }
+    #[test]
+    fn webtoon_scroll_stops_before_unknown_geometry_and_releases_after_loading() {
+        let mut reader = tall_reader();
+        reader.ratios = vec![2., 1.5];
+        assert_eq!(
+            reader.loaded_scroll_offset(9000., 400., 600., |_| false),
+            0.
+        );
+        assert_eq!(
+            reader.loaded_scroll_offset(9000., 400., 600., |i| i == 0),
+            248.
+        );
+        reader.ratios[1] = 50.;
+        assert_eq!(
+            reader.loaded_scroll_offset(9000., 400., 600., |i| i == 0),
+            248.,
+            "a tall incoming page cannot move the admitted anchor"
+        );
+        assert_eq!(
+            reader.loaded_scroll_offset(9000., 400., 600., |_| true),
+            9000.
+        );
+        // Fast reverse scrolling must not enter an unloaded previous page at a
+        // guessed fractional offset either; start at its bottom once it loads.
+        reader.anchor = ResumeAnchor::new("page-1", 1, 0.).unwrap();
+        assert_eq!(
+            reader.loaded_scroll_offset(0., 400., 600., |i| i == 1),
+            800.
+        );
+        assert_eq!(reader.loaded_scroll_offset(0., 400., 600., |_| true), 0.);
+        // An explicit saved position inside a loading image stays put.
+        reader.anchor = ResumeAnchor::new("page-1", 1, 0.5).unwrap();
+        let restored = (reader.page_position(1) + reader.ratios[1] * 0.5) * 400.;
+        assert_eq!(
+            reader.loaded_scroll_offset(90000., 400., 600., |_| false),
+            restored
+        );
+    }
+
     #[test]
     fn paged_completion_waits_for_the_second_spread_half_and_uses_chapter_local_end() {
         let mut reader = tall_reader();
@@ -6471,6 +6802,8 @@ mod tests {
         assert_eq!(app.view().reader.as_ref().unwrap().anchor, before);
         ui.set_zoom(1.);
         app.reflow(&ui, 500., 500.);
+        // Reset deliberately: ordinary scrolling now stops at unloaded images.
+        app.reader_seek(&ui, 0.);
         app.position(&ui, 0., 500., 500.);
         let mut view = app.view();
         let reader = view.reader.as_mut().unwrap();
