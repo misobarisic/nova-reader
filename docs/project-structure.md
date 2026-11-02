@@ -77,7 +77,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `crates/reader-catalogue` | Bounded Keiyoushi protobuf discovery, exact port mappings, signed native catalogue verification and availability states |
 | `addons/README.md` | Installation instructions and external nova-addons link; no real site sources or ZIPs are bundled |
 | `examples/addons/neutral-fixture` | Installable network-free fixture, bundled geometric PNGs and 320-page chapter |
-| External `nova-addons/reader-addons`, `reader-tests`, `reader-packages` | Real site implementations, parser/QuickJS tests, licensing and immutable installable ZIPs; intentionally absent from Reader |
+| External `nova-addons/reader-addons`, `reader-tests` and tagged releases | Real site implementations, parser/QuickJS tests and licensing; installable ZIPs are generated on tags and published in GitHub Releases |
 | `tests/reading_journey.rs` | Process-boundary install/read/progress/interrupted download/recovery/source-removal/offline journey |
 | `tests/ui_navigation.rs`, `tests/mobile_layout.rs` | Headless reader models, phone/landscape/tablet/desktop control bounds, tab taps, accessible activation and back navigation |
 | `tests/appearance.rs` | Process-boundary appearance persistence, palette application, invalid edits and theme reset preserving motion preferences |
@@ -311,9 +311,9 @@ generic envelope/runtime into nova-kit requires shared API design and Nova v1
 consumer regressions; this workspace does not claim that extraction is complete.
 Reader retains only its neutral executable addon fixture; catalogue compatibility
 metadata and its host regressions remain in `reader-catalogue`. Real site implementations,
-source-specific Node/native tests, notices and immutable ZIPs live exclusively
-in `nova-addons/reader-addons/`, `nova-addons/reader-tests/` and
-`nova-addons/reader-packages/`; Reader does not depend on a sibling checkout.
+source-specific Node/native tests and notices live exclusively in
+`nova-addons/reader-addons/` and `nova-addons/reader-tests/`. Tagged releases
+generate all installable ZIPs; Reader does not depend on a sibling checkout.
 
 ## Where to look
 
@@ -324,7 +324,7 @@ in `nova-addons/reader-addons/`, `nova-addons/reader-tests/` and
 - Cache quotas, disk master switch and worker snapshots: `src/image_storage.rs`, `crates/ui/image-storage-settings.slint`, `tests/image_storage.rs`.
 - Shared Nova settings controls: Kit `slint/cache-settings-controls.slint`; Nova keeps SettingsRow/search/sync/keyboard wrappers.
 - Cover cache placement, immediate reuse and source revocation: `src/paths.rs`, `src/artwork.rs`, More → Settings → Cache.
-- Real site addons, their tests and immutable ZIPs: [nova-addons](https://github.com/misobarisic/nova-addons). Reader keeps only `examples/addons/neutral-fixture`.
+- Real site addons, their tests and tagged release downloads: [nova-addons](https://github.com/misobarisic/nova-addons). Reader keeps only `examples/addons/neutral-fixture`.
 - Progressive JPEG XL reader previews and strict final handoff: `src/reader_progressive.rs`, `src/app.rs::image_worker`, `src/chapter_cache.rs::read_with_chunks`; neutral streamed-EOF regressions live with the progressive module.
 - Addon icons and source filters: `src/addon_icons.rs`, `crates/ui/addon-icon.slint`, `src/source_filters.rs`, `crates/reader-sources/src/package.rs`; optional `manifest.icon` must name a declared PNG asset. Multiple/include/exclude groups use existing Nova setting rows with typed JSON output.
 - Shared cache implementation/settings: Kit `crates/cache` and `crates/ui-base/slint/cache-settings-controls.slint`; Reader `src/chapter_cache.rs`, `src/image_storage.rs` and `tests/image_storage.rs`.

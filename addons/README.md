@@ -1,9 +1,9 @@
 # Installable addons
 
-Real site addons, their tests, immutable ZIPs and release packaging are maintained
+Real site addons, their tests and release packaging are maintained
 in [nova-addons](https://github.com/misobarisic/nova-addons#nova-reader-chapter-and-page-sources).
-Use its `reader-addons/` sources and `reader-packages/` installable archives, or
-its published releases. Reader contains no real site addon implementations or ZIPs.
+Use its `reader-addons/` sources and download installable ZIPs from its
+[GitHub Releases](https://github.com/misobarisic/nova-addons/releases). Reader contains no real site addon implementations or ZIPs.
 
 Install a ZIP from **Browse → Extensions → Install addon**, or run
 `nova-reader install-addon /path/to/addon.zip`. Permission-expanding updates
