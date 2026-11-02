@@ -125,13 +125,21 @@ fn display_options(prefs: &ReaderSettings, mode: ReadingMode) -> reader_engine::
     }
 }
 
+/// Reading with the Fullscreen preference hides both Android system bars for
+/// the whole session, as Nova's player hides them during playback. Controls
+/// being visible must not pull the bars back in: that would resize the reader
+/// every time the OSD toggles.
+fn immersive_reading(reading: bool, fullscreen: bool) -> bool {
+    reading && fullscreen
+}
+
 pub(super) fn platform(ui: &AppWindow) {
     let prefs = reader_settings::snapshot();
     let reading = ui.get_section() == 6;
     if !reading {
         crate::reader_settings_ui::apply(ui, &prefs);
     }
-    let immersive = reading && prefs.fullscreen && !ui.get_reader_osd();
+    let immersive = immersive_reading(reading, prefs.fullscreen);
     #[cfg(target_os = "android")]
     if let Err(error) = crate::android_documents::set_reader_presentation(
         reading,
@@ -774,6 +782,20 @@ mod tests {
         for _ in 0..ms / 10 {
             mock_elapsed_time(Duration::from_millis(10));
         }
+    }
+    #[test]
+    fn android_immersive_bars_follow_reading_not_controls_visibility() {
+        assert!(immersive_reading(true, true));
+        assert!(
+            !immersive_reading(false, true),
+            "leaving the reader restores both bars"
+        );
+        assert!(
+            !immersive_reading(true, false),
+            "Fullscreen stays user-controlled"
+        );
+        // `platform` deliberately has no OSD argument: showing controls cannot
+        // reveal the bars and resize the reading area mid-scroll.
     }
     fn touch(ui: &AppWindow, id: i32, x: f32, y: f32, phase: TouchPhase) {
         ui.window()

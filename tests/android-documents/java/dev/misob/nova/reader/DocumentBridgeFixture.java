@@ -257,5 +257,10 @@ public class DocumentBridgeFixture {
         if (Build.VERSION.SDK_INT>=30) window.getInsetsController().show(WindowInsets.Type.statusBars());
         else window.getDecorView().setSystemUiVisibility(window.getDecorView().getSystemUiVisibility()&~View.SYSTEM_UI_FLAG_FULLSCREEN);
     }
+    public static void revealSystemBars() {
+        Window window=current.getWindow();
+        if (Build.VERSION.SDK_INT>=30) window.getInsetsController().show(WindowInsets.Type.systemBars());
+        else window.getDecorView().setSystemUiVisibility(window.getDecorView().getSystemUiVisibility()&~(View.SYSTEM_UI_FLAG_FULLSCREEN|View.SYSTEM_UI_FLAG_HIDE_NAVIGATION));
+    }
     public static void focus() { current.onWindowFocusChanged(true); }
 }

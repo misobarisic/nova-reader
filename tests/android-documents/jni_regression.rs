@@ -947,7 +947,6 @@ fn assert_reader_window_layout(env: &mut JNIEnv<'_>) {
     assert!(fixture_bool(env, "transparentStatusBar"));
     assert!(fixture_bool(env, "cutoutAllowed"));
     assert!(fixture_bool(env, "unrelatedWindowFlagsPreserved"));
-    assert!(!fixture_bool(env, "navigationHidden"));
 }
 
 fn reader_immersive_follows_controls_and_activity_lifecycle(env: &mut JNIEnv<'_>) {
@@ -957,6 +956,10 @@ fn reader_immersive_follows_controls_and_activity_lifecycle(env: &mut JNIEnv<'_>
         fixture_run(env, "destroy");
         fixture_run(env, "create");
         assert_reader_window_layout(env);
+        assert!(
+            !fixture_bool(env, "navigationHidden"),
+            "bars stay visible outside immersive reading"
+        );
         let layout_changes = fixture_updates(env, "layoutChanges");
         let fitting_calls = fixture_updates(env, "decorFitCalls");
         assert_eq!(layout_changes, 1);
@@ -964,6 +967,7 @@ fn reader_immersive_follows_controls_and_activity_lifecycle(env: &mut JNIEnv<'_>
         env.call_static_method(FIXTURE, "drain", "()V", &[])
             .unwrap();
         assert!(!fixture_bool(env, "statusHidden"));
+        assert!(!fixture_bool(env, "navigationHidden"));
         assert_reader_window_layout(env);
         assert_eq!(fixture_updates(env, "layoutChanges"), layout_changes);
         assert_eq!(fixture_updates(env, "decorFitCalls"), fitting_calls);
@@ -977,7 +981,10 @@ fn reader_immersive_follows_controls_and_activity_lifecycle(env: &mut JNIEnv<'_>
             .unwrap();
         assert!(fixture_bool(env, "statusHidden"));
         assert!(fixture_bool(env, "transientSwipe"));
-        assert!(!fixture_bool(env, "navigationHidden"));
+        assert!(
+            fixture_bool(env, "navigationHidden"),
+            "immersive reading hides the navigation bar too"
+        );
         assert!(fixture_bool(env, "stableLayout"));
         assert_reader_window_layout(env);
         assert_eq!(
@@ -991,17 +998,23 @@ fn reader_immersive_follows_controls_and_activity_lifecycle(env: &mut JNIEnv<'_>
             "OSD toggles must not redispatch decor fitting"
         );
 
-        // Recreation and focus regain restore the requested status-bar state.
+        // Recreation and focus regain restore the requested bars state.
         env.call_static_method(FIXTURE, "recreate", "()V", &[])
             .unwrap();
         assert!(fixture_bool(env, "statusHidden"));
+        assert!(fixture_bool(env, "navigationHidden"));
         assert_reader_window_layout(env);
-        env.call_static_method(FIXTURE, "revealStatusBar", "()V", &[])
+        env.call_static_method(FIXTURE, "revealSystemBars", "()V", &[])
             .unwrap();
         assert!(!fixture_bool(env, "statusHidden"));
+        assert!(!fixture_bool(env, "navigationHidden"));
         env.call_static_method(FIXTURE, "focus", "()V", &[])
             .unwrap();
         assert!(fixture_bool(env, "statusHidden"));
+        assert!(
+            fixture_bool(env, "navigationHidden"),
+            "focus regain re-hides both bars"
+        );
         assert_reader_window_layout(env);
         fixture_run(env, "disturbWindowLayout");
         assert!(!fixture_bool(env, "edgeToEdge"));
@@ -1063,6 +1076,10 @@ fn reader_immersive_follows_controls_and_activity_lifecycle(env: &mut JNIEnv<'_>
     fixture_run(env, "attachInsets");
     fixture_run(env, "drain");
     assert!(fixture_bool(env, "statusHidden"));
+    assert!(
+        fixture_bool(env, "navigationHidden"),
+        "deferred attachment hides both bars"
+    );
     assert_reader_window_layout(env);
     set_reader_immersive(false).unwrap();
     fixture_run(env, "deferInsets");

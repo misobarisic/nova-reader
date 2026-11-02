@@ -11,17 +11,19 @@ to the main thread and resolves the current ReaderActivity there, retaining only
 a weak reference. JNI explicitly registers the result callback on the app class;
 Java launch exceptions preserve their class/message and are cleared before retry.
 
-The same Application-context bridge controls the reader's Android status bar.
-`set_reader_immersive(true)` hides the status bar while chapter controls are
-hidden; `set_reader_immersive(false)` restores it when controls are shown or the
-reader closes. Java posts window changes to main and resolves the current weak
-activity reference when the queue runs. The latest desired state survives
-activity recreation and is reapplied on creation and window focus. API 30 and
-newer use `WindowInsetsController` with transient bars available by swipe; older
-versions use fullscreen/immersive-sticky decor flags while retaining other flags.
-Only the status bar is hidden; the navigation bar remains visible.
+The same Application-context bridge controls the reader's Android system bars.
+`set_reader_immersive(true)` hides both the status bar and the navigation bar
+while the reader is open with **Fullscreen** enabled; `set_reader_immersive(false)`
+restores both when Fullscreen is off or the reader closes. Java posts window
+changes to main and resolves the current weak activity reference when the queue
+runs. The latest desired state survives activity recreation and is reapplied on
+creation and window focus. API 30 and newer hide
+`WindowInsets.Type.systemBars()` through `WindowInsetsController` with transient
+bars available by swipe; older versions use fullscreen plus navigation-hiding
+immersive-sticky decor flags while retaining other flags. The bars stay hidden
+while controls are shown too, so toggling the OSD cannot resize the reader.
 
-The activity keeps its native surface behind the status bar in every page and
+The activity keeps its native surface behind the system bars in every page and
 both reader control states. API 30+ uses `setDecorFitsSystemWindows(false)`;
 API 26-29 retains `LAYOUT_STABLE|LAYOUT_HIDE_NAVIGATION|LAYOUT_FULLSCREEN` while toggling only bar
 visibility flags. The status bar is transparent. Cutout layout uses `ALWAYS`
@@ -30,14 +32,15 @@ same client viewport instead of reserving or releasing a strip above the image.
 These settings are reapplied on activity creation and window focus.
 This matches Nova's normal transparent, edge-to-edge window policy in
 `nova/crates/player/src/external.rs` (`EDGE_TO_EDGE` at line 523 and
-`apply_system_bars` at lines 666-732). Navigation is kept visible for Reader's
-status-only immersive mode. Inherited window `FLAG_FULLSCREEN`, translucent
-status flags and legacy navigation-hiding flags are cleared, so leaving a
-chapter can restore the status bar even if the native framework set fullscreen.
-Decor fitting is configured once per creation/focus rather than redispatched
-for each controls toggle. If the API 30+ insets controller is not attached during
-creation, one decor-view post retries against the latest activity/state; focus
-also reasserts it.
+`apply_system_bars` at lines 666-732). Reader hides both bars, matching Nova's
+player; Slint's safe-area insets follow the visible bars, so hiding the
+navigation bar releases its bottom inset instead of leaving a black strip.
+Inherited window `FLAG_FULLSCREEN` and translucent status flags are cleared, so
+leaving a chapter can restore the bars even if the native framework set
+fullscreen. Decor fitting is configured once per creation/focus rather than
+redispatched for each controls toggle. If the API 30+ insets controller is not
+attached during creation, one decor-view post retries against the latest
+activity/state; focus also reasserts it.
 
 Slint 1.18's Android backend reports system-bar and cutout insets without setting
 the window fitting policy. Its Java inset listeners remain installed: normal
@@ -210,10 +213,11 @@ recreation/destruction, plus launch exception reporting and successful recovery.
 The window fixtures exercise API 26/28/29 decor flags and API 30/35 insets: queued hide/show,
 transient swipe behavior, retained state across recreation and missing activity,
 focus reapplication, rapid toggles, and rejection of updates to stale windows.
-They also check transparent status bars, the matching cutout policies and
-edge-to-edge fitting with both hidden/shown controls, unchanged layout flags
-across toggles, and restoration after recreation/focus. Unrelated window/decor
-flags and navigation visibility must survive.
+They hide and restore both the status and navigation bars, check that a focus
+regain re-hides both, and check transparent status bars, the matching cutout
+policies and edge-to-edge fitting with both hidden/shown controls, unchanged
+layout flags across toggles, and restoration after recreation/focus. Unrelated
+window/decor flags and navigation visibility must survive.
 Fixtures begin with fullscreen/navigation hiding already set and verify normal
 bar restoration, deferred controller attachment and a stale attachment retry.
 Image fixtures verify MIME/filename picker metadata, real export bytes, provider
@@ -239,10 +243,11 @@ backup; cancel before and during a slow provider copy; rotate/recreate while the
 picker is open; kill the process during copying; reject an over-limit document;
 and exercise a provider that offers only a transient grant. Confirm the activity,
 Java dex, native library name and native callback are packaged together.
-In a chapter, verify controls start hidden, tapping restores both the controls
-and status bar, tapping again hides both, a system swipe temporarily reveals the
-status bar, and rotation or returning from another app preserves the requested
-state. Leaving the reader must restore the status bar.
+In a chapter, verify controls start hidden and both the status and navigation
+bars are hidden, tapping shows the controls without revealing the bars, a system
+swipe temporarily reveals the bars, and rotation or returning from another app
+preserves the hidden state. Leaving the reader must restore both bars. With
+**Fullscreen** turned off, both bars stay visible inside the reader.
 Check portrait and landscape on a cutout device: chapter pixels must reach the
 top edge with either control state, the image must not move when toggling
 controls, the visible toolbar must remain clear of status icons/cutouts, and

@@ -91,6 +91,9 @@ def main():
         (work / 'Cargo.toml').write_text(
             '[package]\nname="reader-document-jni-regression"\nversion="0.0.0"\nedition="2024"\n'
             '[workspace]\n[dependencies]\njni={version="=0.21.1",features=["invocation"]}\nndk-context="=0.1.1"\n'
+            # ExportImage is extracted from reader_export.rs, whose clipboard
+            # field is typed as image::RgbaImage.
+            'image={version="0.25",default-features=false}\n'
         )
         production = (ROOT / 'src/android_documents.rs').read_text().replace('#![cfg(target_os = "android")]\n', '')
         regression = json.dumps(str(ROOT / 'tests/android-documents/jni_regression.rs'))

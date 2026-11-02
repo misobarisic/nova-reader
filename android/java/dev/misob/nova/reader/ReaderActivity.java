@@ -131,7 +131,7 @@ public final class ReaderActivity extends NativeActivity {
     }
 
     public static void setReaderImmersive(boolean immersive) {
-        // Compatibility entry point: only change status-bar visibility.
+        // Compatibility entry point: changes both system bars.
         ReaderPresentation current=readerPresentation;
         readerPresentation=new ReaderPresentation(current.reading,immersive,current.rotation,current.keepAwake,current.cutout);
         postReaderPresentation();
@@ -218,10 +218,14 @@ public final class ReaderActivity extends NativeActivity {
             }
             WindowInsetsController controller=window.getInsetsController();
             if (controller!=null) {
+                // Immersive reading hides the status and navigation bars, as
+                // Nova's video player does. A swipe still reveals them
+                // transiently; they auto-hide again. Slint's safe-area insets
+                // follow the visible bars, so hiding the navigation bar
+                // releases its bottom inset instead of leaving a black strip.
                 controller.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
-                controller.show(WindowInsets.Type.navigationBars());
-                if (state.immersive) controller.hide(WindowInsets.Type.statusBars());
-                else controller.show(WindowInsets.Type.statusBars());
+                if (state.immersive) controller.hide(WindowInsets.Type.systemBars());
+                else controller.show(WindowInsets.Type.systemBars());
             } else if (retryOnAttach) {
                 // View.post waits for attachment when onCreate has no insets
                 // controller yet. Resolve current activity and latest intent;
@@ -235,7 +239,8 @@ public final class ReaderActivity extends NativeActivity {
             View decor=window.getDecorView();
             int flags=(decor.getSystemUiVisibility()&~View.SYSTEM_UI_FLAG_HIDE_NAVIGATION)
                 |View.SYSTEM_UI_FLAG_LAYOUT_STABLE|View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION|View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN;
-            int readerFlags=View.SYSTEM_UI_FLAG_FULLSCREEN|View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY;
+            // API 26–29 immersive-sticky: both bars hidden, swipe reveals.
+            int readerFlags=View.SYSTEM_UI_FLAG_FULLSCREEN|View.SYSTEM_UI_FLAG_HIDE_NAVIGATION|View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY;
             decor.setSystemUiVisibility(state.immersive?flags|readerFlags:flags&~readerFlags);
         }
         presentationConfigured=true;

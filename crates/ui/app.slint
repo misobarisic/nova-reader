@@ -471,7 +471,7 @@ export component AppWindow inherits Window {
     changed reader-osd => {
         if root.reader-context-visible && root.reader-osd { root.reader-osd = false; }
         if !root.reader-osd { root.show-reader-options = false; }
-        root.immersive-changed(root.section == 6 && ReaderSettings.fullscreen && !root.reader-osd);
+        root.immersive-changed(root.section == 6 && ReaderSettings.fullscreen);
     }
     // Cap the reading column before padding: otherwise wide desktop windows
     // swallow padding edits until the padded viewport drops below the cap.
@@ -599,7 +599,7 @@ export component AppWindow inherits Window {
         if root.reader-context-visible { root.close-reader-context(); }
         root.reader-context-toast-open = false;
         if root.section == 6 { root.reader-osd = false; root.show-reader-options = false; }
-        root.immersive-changed(root.section == 6 && ReaderSettings.fullscreen && !root.reader-osd);
+        root.immersive-changed(root.section == 6 && ReaderSettings.fullscreen);
         keyboard.focus();
         if root.section == 4 || (root.section >= 9 && root.section <= 22) { more-page.focus_shell(); }
     }

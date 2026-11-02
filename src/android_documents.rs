@@ -481,8 +481,8 @@ pub fn open_browser(url: &str) -> Result<(), String> {
         )
     })
 }
-/// Hide the Android status bar while reader controls are hidden, or restore it
-/// with the controls. Java applies this on main and retains it across recreation.
+/// Hide both Android system bars while reading, or restore them afterwards.
+/// Java applies this on main and retains it across recreation.
 pub fn set_reader_immersive(immersive: bool) -> Result<(), String> {
     with_context(|env, _, class| {
         env.call_static_method(

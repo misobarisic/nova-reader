@@ -683,7 +683,10 @@ fn poster_layout_timelines_chapters_and_reader_controls() {
     touch.mock_single_click(PointerEventButton::Left);
     settle();
     assert!(ui.get_reader_osd());
-    assert!(!immersive.get());
+    assert!(
+        immersive.get(),
+        "showing controls keeps both system bars hidden while reading"
+    );
     assert_eq!(reader.size().height, initial_height);
     button(&ui, "Settings").invoke_accessible_default_action();
     settle();
@@ -705,7 +708,10 @@ fn poster_layout_timelines_chapters_and_reader_controls() {
     );
     ui.set_section(5);
     settle();
-    assert!(!immersive.get(), "leaving reader restores status bar");
+    assert!(
+        !immersive.get(),
+        "leaving reader restores both system bars"
+    );
 }
 
 #[test]

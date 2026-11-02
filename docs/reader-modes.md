@@ -100,8 +100,12 @@ single, and pans cancel both taps and holds.
 
 On Android orientation uses the activity's requested orientation, while desktop
 orientation constrains the reading viewport and reverse portrait rotates the
-display. Fullscreen and keep-awake apply only while reading. Native desktop
-idle inhibition runs on a coalescing worker and releases on leaving the reader.
+display. Fullscreen and keep-awake apply only while reading. On Android,
+**Fullscreen** hides both the status bar and the navigation bar for the whole
+reader session, like Nova's player; the bars stay hidden when the OSD is shown,
+a swipe reveals them transiently, and both are restored on leaving the reader.
+Native desktop idle inhibition runs on a coalescing worker and releases on
+leaving the reader.
 
 Display crop/split/rotation and tint/grayscale/inversion operate on bounded
 windows from the immutable source. Source-resolution screencaps use the same
