@@ -759,6 +759,9 @@ fn trim_ui(ui: &AppWindow, id: u64, shared: &Shared) {
 }
 
 fn decode(bytes: &[u8]) -> Result<Pixels, String> {
+    let _permit = crate::decode_admission::SHARED
+        .acquire(crate::decode_admission::Priority::Prefetch, || true)
+        .ok_or_else(|| "operation cancelled".to_string())?;
     let image = decode_display_image(bytes, cover_limits(), 460, 690).map_err(|e| e.to_string())?;
     Ok(Pixels::clone_from_slice(
         image.as_raw(),

@@ -224,6 +224,7 @@ pub(super) struct Stream {
     last_render: Option<Instant>,
     render_disabled: bool,
     failure: Option<String>,
+    decode_permit: Option<crate::decode_admission::Permit>,
 }
 impl Stream {
     pub(super) fn new(
@@ -260,6 +261,7 @@ impl Stream {
             last_render: None,
             render_disabled: false,
             failure: None,
+            decode_permit: None,
         })
     }
     pub(super) fn cleanup(&self) -> Cleanup {
@@ -278,10 +280,21 @@ impl Stream {
             if !nova_image::is_jpeg_xl(prefix) {
                 if prefix.len() >= 12 {
                     self.decoder = Decoder::Disabled;
+                    self.decode_permit.take();
                 }
                 return;
             }
             before_start();
+            self.decode_permit = crate::decode_admission::SHARED
+                .acquire(crate::decode_admission::Priority::Viewer, || {
+                    self.mailbox.current()
+                });
+            if self.decode_permit.is_none() {
+                self.mailbox.cancel.cancel();
+                self.decoder = Decoder::Disabled;
+                self.decode_permit.take();
+                return;
+            }
             let options = nova_image::JxlPreviewOptions {
                 max_width: self.width,
                 max_height: 8192,
@@ -297,11 +310,13 @@ impl Stream {
                 Ok(decoder) => self.decoder = Decoder::Active(Box::new(decoder)),
                 Err(nova_image::Error::JxlUnsupported(_) | nova_image::Error::Limit) => {
                     self.decoder = Decoder::Disabled;
+                    self.decode_permit.take();
                     return;
                 }
                 Err(error) => {
                     self.failure = Some(error.to_string());
                     self.decoder = Decoder::Disabled;
+                    self.decode_permit.take();
                     return;
                 }
             }
@@ -317,6 +332,7 @@ impl Stream {
                 self.failure = Some(error.to_string());
             }
             self.decoder = Decoder::Disabled;
+            self.decode_permit.take();
             return;
         }
         if self.render_disabled
@@ -371,6 +387,7 @@ impl Stream {
             _ => Ok(()),
         };
         self.decoder = Decoder::Disabled;
+        self.decode_permit.take();
         self.mailbox.stop();
         if let Some(error) = self.failure.take() {
             return Err(error);
@@ -381,6 +398,7 @@ impl Stream {
 impl Drop for Stream {
     fn drop(&mut self) {
         self.decoder = Decoder::Disabled;
+        self.decode_permit.take();
         self.mailbox.stop();
     }
 }
@@ -613,6 +631,7 @@ mod tests {
                 directory.path().join("viewed"),
             )),
             capture_originals: Mutex::default(),
+            thumbnail_service: OnceLock::new(),
             image_worker_live: AtomicBool::new(true),
             view: Mutex::new(View {
                 section: 6,

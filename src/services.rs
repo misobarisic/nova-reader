@@ -158,11 +158,19 @@ impl Services {
             .and_then(|p| self.sources.source(&p.id).map_err(error))
     }
     pub fn series(&self, source_id: &str, dto: reader_sources::Series) -> Series {
+        let id = SeriesId::new(source_id, &dto.id);
+        // Capture before discarding source-only metadata. Browse/search and both
+        // manual and scheduled detail refreshes share this conversion boundary.
+        if let Err(error) =
+            crate::content_presentation::Settings::record_hint(&id, dto.presentation.as_deref())
+        {
+            eprintln!("Nova Reader: could not save content presentation hint: {error}");
+        }
         Series {
             publication_status: reader_domain::PublicationStatus::from_source(
                 dto.status.as_deref(),
             ),
-            id: SeriesId::new(source_id, dto.id),
+            id,
             title: dto.title,
             description: dto.description.unwrap_or_default(),
             authors: dto.authors,

@@ -27,10 +27,15 @@ export global ImageStorageSettings {
     in-out property <string> chapter-cache-info;
     in-out property <string> chapter-cache-status;
     in-out property <bool> chapter-cache-busy: false;
+    in-out property <string> thumbnail-cache-info;
+    in-out property <string> thumbnail-cache-status;
+    in-out property <bool> thumbnail-cache-busy: false;
     callback settings-changed(string, int);
     callback policy-changed();
     callback chapter-cache-refresh();
     callback chapter-cache-clear();
+    callback thumbnail-cache-refresh();
+    callback thumbnail-cache-clear();
 }
 
 export component ImageStorageSettingsPage inherits VerticalLayout {
@@ -39,15 +44,15 @@ export component ImageStorageSettingsPage inherits VerticalLayout {
     in property <string> image-cache-info;
     in property <string> image-cache-status;
     callback image-cache-clear();
-    private property <bool> maintenance: root.busy || ImageStorageSettings.chapter-cache-busy;
+    private property <bool> maintenance: root.busy || ImageStorageSettings.chapter-cache-busy || ImageStorageSettings.thumbnail-cache-busy;
     spacing: 16px; alignment: start;
-    init => { if root.interactive { ImageStorageSettings.chapter-cache-refresh(); } }
-    changed interactive => { if root.interactive { ImageStorageSettings.chapter-cache-refresh(); } }
+    init => { if root.interactive { ImageStorageSettings.chapter-cache-refresh(); ImageStorageSettings.thumbnail-cache-refresh(); } }
+    changed interactive => { if root.interactive { ImageStorageSettings.chapter-cache-refresh(); ImageStorageSettings.thumbnail-cache-refresh(); } }
     SectionHeader { label: @tr("Chapter cache"); }
     SettingsCard {
         SettingsRow { setting-key: "reader:image-storage/policy/disk_enabled";
             row-title: @tr("Disk caching");
-            row-desc: @tr("Keep viewed chapter pages and artwork on this device to reduce network use. Offline downloads stay independent.");
+            row-desc: @tr("Keep viewed chapter pages, thumbnails and artwork on this device to reduce network use. Offline downloads stay independent.");
             CacheDiskToggle {
                 busy: !root.interactive || root.maintenance;
                 checked <=> ImageStorageSettings.disk-enabled;
@@ -75,9 +80,23 @@ export component ImageStorageSettingsPage inherits VerticalLayout {
                 clicked => { ImageStorageSettings.chapter-cache-clear(); }
             }
         }
+        SettingsRow {
+            row-title: @tr("Thumbnail cache");
+            row-desc: (ImageStorageSettings.thumbnail-cache-info == "" ? "" : ImageStorageSettings.thumbnail-cache-info + "\n\n")
+                + @tr("Thumbnails share the chapter disk-cache limit. Clear only generated previews; original pages, downloaded chapters and imports stay intact.");
+            CacheClearControl {
+                height: 48px; label: @tr("Clear thumbnails");
+                busy: !root.interactive || root.maintenance;
+                clicked => { ImageStorageSettings.thumbnail-cache-clear(); }
+            }
+        }
     }
     if ImageStorageSettings.chapter-cache-status != "": Text {
         text: ImageStorageSettings.chapter-cache-status;
+        color: Theme.current.text_settings; wrap: word-wrap; min-width: 0px;
+    }
+    if ImageStorageSettings.thumbnail-cache-status != "": Text {
+        text: ImageStorageSettings.thumbnail-cache-status;
         color: Theme.current.text_settings; wrap: word-wrap; min-width: 0px;
     }
     SectionHeader { label: @tr("Cache compression"); }
@@ -177,7 +196,7 @@ export component ImageStorageSettingsPage inherits VerticalLayout {
                 + @tr("Covers are temporary and can be downloaded again. Downloaded chapters, imports and library data stay intact when you clear this cache.");
             CacheClearControl {
                 label: @tr("Clear artwork cache");
-                busy: !root.interactive || root.busy;
+                busy: !root.interactive || root.maintenance;
                 clicked => { root.image-cache-clear(); }
             }
         }

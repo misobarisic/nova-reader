@@ -16,6 +16,8 @@ pub mod capture_settings;
 pub mod chapter_cache;
 mod chapter_capture;
 mod cli;
+pub mod content_presentation;
+mod decode_admission;
 #[cfg(not(target_os = "android"))]
 mod desktop_dialogs;
 mod download_background;
@@ -25,6 +27,8 @@ pub mod image_limits;
 mod image_limits_ui;
 pub mod image_storage;
 mod metadata_refresh;
+pub mod page_inventory;
+pub mod page_thumbnails;
 mod paths;
 mod progress_checkpoint;
 #[cfg(not(target_os = "android"))]

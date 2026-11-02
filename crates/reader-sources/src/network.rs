@@ -13,6 +13,8 @@ use std::{
 };
 use url::Url;
 pub(crate) const BODY_CHUNK_BYTES: usize = 16 * 1024;
+pub type PageChunkControl = std::ops::ControlFlow<()>;
+type UntilObserver<'a> = &'a mut dyn FnMut(&[u8]) -> Result<PageChunkControl>;
 type BodyChunkObserver<'a> = &'a mut dyn FnMut(&[u8]) -> Result<()>;
 #[derive(Clone, Default)]
 pub struct CancelToken(Arc<AtomicBool>);
@@ -52,6 +54,13 @@ pub struct HttpResponse {
     pub headers: BTreeMap<String, String>,
     pub body: Vec<u8>,
 }
+/// A successful transfer may deliberately end before EOF. Its bytes must never
+/// be treated as an authoritative original when `complete` is false.
+#[derive(Clone, Debug)]
+pub struct PrefixResponse {
+    pub response: HttpResponse,
+    pub complete: bool,
+}
 pub trait SourceTransport: Send + Sync {
     /// Revision of settings-owned in-memory session state. Production snapshots
     /// retain their original revision; legacy custom transports may omit it.
@@ -85,6 +94,37 @@ pub trait SourceTransport: Send + Sync {
         max_bytes: usize,
         cancel: &CancelToken,
     ) -> Result<HttpResponse>;
+    /// Native preview transfer. Legacy transports safely fall back to a full
+    /// read; the network transport drops its response as soon as the observer
+    /// has enough pixels. Error responses never invoke the observer.
+    fn request_until(
+        &self,
+        request: &HttpRequest,
+        max_bytes: usize,
+        cancel: &CancelToken,
+        on_chunk: &mut dyn FnMut(&[u8]) -> Result<PageChunkControl>,
+    ) -> Result<PrefixResponse> {
+        cancel.check()?;
+        let response = self.request(request, max_bytes, cancel)?;
+        cancel.check()?;
+        if response.body.len() > max_bytes {
+            return Err(network("response byte limit"));
+        }
+        if (200..=299).contains(&response.status) {
+            for chunk in response.body.chunks(BODY_CHUNK_BYTES) {
+                cancel.check()?;
+                let control = on_chunk(chunk)?;
+                cancel.check()?;
+                if control.is_break() {
+                    break;
+                }
+            }
+        }
+        Ok(PrefixResponse {
+            response,
+            complete: true,
+        })
+    }
     /// Native-only observation of successful response body bytes. Observations
     /// are provisional until the returned full response has been validated.
     /// Existing custom transports remain compatible and feed only after their
@@ -375,6 +415,20 @@ fn read_body(
     cancel: &CancelToken,
     mut on_chunk: Option<BodyChunkObserver<'_>>,
 ) -> Result<Vec<u8>> {
+    let mut observer = |chunk: &[u8]| {
+        if let Some(observer) = on_chunk.as_mut() {
+            observer(chunk)?;
+        }
+        Ok(PageChunkControl::Continue(()))
+    };
+    read_body_until(reader, max_bytes, cancel, Some(&mut observer)).map(|(body, _)| body)
+}
+fn read_body_until(
+    reader: &mut dyn Read,
+    max_bytes: usize,
+    cancel: &CancelToken,
+    mut on_chunk: Option<UntilObserver<'_>>,
+) -> Result<(Vec<u8>, bool)> {
     let mut body = Vec::new();
     let mut chunk = [0; BODY_CHUNK_BYTES];
     loop {
@@ -384,15 +438,18 @@ fn read_body(
             .map_err(|_| network("response read failed"))?;
         cancel.check()?;
         if n == 0 {
-            return Ok(body);
+            return Ok((body, true));
         }
         if n > max_bytes.saturating_sub(body.len()) {
             return Err(network("response byte limit"));
         }
         body.extend_from_slice(&chunk[..n]);
         if let Some(observer) = on_chunk.as_mut() {
-            observer(&chunk[..n])?;
+            let control = observer(&chunk[..n])?;
             cancel.check()?;
+            if control.is_break() {
+                return Ok((body, false));
+            }
         }
     }
 }
@@ -443,6 +500,7 @@ impl SourceTransport for NetworkTransport {
         cancel: &CancelToken,
     ) -> Result<HttpResponse> {
         self.request_internal(input, max_bytes, cancel, None)
+            .map(|transfer| transfer.response)
     }
     fn request_with_chunks(
         &self,
@@ -451,6 +509,24 @@ impl SourceTransport for NetworkTransport {
         cancel: &CancelToken,
         on_chunk: &mut dyn FnMut(&[u8]) -> Result<()>,
     ) -> Result<HttpResponse> {
+        self.request_internal(
+            input,
+            max_bytes,
+            cancel,
+            Some(&mut |chunk| {
+                on_chunk(chunk)?;
+                Ok(PageChunkControl::Continue(()))
+            }),
+        )
+        .map(|transfer| transfer.response)
+    }
+    fn request_until(
+        &self,
+        input: &HttpRequest,
+        max_bytes: usize,
+        cancel: &CancelToken,
+        on_chunk: &mut dyn FnMut(&[u8]) -> Result<PageChunkControl>,
+    ) -> Result<PrefixResponse> {
         self.request_internal(input, max_bytes, cancel, Some(on_chunk))
     }
 }
@@ -460,8 +536,8 @@ impl NetworkTransport {
         input: &HttpRequest,
         max_bytes: usize,
         cancel: &CancelToken,
-        on_chunk: Option<BodyChunkObserver<'_>>,
-    ) -> Result<HttpResponse> {
+        on_chunk: Option<UntilObserver<'_>>,
+    ) -> Result<PrefixResponse> {
         let session = self.session.lock().unwrap().clone();
         cancel.check()?;
         validate_headers(&input.headers, &self.permissions)?;
@@ -585,21 +661,28 @@ impl NetworkTransport {
                     headers.insert(name.into(), v.into());
                 }
             }
-            let body = read_body(
-                &mut response,
-                max_bytes,
-                cancel,
-                if (200..=299).contains(&status) {
-                    on_chunk
-                } else {
-                    None
+            let (body, complete) = if on_chunk.is_none() {
+                (read_body(&mut response, max_bytes, cancel, None)?, true)
+            } else {
+                read_body_until(
+                    &mut response,
+                    max_bytes,
+                    cancel,
+                    if (200..=299).contains(&status) {
+                        on_chunk
+                    } else {
+                        None
+                    },
+                )?
+            };
+            return Ok(PrefixResponse {
+                response: HttpResponse {
+                    status,
+                    url: url.into(),
+                    headers,
+                    body,
                 },
-            )?;
-            return Ok(HttpResponse {
-                status,
-                url: url.into(),
-                headers,
-                body,
+                complete,
             });
         }
         Err(network("redirect loop"))
@@ -655,6 +738,33 @@ mod tests {
             cookies: vec![],
         }
     }
+    #[test]
+    fn preview_reader_stops_before_eof_and_cancellation_wins_over_usable_pixels() {
+        let bytes = vec![7; BODY_CHUNK_BYTES * 4];
+        let mut reader = std::io::Cursor::new(&bytes);
+        let (prefix, complete) = read_body_until(
+            &mut reader,
+            bytes.len(),
+            &CancelToken::default(),
+            Some(&mut |_| Ok(PageChunkControl::Break(()))),
+        )
+        .unwrap();
+        assert!(!complete);
+        assert_eq!(prefix.len(), BODY_CHUNK_BYTES);
+        assert_eq!(reader.position(), BODY_CHUNK_BYTES as u64);
+        let cancel = CancelToken::default();
+        let result = read_body_until(
+            &mut std::io::Cursor::new(&bytes),
+            bytes.len(),
+            &cancel,
+            Some(&mut |_| {
+                cancel.cancel();
+                Ok(PageChunkControl::Break(()))
+            }),
+        );
+        assert!(matches!(result, Err(SourceError::Cancelled)));
+    }
+
     #[test]
     fn url_and_header_policy_rejects_transport_confusion() {
         for url in [

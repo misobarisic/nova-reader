@@ -784,6 +784,7 @@ mod tests {
                 dir.path().join("viewed"),
             )),
             capture_originals: Mutex::default(),
+            thumbnail_service: OnceLock::new(),
             image_worker_live: AtomicBool::new(false),
             view: Mutex::new(View {
                 section: 7,

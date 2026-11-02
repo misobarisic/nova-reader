@@ -170,6 +170,53 @@ impl SourceTransport for IncrementalTransport {
             ..Default::default()
         })
     }
+    fn request_until(
+        &self,
+        request: &HttpRequest,
+        _: usize,
+        token: &CancelToken,
+        on_chunk: &mut dyn FnMut(&[u8]) -> Result<reader_sources::PageChunkControl>,
+    ) -> Result<reader_sources::PrefixResponse> {
+        if !request.url.ends_with("/refreshed") {
+            self.events.lock().unwrap().push("rejected");
+            return Ok(reader_sources::PrefixResponse {
+                response: self.request(request, 0, token)?,
+                complete: true,
+            });
+        }
+        let mut body = Vec::new();
+        for (event, chunk) in [
+            ("first read", b"first".as_slice()),
+            ("second read", b"second".as_slice()),
+        ] {
+            token.check()?;
+            self.events.lock().unwrap().push(event);
+            body.extend_from_slice(chunk);
+            let control = on_chunk(chunk)?;
+            token.check()?;
+            if control.is_break() {
+                return Ok(reader_sources::PrefixResponse {
+                    response: HttpResponse {
+                        status: 200,
+                        url: request.url.clone(),
+                        body,
+                        ..Default::default()
+                    },
+                    complete: false,
+                });
+            }
+        }
+        self.events.lock().unwrap().push("complete");
+        Ok(reader_sources::PrefixResponse {
+            response: HttpResponse {
+                status: 200,
+                url: request.url.clone(),
+                body,
+                ..Default::default()
+            },
+            complete: true,
+        })
+    }
     fn request_with_chunks(
         &self,
         request: &HttpRequest,
@@ -477,4 +524,110 @@ fn native_image_policy_can_exceed_baseline_for_full_and_streamed_fetches() {
         bytes
     );
     assert_eq!(observed, bytes.len());
+}
+
+#[test]
+fn preview_fetch_legacy_fallback_preserves_headers_policy_and_full_original_type() {
+    let (_directory, registry, source) = source();
+    let bytes = vec![3; 16 * 1024 * 3];
+    let transport = Arc::new(LegacyTransport {
+        status: 200,
+        bytes: bytes.clone(),
+        seen: Mutex::new(vec![]),
+    });
+    let source = source.with_transport(transport.clone());
+    let mut calls = 0;
+    let prefix = source
+        .fetch_page_until(
+            "https://example.com/page",
+            &BTreeMap::new(),
+            &CancelToken::default(),
+            bytes.len(),
+            &mut |_| {
+                calls += 1;
+                Ok(reader_sources::PageChunkControl::Break(()))
+            },
+        )
+        .unwrap();
+    assert!(prefix.complete); // Legacy fallback drains EOF, honestly marked.
+    assert_eq!(prefix.bytes, bytes);
+    assert_eq!(calls, 1);
+    assert!(
+        source
+            .fetch_page_until(
+                "https://forbidden.example/page",
+                &BTreeMap::new(),
+                &CancelToken::default(),
+                bytes.len(),
+                &mut |_| panic!("forbidden observer")
+            )
+            .is_err()
+    );
+    registry.set_enabled("streaming", false).unwrap();
+    assert!(
+        source
+            .fetch_page_until(
+                "https://example.com/page",
+                &BTreeMap::new(),
+                &CancelToken::default(),
+                bytes.len(),
+                &mut |_| panic!("revoked observer")
+            )
+            .is_err()
+    );
+    assert_eq!(transport.seen.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn preview_prefix_refreshes_authorized_request_once_and_stops_before_second_read() {
+    let (_directory, _registry, source) = source();
+    let events = Arc::new(Mutex::new(vec![]));
+    let source = source.with_transport(Arc::new(IncrementalTransport {
+        events: events.clone(),
+    }));
+    let prefix = source
+        .fetch_page_until(
+            "https://example.com/expired",
+            &BTreeMap::new(),
+            &CancelToken::default(),
+            100,
+            &mut |_| {
+                events.lock().unwrap().push("pixels ready");
+                Ok(reader_sources::PageChunkControl::Break(()))
+            },
+        )
+        .unwrap();
+    assert!(!prefix.complete);
+    assert_eq!(prefix.bytes, b"first");
+    assert_eq!(
+        *events.lock().unwrap(),
+        vec!["rejected", "first read", "pixels ready"]
+    );
+}
+#[test]
+fn preview_prefix_does_not_publish_after_revocation_or_cancellation_inside_usable_callback() {
+    for revoke in [false, true] {
+        let (_directory, registry, source) = source();
+        let events = Arc::new(Mutex::new(vec![]));
+        let source = source.with_transport(Arc::new(IncrementalTransport {
+            events: events.clone(),
+        }));
+        let token = CancelToken::default();
+        let result = source.fetch_page_until(
+            "https://example.com/refreshed",
+            &BTreeMap::new(),
+            &token,
+            100,
+            &mut |_| {
+                if revoke {
+                    registry.set_enabled("streaming", false).unwrap();
+                } else {
+                    token.cancel();
+                }
+                Ok(reader_sources::PageChunkControl::Break(()))
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(*events.lock().unwrap(), vec!["first read"]);
+    }
 }

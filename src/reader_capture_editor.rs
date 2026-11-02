@@ -577,6 +577,7 @@ mod tests {
                 dir.path().join("cache"),
             )),
             capture_originals: Mutex::default(),
+            thumbnail_service: OnceLock::new(),
             image_worker_live: AtomicBool::new(true),
             view: Mutex::new(View {
                 reader: Some(reader),

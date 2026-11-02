@@ -1,0 +1,227 @@
+import { ListView, Spinner } from "std-widgets.slint";
+import { Theme, SettingsStyle } from "@NovaUiShared";
+import { ActionButton, IconAction, BackButton, ReaderSelect } from "controls.slint";
+import { OverviewTile, PageThumbnail } from "page-thumbnail.slint";
+export { OverviewTile } from "page-thumbnail.slint";
+
+// One regular row grid is shared by chapter pages and title image collections.
+// Slint 1.18's ListView calls update_visible_instances in model/repeater.rs;
+// its outer repeater instantiates only rows intersecting the viewport. The
+// inner repeater is bounded by columns, never by the entire page inventory.
+export component PageOverview inherits Rectangle {
+    in property <[OverviewTile]> tiles;
+    in property <string> title;
+    in property <string> subtitle;
+    in property <bool> collection;
+    in property <bool> rtl;
+    in property <int> current-index: -1;
+    in property <int> density: 1;
+    in property <int> restore-index: -1;
+    in property <float> restore-fraction;
+    in property <int> restore-serial;
+    in property <int> focus-request;
+    in property <bool> show-menu: true;
+    in property <bool> busy;
+    in property <string> status;
+    in property <[string]> groups;
+    in-out property <int> group-index;
+    out property <int> columns: max(1, min(12, Math.floor((grid.visible-width + 12px) / ((root.density <= 0 ? 104px : root.density == 1 ? 144px : 190px) + 12px))));
+    out property <length> row-height: root.tile-width * 1.4 + 44px;
+    out property <length> viewport-height: grid.visible-height;
+    private property <length> tile-width: max(1px, (grid.visible-width - (root.columns - 1) * 12px) / root.columns);
+    private property <int> row-count: Math.ceil(root.tiles.length * 1.0 / root.columns);
+    private property <int> tile-count: root.tiles.length;
+    private property <int> focus-index: max(0, root.current-index);
+    private property <bool> keyboard-active;
+    private property <bool> restoring: true;
+    private property <int> restore-pass;
+    callback selected(string);
+    callback visible-range(int, int, int);
+    callback anchor(string, float);
+    callback density-changed(int);
+    callback back();
+    callback current();
+    callback menu();
+    callback group-selected(int);
+    callback retry();
+    background: Theme.current.artwork_canvas;
+    forward-focus: keyboard;
+
+    function publish-viewport() {
+        if root.tiles.length > 0 && grid.visible-height > 0px {
+            root.visible-range(min(root.tiles.length, max(0, Math.floor(-grid.content-y / root.row-height) * root.columns)),
+                min(root.tiles.length, Math.ceil((-grid.content-y + grid.visible-height) / root.row-height) * root.columns), root.columns);
+            if !root.restoring {
+                root.anchor(root.tiles[min(root.tiles.length - 1, max(0, Math.floor(-grid.content-y / root.row-height) * root.columns))].page-id,
+                    (Math.floor(-grid.content-y / root.row-height) * root.row-height + grid.content-y) / max(1px, grid.visible-height));
+            }
+        } else { root.visible-range(0, 0, root.columns); }
+    }
+    public function reveal(index: int) {
+        if index < 0 || index >= root.tiles.length { return; }
+        if Math.floor(index / root.columns) * root.row-height + grid.content-y < 0px {
+            grid.content-y = -Math.floor(index / root.columns) * root.row-height;
+        } else if (Math.floor(index / root.columns) + 1) * root.row-height + grid.content-y > grid.visible-height {
+            grid.content-y = min(0px, grid.visible-height - (Math.floor(index / root.columns) + 1) * root.row-height);
+        }
+    }
+    public function focus-shell() { keyboard.focus(); }
+    function move-focus(delta: int) {
+        root.keyboard-active = true;
+        SettingsStyle.keyboard-mode = true;
+        root.focus-index = max(0, min(root.tiles.length - 1, root.focus-index + delta));
+        root.reveal(root.focus-index);
+    }
+    function defer-restore() {
+        root.restoring = true;
+        root.restore-pass = 0;
+        restore.start();
+        // The host sees new columns before publishing an anchor for that layout.
+        root.publish-viewport();
+    }
+    changed restore-serial => { root.defer-restore(); }
+    changed focus-request => { keyboard.focus(); }
+    changed columns => { root.defer-restore(); }
+    changed row-height => { root.defer-restore(); }
+    changed tile-count => {
+        root.focus-index = max(0, min(root.tiles.length - 1, root.focus-index));
+        root.defer-restore();
+    }
+    changed viewport-height => { root.defer-restore(); }
+    changed current-index => { root.focus-index = max(0, root.current-index); }
+    init => { keyboard.focus(); root.defer-restore(); }
+    restore := Timer {
+        interval: 16ms; running: false;
+        triggered => {
+            self.stop();
+            if root.restore-index >= 0 && root.restore-index < root.tiles.length {
+                grid.content-y = max(min(0px, grid.visible-height - root.row-count * root.row-height),
+                    min(0px, root.restore-fraction * grid.visible-height - Math.floor(root.restore-index / root.columns) * root.row-height));
+            }
+            // Pinned ListView first seeks with its previous average row height
+            // and snaps a distant seek to that row's top. Give layout one pass
+            // to measure the new density, one to seek the exact source row, and
+            // one to apply its viewport fraction without a random-seek snap.
+            if root.restore-pass < 2 {
+                root.restore-pass += 1;
+                self.start();
+            } else {
+                root.restoring = false;
+                root.publish-viewport();
+            }
+        }
+    }
+    keyboard := FocusScope {
+        width: 100%; height: 100%;
+        key-pressed(event) => {
+            if event.text == Key.Escape || event.text == Key.Back { root.back(); return accept; }
+            if root.tiles.length == 0 { return reject; }
+            if event.text == Key.LeftArrow { root.move-focus(root.rtl ? 1 : -1); return accept; }
+            if event.text == Key.RightArrow { root.move-focus(root.rtl ? -1 : 1); return accept; }
+            if event.text == Key.UpArrow { root.move-focus(-root.columns); return accept; }
+            if event.text == Key.DownArrow { root.move-focus(root.columns); return accept; }
+            if event.text == Key.Home { root.move-focus(-root.tiles.length); return accept; }
+            if event.text == Key.End { root.move-focus(root.tiles.length); return accept; }
+            if event.text == Key.PageDown { root.move-focus(max(1, Math.floor(grid.visible-height / root.row-height)) * root.columns); return accept; }
+            if event.text == Key.PageUp { root.move-focus(-max(1, Math.floor(grid.visible-height / root.row-height)) * root.columns); return accept; }
+            if event.text == Key.Return || event.text == " " {
+                if !event.repeat { root.selected(root.tiles[root.focus-index].page-id); }
+                return accept;
+            }
+            return reject;
+        }
+        VerticalLayout {
+            padding: 18px; spacing: 14px;
+            HorizontalLayout {
+                spacing: 12px; height: 48px;
+                BackButton { width: 48px; height: 48px; clicked => { root.back(); } }
+                VerticalLayout {
+                    min-width: 0px; spacing: 2px;
+                    Text { text: root.title; font-size: root.width < 700px ? 24px : 28px; font-weight: 700; color: Theme.current.text_bright; overflow: elide; min-width: 0px; }
+                    Text { text: root.subtitle; font-size: 12px; color: Theme.current.text_secondary; overflow: elide; min-width: 0px; }
+                }
+                if root.show-menu: IconAction {
+                    width: 48px; height: 48px; text: @tr("Overview options");
+                    icon: @image-url("../../assets/icons/navigation/more.svg"); clicked => { root.menu(); }
+                }
+            }
+            HorizontalLayout {
+                height: 48px; spacing: 8px;
+                Text {
+                    text: root.tiles.length == 0 && (root.busy || root.status != "") ? ""
+                        : root.collection ? @tr("{} images", root.tiles.length) : @tr("{} pages", root.tiles.length);
+                    font-size: 13px; color: Theme.current.text_secondary; vertical-alignment: center; min-width: 0px;
+                }
+                ActionButton {
+                    height: 48px; max-width: 180px;
+                    text: root.collection ? @tr("Current image") : @tr("Current page");
+                    enabled: root.current-index >= 0 && root.current-index < root.tiles.length;
+                    clicked => {
+                        root.focus-index = root.current-index;
+                        root.keyboard-active = false;
+                        keyboard.focus(); root.reveal(root.current-index); root.current();
+                    }
+                }
+                IconAction {
+                    width: 48px; height: 48px; text: @tr("Smaller thumbnails"); enabled: root.density > 0;
+                    icon: @image-url("../../assets/icons/navigation/minus.svg"); clicked => { root.density-changed(root.density - 1); }
+                }
+                IconAction {
+                    width: 48px; height: 48px; text: @tr("Larger thumbnails"); enabled: root.density < 2;
+                    icon: @image-url("../../assets/icons/navigation/plus.svg"); clicked => { root.density-changed(root.density + 1); }
+                }
+            }
+            if root.groups.length > 1: HorizontalLayout {
+                height: 48px; spacing: 12px;
+                Text {
+                    text: @tr("Chapter"); font-size: 13px;
+                    color: Theme.current.text_secondary; vertical-alignment: center;
+                }
+                ReaderSelect {
+                    height: 48px; min-width: 0px; horizontal-stretch: 1;
+                    placeholder-text: @tr("Choose chapter"); model: root.groups;
+                    current-index <=> root.group-index;
+                    selected(value) => { root.group-selected(root.group-index); }
+                }
+            }
+            if root.busy || root.status != "": HorizontalLayout {
+                min-height: 48px; vertical-stretch: 0; spacing: 12px;
+                if root.busy: Spinner {
+                    width: 24px; height: 24px;
+                    accessible-label: @tr("Loading image inventory");
+                }
+                Text {
+                    min-width: 0px; horizontal-stretch: 1; wrap: word-wrap;
+                    text: root.status != "" ? root.status : root.collection ? @tr("Loading image inventory…") : @tr("Loading pages…");
+                    color: Theme.current.text_secondary; font-size: 13px; vertical-alignment: center;
+                }
+                if !root.busy && root.status != "": ActionButton {
+                    height: 48px; text: @tr("Retry"); clicked => { root.retry(); }
+                }
+            }
+            grid := ListView {
+                min-height: 0px; vertical-stretch: 1;
+                horizontal-scrollbar-policy: always-off; vertical-scrollbar-policy: always-off;
+                mouse-drag-pan-enabled: true; content-width: self.visible-width;
+                changed content-y => { root.publish-viewport(); }
+                for row in root.row-count: Rectangle {
+                    width: grid.visible-width; height: root.row-height;
+                    for column in root.columns: cell := Rectangle {
+                        x: (root.rtl ? root.columns - column - 1 : column) * (root.tile-width + 12px);
+                        y: 0px; width: root.tile-width; height: root.row-height - 12px;
+                        private property <int> tile-index: row * root.columns + column;
+                        if cell.tile-index < root.tiles.length: PageThumbnail {
+                            width: 100%; height: 100%; tile: root.tiles[row * root.columns + column];
+                            collection: root.collection; current: row * root.columns + column == root.current-index;
+                            focused: root.keyboard-active && row * root.columns + column == root.focus-index;
+                            selected(id) => {
+                                root.focus-index = row * root.columns + column;
+                                root.keyboard-active = false; keyboard.focus(); root.selected(id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -342,3 +342,54 @@ intact. All language variants resolve the same installed package identity.
 The page retains native catalogue/custom-field callbacks, password input and
 accessible field labels. Its top-aligned Flickable yields horizontal quality
 gestures to Kit sliders and reveals focused controls during keyboard navigation.
+
+
+## Page overview and gallery presentation
+
+`page-overview.slint` and `page-thumbnail.slint` extend the existing Nova Kit
+Theme, Roboto, control and focus conventions. They share one responsive,
+row-virtualized grid for chapter pages and image collections, with stable page
+IDs, number labels, loading/error/current states, three thumbnail densities and
+Current page/image. RTL changes columns within each row while page identity and
+labels stay in source order. Tall-image tiles identify their top preview.
+Keyboard navigation, accessible selection and viewport anchors follow the same
+surface on desktop and Android; resizing or changing density restores the
+logical anchor.
+
+The reader OSD's Pages action opens the current chapter overview. Selecting a
+tile returns to that page in the existing reading mode; Back restores the saved
+page, intra-page position, zoom and pan. Merely opening or scrolling the overview
+and loading thumbnails does not write reading progress or History.
+
+A Gallery-designated title opens the grid directly with its title and image
+count. Multiple source chapters remain selectable groups; a single group has no
+intermediate chapter row. The existing EntryMenu adds Presentation with
+Default/Reader/Gallery, and collection menus retain library/status/category
+controls plus Metadata and Download. Metadata fetch begins only after the
+explicit Metadata action. Overrides take precedence over optional addon hints
+and remain device-local across restarts, outside backup/sync.
+
+Selecting an image enters the existing fullscreen viewer. Collection OSD uses
+Image counts and an Images return action; a Groups action appears only for
+multiple groups. Back/Images restores the collection grid anchor. Collections with the series mode set to Default
+use LTR; explicit Automatic or manual series choices retain their normal
+behavior. This effective fallback does not overwrite global or series
+reading-mode preferences. Viewing saves the last
+viewed image and real History without automatically completing a collection,
+including when the last image is opened first. Manual completion remains
+available.
+
+Thumbnail loading activates only for this overview, covering visible rows and
+one neighboring row on each side. A failed tile does not block the grid;
+source-wide failures pause the queue with Retry. A thumbnail never establishes
+full-resolution offline availability. Cache settings expose thumbnail usage and
+an independent clear action alongside chapter maintenance; derivatives share
+the chapter disk quota. Clearing thumbnails preserves original pages, downloads,
+imports and library state. Live retained thumbnail pixels use 8 MiB plus an
+8 MiB renderer reserve, separately from bounded source/decoder allocations.
+Progressive JPEG XL previews use available prefix pixels directly without
+re-encoding or assuming a fixed byte fraction.
+
+Native headless interaction/controller tests and opt-in raster previews cover
+the shared surface. Physical Android hardware was unavailable; these checks do
+not establish real-device scrolling or memory performance.

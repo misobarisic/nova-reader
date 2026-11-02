@@ -52,7 +52,13 @@ page, query, filters, seriesId, chapterId, id and url are passed through. Operat
 | chapters | `{chapters: [Chapter]}` |
 | pages/resolvePage | `{pages: [Page]}` (resolvePage optional) |
 
-Series: `id,title,url,coverUrl?,description?,authors[],genres[],status?`.
+Series: `id,title,url,coverUrl?,description?,authors[],genres[],status?,presentation?`.
+
+`presentation` is an optional per-series UI suggestion. `"gallery"` suggests the
+Gallery page; missing or unrecognized values use the Reader page. An explicit
+per-entry user preference takes precedence. Emit it consistently from browse,
+search and details. Older Readers ignore this additive field. It does not change
+series, chapter or zero-based page identities, and adds no source-wide capability.
 Chapter: `id,seriesId,title,number?:string,sourceOrder,url,language?,scanlator?,uploadedAt?`.
 Page: `id,url,headers:{},width?,height?`. If `resolvePage` is declared, a rejected
 image request (401/403/507) calls it once with `{url}` and retries its single
@@ -121,12 +127,22 @@ page body bytes during transfer. Its synchronous observer receives ordered slice
 of at most 16 KiB; HTTP error bodies never reach it, including before a
 `resolvePage` retry. Observations are provisional: cancellation, revocation,
 oversized bodies or transfer failure still return an error, and only the complete
-successful byte vector may enter durable caches or final image decoding. Existing
+successful byte vector may enter original-page caches or final image decoding. Existing
 `fetch_page` callers retain the same complete-byte behavior. Custom transports
 inherit a bounded full-response fallback; no streaming capability is exposed to
 JavaScript or added to manifest permissions. Source revocation, cancellation and
 settings-owned session revision are checked before and after each observer call
 and before returning completed bytes.
+
+Native preview consumers can instead use `Source::fetch_page_until` with a
+byte limit and a fallible `PageChunkControl` observer. `Break` stops the transfer
+once a usable preview exists; `PagePrefix { bytes, complete }` distinguishes an
+early prefix from EOF. Permission, session, cancellation and `resolvePage` checks
+still apply. An incomplete prefix may be retained only as a disposable preview
+derivative, never as an original page or proof of offline availability. The
+thumbnail service uses this path for direct progressive JPEG XL previews; the
+required prefix size depends on the file. JavaScript receives no new capability
+or thumbnail URL field.
 
 Metadata and images use the same explicit domain allowlist, HTTPS-only/default-port
 policy, safe header whitelist, manual redirect checks and source/profile cookie jar.

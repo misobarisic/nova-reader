@@ -51,7 +51,7 @@ export component MorePage inherits Rectangle {
         else { child-scope.focus(); }
     }
     changed narrow => { root.choice = max(root.narrow ? 1 : 2, root.choice); }
-    private property <bool> local-open: root.section >= 9;
+    private property <bool> local-open: root.section >= 9 && root.section <= 22;
     private property <bool> detail-open: root.section == 11 || root.section == 12 || root.section == 14 || root.section == 15 || root.section == 16 || root.section == 17 || root.section == 18 || root.section == 19 || root.section == 20 || root.section == 21 || root.section == 22;
     private property <int> child-section: 9;
     private property <int> detail-section: 11;

@@ -42,6 +42,8 @@ import { SyncContent } from "sync-host.slint";
 import { SettingSyncModal } from "settings-sync.slint";
 import { SyncPeerRemovalModal } from "@NovaUiBase/sync-peer-removal.slint";
 import { MorePage } from "more.slint";
+import { PageOverview, OverviewTile } from "page-overview.slint";
+export { OverviewTile } from "page-overview.slint";
 import { LicenseSource } from "about-models.slint";
 export { LicenseSource } from "about-models.slint";
 export { Appearance } from "appearance.slint";
@@ -69,6 +71,32 @@ export component AppWindow inherits Window {
     title: "Nova Reader";
     in-out property <bool> touch-menus <=> ControlInput.touch-feedback;
     in property <string> app-version;
+    in-out property <[OverviewTile]> overview-tiles;
+    in-out property <string> overview-title;
+    in-out property <string> overview-subtitle;
+    in-out property <bool> overview-collection;
+    in-out property <bool> overview-rtl;
+    in-out property <bool> overview-busy;
+    in-out property <string> overview-status;
+    in-out property <int> overview-current-index: -1;
+    in-out property <int> overview-density: 1;
+    in-out property <int> overview-origin: 0;
+    in-out property <int> overview-focus-request;
+    in-out property <int> overview-restore-index: -1;
+    in-out property <float> overview-restore-fraction;
+    in-out property <int> overview-restore-serial;
+    in-out property <[string]> overview-groups;
+    in-out property <int> overview-group-index;
+    callback overview-selected(string);
+    callback overview-visible-range(int, int, int);
+    callback overview-anchor(string, float);
+    callback overview-density-changed(int);
+    callback overview-group-selected(int);
+    callback overview-back();
+    callback overview-current();
+    callback overview-menu();
+    callback overview-retry();
+
     in-out property <[string]> license-text-chunks;
     in-out property <[LicenseSource]> license-sources;
     in-out property <bool> about-licenses-open: false;
@@ -107,6 +135,8 @@ export component AppWindow inherits Window {
     in property <bool> reader-opening;
     in property <string> reader-open-error;
     in-out property <int> reader-return-section: 5;
+    in-out property <bool> reader-collection;
+    in-out property <int> reader-gallery-group-count;
     callback reader-retry-open;
     private property <bool> reader-initial-content: root.pages.length > 0 &&
         (root.pages[root.current-page].loaded || root.pages[root.current-page].preview || root.pages[root.current-page].error != "");
@@ -172,6 +202,7 @@ export component AppWindow inherits Window {
     callback source-filters-applied;
     in property <string> series-title;
     in property <string> detail-series-key;
+    in-out property <bool> detail-gallery-single;
     in-out property <length> detail-scroll-y: 0px;
     in-out property <bool> detail-synopsis-expanded: false;
     private property <bool> detail-restore-pending: false;
@@ -293,6 +324,8 @@ export component AppWindow inherits Window {
     in property <[string]> categories;
     in-out property <int> category-index: 0;
     in-out property <bool> entry-menu-visible: false;
+    in-out property <int> entry-menu-presentation;
+    callback entry-menu-requested(string);
     in property <[EntryCategoryRow]> entry-categories;
     private property <string> entry-menu-key;
     private property <string> entry-menu-title;
@@ -306,9 +339,10 @@ export component AppWindow inherits Window {
         if key == "" { return; }
         root.entry-menu-key = key; root.entry-menu-title = title;
         root.entry-menu-library = in-library; root.entry-menu-editing = false; root.entry-menu-status-editing = false;
+        root.entry-menu-requested(key);
         root.entry-menu-x = x; root.entry-menu-y = y; root.entry-menu-visible = true;
     }
-    public function close-entry-menu() { root.entry-menu-visible = false; root.entry-menu-editing = false; root.entry-menu-status-editing = false; keyboard.focus(); }
+    public function close-entry-menu() { root.entry-menu-visible = false; root.entry-menu-editing = false; root.entry-menu-status-editing = false; if root.section == 23 { root.overview-focus-request += 1; } else { keyboard.focus(); } }
     function entry-menu-picked(action: string) {
         // Dispatch before the conditional overlay is destroyed, including
         // accessibility actions. Category toggles retain this captured ID.
@@ -532,11 +566,12 @@ export component AppWindow inherits Window {
         if root.section == 6 && root.reader-osd { root.reader-osd = false; return; }
         if root.section == 13 { root.about-back-request += 1; return; }
         if root.entry-menu-visible { root.close-entry-menu(); return; }
+        if root.section == 23 { root.overview-back(); return; }
         if root.reader-context-visible { root.close-reader-context(); return; }
         if root.section == 0 && root.library-search-open { root.close-library-search(); return; }
         if ((root.section == 5 && root.detail-origin == 3) || root.section == 8) && root.source-catalog-open { root.return-to-catalogue(); return; }
         if root.section == 3 && root.source-catalog-open { root.source-catalog-open = false; root.navigate(3); return; }
-        root.navigate(root.section == 6 ? (root.reader-opening ? root.reader-return-section : 5) : root.section == 8 ? 3 : root.section == 11 || root.section == 12 || root.section == 14 || root.section == 15 || root.section == 16 || root.section == 17 || root.section == 18 || root.section == 19 || root.section == 20 || root.section == 21 || root.section == 22 ? 10 : root.section >= 9 || root.section == 7 ? 4 : root.section == 5 ? root.detail-origin : 0);
+        root.navigate(root.section == 6 ? (root.reader-opening || root.reader-collection ? root.reader-return-section : 5) : root.section == 8 ? 3 : root.section == 11 || root.section == 12 || root.section == 14 || root.section == 15 || root.section == 16 || root.section == 17 || root.section == 18 || root.section == 19 || root.section == 20 || root.section == 21 || root.section == 22 ? 10 : root.section >= 9 || root.section == 7 ? 4 : root.section == 5 ? root.detail-origin : 0);
     }
 
     changed section => {
@@ -562,7 +597,7 @@ export component AppWindow inherits Window {
         if root.section == 6 { root.reader-osd = false; root.show-reader-options = false; }
         root.immersive-changed(root.section == 6 && ReaderSettings.fullscreen && !root.reader-osd);
         keyboard.focus();
-        if root.section == 4 || root.section >= 9 { more-page.focus_shell(); }
+        if root.section == 4 || (root.section >= 9 && root.section <= 22) { more-page.focus_shell(); }
     }
 
     changed reader-width => { if root.section == 6 && !root.reader-zoom-animating {root.reader-reflow(root.reader-width / 1px, root.reader-viewport-height / 1px);} }
@@ -593,7 +628,7 @@ export component AppWindow inherits Window {
                 HorizontalLayout {
                     spacing: 0px;
                     if root.navigation-width > 0px: DesktopSidebar {
-                        section: root.section >= 9 ? 4 : root.section;
+                        section: root.section == 23 ? root.overview-origin : root.section >= 9 ? 4 : root.section;
                         navigate(section) => { root.navigate(section); }
                     }
                     page-content := Rectangle {
@@ -827,7 +862,7 @@ export component AppWindow inherits Window {
                                     context-requested(key,title,in-library,x,y) => { root.open-entry-menu(key,title,in-library,x,y); }
                                     request-artwork(first,last) => { root.request-artwork(first,last); }
                                 }
-                                if root.section == 5: VerticalLayout {
+                                if root.section == 5 && !root.detail-gallery-single: VerticalLayout {
                                     padding-left: root.safe-area-insets.left + (root.mobile-ui ? 20px : 64px);
                                     padding-right: root.safe-area-insets.right + (root.mobile-ui ? 20px : 64px);
                                     spacing: 4px;
@@ -1111,6 +1146,7 @@ export component AppWindow inherits Window {
                                 width: 100%; height: 100%; compact: root.mobile-ui;
                                 title: root.series-title; chapter-title: root.reader-chapter-title;
                                 page: root.reader-local-page; page-count: root.reader-page-count;
+                                collection: root.reader-collection; group-count: root.reader-gallery-group-count;
                                 progress: root.reader-progress; mode-label: root.reader-mode-label; reading-mode: root.reading-mode;
                                 zoom-percent: round(root.zoom * 100); fit-width: root.zoom == 1;
                                 fullscreen: root.reader-window-fullscreen; bookmarked: root.reader-bookmarked;
@@ -1174,11 +1210,31 @@ export component AppWindow inherits Window {
                                 IconAction { width: 44px; text: @tr("Title options"); icon: @image-url("../../assets/icons/navigation/more.svg"); clicked => { root.open-entry-menu(root.detail-series-key,root.series-title,root.in-library,self.absolute-position.x,self.absolute-position.y + self.height); } }
                             }
                         }
+                        if root.section == 23: overview := PageOverview {
+                            width: parent.width; height: parent.height;
+                            tiles: root.overview-tiles; title: root.overview-title;
+                            subtitle: root.overview-subtitle; collection: root.overview-collection;
+                            rtl: root.overview-rtl; current-index: root.overview-current-index;
+                            busy: root.overview-busy; status: root.overview-status;
+                            focus-request: root.overview-focus-request;
+                            density: root.overview-density; restore-index: root.overview-restore-index;
+                            restore-fraction: root.overview-restore-fraction; restore-serial: root.overview-restore-serial;
+                            groups: root.overview-groups; group-index <=> root.overview-group-index;
+                            selected(id) => { root.overview-selected(id); }
+                            visible-range(first,last,columns) => { root.overview-visible-range(first,last,columns); }
+                            anchor(id,fraction) => { root.overview-anchor(id,fraction); }
+                            density-changed(value) => { root.overview-density-changed(value); }
+                            group-selected(index) => { root.overview-group-selected(index); }
+                            back => { root.overview-back(); }
+                            current => { root.overview-current(); }
+                            menu => { root.overview-menu(); }
+                            retry => { root.overview-retry(); }
+                        }
                         more-page := MorePage {
                             // Keep More's retained landing viewport unchanged
                             // when its child pages hide the external bottom bar.
                             width: parent.width; height: parent.height + (Theme.transparent_navbar ? 0px : root.bottom-navigation-height);
-                            visible: root.section == 4 || root.section >= 9;
+                            visible: root.section == 4 || (root.section >= 9 && root.section <= 22);
                             section: root.section; narrow: root.mobile-ui;
                             app-version: root.app-version; status: root.status;
                             license-text-chunks: root.license-text-chunks;
@@ -1295,6 +1351,8 @@ export component AppWindow inherits Window {
         width: root.width; height: root.height;
         narrow: root.mobile-ui; editing: root.entry-menu-editing; status-editing: root.entry-menu-status-editing;
         title: root.entry-menu-title; in-library: root.entry-menu-library;
+        collection: root.section == 23 && root.overview-collection;
+        presentation-choice: root.entry-menu-presentation;
         categories: root.entry-categories;
         anchor-x: root.entry-menu-x; anchor-y: root.entry-menu-y;
         safe-bottom: root.safe-area-insets.bottom; safe-left: root.safe-area-insets.left; safe-right: root.safe-area-insets.right;

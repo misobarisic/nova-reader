@@ -3,13 +3,21 @@ mod network;
 mod package;
 mod runtime;
 mod settings;
-pub use network::{CancelToken, HttpRequest, HttpResponse, SourceTransport};
+pub use network::{
+    CancelToken, HttpRequest, HttpResponse, PageChunkControl, PrefixResponse, SourceTransport,
+};
 pub use package::{CookiePermission, Manifest, Permissions, SourceDescriptor, SourceRegistry};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 pub use settings::{SettingField, SettingKind};
 use std::{collections::BTreeMap, sync::Arc};
 
+/// Bytes fetched specifically for a disposable preview. An incomplete prefix
+/// cannot establish original-image availability or offline chapter state.
+pub struct PagePrefix {
+    pub bytes: Vec<u8>,
+    pub complete: bool,
+}
 pub type Result<T> = std::result::Result<T, SourceError>;
 type PageChunkObserver<'a> = &'a mut dyn FnMut(&[u8]);
 #[derive(Debug, thiserror::Error)]
@@ -143,6 +151,128 @@ impl Source {
             return Err(SourceError::Network("invalid image byte limit".into()));
         }
         self.fetch_page_attempt(url, headers, cancel, max_bytes, true, &mut None)
+    }
+    /// Preview-only fetch with the ordinary permission/session/refresh policy.
+    /// A partial result is explicitly distinct from a complete source original.
+    pub fn fetch_page_until(
+        &self,
+        url: &str,
+        headers: &BTreeMap<String, String>,
+        cancel: &CancelToken,
+        max_bytes: usize,
+        on_chunk: &mut dyn FnMut(&[u8]) -> Result<PageChunkControl>,
+    ) -> Result<PagePrefix> {
+        self.fetch_page_until_attempt(url, headers, cancel, max_bytes, true, on_chunk)
+    }
+    fn fetch_page_until_attempt(
+        &self,
+        url: &str,
+        headers: &BTreeMap<String, String>,
+        cancel: &CancelToken,
+        max_bytes: usize,
+        refresh: bool,
+        on_chunk: &mut dyn FnMut(&[u8]) -> Result<PageChunkControl>,
+    ) -> Result<PagePrefix> {
+        if max_bytes == 0 || max_bytes == usize::MAX {
+            return Err(SourceError::Network("invalid image byte limit".into()));
+        }
+        self.validate_page_request(url, headers)?;
+        let transport = {
+            let _settings = self.settings.lock().unwrap();
+            self.transport
+                .snapshot()
+                .unwrap_or_else(|| self.transport.clone())
+        };
+        let revision = transport.session_revision();
+        self.check_page_work(cancel, revision)?;
+        let mut observed = 0usize;
+        let mut observer = |chunk: &[u8]| {
+            for chunk in chunk.chunks(network::BODY_CHUNK_BYTES) {
+                self.check_page_work(cancel, revision)?;
+                observed = observed
+                    .checked_add(chunk.len())
+                    .filter(|n| *n <= max_bytes)
+                    .ok_or_else(|| SourceError::Network("image byte limit".into()))?;
+                let control = on_chunk(chunk)?;
+                self.check_page_work(cancel, revision)?;
+                if control.is_break() {
+                    return Ok(control);
+                }
+            }
+            Ok(PageChunkControl::Continue(()))
+        };
+        let transfer =
+            if let Some(path) = url.strip_prefix(&format!("addon://{}/", self.manifest.id)) {
+                let body = package::asset(&self.archive, &self.manifest, path)?;
+                if body.len() > max_bytes {
+                    return Err(SourceError::Network("image byte limit".into()));
+                }
+                let mut end = body.len();
+                let mut seen = 0;
+                for chunk in body.chunks(network::BODY_CHUNK_BYTES) {
+                    seen += chunk.len();
+                    if observer(chunk)?.is_break() {
+                        end = seen;
+                        break;
+                    }
+                }
+                PrefixResponse {
+                    complete: end == body.len(),
+                    response: HttpResponse {
+                        status: 200,
+                        url: url.into(),
+                        body: body[..end].to_vec(),
+                        ..Default::default()
+                    },
+                }
+            } else {
+                transport.request_until(
+                    &HttpRequest {
+                        url: url.into(),
+                        headers: headers.clone(),
+                        ..Default::default()
+                    },
+                    max_bytes,
+                    cancel,
+                    &mut observer,
+                )?
+            };
+        self.check_page_work(cancel, revision)?;
+        if transfer.response.body.len() > max_bytes {
+            return Err(SourceError::Network("image byte limit".into()));
+        }
+        if refresh
+            && matches!(transfer.response.status, 401 | 403 | 507)
+            && self
+                .manifest
+                .capabilities
+                .iter()
+                .any(|op| op == "resolvePage")
+        {
+            let result =
+                self.call_cancelled("resolvePage", &serde_json::json!({"url":url}), cancel)?;
+            let pages: PageList = serde_json::from_value(result)
+                .map_err(|_| SourceError::ParseChanged("invalid refreshed page".into()))?;
+            if pages.pages.len() != 1 {
+                return Err(SourceError::ParseChanged(
+                    "refresh must return exactly one page".into(),
+                ));
+            }
+            let page = &pages.pages[0];
+            return self.fetch_page_until_attempt(
+                &page.url,
+                &page.headers,
+                cancel,
+                max_bytes,
+                false,
+                on_chunk,
+            );
+        }
+        network::check_status(transfer.response.status)?;
+        Ok(PagePrefix {
+            bytes: transfer.response.body,
+            complete: transfer.complete,
+        })
     }
     /// Observe native page bytes as they arrive, while retaining the same
     /// authoritative full-byte result and policy as `fetch_page`. Chunks are
@@ -331,9 +461,27 @@ impl Source {
             .map_err(|e| SourceError::ParseChanged(e.to_string()))
     }
 }
+// Hints are advisory. A future addon value must not invalidate a whole listing.
+fn deserialize_presentation<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error> {
+    let value = Value::deserialize(deserializer)?;
+    Ok(value
+        .as_str()
+        .filter(|s| matches!(*s, "gallery" | "reader"))
+        .map(str::to_owned))
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Series {
+    /// Optional entry-level UI suggestion. Unknown values retain Reader fallback.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_presentation",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub presentation: Option<String>,
     pub id: String,
     pub title: String,
     #[serde(default)]

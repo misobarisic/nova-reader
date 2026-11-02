@@ -365,9 +365,18 @@ impl Controller {
             platform(ui);
             return;
         };
-        let prefs = reader_settings::effective(&reader.chapter.series);
+        let mut prefs = reader_settings::effective(&reader.chapter.series);
         let previous_mode = reader.mode;
-        reader.mode = reader.mode_choice.resolve(reader.automatic_mode);
+        if reader.collection && reader.mode_choice == ModeChoice::Default {
+            // Gallery defaults are a transient presentation layer. Apply only
+            // explicit per-entry paged choices over single-image defaults.
+            prefs.paged = reader_settings::series_snapshot(&reader.chapter.series)
+                .paged
+                .apply(reader_settings::LayoutPreferences::default());
+            reader.mode = ReadingMode::LeftToRight;
+        } else {
+            reader.mode = reader.mode_choice.resolve(reader.automatic_mode);
+        }
         let gaps = if reader.mode == ReadingMode::Webtoon && reader.mode_choice.is_gapped() {
             16.
         } else {
@@ -636,6 +645,12 @@ impl Controller {
     }
 
     pub(super) fn reader_action(self: &Arc<Self>, ui: &AppWindow, action: &str) {
+        if matches!(action, "back" | "pages" | "chapters")
+            && self.view().overview.as_ref().is_some_and(|o| o.collection)
+        {
+            self.gallery_return(ui);
+            return;
+        }
         match action {
             "back" => self.navigate(
                 ui,
@@ -646,6 +661,7 @@ impl Controller {
                 },
             ),
             "chapters" => self.navigate(ui, 5),
+            "pages" => self.open_page_overview(ui),
             "previous-chapter" => self.step_chapter(ui, -1),
             "next-chapter" => self.step_chapter(ui, 1),
             "previous-page" => self.step_page(ui, -1),
@@ -851,6 +867,7 @@ mod tests {
             download_serial: Mutex::new(()),
             active_image: Mutex::new(None),
             capture_originals: Mutex::default(),
+            thumbnail_service: OnceLock::new(),
             metadata_refresh: Arc::default(),
         });
         wire(&app, &ui);

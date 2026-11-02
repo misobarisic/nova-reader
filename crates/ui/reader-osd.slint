@@ -11,6 +11,7 @@ component ReaderGlyph inherits Path {
         : root.name == "next-page" ? "M9 6l6 6-6 6"
         : root.name == "previous-chapter" ? "M5 5v14M19 5l-10 7 10 7z"
         : root.name == "next-chapter" ? "M19 5v14M5 5l10 7-10 7z"
+        : root.name == "pages" ? "M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z"
         : root.name == "chapters" ? "M8 6h13M8 12h13M8 18h13M3 6h1M3 12h1M3 18h1"
         : root.name == "mode" ? "M12 6c-3-2-7-2-10-1v15c4-1 7-1 10 1 3-2 6-2 10-1V5c-3-1-7-1-10 1zM12 6v15"
         : root.name == "settings" ? "M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM10 2h4l1 3 3 1 3-1 2 4-2 2v3l2 2-2 4-3-1-3 1-1 3h-4l-1-3-3-1-3 1-2-4 2-2v-3L1 9l2-4 3 1 3-1z"
@@ -94,6 +95,8 @@ export component ReaderOsd inherits Rectangle {
     in property <string> chapter-title;
     in property <int> page: 1;
     in property <int> page-count: 0;
+    in property <bool> collection;
+    in property <int> group-count;
     in property <float> progress: 0;
     in property <string> mode-label;
     in property <int> reading-mode;
@@ -150,7 +153,9 @@ export component ReaderOsd inherits Rectangle {
         }
         Text {
             x: root.compact ? 4px : 8px; y: 28px; width: max(0px, parent.width - 16px); height: 22px;
-            text: @tr("{0} · Page {1} of {2}", root.chapter-title, root.page, root.page-count);
+            text: root.collection && root.group-count <= 1 ? @tr("Image {0} of {1}", root.page, root.page-count)
+                : root.collection ? @tr("{0} · Image {1} of {2}", root.chapter-title, root.page, root.page-count)
+                : @tr("{0} · Page {1} of {2}", root.chapter-title, root.page, root.page-count);
             color: Theme.current.text_player_caption; font-size: 14px; overflow: elide;
         }
         if root.compact: HorizontalLayout {
@@ -170,7 +175,8 @@ export component ReaderOsd inherits Rectangle {
         }
         if root.compact: HorizontalLayout {
             x: 0px; y: 100px; width: 100%; height: 66px; spacing: 0px;
-            OsdAction { label: @tr("Chapters"); glyph: "chapters"; clicked => { root.action("chapters"); } }
+            OsdAction { label: root.collection ? @tr("Images") : @tr("Pages"); glyph: "pages"; clicked => { root.action("pages"); } }
+            if !root.collection || root.group-count > 1: OsdAction { label: root.collection ? @tr("Groups") : @tr("Chapters"); glyph: "chapters"; clicked => { root.action("chapters"); } }
             OsdAction { label: root.mode-label; glyph: "mode"; clicked => { root.action("mode"); } }
             OsdAction { label: @tr("Settings"); glyph: "settings"; clicked => { root.action("settings"); } }
             OsdAction { label: @tr("More"); glyph: "more"; clicked => { root.action("more"); } }
@@ -189,7 +195,8 @@ export component ReaderOsd inherits Rectangle {
             OsdAction { label: @tr("Fit width"); glyph: "fit-width"; active: root.fit-width; clicked => { root.action("fit-width"); } }
             OsdAction { label: root.zoom-percent + "%"; glyph: "zoom"; clicked => { root.action("zoom"); } }
             OsdAction { label: @tr("Screencap"); glyph: "screencap"; clicked => { root.action("screencap"); } }
-            OsdAction { label: @tr("Chapters"); glyph: "chapters"; clicked => { root.action("chapters"); } }
+            OsdAction { label: root.collection ? @tr("Images") : @tr("Pages"); glyph: "pages"; clicked => { root.action("pages"); } }
+            if !root.collection || root.group-count > 1: OsdAction { label: root.collection ? @tr("Groups") : @tr("Chapters"); glyph: "chapters"; clicked => { root.action("chapters"); } }
             OsdAction { label: @tr("Settings"); glyph: "settings"; clicked => { root.action("settings"); } }
             OsdAction { label: @tr("Fullscreen"); glyph: root.fullscreen ? "fullscreen-exit" : "fullscreen"; clicked => { root.action("fullscreen"); } }
         }

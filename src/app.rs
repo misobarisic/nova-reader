@@ -24,6 +24,10 @@ use std::{
 mod downloads;
 
 static LIFECYCLE: OnceLock<Weak<Controller>> = OnceLock::new();
+#[path = "gallery_presentation.rs"]
+mod gallery_presentation;
+#[path = "page_overview.rs"]
+mod page_overview;
 #[path = "reader_capture_editor.rs"]
 mod reader_capture_editor;
 #[path = "reader_capture_sources.rs"]
@@ -39,6 +43,8 @@ mod reader_open;
 mod reader_preview;
 #[path = "reader_progressive.rs"]
 mod reader_progressive;
+#[path = "thumbnail_cache_settings.rs"]
+mod thumbnail_cache_settings;
 #[cfg(target_os = "android")]
 pub fn flush_lifecycle() {
     if let Some(app) = LIFECYCLE.get().and_then(Weak::upgrade) {
@@ -81,6 +87,7 @@ enum Row {
 }
 #[derive(Clone)]
 enum PageInput {
+    Verified(Box<crate::page_inventory::Resource>),
     Local { path: PathBuf, id: String },
     Remote(reader_sources::Page),
 }
@@ -89,6 +96,7 @@ impl PageInput {
         cancel.check().map_err(error)?;
         let cap = reader_engine::current_limits().max_encoded_bytes;
         let bytes = match self {
+            Self::Verified(resource) => resource.read(cancel)?,
             Self::Local { path, .. } => {
                 use std::io::Read;
                 let file = std::fs::File::open(path).map_err(error)?;
@@ -153,6 +161,7 @@ struct Reader {
     mode_choice: ModeChoice,
     automatic_mode: ReadingMode,
     mode_switching: bool,
+    collection: bool,
     completed: bool,
 }
 impl Reader {
@@ -403,6 +412,7 @@ impl Reader {
     fn page_id(&self, index: usize) -> String {
         match &self.pages[index] {
             PageInput::Local { id, .. } => id.clone(),
+            PageInput::Verified(resource) => resource.id.clone(),
             PageInput::Remote(p) => p.id.clone(),
         }
     }
@@ -550,6 +560,7 @@ struct View {
     series: Option<Series>,
     chapters: Vec<Chapter>,
     reader: Option<Reader>,
+    overview: Option<page_overview::Overview>,
     reader_open: Option<ChapterId>,
     catalogue: String,
     query: String,
@@ -662,6 +673,7 @@ struct Controller {
     artwork: crate::artwork::ArtworkLoader,
     chapter_cache: Arc<crate::chapter_cache::ChapterCache>,
     capture_originals: Mutex<reader_capture_sources::Originals>,
+    thumbnail_service: OnceLock<Arc<crate::page_thumbnails::PageThumbnails>>,
     image_worker_live: AtomicBool,
     view: Mutex<View>,
     generation: AtomicU64,
@@ -733,6 +745,9 @@ impl Controller {
     }
     fn invalidate(&self) -> (u64, CancelToken) {
         self.metadata_refresh.pause();
+        if let Some(service) = self.thumbnail_service.get() {
+            service.cancel();
+        }
         self.artwork.invalidate();
         self.chapter_cache.deactivate();
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
@@ -789,6 +804,9 @@ impl Controller {
                                 .into(),
                         );
                     }
+                    // Page entry requests both counters. The shared maintenance
+                    // guard may defer the thumbnail query until this one ends.
+                    settings.invoke_thumbnail_cache_refresh();
                 })
                 .is_err()
             {
@@ -937,6 +955,7 @@ impl Controller {
         ))
     }
     fn render(&self, ui: &AppWindow) {
+        ui.set_detail_gallery_single(false);
         let snapshot = match self.services.domain.snapshot() {
             Ok(s) => s,
             Err(e) => {
@@ -1102,6 +1121,18 @@ impl Controller {
                     ui.set_detail_series_key(detail_key.into());
                     ui.set_heading(series.title.clone().into());
                     ui.set_series_title(series.title.clone().into());
+                    ui.set_detail_gallery_single(
+                        crate::content_presentation::Settings::load(&series.id)
+                            .unwrap_or_default()
+                            .effective()
+                            == crate::content_presentation::Presentation::Gallery
+                            && snapshot
+                                .chapters
+                                .iter()
+                                .filter(|chapter| chapter.id.series == series.id)
+                                .count()
+                                == 1,
+                    );
                     ui.set_series_description(series.description.clone().into());
                     ui.set_series_metadata(
                         std::iter::once(series.authors.join(", "))
@@ -1130,10 +1161,14 @@ impl Controller {
                         .collect();
                     view.chapters.sort_by_key(|c| c.source_order);
                     ui.set_resume_chapter(
-                        resume_chapter(&view.chapters, &snapshot.progress)
-                            .map(resume_label)
-                            .unwrap_or_default()
-                            .into(),
+                        if ui.get_detail_gallery_single() {
+                            String::new()
+                        } else {
+                            resume_chapter(&view.chapters, &snapshot.progress)
+                                .map(resume_label)
+                                .unwrap_or_default()
+                        }
+                        .into(),
                     );
                     view.rows = view.chapters.iter().cloned().map(Row::Chapter).collect();
                 }
@@ -1211,6 +1246,10 @@ impl Controller {
             .iter()
             .map(|row| match row {
                 Row::Series(s) => {
+                    let gallery = crate::content_presentation::Settings::load(&s.id)
+                        .unwrap_or_default()
+                        .effective()
+                        == crate::content_presentation::Presentation::Gallery;
                     let chapters: Vec<_> = snapshot
                         .chapters
                         .iter()
@@ -1254,8 +1293,14 @@ impl Controller {
                         bookmarked: snapshot.library.iter().any(|l| l.series == s.id),
                         poster: self.artwork.cached_image(s).unwrap_or_default(),
                         artwork_key: key.into(),
-                        completed: (chapters.len() - unread) as i32,
-                        total: chapters.len() as i32,
+                        // A last-viewed gallery image does not imply that all
+                        // preceding images were viewed. Keep manual status intact.
+                        completed: if gallery {
+                            0
+                        } else {
+                            (chapters.len() - unread) as i32
+                        },
+                        total: if gallery { 0 } else { chapters.len() as i32 },
                         ..ItemRow::default()
                     }
                 }
@@ -1270,6 +1315,10 @@ impl Controller {
                     let series = snapshot.series.iter().find(|s| s.id == c.id.series);
                     let key = series.map(crate::artwork::key).unwrap_or_default();
                     let progress = snapshot.progress.iter().find(|p| p.chapter == c.id);
+                    let gallery = crate::content_presentation::Settings::load(&c.id.series)
+                        .unwrap_or_default()
+                        .effective()
+                        == crate::content_presentation::Presentation::Gallery;
                     let read = progress.is_some_and(|p| p.completed);
                     let stamp = if view.section == 2 {
                         clock.history(
@@ -1297,7 +1346,7 @@ impl Controller {
                     {
                         meta.push(format!(
                             "{}: {}",
-                            text::tr("Page"),
+                            text::tr(if gallery { "Image" } else { "Page" }),
                             progress.anchor.page_index.saturating_add(1)
                         ));
                     }
@@ -1320,7 +1369,20 @@ impl Controller {
                         }
                         .into(),
                         subtitle: if view.section == 1 || view.section == 2 {
-                            c.title.clone()
+                            if gallery {
+                                progress
+                                    .map(|p| {
+                                        format!(
+                                            "{} · {} {}",
+                                            c.title,
+                                            text::tr("Image"),
+                                            p.anchor.page_index.saturating_add(1)
+                                        )
+                                    })
+                                    .unwrap_or_else(|| c.title.clone())
+                            } else {
+                                c.title.clone()
+                            }
                         } else {
                             String::new()
                         }
@@ -1596,6 +1658,11 @@ impl Controller {
         }
     }
     fn navigate(self: &Arc<Self>, ui: &AppWindow, section: i32) {
+        if section == 23 && self.gallery_return(ui) {
+            return;
+        }
+        self.clear_overview_images(ui);
+        self.view().overview = None;
         if section == 22 {
             crate::image_limits_ui::refresh(ui);
         }
@@ -1869,6 +1936,16 @@ impl Controller {
         self.render(ui);
     }
     fn open_series(self: &Arc<Self>, ui: &AppWindow, series: Series) {
+        if crate::content_presentation::Settings::load(&series.id)
+            .unwrap_or_default()
+            .effective()
+            == crate::content_presentation::Presentation::Gallery
+        {
+            self.open_gallery(ui, series);
+            return;
+        }
+        self.clear_overview_images(ui);
+        self.view().overview = None;
         ui.set_detail_origin(self.view().section);
         if self.view().series.as_ref().map(|current| &current.id) != Some(&series.id) {
             ui.set_chapter_filter(0);
@@ -2003,6 +2080,9 @@ impl Controller {
         let Ok(mut view) = self.view.try_lock() else {
             return;
         };
+        if view.section != 6 {
+            return;
+        }
         if let Some(reader) = &mut view.reader {
             reader.viewport_width = width;
             reader.viewport_height = height;
@@ -2021,6 +2101,9 @@ impl Controller {
         let Ok(mut view) = self.view.try_lock() else {
             return;
         };
+        if view.section != 6 {
+            return;
+        }
         let Some(reader) = &mut view.reader else {
             return;
         };
@@ -2053,9 +2136,14 @@ impl Controller {
         let last = reader.pages.len() - 1;
         let complete = (index..=last).all(|i| reader.has_visible_pixels(i))
             && offset + viewport >= reader.total_extent() * width - 2.;
-        reader.completed |= complete;
+        if !reader.collection {
+            reader.completed |= complete;
+        }
+        let record = !reader.collection || reader.has_visible_pixels(reader.anchor.page_index);
         let progress = reader.progress_record();
-        view.pending = Some(progress);
+        if record {
+            view.pending = Some(progress);
+        }
         drop(view);
         if changed_chapter {
             ui.invoke_cancel_reader_zoom();
@@ -2214,11 +2302,13 @@ impl Controller {
     ) {
         let mut encoded = EncodedPages::default();
         let mut decoded = reader_engine::DisplayDecoder::default();
+        let mut decode_permit = None;
         let mut epoch = u64::MAX;
         let mut limits_epoch = reader_engine::limits_revision();
         loop {
             if limits_epoch != reader_engine::limits_revision() {
                 decoded.clear();
+                decode_permit.take();
                 encoded = EncodedPages::default();
                 limits_epoch = reader_engine::limits_revision();
             }
@@ -2245,6 +2335,7 @@ impl Controller {
                     };
                     if generation != epoch || !reading {
                         decoded.clear();
+                        decode_permit.take();
                         encoded = EncodedPages::default();
                         epoch = generation;
                     }
@@ -2253,6 +2344,7 @@ impl Controller {
             };
             if task.generation != epoch {
                 decoded.clear();
+                decode_permit.take();
                 encoded = EncodedPages::default();
                 epoch = task.generation;
             }
@@ -2301,10 +2393,14 @@ impl Controller {
                 let before_scope = reader_capture_sources::scope(&input, source.as_ref())?;
                 let mut fresh_original = false;
                 let bytes = match &input {
-                    PageInput::Local { .. } => encoded.read(task.generation, task.index, || {
-                        fresh_original = true;
-                        input.read(source.as_ref(), &cancel)
-                    })?,
+                    PageInput::Local { .. } | PageInput::Verified(_) => {
+                        encoded.read(task.generation, task.index, || {
+                            decoded.clear();
+                            decode_permit.take();
+                            fresh_original = true;
+                            input.read(source.as_ref(), &cancel)
+                        })?
+                    }
                     PageInput::Remote(page) => {
                         let source = source
                             .as_ref()
@@ -2331,11 +2427,16 @@ impl Controller {
                         let mut fetched = false;
                         let mut reused = false;
                         let mut load = || {
+                            decoded.clear();
+                            decode_permit.take();
                             fetched = true;
                             let read =
                                 app.chapter_cache.read_with_chunks(&request, &mut |chunk| {
                                     if let Some(stream) = progressive.as_mut() {
-                                        stream.feed(chunk, || decoded.clear());
+                                        stream.feed(chunk, || {
+                                            decoded.clear();
+                                            decode_permit.take();
+                                        });
                                     }
                                 })?;
                             // Validate streaming EOF before EncodedPages can
@@ -2356,6 +2457,8 @@ impl Controller {
                             reused = true;
                         }
                         if !fetched && request.validate_scope().is_err() {
+                            decoded.clear();
+                            decode_permit.take();
                             if let Some(stream) = progressive.as_mut() {
                                 stream.finish()?;
                             }
@@ -2369,7 +2472,10 @@ impl Controller {
                             let read =
                                 app.chapter_cache.read_with_chunks(&request, &mut |chunk| {
                                     if let Some(stream) = progressive.as_mut() {
-                                        stream.feed(chunk, || decoded.clear());
+                                        stream.feed(chunk, || {
+                                            decoded.clear();
+                                            decode_permit.take();
+                                        });
                                     }
                                 })?;
                             reused = read.from_cache;
@@ -2412,6 +2518,18 @@ impl Controller {
                         .ok_or_else(|| text::tr("Source unavailable"))?
                         .display_options
                 };
+                if decode_permit.is_none() {
+                    decode_permit = crate::decode_admission::SHARED.acquire(
+                        crate::decode_admission::Priority::Viewer,
+                        || {
+                            !cancel.is_cancelled()
+                                && app.generation.load(Ordering::Acquire) == task.generation
+                        },
+                    );
+                    if decode_permit.is_none() {
+                        return Err(text::tr("Operation cancelled"));
+                    }
+                }
                 let presentation = decoded
                     .presentation(&bytes, reader_engine::current_limits(), options)
                     .map_err(error)?;
@@ -2501,6 +2619,7 @@ impl Controller {
             if result.is_err() {
                 encoded.discard(task.generation, task.index);
                 decoded.clear();
+                decode_permit.take();
             }
             let pending = Arc::new(Mutex::new(Some(result)));
             let handed = pending.clone();
@@ -2710,7 +2829,9 @@ impl Controller {
                     } else {
                         let mut view = app.view();
                         if let Some(reader) = &mut view.reader {
-                            reader.completed |= reader.paged_chapter_finished();
+                            if !reader.collection {
+                                reader.completed |= reader.paged_chapter_finished();
+                            }
                             let progress = reader.progress_record();
                             view.pending = Some(progress);
                         }
@@ -2734,6 +2855,7 @@ impl Controller {
                     .is_none_or(|guard| guard.is_available())
             }) {
                 decoded.clear();
+                decode_permit.take();
                 encoded = EncodedPages::default();
             }
             if let Some(cleanup) = preview_cleanup {
@@ -2777,9 +2899,14 @@ impl Controller {
         }
         reader.anchor =
             ResumeAnchor::new(reader.page_id(index), index, fraction).unwrap_or_default();
-        reader.completed |= reader.paged_chapter_finished();
+        if !reader.collection {
+            reader.completed |= reader.paged_chapter_finished();
+        }
+        let record = !reader.collection || reader.has_visible_pixels(reader.anchor.page_index);
         let progress = reader.progress_record();
-        view.pending = Some(progress);
+        if record {
+            view.pending = Some(progress);
+        }
         drop(view);
         if changed_chapter {
             ui.invoke_cancel_reader_zoom();
@@ -2944,7 +3071,55 @@ impl Controller {
                 .find(|series| series.id == id)
                 .cloned()
                 .ok_or_else(|| text::tr("Title is no longer available."))?;
+            if let Some(user) = match action {
+                "presentation-default" => {
+                    Some(crate::content_presentation::UserPreference::Default)
+                }
+                "presentation-reader" => Some(crate::content_presentation::UserPreference::Reader),
+                "presentation-gallery" => {
+                    Some(crate::content_presentation::UserPreference::Gallery)
+                }
+                _ => None,
+            } {
+                let saved = crate::content_presentation::Settings::set_user(&id, user);
+                // Always project durable state after a failure, rather than
+                // showing a selection that could not be saved.
+                let settings = crate::content_presentation::Settings::load(&id).unwrap_or_default();
+                ui.set_entry_menu_presentation(match settings.user {
+                    crate::content_presentation::UserPreference::Default => 0,
+                    crate::content_presentation::UserPreference::Reader => 1,
+                    crate::content_presentation::UserPreference::Gallery => 2,
+                });
+                saved?;
+                self.render(ui);
+                return Ok(());
+            }
+            if action == "details" {
+                self.gallery_details(ui, series);
+                return Ok(());
+            }
+            if action == "download" {
+                let chapter = self
+                    .view()
+                    .overview
+                    .as_ref()
+                    .filter(|o| o.collection && o.series.id == id && !o.inventory.is_empty())
+                    .map(|o| o.chapter.clone());
+                if let Some(chapter) = chapter {
+                    self.download(ui, chapter);
+                }
+                return Ok(());
+            }
             if action == "refresh" {
+                let gallery = self
+                    .view()
+                    .overview
+                    .as_ref()
+                    .is_some_and(|o| o.collection && o.series.id == id);
+                if gallery {
+                    self.gallery_refresh(ui);
+                    return Ok(());
+                }
                 self.task(
                     ui,
                     move |app, cancel| app.services.details(&series, cancel),
@@ -4286,6 +4461,7 @@ pub fn run(services: Services) -> Result<()> {
             crate::paths::chapter_cache_dir()?,
         )),
         capture_originals: Mutex::default(),
+        thumbnail_service: OnceLock::new(),
         image_worker_live: AtomicBool::new(true),
         view: Mutex::new(View {
             source_browser: crate::source_browser::SourceBrowser::load(),
@@ -4331,12 +4507,16 @@ pub fn run(services: Services) -> Result<()> {
     app.chapter_cache.on_gc(Arc::new(move || {
         let _ = weak.upgrade_in_event_loop(|ui| {
             ui.global::<crate::ImageStorageSettings>()
-                .invoke_chapter_cache_refresh()
+                .invoke_chapter_cache_refresh();
+            ui.global::<crate::ImageStorageSettings>()
+                .invoke_thumbnail_cache_refresh()
         });
     }));
     wire_reader_context(&app, &ui);
     reader_controls::wire(&app, &ui);
     reader_open::wire(&app, &ui);
+    let _overview_timer = page_overview::wire(&app, &ui);
+    thumbnail_cache_settings::wire(&app, &ui);
     {
         let app = app.clone();
         let weak = ui.as_weak();
@@ -4782,6 +4962,22 @@ pub fn run(services: Services) -> Result<()> {
         app.view().category = index.max(0) as usize;
         app.render(&ui);
     });
+    wire!(on_entry_menu_requested, |_app, ui, key| {
+        let settings = serde_json::from_str::<reader_domain::SeriesId>(&key)
+            .map_err(error)
+            .and_then(|id| crate::content_presentation::Settings::load(&id));
+        match settings {
+            Ok(settings) => ui.set_entry_menu_presentation(match settings.user {
+                crate::content_presentation::UserPreference::Default => 0,
+                crate::content_presentation::UserPreference::Reader => 1,
+                crate::content_presentation::UserPreference::Gallery => 2,
+            }),
+            Err(error) => {
+                ui.set_entry_menu_presentation(0);
+                ui.set_status(error.into());
+            }
+        }
+    });
     wire!(on_entry_action, |app, ui, key, action| app
         .entry_action(&ui, &key, &action));
     wire!(on_catalog_enabled_changed, |app, ui, id, enabled| {
@@ -5041,6 +5237,7 @@ mod tests {
                 dir.path().join("chapters"),
             )),
             capture_originals: Mutex::default(),
+            thumbnail_service: OnceLock::new(),
             image_worker_live: AtomicBool::new(true),
             view: Mutex::new(View {
                 section: 3,
@@ -5231,6 +5428,7 @@ mod tests {
             mode_choice: ModeChoice::Automatic,
             automatic_mode: ReadingMode::Webtoon,
             mode_switching: false,
+            collection: false,
             completed: false,
         }
     }
@@ -6148,6 +6346,7 @@ mod tests {
             mode_choice: ModeChoice::Automatic,
             automatic_mode: ReadingMode::Webtoon,
             mode_switching: false,
+            collection: false,
             completed: false,
         };
         let services = Services::open(&dir.path().join("data")).unwrap();
@@ -6166,6 +6365,7 @@ mod tests {
                 dir.path().join("cache/viewed-chapters"),
             )),
             capture_originals: Mutex::default(),
+            thumbnail_service: OnceLock::new(),
             image_worker_live: AtomicBool::new(true),
             view: Mutex::new(View {
                 reader: Some(reader),

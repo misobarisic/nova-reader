@@ -8,6 +8,23 @@ pub(super) struct Prepared {
 }
 
 fn prepare(app: &Arc<Controller>, chapter: ChapterId, cancel: &CancelToken) -> Result<Prepared> {
+    let inventory = crate::page_inventory::load(&app.services, &chapter, cancel).map_err(error)?;
+    let collection = crate::content_presentation::Settings::load(&chapter.series)
+        .map(|s| s.effective() == crate::content_presentation::Presentation::Gallery)
+        .unwrap_or(false);
+    prepare_inventory(app, chapter, cancel, inventory.pages, None, collection)
+}
+
+fn prepare_inventory(
+    app: &Arc<Controller>,
+    chapter: ChapterId,
+    cancel: &CancelToken,
+    resources: Arc<Vec<crate::page_inventory::Resource>>,
+    selected: Option<String>,
+    collection: bool,
+) -> Result<Prepared> {
+    use crate::page_inventory::ResourceKind;
+    cancel.check().map_err(error)?;
     let state = app.services.domain.snapshot().map_err(error)?;
     let progress = state
         .progress
@@ -23,139 +40,97 @@ fn prepare(app: &Arc<Controller>, chapter: ChapterId, cancel: &CancelToken) -> R
         reader_modes::legacy_mode(&state, &chapter.series),
     )
     .map_err(error)?;
-    let automatic_mode = reader_modes::automatic_for_state(&state, &chapter.series, None);
-    let mode = mode_choice.resolve(automatic_mode);
-    let anchor = progress.map(|p| p.anchor).unwrap_or_default();
-    let reader: Result<Reader> = if let Ok(offline) = app.services.downloads.offline(&chapter) {
-        let pages = offline
-            .pages
-            .into_iter()
-            .zip(app.services.downloads.job(&chapter).map_err(error)?.pages)
-            .map(|(path, page)| PageInput::Local {
-                path,
-                id: page.resource.id,
-            })
-            .collect::<Vec<_>>();
-        let ratios = pages
-            .iter()
-            .map(|p| match p {
-                PageInput::Local { .. } => p
-                    .read(None, cancel)
-                    .ok()
-                    .and_then(|bytes| {
-                        reader_engine::inspect_image(&bytes, reader_engine::current_limits()).ok()
-                    })
-                    .map(|d| d.height as f32 / d.width as f32)
-                    .unwrap_or(1.5),
-                _ => 1.5,
-            })
-            .collect();
-        Ok(Reader {
-            chapter,
-            source: None,
-            pages,
-            ratios,
-            requested: BTreeSet::new(),
-            retained: BTreeSet::new(),
-            desired: BTreeSet::new(),
-            failed: BTreeSet::new(),
-            budget_blocked: BTreeSet::new(),
-            desired_anchor: usize::MAX,
-            decoded_bytes: BTreeMap::new(),
-            decoded_widths: BTreeMap::new(),
-            decoded_windows: BTreeMap::new(),
-            decoded_responses: BTreeMap::new(),
-            native_dimensions: BTreeMap::new(),
-            progressive_job: None,
-            presentations: BTreeMap::new(),
-            display_options: reader_engine::DisplayOptions::default(),
-            gap_pixels: 0.,
-            chapter_boundaries: true,
-            preload_epoch: 0,
-            segments: Vec::new(),
-            preloading: None,
-            continuity_error: None,
-            bookmarked_chapters: BTreeSet::new(),
-            target_width: 0,
-            viewport_width: 0.,
-            viewport_height: 0.,
-            anchor,
-            mode,
-            mode_choice,
-            automatic_mode,
-            mode_switching: false,
-            completed,
-        })
+    let source = resources.iter().find_map(|resource| match &resource.kind {
+        ResourceKind::Remote { source, .. } => Some((**source).clone()),
+        _ => None,
+    });
+    let source_name = source.as_ref().map(|s| s.descriptor().name.clone());
+    let automatic_mode =
+        reader_modes::automatic_for_state(&state, &chapter.series, source_name.as_deref());
+    let mode = if collection && mode_choice == reader_modes::ModeChoice::Default {
+        ReadingMode::LeftToRight
     } else {
-        let (source, pages) = app.services.pages(&chapter, cancel)?;
-        let automatic_mode = reader_modes::automatic_for_state(
-            &state,
-            &chapter.series,
-            Some(&source.descriptor().name),
-        );
-        let mode = mode_choice.resolve(automatic_mode);
-
-        let ratios = pages
-            .iter()
-            .map(|p| {
-                p.width
-                    .zip(p.height)
-                    .filter(|(w, h)| *w > 0 && *h > 0)
-                    .map(|(w, h)| h as f32 / w as f32)
-                    .unwrap_or(1.5)
-            })
-            .collect();
-        Ok(Reader {
-            chapter,
-            source: Some(source),
-            pages: pages.into_iter().map(PageInput::Remote).collect(),
-            ratios,
-            requested: BTreeSet::new(),
-            retained: BTreeSet::new(),
-            desired: BTreeSet::new(),
-            failed: BTreeSet::new(),
-            budget_blocked: BTreeSet::new(),
-            desired_anchor: usize::MAX,
-            decoded_bytes: BTreeMap::new(),
-            decoded_widths: BTreeMap::new(),
-            decoded_windows: BTreeMap::new(),
-            decoded_responses: BTreeMap::new(),
-            native_dimensions: BTreeMap::new(),
-            progressive_job: None,
-            presentations: BTreeMap::new(),
-            display_options: reader_engine::DisplayOptions::default(),
-            gap_pixels: 0.,
-            chapter_boundaries: true,
-            preload_epoch: 0,
-            segments: Vec::new(),
-            preloading: None,
-            continuity_error: None,
-            bookmarked_chapters: BTreeSet::new(),
-            target_width: 0,
-            viewport_width: 0.,
-            viewport_height: 0.,
-            anchor,
-            mode,
-            mode_choice,
-            automatic_mode,
-            mode_switching: false,
-            completed,
-        })
+        mode_choice.resolve(automatic_mode)
     };
-    let mut reader = reader?;
-
-    cancel.check().map_err(error)?;
+    let mut anchor = progress.map(|p| p.anchor).unwrap_or_default();
+    if let Some(id) = selected {
+        let index = resources
+            .iter()
+            .position(|r| r.id == id)
+            .ok_or_else(|| text::tr("Image is no longer available"))?;
+        anchor = ResumeAnchor::new(id, index, 0.).map_err(error)?;
+    }
+    let ratios = resources
+        .iter()
+        .map(|resource| match &resource.kind {
+            ResourceKind::Remote { page, .. } => page
+                .width
+                .zip(page.height)
+                .filter(|(w, h)| *w > 0 && *h > 0)
+                .map(|(w, h)| h as f32 / w as f32)
+                .unwrap_or(1.5),
+            _ => 1.5,
+        })
+        .collect();
+    let pages = resources
+        .iter()
+        .map(|resource| match &resource.kind {
+            ResourceKind::Remote { page, .. } => PageInput::Remote(page.clone()),
+            _ => PageInput::Verified(Box::new(resource.clone())),
+        })
+        .collect();
+    let mut reader = Reader {
+        chapter,
+        source,
+        pages,
+        ratios,
+        requested: BTreeSet::new(),
+        retained: BTreeSet::new(),
+        desired: BTreeSet::new(),
+        failed: BTreeSet::new(),
+        budget_blocked: BTreeSet::new(),
+        desired_anchor: usize::MAX,
+        decoded_bytes: BTreeMap::new(),
+        decoded_widths: BTreeMap::new(),
+        decoded_windows: BTreeMap::new(),
+        decoded_responses: BTreeMap::new(),
+        native_dimensions: BTreeMap::new(),
+        progressive_job: None,
+        presentations: BTreeMap::new(),
+        display_options: reader_engine::DisplayOptions::default(),
+        gap_pixels: 0.,
+        chapter_boundaries: true,
+        preload_epoch: 0,
+        segments: Vec::new(),
+        preloading: None,
+        continuity_error: None,
+        bookmarked_chapters: BTreeSet::new(),
+        target_width: 0,
+        viewport_width: 0.,
+        viewport_height: 0.,
+        anchor,
+        mode,
+        mode_choice,
+        automatic_mode,
+        mode_switching: false,
+        completed,
+        collection,
+    };
     let ids = (0..reader.pages.len())
         .map(|i| reader.page_id(i))
         .collect::<Vec<_>>();
     reader.anchor = reader_engine::resolve_anchor(&reader.anchor, &ids).unwrap_or_default();
-    // Settings changed during network preparation win without storage work on the UI.
+    // A deliberate mode edit during preparation wins; Gallery's default is transient.
     reader.mode_choice = reader_modes::load(
         &reader.chapter.series,
         reader_modes::legacy_mode(&state, &reader.chapter.series),
     )
     .map_err(error)?;
-    reader.mode = reader.mode_choice.resolve(reader.automatic_mode);
+    reader.mode = if collection && reader.mode_choice == reader_modes::ModeChoice::Default {
+        ReadingMode::LeftToRight
+    } else {
+        reader.mode_choice.resolve(reader.automatic_mode)
+    };
     let series = state
         .series
         .into_iter()
@@ -183,7 +158,31 @@ fn prepare(app: &Arc<Controller>, chapter: ChapterId, cancel: &CancelToken) -> R
 
 impl Controller {
     pub(super) fn open_chapter(self: &Arc<Self>, ui: &AppWindow, chapter: ChapterId) {
+        if self.open_gallery_chapter(ui, &chapter) {
+            return;
+        }
+        self.clear_overview_images(ui);
+        self.view().overview = None;
         self.begin_reader_open(ui, chapter, prepare);
+    }
+    pub(super) fn open_inventory_chapter(
+        self: &Arc<Self>,
+        ui: &AppWindow,
+        chapter: ChapterId,
+        resources: Arc<Vec<crate::page_inventory::Resource>>,
+        selected_page: String,
+        collection: bool,
+    ) {
+        self.begin_reader_open(ui, chapter, move |app, chapter, cancel| {
+            prepare_inventory(
+                app,
+                chapter,
+                cancel,
+                resources,
+                Some(selected_page),
+                collection,
+            )
+        });
     }
     fn begin_reader_open(
         self: &Arc<Self>,
@@ -256,6 +255,15 @@ impl Controller {
                             let mut view = app.view();
                             view.series = prepared.series;
                             view.chapters = prepared.chapters;
+                            ui.set_reader_collection(prepared.reader.collection);
+                            ui.set_reader_gallery_group_count(if prepared.reader.collection {
+                                view.overview
+                                    .as_ref()
+                                    .and_then(|o| o.groups.as_ref())
+                                    .map_or(1, |g| g.len()) as i32
+                            } else {
+                                0
+                            });
                             view.reader = Some(prepared.reader);
                             view.reader_open = None;
                         }
@@ -339,6 +347,7 @@ mod tests {
                 dir.path().join("viewed"),
             )),
             capture_originals: Mutex::default(),
+            thumbnail_service: OnceLock::new(),
             image_worker_live: AtomicBool::new(false),
             view: Mutex::new(View::default()),
             generation: AtomicU64::new(0),

@@ -25,6 +25,21 @@ pub(super) fn scope(input: &PageInput, source: Option<&Source>) -> Result<Option
                 metadata.modified().ok(),
             )))
         }
+        PageInput::Verified(resource) => match &resource.kind {
+            crate::page_inventory::ResourceKind::Local { path, .. } => {
+                let metadata = std::fs::metadata(path).map_err(error)?;
+                Ok(Some(Scope::Local(
+                    path.clone(),
+                    metadata.len(),
+                    metadata.modified().ok(),
+                )))
+            }
+            crate::page_inventory::ResourceKind::Remote { source, page } => source
+                .page_cache_scope(&page.url, &page.headers)
+                .map(|v| v.map(Scope::Remote))
+                .map_err(error),
+            crate::page_inventory::ResourceKind::Unavailable { .. } => Ok(None),
+        },
         PageInput::Remote(page) => source
             .ok_or_else(|| text::tr("Source unavailable"))?
             .page_cache_scope(&page.url, &page.headers)

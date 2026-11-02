@@ -185,6 +185,7 @@ struct Active {
 }
 pub struct ChapterCache {
     cache: blob::Cache,
+    admission: Arc<Mutex<()>>,
     policy: Policy,
     usable: bool,
     active: Mutex<Option<Active>>,
@@ -217,6 +218,8 @@ impl ChapterCache {
             notify: notify.clone(),
         });
         let gc = usable.then(|| gc::start(directory, backend).ok()).flatten();
+        let admission = Arc::new(Mutex::new(()));
+        let writer_admission = admission.clone();
         let queue = Arc::new(Queue::default());
         let epoch = Arc::new(AtomicU64::new(0));
         let (sender, receiver) = mpsc::sync_channel::<Job>(1);
@@ -258,6 +261,7 @@ impl ChapterCache {
                     // admission as well as GC: a pinned chapter cannot grow the
                     // disposable namespace without bound. This single writer
                     // owns admission; a ready tracker avoids filesystem work.
+                    let _admission = writer_admission.lock().unwrap_or_else(|e| e.into_inner());
                     if (worker_policy)().limit_bytes.is_some_and(|limit| {
                         let used = worker_cache
                             .tracked_usage()
@@ -282,6 +286,7 @@ impl ChapterCache {
             .ok();
         Self {
             cache,
+            admission,
             policy,
             usable,
             active: Mutex::new(None),
@@ -293,6 +298,17 @@ impl ChapterCache {
             maintenance_busy: AtomicBool::new(false),
             notify,
         }
+    }
+    #[cfg(test)]
+    pub(crate) fn test_cache(directory: PathBuf, limit_bytes: u64) -> Self {
+        Self::with_hooks(
+            directory,
+            Arc::new(move || gc::DiskPolicy {
+                enabled: true,
+                limit_bytes: Some(limit_bytes),
+            }),
+            Arc::new(compress),
+        )
     }
     pub fn prepare(
         &self,
@@ -323,6 +339,91 @@ impl ChapterCache {
             cache_epoch: self.cache.generation(),
             write_epoch: self.write_epoch.load(Ordering::Acquire),
         })
+    }
+    /// Current shared original/derivative namespace revision.
+    pub fn revision(&self) -> u64 {
+        self.cache.generation()
+    }
+    /// Authorized disk-only original lookup. A thumbnail caller can then choose
+    /// a preview transfer without accidentally fetching/caching a full original.
+    pub fn read_cached(&self, request: &Request) -> Result<Option<Read>> {
+        request.validate_active()?;
+        if !self.usable || !(self.policy)().enabled || request.cache_epoch != self.revision() {
+            return Ok(None);
+        }
+        request.validate_scope()?;
+        let bytes = request
+            .key
+            .as_deref()
+            .and_then(|key| self.cache.get(key, inspect).ok().flatten());
+        request.validate_scope()?;
+        Ok(bytes.map(|bytes| Read {
+            bytes,
+            pending: None,
+            from_cache: true,
+        }))
+    }
+    pub(crate) fn thumbnail_key(chapter: &ChapterId, identity: &[u8]) -> String {
+        format!("{}:thumb:{}", chapter_group(chapter), digest(identity))
+    }
+    pub(crate) fn thumbnail_read(
+        &self,
+        key: &str,
+        inspect: impl Fn(&[u8]) -> Result<(u32, u32)>,
+    ) -> Result<Option<Vec<u8>>> {
+        if !self.usable || !(self.policy)().enabled {
+            return Ok(None);
+        }
+        self.cache.get(key, inspect)
+    }
+    pub(crate) fn thumbnail_write(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        revision: u64,
+        inspect: impl Fn(&[u8]) -> Result<(u32, u32)>,
+        current: impl Fn() -> bool,
+    ) -> Result<bool> {
+        if !self.usable || bytes.is_empty() || bytes.len() > ENTRY_BYTES {
+            return Ok(false);
+        }
+        let _admission = self.admission.lock().unwrap_or_else(|e| e.into_inner());
+        let policy = (self.policy)();
+        if !policy.enabled || revision != self.revision() || !current() {
+            return Ok(false);
+        }
+        if policy.limit_bytes.is_some_and(|limit| {
+            self.cache
+                .tracked_usage()
+                .unwrap_or_else(|| self.cache.usage())
+                .0
+                .saturating_add(bytes.len() as u64)
+                .saturating_add(64 * 1024 + 12)
+                > limit
+        }) {
+            gc::wake();
+            return Ok(false);
+        }
+        self.cache
+            .put_if_current(key, bytes, revision, inspect, || {
+                (self.policy)().enabled && current()
+            })
+    }
+    pub fn thumbnail_usage(&self) -> (u64, usize) {
+        if self.usable {
+            self.cache.usage_matching(|key| key.contains(":thumb:"))
+        } else {
+            (0, 0)
+        }
+    }
+    /// Clears derivatives only; original page files retain their identities.
+    pub fn clear_thumbnails(&self) -> (u64, usize) {
+        self.write_epoch.fetch_add(1, Ordering::AcqRel);
+        if self.usable {
+            self.cache.clear_matching(|key| key.contains(":thumb:"))
+        } else {
+            (0, 0)
+        }
     }
     pub fn read(&self, request: &Request) -> Result<Read> {
         self.read_with_chunks(request, &mut |_| {})
@@ -508,6 +609,71 @@ mod tests {
     use super::*;
     use reader_sources::{HttpRequest, HttpResponse, SourceRegistry, SourceTransport};
     use std::{io::Write, sync::atomic::AtomicUsize, time::Instant};
+    #[test]
+    fn thumbnails_share_physical_original_quota_and_clear_preserves_originals() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = ChapterCache::test_cache(directory.path().join("cache"), 200_000);
+        let epoch = cache.revision();
+        let inspect = |_: &[u8]| Ok((10, 10));
+        assert!(
+            cache
+                .cache
+                .put_if_current(
+                    "reader-page:v1:chapter:original",
+                    &vec![7; 80_000],
+                    epoch,
+                    inspect,
+                    || true
+                )
+                .unwrap()
+        );
+        assert!(
+            cache
+                .thumbnail_write(
+                    "reader-page:v1:chapter:thumb:first",
+                    &vec![9; 1000],
+                    epoch,
+                    inspect,
+                    || true
+                )
+                .unwrap()
+        );
+        assert!(
+            !cache
+                .thumbnail_write(
+                    "reader-page:v1:chapter:thumb:oversize",
+                    &vec![9; 80_000],
+                    epoch,
+                    inspect,
+                    || true
+                )
+                .unwrap()
+        );
+        assert!(cache.usage().0 <= 200_000);
+        let usage = cache.thumbnail_usage();
+        assert_eq!(usage.1, 1);
+        assert!(usage.0 > 1000);
+        assert_eq!(cache.clear_thumbnails(), usage);
+        assert!(
+            cache
+                .cache
+                .get("reader-page:v1:chapter:original", inspect)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            !cache
+                .thumbnail_write(
+                    "reader-page:v1:chapter:thumb:late",
+                    &[9; 20],
+                    epoch,
+                    inspect,
+                    || true
+                )
+                .unwrap()
+        );
+        assert_eq!(cache.thumbnail_usage(), (0, 0));
+    }
     struct Transport {
         body: Vec<u8>,
         reads: AtomicUsize,

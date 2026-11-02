@@ -81,6 +81,15 @@ pub struct OfflineChapter {
     pub chapter: ChapterId,
     pub pages: Vec<PathBuf>,
 }
+/// Metadata for lazy page consumers. This is not proof that the original bytes
+/// are present or intact: consumers must verify length and SHA-256 when reading.
+#[derive(Clone, Debug)]
+pub struct InventoryPage {
+    pub resource: PageResource,
+    pub path: PathBuf,
+    pub bytes: u64,
+    pub sha256: Option<String>,
+}
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DownloadProgress {
     pub queued: usize,
@@ -897,6 +906,24 @@ impl DownloadStore {
             chapter: chapter.clone(),
             pages,
         })
+    }
+    /// Read a validated manifest without hashing every page up front. Keep all
+    /// declared identities, including missing/partial pages, so a gallery can
+    /// show per-image unavailability rather than silently dropping its images.
+    pub fn page_inventory(&self, chapter: &ChapterId) -> Result<Vec<InventoryPage>> {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let job = load(&inner.root, chapter)?;
+        let directory = inner.root.join(chapter_key(chapter));
+        Ok(job
+            .pages
+            .into_iter()
+            .map(|page| InventoryPage {
+                resource: page.resource,
+                path: directory.join(page.filename),
+                bytes: page.bytes,
+                sha256: page.sha256,
+            })
+            .collect())
     }
     pub fn recover(&self) -> Result<()> {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());

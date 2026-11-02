@@ -18,7 +18,11 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `src/android_downloads.rs`, `src/download_background.rs`, `android/java/dev/misob/nova/reader/ReaderBackgroundService.java` | Nova's copied download foreground service and JNI adapter; Reader queue leases, independent notification progress, wake lock, resumed-only permission prompt and error-safe native calls |
 | `src/addon_icons.rs`, `crates/ui/addon-icon.slint` | Verified bundled addon PNGs decoded on workers, retained UI-thread image handles shared by language variants, Sources/Extensions decoration and Kit fallback |
 | `src/artwork.rs` | Kit decoded-poster LRU and encoded variants, synchronous cross-page hits, source permits, UI handles, four bounded fetchers, serialized display decoding, independent bounded cache encoding, and legacy artwork migration |
-| `src/chapter_cache.rs` | Kit-backed disposable viewed pages, authorization scopes, chapter-group eviction/active leases and bounded background encoding |
+| `src/chapter_cache.rs` | Kit-backed disposable viewed pages and thumbnail derivatives sharing one disk namespace/quota, authorization scopes, chapter-group eviction/active leases, filtered thumbnail clear and bounded background encoding |
+| `src/page_inventory.rs`, `tests/page_inventory.rs` | Reader-free stable page/resource inventory; source-free downloaded/imported metadata and selection-time original integrity checks |
+| `src/page_overview.rs`, `src/gallery_presentation.rs` | Shared overview orchestration, reader anchor restoration, gallery-first entry/groups, explicit metadata and full-resolution selection; native controller regressions live beside these modules |
+| `src/page_thumbnails.rs`, `src/decode_admission.rs` | Lazy viewport-bounded thumbnail worker, leased pixels, direct progressive JXL prefixes and shared foreground-first heavy decode admission; service/admission regressions live beside the modules |
+| `src/thumbnail_cache_settings.rs` | Thumbnail usage/clear callbacks; invalidates live work and UI references while preserving originals and downloads |
 | `src/reader_settings.rs`, `src/reader_settings_ui.rs` | Durable global reader defaults, source-local series layout/orientation overrides, cached effective snapshots and fallible UI rollback |
 | `src/reader_controls.rs`, `src/reader_navigation.rs` | Nova-style OSD actions, source-anchored 0.5×–8× zoom/seek, motion-setting-aware double-tap animation, zoomed tap-zone bypass, Mihon tap maps, mode inheritance and Android/desktop preference projection |
 | `src/reader_continuity.rs` | Near-boundary chapter preparation, per-chapter source ownership and canonical progress, stable in-place page growth and bounded three-chapter retention |
@@ -38,6 +42,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `crates/ui/source-settings.slint` | Addon settings page with slider-owned Flickable gestures, keyboard focus reveal and existing catalogue/custom-field callbacks |
 | `src/source_compression.rs`, `crates/ui/source-compression-settings.slint`, `tests/source_compression.rs` | Host-owned per-addon global/explicit cache and download compression, worker snapshots and addon sync projection; budgets remain device-wide |
 | `src/source_catalogs.rs` | Host-owned per-addon catalogue switches under `reader:disabled-catalogs:<JSON package ID>`; filters Browse while preserving direct/history/offline access |
+| `src/content_presentation.rs`, `tests/content_presentation.rs` | Device-local versioned `reader:content-presentation:<JSON SeriesId>` records; explicit Default/Reader/Gallery choice and last addon hint, captured before domain conversion and retained for offline use |
 | `src/reading_preferences.rs` | Fallible Nova KV persistence for adult-source visibility and chapter order keyed by full source-local series identity |
 | `src/reader_modes.rs`, `docs/reader-modes.md` | Pinned TachiyomiJ2K classification, Default/global inheritance, explicit Automatic/manual/gapped selection, and durable per-series mode overrides |
 | `src/timeline.rs`, `src/source_filters.rs`, `src/source_browser.rs` | Local date groups/provider date parsing, bounded typed filter values and persistent source pins/last-used grouping |
@@ -56,12 +61,13 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `crates/ui/library-cards.slint`, `crates/ui/display-settings.slint` | Nova poster/list painting and left-anchored progress fill shown after a chapter is read, per-entry context gestures, viewport admission, grid/list switch and persisted display choices |
 | `../nova-kit/crates/cache`, `../nova-kit/crates/ui-base/slint/cache-settings-controls.slint` | Actual Nova cache/settings implementations and NumericSetting/cache controls shared by Nova and Reader; app persistence/search/sync adapters remain local |
 | `crates/ui/library-search.slint` | Retained Nova search reveal, deferred focus, live filtering and viewport-aware field exposure |
-| `crates/ui/entry-menu.slint`, `crates/ui/status-menu.slint` | Per-title Kit action sheet/anchored desktop menu, copied Nova Change status picker, stable-identity category editing and library/refresh actions |
+| `crates/ui/entry-menu.slint`, `crates/ui/status-menu.slint` | Per-title Kit action sheet/anchored desktop menu, copied Nova Change status picker, stable-identity category editing, library/refresh actions, Default/Reader/Gallery presentation and collection Metadata/Download actions |
 | `crates/ui/detail-hero.slint`, `crates/ui/title-artwork.slint`, `crates/ui/chapter-row.slint` | Nova detail artwork/title/metadata/actions, retained synopsis state, chapter-ready Continue gating, compact chapter rows and accessible action popup |
 | `crates/ui/timeline.slint`, `crates/ui/source-list.slint`, `crates/ui/extensions.slint`, `crates/ui/source-filters.slint` | Dated History/Updates, grouped sources with bundled icons, extension management and actual source-defined browse filters |
 | `crates/ui/reader-context-menu.slint` | Normal selection save/copy plus optional `(simple)` viewport actions, stationary-hold/right-click handling, clamping, keyboard navigation and export feedback |
 | `crates/ui/reader-pager.slint`, `tests/reader_pager.rs` | Touch/mouse gallery dragging and wheel paging in reading order, adjacent-page motion and bounded settling; zoomed artwork yields to image panning |
 | `crates/ui/reader-zoom.slint` | Native pinch scale/moving-midpoint lifecycle and remaining-finger guard; `app.slint` forwards `reader-zoom-by` and `reader-transform` into reader controls, while image interactions consume actual Ctrl+wheel modifiers |
+| `crates/ui/page-overview.slint`, `crates/ui/page-thumbnail.slint`, `tests/page_overview.rs` | Shared chapter/collection thumbnail grid with Slint ListView row virtualization, stable-ID selection, RTL column placement, density and logical viewport-anchor restoration; native interaction and opt-in raster previews |
 | `crates/ui/navigation.slint` | Nova’s 64px icon rail, flat five-tab bottom bar, icon feedback and keyboard navigation |
 | `crates/ui/controls.slint`, `crates/ui/page-header.slint` | Thin Nova Kit control adapters and Nova’s PageHeader; shared palette, typography and accessibility |
 | `crates/ui/more.slint` | Retained Nova-style More/Settings landings, nested slide/fade layers, scroll/focus restoration and local import/categories/data/About pages |
@@ -217,6 +223,15 @@ choice. Corrupt raw values remain intact while defaults are used, until a
 successful edit. These device-local preferences are outside portable metadata
 backups.
 
+`reader:content-presentation:<JSON SeriesId>` stores schema-version-1 records
+with separate Default/Reader/Gallery user preference and last-known addon hint.
+The complete source-local series identity scopes each record. Explicit user
+choices win over the hint; Default uses Gallery only for `"gallery"`, otherwise
+Reader. Source browse/search/details capture hints before domain conversion;
+metadata refresh cannot replace the user's choice. These records survive restart
+and support offline entry, but remain outside portable backups and sync. They do
+not change reading-mode settings, IDs or download paths.
+
 `reader:mode-choice:<serialized SeriesId>` stores a versioned Automatic/manual
 choice independently of library membership. A manual mode overrides chapter
 progress modes; explicit library preferences migrate once. Automatic classifies
@@ -270,6 +285,30 @@ preserves dimensions, retains original bytes when unsupported/over budget, and
 has a 32 MiB active-plus-pending encoded-byte limit. Namespace epochs prevent
 cleared or cancelled work from repopulating files. Explicit downloads keep their
 own manifests and are never removed by disposable-cache maintenance.
+
+Thumbnail derivatives share this same viewed-chapter container, chapter groups
+and disk quota; they have no separate disk allowance. Thumbnail usage and clear
+under More → Settings → Cache filter derivative keys, preserving original viewed
+pages and explicit downloads/imports. Whole chapter-cache maintenance includes
+both kinds. Clear invalidates pending work and live Slint references before
+removing files.
+
+Page inventory loading reads metadata without constructing a Reader or writing
+progress/History. The Controller creates its single thumbnail service only when
+an overview opens. Requests cover visible rows plus one neighboring row on each
+side, with one fetch/decode worker. Shared heavy-decode admission prefers the
+fullscreen viewer, then visible thumbnails, then prefetch; an active decode is
+non-preemptible. Live thumbnail leases include service, mailbox and UI ownership
+within 8 MiB, with another 8 MiB reserved for the renderer's previous frame;
+source and heavy-decode allocations remain additional and image-policy bounded.
+Tall pages use a marked top preview. Tile errors stay local; authentication,
+challenge, rate-limit and unavailable-source errors pause that source until Retry.
+Generation, source authorization, image-policy revision and cache invalidation
+guard publication. Local/remote progressive JXL uses a bounded prefix directly,
+without re-encoding and without assuming a fixed fraction of the original bytes.
+Prefixes belong only to disposable thumbnail derivatives; full-resolution entry
+still verifies original availability/integrity. Thumbnail work neither creates a
+chapter download nor marks it offline or read.
 
 `addons/` contains registry state, immutable content-addressed packages and its
 writer lock. Package version history rejects changed bytes at the same identity
@@ -400,9 +439,15 @@ generate all installable ZIPs; Reader does not depend on a sibling checkout.
 - Shared cache implementation/settings: Kit `crates/cache` and `crates/ui-base/slint/cache-settings-controls.slint`; Reader `src/chapter_cache.rs`, `src/image_storage.rs` and `tests/image_storage.rs`.
 - Library search, retained details and per-title actions: `crates/ui/library-search.slint`, `crates/ui/entry-menu.slint`, `src/app.rs`, `tests/library_navigation.rs`, `tests/entry_menu.rs`.
 - Automatic source paging and Retry: `src/app.rs` (`browse`/`complete_browse`), `crates/ui/app.slint`, `tests/source_paging.rs`.
+- Per-entry Reader/Gallery preferences and optional addon hints: `src/content_presentation.rs`, `src/services.rs::Services::series`, `tests/content_presentation.rs`.
 - Automatic/manual reader mode and per-series overrides: `src/reader_modes.rs`, `docs/reader-modes.md`, `tests/reader_modes.rs`.
 - Effective-direction chapter/page controls and progress slider: `crates/ui/reader-osd.slint`, `tests/reader_mode_controls.rs`.
 - Paged gallery dragging, zoom/pan and fitted image geometry: `crates/ui/reader-pager.slint`, `crates/ui/app.slint`, `src/reader_controls.rs`, `tests/reader_pager.rs`.
+- Shared page/image overview grid, reader return anchors and native previews: `src/page_overview.rs`, `crates/ui/page-overview.slint`, `crates/ui/page-thumbnail.slint`, `tests/page_overview.rs`.
+- Gallery-first routing, groups, explicit Metadata/Download and collection progress: `src/gallery_presentation.rs`, `src/reader_open.rs`, `src/reader_controls.rs`.
+- Reader-free inventory and selection-time original integrity: `src/page_inventory.rs`, `DownloadStore::page_inventory`, `tests/page_inventory.rs`.
+- Lazy thumbnail admission, direct progressive JXL prefixes and pixel leases: `src/page_thumbnails.rs`, `src/decode_admission.rs`, `crates/reader-sources/src/lib.rs::Source::fetch_page_until`.
+- Shared chapter/thumbnail disk quota and independent thumbnail clear: `src/chapter_cache.rs`, `src/thumbnail_cache_settings.rs`, `crates/ui/image-storage-settings.slint`.
 - Desktop Ctrl+wheel, Android pinch, source-point anchoring and magnified tap behavior: `crates/ui/reader-zoom.slint`, `crates/ui/reader-context-menu.slint`, `src/reader_controls.rs` (native production-controller regression).
 - Pinned Slint raw pinch scale correction and provenance: `vendor/i-slint-core/NOVA_PATCH.md`, `vendor/i-slint-core/input.rs`.
 - Unfinished chapter page labels and manual read/unread History behavior: `src/app.rs` (`render`, `toggle_chapter_read`), `tests/reader_design.rs` and app unit tests.
@@ -496,7 +541,7 @@ persists independently of JPEG/WebP/AVIF and applies only to lossy JPEG XL. Shar
 Kit encoding produces `.jxl` / `image/jxl` screencaps at either capture resolution;
 Reader decode admission is checked before delivery. Original page exports keep
 source bytes. Screenshot quality sits immediately after format. Cache settings
-follow chapter cache → cache compression → artwork/memory → downloads; each
+follow chapter cache (including thumbnail maintenance) → cache compression → artwork/memory → downloads; each
 compression quality row directly follows its format, before optional transcode.
 
 Artwork cache usage/clear/status are owned by `ImageStorageSettingsPage` beside

@@ -299,7 +299,7 @@ impl Controller {
             if reader.sync_continuation_epoch(generation) {
                 ui.set_reader_continuation_error("".into());
             }
-            if reader.mode_switching || reader.pages.is_empty() {
+            if reader.collection || reader.mode_switching || reader.pages.is_empty() {
                 return;
             }
             let Some(tail) = reader.segments.last() else {
