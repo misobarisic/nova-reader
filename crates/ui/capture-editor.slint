@@ -70,6 +70,8 @@ export component CaptureEditor inherits Rectangle {
     private property <int> drag-vertical;
     private property <length> pointer-x;
     private property <length> pointer-y;
+    private property <length> drag-intent-y;
+    private property <int> scroll-direction;
     private property <length> drag-offset-x;
     private property <length> drag-offset-y;
     private property <int> extension-direction;
@@ -122,6 +124,22 @@ export component CaptureEditor inherits Rectangle {
         root.resize(root.drag-horizontal, root.drag-vertical,
             (x - root.drag-offset-x - image-content.absolute-position.x) / max(1px, image-content.width),
             (y - root.drag-offset-y - image-content.absolute-position.y) / max(1px, image-content.height));
+    }
+    function pointer-dragged(x: length, y: length) {
+        // A handle can already be inside an edge band when it is pressed.
+        // Only real outward pointer motion arms scrolling; timer reprojection
+        // must not manufacture intent as the canvas moves under the pointer.
+        // Reversing inward stops scrolling immediately, before the threshold
+        // for a new direction is reached.
+        if root.scroll-direction != 0 && (y - root.pointer-y) * root.scroll-direction < 0px {
+            root.scroll-direction = 0;
+            root.drag-intent-y = root.pointer-y;
+        }
+        if root.scroll-direction == 0 {
+            if y - root.drag-intent-y >= 6px { root.scroll-direction = 1; }
+            else if y - root.drag-intent-y <= -6px { root.scroll-direction = -1; }
+        }
+        root.drag-to(x, y);
     }
     function activate(index: int) {
         if index == 0 { root.action("cancel"); }
@@ -197,10 +215,11 @@ export component CaptureEditor inherits Rectangle {
                 root.drag-horizontal = handle.horizontal; root.drag-vertical = handle.vertical;
                 root.drag-offset-x = x - image-content.absolute-position.x - root.handle-x(handle.horizontal) * image-content.width;
                 root.drag-offset-y = y - image-content.absolute-position.y - root.handle-y(handle.vertical) * image-content.height;
+                root.drag-intent-y = y; root.scroll-direction = 0;
                 root.pointer-x = x; root.pointer-y = y; root.dragging = true;
             }
-            dragged(x,y) => { if root.dragging { root.drag-to(x,y); } }
-            ended => { root.dragging = false; }
+            dragged(x,y) => { if root.dragging { root.pointer-dragged(x,y); } }
+            ended => { root.dragging = false; root.scroll-direction = 0; }
           }
         }
         if !root.preview-mode: PillButton {
@@ -278,16 +297,18 @@ export component CaptureEditor inherits Rectangle {
         }
     }
     auto-scroll := Timer {
-        interval: 24ms; running: root.dragging && !root.busy;
+        interval: 24ms; running: root.dragging && !root.busy && root.drag-vertical != 0 && root.scroll-direction != 0;
         triggered => {
             let y = root.pointer-y - canvas.absolute-position.y;
-            let delta = y < 72px ? 14px : y > canvas.height - 72px ? -14px : 0px;
+            let above = root.drag-vertical < 0 && root.scroll-direction < 0 && y < 72px;
+            let below = root.drag-vertical > 0 && root.scroll-direction > 0 && y > canvas.height - 72px;
+            let delta = above ? 14px : below ? -14px : 0px;
             let next = Math.clamp(canvas-scroll.content-y + delta, min(0px, canvas.height - canvas-scroll.content-height), 0px);
             if next != canvas-scroll.content-y {
                 canvas-scroll.content-y = next;
                 root.drag-to(root.pointer-x, root.pointer-y);
-            } else if root.drag-vertical < 0 && y < 72px { root.extend(-1); }
-            else if root.drag-vertical > 0 && y > canvas.height - 72px { root.extend(1); }
+            } else if root.drag-vertical < 0 && above { root.extend(-1); }
+            else if root.drag-vertical > 0 && below { root.extend(1); }
         }
     }
     scope := FocusScope {

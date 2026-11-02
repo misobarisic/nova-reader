@@ -51,6 +51,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `crates/ui/detail-hero.slint`, `crates/ui/title-artwork.slint`, `crates/ui/chapter-row.slint` | Nova detail artwork/title/metadata/actions, retained synopsis state, chapter-ready Continue gating, compact chapter rows and accessible action popup |
 | `crates/ui/timeline.slint`, `crates/ui/source-list.slint`, `crates/ui/extensions.slint`, `crates/ui/source-filters.slint` | Dated History/Updates, grouped sources with bundled icons, extension management and actual source-defined browse filters |
 | `crates/ui/reader-context-menu.slint` | Normal selection save/copy plus optional `(simple)` viewport actions, stationary-hold/right-click handling, clamping, keyboard navigation and export feedback |
+| `crates/ui/reader-pager.slint`, `tests/reader_pager.rs` | Touch/mouse gallery dragging and wheel paging in reading order, adjacent-page motion and bounded settling; zoomed artwork yields to image panning |
 | `crates/ui/navigation.slint` | Nova’s 64px icon rail, flat five-tab bottom bar, icon feedback and keyboard navigation |
 | `crates/ui/controls.slint`, `crates/ui/page-header.slint` | Thin Nova Kit control adapters and Nova’s PageHeader; shared palette, typography and accessibility |
 | `crates/ui/more.slint` | Retained Nova-style More/Settings landings, nested slide/fade layers, scroll/focus restoration and local import/categories/data/About pages |
@@ -305,6 +306,7 @@ package sources live in `nova-addons/reader-addons/`.
 - Automatic source paging and Retry: `src/app.rs` (`browse`/`complete_browse`), `crates/ui/app.slint`, `tests/source_paging.rs`.
 - Automatic/manual reader mode and per-series overrides: `src/reader_modes.rs`, `docs/reader-modes.md`, `tests/reader_modes.rs`.
 - Effective-direction chapter/page controls and progress slider: `crates/ui/reader-osd.slint`, `tests/reader_mode_controls.rs`.
+- Paged gallery dragging, zoom/pan and fitted image geometry: `crates/ui/reader-pager.slint`, `crates/ui/app.slint`, `src/reader_controls.rs`, `tests/reader_pager.rs`.
 - Unfinished chapter page labels and manual read/unread History behavior: `src/app.rs` (`render`, `toggle_chapter_read`), `tests/reader_design.rs` and app unit tests.
 - Adult visibility and per-series chapter order: `src/reading_preferences.rs`, `tests/reading_preferences.rs`.
 - AVIF image admission/encoding: `crates/reader-engine/src/avif.rs`, `src/reader_export.rs`, `src/image_storage.rs`.
@@ -417,6 +419,12 @@ RTL spread splitting, rotation/reverse and color filtering without modifying
 source/cache bytes or expanding the existing output/decode memory limits.
 
 Continuous reading attaches prepared chapters to the same page model in Webtoon and paged modes.
+Paged frames use local image pan coordinates; Webtoon's chapter-stacked resume
+offset never translates a paged frame. Both viewport dimensions bind directly
+to the live reader frame, including its initial mount. Paged zoom scales the contained image
+after fitting and requests matching physical-pixel detail. At normal zoom,
+horizontal dragging follows LTR/RTL order and vertical paging follows vertical
+drags; zoomed dragging pans artwork without turning pages.
 Per-page chapter/source ownership keeps caches, export filenames and progress
 canonical; old segments are pruned in place to retain previous/current/next,
 with a fresh generation rejecting old indexed tasks. A small boundary row names

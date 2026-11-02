@@ -21,6 +21,7 @@ import { SettingsCard } from "@NovaUiBase/settings-controls.slint";
 import { SourceFilterPanel } from "source-filters.slint";
 import { TimelineList } from "timeline.slint";
 import { ReaderContextMenu, ReaderImageInteraction } from "reader-context-menu.slint";
+import { ReaderPagerMotion } from "reader-pager.slint";
 import { CaptureEditor, CaptureCropRect } from "capture-editor.slint";
 export { CaptureCropRect } from "capture-editor.slint";
 import { ReaderOsd } from "reader-osd.slint";
@@ -221,8 +222,9 @@ export component AppWindow inherits Window {
     private property <bool> reader-page-entered: true;
     private property <bool> reader-page-motion: false;
     private property <float> reader-page-opacity: root.reader-page-entered ? 1 : 0;
+    private property <bool> reader-gallery-committing;
     animate reader-page-opacity { duration: root.reader-page-motion && ReaderSettings.page-animations ? 150ms : 0ms; easing: ease-out; }
-    public function animate-reader-page() { if root.reading-mode != 0 && ReaderSettings.page-animations { root.reader-page-motion = false; root.reader-page-entered = false; reader-page-animation-timer.start(); } }
+    public function animate-reader-page() { if root.reading-mode != 0 && ReaderSettings.page-animations && !root.reader-gallery-committing { root.reader-page-motion = false; root.reader-page-entered = false; reader-page-animation-timer.start(); } }
     reader-page-animation-timer := Timer { interval: 16ms; triggered => { root.reader-page-motion = true; root.reader-page-entered = true; } }
     public function flash-reader-page() { if ReaderSettings.page-flash { root.reader-flash-active = true; reader-flash-timer.restart(); } }
     reader-flash-timer := Timer { interval: 100ms; triggered => { root.reader-flash-active = false; } }
@@ -287,6 +289,7 @@ export component AppWindow inherits Window {
     private property <length> reader-frame-y: (page-content.height - root.reader-canvas-height) / 2 + (ReaderSettings.cutout ? 0px : root.safe-area-insets.top);
     private property <length> reader-frame-width: max(1px, root.reader-canvas-width - (ReaderSettings.cutout ? 0px : root.safe-area-insets.left + root.safe-area-insets.right));
     private property <length> reader-frame-height: max(1px, root.reader-canvas-height - (ReaderSettings.cutout ? 0px : root.safe-area-insets.top + root.safe-area-insets.bottom));
+    out property <length> reader-viewport-width: root.reader-frame-width;
     private property <ReaderCaptureViewport> reader-live-capture-viewport: {
         x: (page-content.absolute-position.x + root.reader-frame-x) / 1px,
         y: (page-content.absolute-position.y + root.reader-frame-y) / 1px,
@@ -379,7 +382,11 @@ export component AppWindow inherits Window {
         if !root.reader-osd { root.show-reader-options = false; }
         root.immersive-changed(root.section == 6 && ReaderSettings.fullscreen && !root.reader-osd);
     }
-    out property <length> reader-width: min(1100px, max(100px, (root.reader-canvas-width - (root.section == 6 && ReaderSettings.cutout ? 0px : root.safe-area-insets.left + root.safe-area-insets.right)) * (1 - root.reader-side-padding / 50.0) * root.zoom));
+    out property <length> reader-fit-width: min(1100px, max(100px, (root.reader-canvas-width - (root.section == 6 && ReaderSettings.cutout ? 0px : root.safe-area-insets.left + root.safe-area-insets.right)) * (1 - root.reader-side-padding / 50.0)));
+    out property <length> reader-width: root.reading-mode == 0 ? min(1100px, max(100px, (root.reader-canvas-width - (root.section == 6 && ReaderSettings.cutout ? 0px : root.safe-area-insets.left + root.safe-area-insets.right)) * (1 - root.reader-side-padding / 50.0) * root.zoom)) : root.reader-fit-width * root.zoom;
+    private property <float> reader-paged-ratio: max(0.001, root.pages[root.current-page].ratio / (root.reader-split-page ? 2 : 1));
+    out property <length> reader-paged-width: min(root.reader-fit-width, root.reader-frame-height / root.reader-paged-ratio) * root.zoom;
+    out property <length> reader-paged-height: root.reader-paged-width * root.reader-paged-ratio;
     private property <length> reader-height: root.total-ratio * root.reader-width;
 
     callback request-artwork(int,int);
@@ -421,7 +428,7 @@ export component AppWindow inherits Window {
     callback toggle-library;
     callback download-chapter;
     callback chapter-step(int);
-    in-out property <length> reader-viewport-height: 0px;
+    out property <length> reader-viewport-height: root.reader-frame-height;
     callback reader-position(float, float, float);
     callback reader-reflow(float,float);
     callback mode-changed(int);
@@ -845,6 +852,15 @@ export component AppWindow inherits Window {
                         }
                         if root.section == 6: Rectangle {
                             background: root.reader-background;
+                            pager := ReaderPagerMotion {
+                                enabled: root.reading-mode != 0 && root.zoom <= 1 && !root.capture-editor-visible && !root.reader-context-visible;
+                                mode: root.reading-mode; page: root.current-page;
+                                animate: Anim.enabled && ReaderSettings.page-animations;
+                                viewport-width: reader.width; viewport-height: reader.height;
+                                can-previous: root.current-page > 0 || (root.reader-split-page && root.reader-split-half > 0);
+                                can-next: root.current-page + 1 < root.pages.length || (root.reader-split-page && root.reader-split-half == 0);
+                                step(value) => { root.reader-gallery-committing = true; root.page-step(value); root.reader-gallery-committing = false; }
+                            }
                             reader := Flickable {
                                 private property <length> physical-pixel: 1phx;
                                 changed physical-pixel => {root.reader-reflow(root.reader-width / 1px,self.height / 1px);}
@@ -853,16 +869,21 @@ export component AppWindow inherits Window {
                                 content-y <=> root.scroll-y;
                                 content-x <=> root.scroll-x;
                                 changed content-y => {if root.reading-mode==0{root.reader-position(-self.content-y / 1px,root.reader-width / 1px,self.height / 1px);}}
-                                changed height => {root.reader-viewport-height=self.height;root.reader-reflow(root.reader-width / 1px,self.height / 1px);}
+                                changed height => {root.reader-reflow(root.reader-width / 1px,self.height / 1px);}
                                 interactive: !root.capture-editor-visible && (root.reading-mode == 0 || root.zoom > 1);
-                                content-width: max(self.width, root.reader-width);
-                                content-height: root.reading-mode == 0 ? max(self.height, root.reader-height) : self.height;
+                                content-width: max(self.width, root.reading-mode == 0 ? root.reader-width : root.reader-paged-width);
+                                content-height: root.reading-mode == 0 ? max(self.height, root.reader-height) : max(self.height, root.reader-paged-height);
                                 ReaderImageInteraction {
                                     width: reader.content-width; height: reader.content-height;
                                     context-enabled: false;
                                     accessible-role: button; accessible-label: @tr("Toggle reader controls");
                                     accessible-action-default => { root.toggle-reader-osd(); }
                                     double-tap-enabled: root.reader-double-tap-enabled;
+                                    page-drag-enabled: pager.enabled;
+                                    page-drag-moved(dx,dy) => { pager.moved(dx,dy); }
+                                    page-drag-ended(dx,dy) => { pager.released(dx,dy); }
+                                    page-drag-cancelled => { pager.cancel(); }
+                                    page-scrolled(dx,dy) => { pager.wheel(dx,dy); }
                                     long-press-enabled: ReaderSettings.long-press-actions;
                                     positioned-tap(x,y) => { root.reader-tap((x - reader.absolute-position.x) / max(1px,reader.width),(y - reader.absolute-position.y) / max(1px,reader.height)); }
                                     double-tapped(x,y) => { root.reader-double-tap((x - reader.absolute-position.x) / max(1px,reader.width),(y - reader.absolute-position.y) / max(1px,reader.height)); }
@@ -880,18 +901,18 @@ export component AppWindow inherits Window {
                                     }
                                 }
                                 for page[index] in root.pages: page-frame := Rectangle {
-                                    visible: root.reading-mode == 0 || index == root.current-page;
+                                    visible: root.reading-mode == 0 || index == root.current-page || (pager.enabled && !root.reader-split-page && abs(index - root.current-page) == 1);
                                     opacity: root.reading-mode == 0 ? 1 : root.reader-page-opacity;
-                                    x: (max(reader.width, root.reader-width) - self.width) / 2;
-                                    y: root.reading-mode == 0 ? page.position * root.reader-width : 0px;
-                                    width: root.reader-width;
-                                    height: root.reading-mode == 0 ? root.reader-width * page.ratio : reader.height;
+                                    x: (reader.content-width - self.width) / 2 + (root.reading-mode == 1 || root.reading-mode == 2 ? (index - root.current-page) * reader.width * (root.reading-mode == 2 ? -1 : 1) + pager.offset-x : 0px);
+                                    y: root.reading-mode == 0 ? page.position * root.reader-width : root.reading-mode == 3 ? (index - root.current-page) * reader.height + pager.offset-y : 0px;
+                                    width: root.reading-mode == 0 ? root.reader-width : reader.content-width;
+                                    height: root.reading-mode == 0 ? root.reader-width * page.ratio : reader.content-height;
                                     clip: root.reading-mode != 0;
                                     // Loaded page frames stay transparent: a logical,
                                     // unsnapped background could paint over its neighbour's
                                     // snapped image edge while the chapter is scrolling.
                                     if page.loaded: image-frame := Rectangle {
-                                        width: root.reading-mode == 0 ? parent.width : min(parent.width,parent.height / (page.ratio / (root.reader-split-page ? 2 : 1)));
+                                        width: root.reading-mode == 0 ? parent.width : min(root.reader-fit-width,reader.height / (page.ratio / (root.reader-split-page ? 2 : 1))) * root.zoom;
                                         height: root.reading-mode == 0 ? parent.height : self.width * page.ratio;
                                         x: (parent.width - self.width) / 2;
                                         y: root.reading-mode != 0 && root.reader-split-page ? -root.reader-split-half * self.height / 2 : (parent.height - self.height) / 2;
@@ -916,6 +937,7 @@ export component AppWindow inherits Window {
                                             width: self.snapped-right - self.snapped-left;
                                             height: max(0px, self.snapped-bottom - self.snapped-top);
                                             image-fit: fill;
+                                            image-rendering: smooth;
                                         }
                                         ReaderImageInteraction {
                                             width: 100%; height: 100%;
@@ -925,6 +947,11 @@ export component AppWindow inherits Window {
                                                 root.open-reader-context(index, self.absolute-position.x + self.width / 2, reader.absolute-position.y + reader.height / 2);
                                             }
                                             double-tap-enabled: root.reader-double-tap-enabled;
+                                            page-drag-enabled: pager.enabled;
+                                            page-drag-moved(dx,dy) => { pager.moved(dx,dy); }
+                                            page-drag-ended(dx,dy) => { pager.released(dx,dy); }
+                                            page-drag-cancelled => { pager.cancel(); }
+                                            page-scrolled(dx,dy) => { pager.wheel(dx,dy); }
                                     long-press-enabled: ReaderSettings.long-press-actions;
                                     positioned-tap(x,y) => { root.reader-tap((x - reader.absolute-position.x) / max(1px,reader.width),(y - reader.absolute-position.y) / max(1px,reader.height)); }
                                     double-tapped(x,y) => { root.reader-double-tap((x - reader.absolute-position.x) / max(1px,reader.width),(y - reader.absolute-position.y) / max(1px,reader.height)); }

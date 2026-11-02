@@ -165,9 +165,9 @@ fn prepare(
             .find(|page| page.index == index)
             .ok_or_else(|| text::tr("Capture geometry unavailable"))?;
         let ratio = f64::from(effective.height) / f64::from(effective.width);
-        if let Some((x, width, height)) = capture.paged_fit {
-            page.rect.width = width.min(height / (ratio / if split { 2. } else { 1. }));
-            page.rect.x = x + (width - page.rect.width) / 2.;
+        if let Some((x, width, height, zoom, viewport_width)) = capture.paged_fit {
+            page.rect.width = width.min(height / (ratio / if split { 2. } else { 1. })) * zoom;
+            page.rect.x = x + (viewport_width.max(page.rect.width) - page.rect.width) / 2.;
         }
         page.rect.height = page.rect.width * ratio;
         let anchor = capture

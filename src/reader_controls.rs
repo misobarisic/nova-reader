@@ -249,6 +249,10 @@ impl Controller {
         crate::reader_settings_ui::apply(ui, &prefs);
         ui.set_reader_mode_choice(choice.selection());
         ui.set_reading_mode(mode_index(mode));
+        if previous_mode != mode && mode != ReadingMode::Webtoon {
+            ui.set_scroll_x(0.);
+            ui.set_scroll_y(0.);
+        }
         ui.set_reader_mode_label(text::tr(mode_label(mode, gaps > 0.)).into());
         ui.set_reader_rotation_choice(rotation);
         ui.set_reader_orientation(prefs.rotation.into());
@@ -388,6 +392,10 @@ impl Controller {
         view.pending = Some(reader.progress_record());
         drop(view);
         ui.set_current_page(index as i32);
+        if ui.get_reading_mode() != 0 {
+            ui.set_scroll_x(0.);
+            ui.set_scroll_y(0.);
+        }
         self.restore_position(ui);
         self.publish_reader_controls(ui);
         self.request_images(ui, index);
@@ -424,6 +432,38 @@ impl Controller {
 
     pub(super) fn reader_zoom(&self, ui: &AppWindow, zoom: f32, x: f32, y: f32) {
         if !zoom.is_finite() {
+            return;
+        }
+        if ui.get_reading_mode() != 0 {
+            let viewport_width = ui.get_reader_viewport_width().max(1.);
+            let viewport_height = ui.get_reader_viewport_height().max(1.);
+            let local_x = x.clamp(0., 1.) * viewport_width;
+            let local_y = y.clamp(0., 1.) * viewport_height;
+            let old_width = ui.get_reader_paged_width().max(1.);
+            let old_height = ui.get_reader_paged_height().max(1.);
+            let source_x =
+                (local_x - ui.get_scroll_x() - (viewport_width - old_width).max(0.) / 2.)
+                    / old_width;
+            let vertical_margin = |height: f32| {
+                if ui.get_reader_split_page() {
+                    0.
+                } else {
+                    (viewport_height - height).max(0.) / 2.
+                }
+            };
+            let source_y = (local_y - ui.get_scroll_y() - vertical_margin(old_height)) / old_height;
+            ui.set_zoom(zoom.clamp(0.5, 3.));
+            let width = ui.get_reader_paged_width().max(1.);
+            let height = ui.get_reader_paged_height().max(1.);
+            ui.set_scroll_x(
+                -((viewport_width - width).max(0.) / 2. + source_x * width - local_x)
+                    .clamp(0., (width - viewport_width).max(0.)),
+            );
+            ui.set_scroll_y(
+                -(vertical_margin(height) + source_y * height - local_y)
+                    .clamp(0., (height - viewport_height).max(0.)),
+            );
+            self.reflow(ui, ui.get_reader_width(), viewport_height);
             return;
         }
         let old_width = ui.get_reader_width().max(1.);

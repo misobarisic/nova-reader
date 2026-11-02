@@ -1,4 +1,5 @@
 use i_slint_backend_testing::{AccessibleRole, ElementHandle};
+use i_slint_core::{input::TouchPhase, lengths::LogicalPoint, platform::InternalEvent};
 use nova_reader::{AppWindow, CaptureCropRect, CaptureSettings, PageRow};
 use slint::platform::{Key, PointerEventButton, WindowEvent};
 use slint::{ComponentHandle, LogicalPosition, LogicalSize, ModelRc, VecModel};
@@ -47,6 +48,248 @@ fn release(ui: &AppWindow, point: LogicalPosition) {
 
 fn canvas_image(height: u32) -> slint::Image {
     slint::Image::from_rgb8(slint::SharedPixelBuffer::new(400, height))
+}
+
+fn drag_input(ui: &AppWindow, touch: bool, phase: TouchPhase, point: LogicalPosition) {
+    ui.window().dispatch_event(if touch {
+        WindowEvent::internal(InternalEvent::Touch {
+            id: 1,
+            position: LogicalPoint::new(point.x, point.y),
+            phase,
+        })
+    } else {
+        match phase {
+            TouchPhase::Started => WindowEvent::PointerPressed {
+                position: point,
+                button: PointerEventButton::Left,
+            },
+            TouchPhase::Ended => WindowEvent::PointerReleased {
+                position: point,
+                button: PointerEventButton::Left,
+            },
+            _ => WindowEvent::PointerMoved { position: point },
+        }
+    });
+}
+
+fn hold_pointer() {
+    for _ in 0..20 {
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(25));
+    }
+}
+
+fn assert_crop_close(actual: CaptureCropRect, expected: CaptureCropRect) {
+    for (actual, expected) in [
+        (actual.x, expected.x),
+        (actual.y, expected.y),
+        (actual.width, expected.width),
+        (actual.height, expected.height),
+    ] {
+        assert!((actual - expected).abs() < 0.0001, "{actual} != {expected}");
+    }
+}
+
+#[test]
+fn edge_handle_press_and_inward_drag_never_extend_the_selection() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().unwrap();
+    ui.set_section(6);
+    let actions = Rc::new(RefCell::new(Vec::new()));
+    ui.on_capture_editor_action({
+        let actions = actions.clone();
+        move |action| actions.borrow_mut().push(action.to_string())
+    });
+    ui.show().unwrap();
+    for (width, height) in [(390., 844.), (1120., 780.)] {
+        ui.window().set_size(LogicalSize::new(width, height));
+        for touch in [false, true] {
+            for (label, inward) in [
+                ("Resize selection bottom", -1.),
+                ("Resize selection bottom left", -1.),
+                ("Resize selection bottom right", -1.),
+                ("Resize selection top", 1.),
+                ("Resize selection top left", 1.),
+                ("Resize selection top right", 1.),
+            ] {
+                ui.set_capture_editor_visible(false);
+                ui.set_capture_editor_image(canvas_image(800));
+                ui.set_capture_editor_crop(CaptureCropRect {
+                    x: 0.1,
+                    y: 0.,
+                    width: 0.8,
+                    height: 1.,
+                });
+                ui.set_capture_editor_can_extend_above(true);
+                ui.set_capture_editor_can_extend_below(true);
+                ui.set_capture_editor_visible(true);
+                settle();
+                let before = ui.get_capture_editor_crop();
+                let center = center(&button(&ui, label));
+                // Touch the outside half of the 44px target. This is already in
+                // the edge-scroll band, without any gesture toward that edge.
+                let start = LogicalPosition::new(center.x, center.y - inward * 10.);
+                drag_input(&ui, touch, TouchPhase::Started, start);
+                hold_pointer();
+                assert!(actions.borrow().is_empty(), "stationary {label} at {width}");
+                assert_crop_close(ui.get_capture_editor_crop(), before.clone());
+
+                // An inward move still inside the same edge band must shorten the
+                // crop, even when the finger pauses before the next input event.
+                let inside = LogicalPosition::new(start.x, start.y + inward * 4.);
+                drag_input(&ui, touch, TouchPhase::Moved, inside);
+                let shortened = ui.get_capture_editor_crop();
+                assert!(
+                    shortened.height < before.height,
+                    "inward {label} at {width}"
+                );
+                hold_pointer();
+                assert_crop_close(ui.get_capture_editor_crop(), shortened.clone());
+                assert!(actions.borrow().is_empty(), "inward {label} cannot extend");
+                let further = LogicalPosition::new(start.x, start.y + inward * 28.);
+                drag_input(&ui, touch, TouchPhase::Moved, further);
+                assert!(ui.get_capture_editor_crop().height < shortened.height);
+                drag_input(&ui, touch, TouchPhase::Ended, further);
+                settle();
+                assert!(actions.borrow().is_empty());
+            }
+        }
+    }
+}
+
+#[test]
+fn shortening_into_the_opposite_edge_band_never_scrolls_or_extends() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().unwrap();
+    ui.set_section(6);
+    ui.on_capture_editor_action(|action| panic!("inward drag extended: {action}"));
+    ui.show().unwrap();
+    for (width, height) in [(390., 844.), (1120., 780.)] {
+        ui.window().set_size(LogicalSize::new(width, height));
+        for touch in [false, true] {
+            for (label, bottom) in [
+                ("Resize selection bottom", true),
+                ("Resize selection bottom left", true),
+                ("Resize selection bottom right", true),
+                ("Resize selection top", false),
+                ("Resize selection top left", false),
+                ("Resize selection top right", false),
+            ] {
+                ui.set_capture_editor_visible(false);
+                ui.set_capture_editor_image(canvas_image(800));
+                ui.set_capture_editor_crop(CaptureCropRect {
+                    x: 0.1,
+                    y: 0.,
+                    width: 0.8,
+                    height: 1.,
+                });
+                ui.set_capture_editor_can_extend_above(true);
+                ui.set_capture_editor_can_extend_below(true);
+                ui.set_capture_editor_visible(true);
+                settle();
+                // Give the canvas room to scroll toward the opposite edge:
+                // a full-size initial image alone would hide that regression.
+                ui.set_capture_editor_image(canvas_image(1600));
+                settle();
+                if bottom {
+                    key(&ui, Key::PageDown);
+                    key(&ui, Key::PageDown);
+                }
+                let canvas = ElementHandle::find_by_element_id(&ui, "CaptureEditor::canvas")
+                    .next()
+                    .unwrap();
+                let artwork =
+                    ElementHandle::find_by_element_id(&ui, "CaptureEditor::image-content")
+                        .next()
+                        .unwrap();
+                let before_y = artwork.absolute_position().y;
+                let start = center(&button(&ui, label));
+                let opposite = LogicalPosition::new(
+                    start.x,
+                    canvas.absolute_position().y
+                        + if bottom {
+                            20.
+                        } else {
+                            canvas.size().height - 20.
+                        },
+                );
+                drag_input(&ui, touch, TouchPhase::Started, start);
+                hold_pointer();
+                drag_input(&ui, touch, TouchPhase::Moved, opposite);
+                let shortened = ui.get_capture_editor_crop();
+                assert!(shortened.height < 1., "{label} must shorten");
+                hold_pointer();
+                assert_crop_close(ui.get_capture_editor_crop(), shortened);
+                assert!(
+                    (artwork.absolute_position().y - before_y).abs() < 0.01,
+                    "{label} at {width}, touch={touch}: opposite edge cannot scroll"
+                );
+                drag_input(&ui, touch, TouchPhase::Ended, opposite);
+                settle();
+            }
+        }
+    }
+}
+
+#[test]
+fn reversing_an_edge_drag_stops_scrolling_before_another_timer_tick() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().unwrap();
+    ui.set_section(6);
+    ui.on_capture_editor_action(|action| panic!("unexpected extension: {action}"));
+    ui.show().unwrap();
+    for (width, height) in [(390., 844.), (1120., 780.)] {
+        ui.window().set_size(LogicalSize::new(width, height));
+        for touch in [false, true] {
+            for above in [false, true] {
+                ui.set_capture_editor_visible(false);
+                ui.set_capture_editor_image(canvas_image(800));
+                ui.set_capture_editor_crop(CaptureCropRect {
+                    x: 0.1,
+                    y: if above { 0.5 } else { 0. },
+                    width: 0.8,
+                    height: 0.5,
+                });
+                ui.set_capture_editor_can_extend_above(true);
+                ui.set_capture_editor_can_extend_below(true);
+                ui.set_capture_editor_visible(true);
+                settle();
+                ui.set_capture_editor_image(canvas_image(1600));
+                settle();
+                if above {
+                    key(&ui, Key::PageDown);
+                    key(&ui, Key::PageDown);
+                }
+                let label = if above {
+                    "Resize selection top left"
+                } else {
+                    "Resize selection bottom right"
+                };
+                let outward = if above { -1. } else { 1. };
+                let center = center(&button(&ui, label));
+                let start = LogicalPosition::new(center.x, center.y + outward * 10.);
+                drag_input(&ui, touch, TouchPhase::Started, start);
+                let edge = LogicalPosition::new(start.x, start.y + outward * 10.);
+                drag_input(&ui, touch, TouchPhase::Moved, edge);
+                let dragged = ui.get_capture_editor_crop();
+                for _ in 0..3 {
+                    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(25));
+                }
+                let scrolled = ui.get_capture_editor_crop();
+                assert!(
+                    scrolled.height > dragged.height,
+                    "deliberate edge scroll at {width}"
+                );
+                let inward = LogicalPosition::new(edge.x, edge.y - outward * 4.);
+                drag_input(&ui, touch, TouchPhase::Moved, inward);
+                let shortened = ui.get_capture_editor_crop();
+                assert!(shortened.height < scrolled.height);
+                hold_pointer();
+                assert_crop_close(ui.get_capture_editor_crop(), shortened);
+                drag_input(&ui, touch, TouchPhase::Ended, inward);
+                settle();
+            }
+        }
+    }
 }
 
 #[test]

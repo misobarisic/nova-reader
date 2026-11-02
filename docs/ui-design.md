@@ -128,8 +128,12 @@ series’ chapter order persist through Nova KV; failed writes keep the saved
 choice rather than publishing an unsaved change.
 
 Chapter controls are hidden on entry. A tap/click reveals their overlay without
-resizing the reading viewport; a drag remains a scroll gesture. On Android the
-status bar follows OSD visibility and its desired state survives recreation and
+resizing the reading viewport; a drag remains a scroll gesture. The
+normal-zoom paged reader follows gallery drags in its reading direction, with
+adjacent-page artwork and a settling transition. Zoomed artwork pans within its
+own page; short or cross-axis drags do not change pages. The page's contained
+size scales with zoom and keeps physical-pixel detail on dense displays. On
+Android the status bar follows OSD visibility and its desired state survives recreation and
 focus changes. Status-bar navigation does not alter the navigation bar. Host
 API 29/35 regressions verify Java/JNI transitions separately from device testing.
 
@@ -155,7 +159,9 @@ controls for format, encoding quality, screencap resolution and separate series 
 under `reader:captures`, independently of library backups and chapter bytes.
 Normal screencap actions open `capture-editor.slint`, with a dimmed crop canvas,
 eight drag handles, edge scrolling, independent above/below extension and
-Preview/Adjust plus Save or Copy. The `simple_screencaps` preference defaults on
+Preview/Adjust plus Save or Copy. Edge scrolling requires an outward drag;
+pressing a handle leaves the selection unchanged and dragging inward stops
+extension immediately. The `simple_screencaps` preference defaults on
 and adds immediate viewport save/copy actions; disabling it hides both simple
 entries. The clean live viewport snapshot is centralized before every context
 open, including keyboard invocation after scrolling or zooming. Controls and

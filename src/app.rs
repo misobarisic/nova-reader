@@ -232,15 +232,13 @@ impl Reader {
     }
     fn span_with_ratio(&self, index: usize, actual_ratio: f32) -> (f64, f64) {
         if self.mode != ReadingMode::Webtoon {
-            return if index == self.anchor.page_index {
-                if self.is_split(index) {
-                    let half = if self.anchor.offset() >= 0.5 { 0.5 } else { 0. };
-                    (half, half + 0.5)
-                } else {
-                    (0., 1.)
-                }
+            return if index == self.anchor.page_index && self.is_split(index) {
+                let half = if self.anchor.offset() >= 0.5 { 0.5 } else { 0. };
+                (half, half + 0.5)
             } else {
-                (0., 0.)
+                // Adjacent pages can be visible during a gallery drag. A
+                // loaded preview must cover its entire page, not a top strip.
+                (0., 1.)
             };
         }
         let page_start = f64::from(self.page_position(index));
@@ -278,15 +276,10 @@ impl Reader {
             return None;
         }
         let ratio = dimensions.height as f32 / dimensions.width as f32;
-        let fit_ratio = ratio / if self.is_split(index) { 2. } else { 1. };
         let width = if self.mode == ReadingMode::Webtoon {
             self.target_width
         } else {
-            Self::decode_width(
-                self.target_width as f32
-                    * (self.viewport_height / (fit_ratio * self.viewport_width.max(1.))).min(1.),
-                1.,
-            )
+            self.paged_detail_width(index, dimensions)
         };
         let anchor = self.anchor.page_index.min(self.pages.len() - 1);
         let mut end = anchor;
@@ -313,15 +306,44 @@ impl Reader {
                 plan.covers(start, end)
             })
     }
+    /// Preserve the same source-column detail as Webtoon before the renderer
+    /// fits a paged image. A second CPU fit-downsample loses thin strokes and
+    /// makes the renderer interpolate an already reduced image again.
+    fn paged_detail_width(&self, index: usize, dimensions: reader_engine::PageDimensions) -> u32 {
+        let (start, end) =
+            self.span_with_ratio(index, dimensions.height as f32 / dimensions.width as f32);
+        let source = self
+            .presentations
+            .get(&index)
+            .map(|presentation| presentation.source)
+            .unwrap_or(dimensions);
+        let source_bytes = u64::from(source.width) * u64::from(source.height) * 4;
+        let copy_budget = (reader_engine::DecodeLimits::default()
+            .max_decoded_bytes
+            .saturating_sub(source_bytes)
+            / 2) as usize;
+        let budget = self.window_budget().min(copy_budget);
+        let mut low = 1;
+        let mut high = self.target_width.min(dimensions.width).max(1);
+        while low < high {
+            let candidate = low + (high - low).div_ceil(2);
+            if reader_engine::plan_display_window(dimensions, candidate, start, end, budget).is_ok()
+            {
+                low = candidate;
+            } else {
+                high = candidate - 1;
+            }
+        }
+        low
+    }
     fn quality_width(&self, index: usize) -> u32 {
         if self.mode == ReadingMode::Webtoon {
             return self.target_width;
         }
-        let fitted = (self.viewport_height
-            / ((self.ratios[index] / if self.is_split(index) { 2. } else { 1. })
-                * self.viewport_width.max(1.)))
-        .min(1.);
-        Self::decode_width(self.target_width as f32 * fitted, 1.)
+        self.native_dimensions
+            .get(&index)
+            .map(|dimensions| self.paged_detail_width(index, *dimensions))
+            .unwrap_or(self.target_width)
     }
     fn window_budget(&self) -> usize {
         let visible = self.visible_end() + 1 - self.anchor.page_index.min(self.pages.len() - 1);
@@ -2080,6 +2102,11 @@ impl Controller {
             .anchor
             .page_index
             .min(reader.pages.len().saturating_sub(1));
+        if reader.mode != ReadingMode::Webtoon {
+            // Paged frames have their own local pan. Chapter-stacked resume
+            // coordinates belong only to the scrolling Webtoon canvas.
+            return;
+        }
         let offset =
             reader.page_position(index) + reader.ratios[index] * reader.anchor.offset() as f32;
         ui.set_scroll_y(-offset * ui.get_reader_width());
@@ -2811,6 +2838,10 @@ impl Controller {
         view.pending = Some(progress);
         drop(view);
         ui.set_current_page(index as i32);
+        if ui.get_reading_mode() != 0 {
+            ui.set_scroll_x(0.);
+            ui.set_scroll_y(0.);
+        }
         self.restore_position(ui);
         self.publish_reader_controls(ui);
         if step != 0 {
@@ -3471,7 +3502,7 @@ struct ChapterScreencap {
     known_dimensions: BTreeSet<usize>,
     layout_anchor: usize,
     layout_gaps: Vec<f64>,
-    paged_fit: Option<(f64, f64, f64)>,
+    paged_fit: Option<(f64, f64, f64, f64, f64)>,
     naming: BTreeMap<usize, (ChapterId, usize)>,
     background: [u8; 4],
 }
@@ -3523,6 +3554,7 @@ fn capture_chapter_request(
             &row,
             (reader.mode != ReadingMode::Webtoon && reader.is_split(index))
                 .then_some(ui.get_reader_split_half()),
+            f64::from(ui.get_zoom()),
         );
         if (advanced
             || (rect.x < viewport.x + viewport.width
@@ -3577,9 +3609,11 @@ fn capture_chapter_request(
         layout_anchor: reference,
         layout_gaps,
         paged_fit: (ui.get_reading_mode() != 0).then_some((
-            f64::from(frame.x + frame.content_x) + (viewport.width.max(width) - width) / 2.,
-            width,
+            f64::from(frame.x + frame.content_x),
+            width / f64::from(ui.get_zoom()).max(0.01),
             viewport.height,
+            f64::from(ui.get_zoom()),
+            viewport.width,
         )),
         naming,
         brightness: if crate::reader_settings::snapshot().custom_brightness {
@@ -3600,7 +3634,7 @@ fn chapter_capture_rect(
     mode: i32,
     row: &PageRow,
 ) -> crate::chapter_capture::Rect {
-    chapter_capture_rect_with_split(viewport, width, mode, row, None)
+    chapter_capture_rect_with_split(viewport, width, mode, row, None, 1.)
 }
 fn chapter_capture_rect_with_split(
     viewport: &crate::ReaderCaptureViewport,
@@ -3608,6 +3642,7 @@ fn chapter_capture_rect_with_split(
     mode: i32,
     row: &PageRow,
     split: Option<i32>,
+    zoom: f64,
 ) -> crate::chapter_capture::Rect {
     let x = f64::from(viewport.x + viewport.content_x)
         + (f64::from(viewport.width).max(width) - width) / 2.;
@@ -3621,14 +3656,18 @@ fn chapter_capture_rect_with_split(
         }
     } else {
         let height = f64::from(viewport.height);
-        let image_width =
-            width.min(height / (f64::from(row.ratio) / if split.is_some() { 2. } else { 1. }));
+        let zoom = zoom.max(0.01);
+        let image_width = (width / zoom)
+            .min(height / (f64::from(row.ratio) / if split.is_some() { 2. } else { 1. }))
+            * zoom;
         let image_height = image_width * f64::from(row.ratio);
+        let visible_height = image_height / if split.is_some() { 2. } else { 1. };
         crate::chapter_capture::Rect {
-            x: x + (width - image_width) / 2.,
+            x: f64::from(viewport.x + viewport.content_x)
+                + (f64::from(viewport.width).max(image_width) - image_width) / 2.,
             y: y + split
                 .map(|half| -f64::from(half) * image_height / 2.)
-                .unwrap_or((height - image_height) / 2.),
+                .unwrap_or((height.max(visible_height) - image_height) / 2.),
             width: image_width,
             height: image_height,
         }
@@ -3722,6 +3761,7 @@ fn export_name_position(
             &row,
             (reader.mode != ReadingMode::Webtoon && reader.is_split(page))
                 .then_some(ui.get_reader_split_half()),
+            f64::from(ui.get_zoom()),
         );
         if rect.y >= f64::from(viewport.y + viewport.height)
             || rect.y + rect.height <= f64::from(viewport.y)
@@ -5189,7 +5229,11 @@ mod tests {
             reader.mode = mode;
             for dpr in [1., 1.25, 1.5, 2.75, 3.] {
                 for zoom in [0.75, 1., 1.5, 3.] {
-                    reader.viewport_width = (390_f32 * zoom).min(1100.);
+                    reader.viewport_width = if mode == ReadingMode::Webtoon {
+                        (390_f32 * zoom).min(1100.)
+                    } else {
+                        390_f32 * zoom
+                    };
                     reader.target_width = Reader::decode_width(reader.viewport_width, dpr);
                     let before = reader.anchor.clone();
                     let (width, (start, end), budget) =
@@ -5202,13 +5246,15 @@ mod tests {
                         assert_eq!(plan.width, 720);
                     }
                     if mode != ReadingMode::Webtoon {
-                        assert!(
-                            width
-                                <= Reader::decode_width(
-                                    reader.viewport_height / (20000. / 720.) * dpr,
-                                    1.
-                                )
-                        );
+                        assert!(width <= reader.target_width.min(dimensions.width));
+                        let desired = reader.target_width.min(dimensions.width);
+                        if reader_engine::plan_display_window(
+                            dimensions, desired, start, end, budget,
+                        )
+                        .is_ok()
+                        {
+                            assert_eq!(width, desired);
+                        }
                     }
                     assert!(plan.covers(start, end));
                     assert!(plan.byte_len() <= reader.window_budget());
@@ -5234,6 +5280,111 @@ mod tests {
             720
         );
     }
+    #[test]
+    fn paged_initial_detail_keeps_webtoon_columns_when_height_limited_and_caps_memory() {
+        let mut reader = tall_reader();
+        for mode in [
+            ReadingMode::LeftToRight,
+            ReadingMode::RightToLeft,
+            ReadingMode::Vertical,
+        ] {
+            reader.mode = mode;
+            for (logical_width, height, density, dimensions) in [
+                (
+                    390.,
+                    844.,
+                    2.75,
+                    reader_engine::PageDimensions {
+                        width: 1920,
+                        height: 5760,
+                    },
+                ),
+                (
+                    1100.,
+                    780.,
+                    1.,
+                    reader_engine::PageDimensions {
+                        width: 1920,
+                        height: 2880,
+                    },
+                ),
+            ] {
+                reader.viewport_width = logical_width;
+                reader.viewport_height = height;
+                reader.target_width = Reader::decode_width(logical_width, density);
+                reader.ratios[0] = dimensions.height as f32 / dimensions.width as f32;
+                let (width, (start, end), budget) = reader.window_request(0, dimensions).unwrap();
+                assert_eq!(width, reader.target_width.min(dimensions.width));
+                // Chapter metadata can queue its first image before the
+                // conditional Flickable publishes a nonzero height. That
+                // startup ordering must not install a final 128px texture.
+                reader.viewport_height = 0.;
+                assert_eq!(reader.window_request(0, dimensions).unwrap().0, width);
+                reader.viewport_height = height;
+                let fitted_width = height / (dimensions.height as f32 / dimensions.width as f32);
+                assert!(
+                    fitted_width < logical_width,
+                    "fixture must exercise the previously reduced paged target"
+                );
+                assert!(width > Reader::decode_width(fitted_width, density));
+                let plan =
+                    reader_engine::plan_display_window(dimensions, width, start, end, budget)
+                        .unwrap();
+                assert!(plan.byte_len() <= READER_MODEL_BYTES);
+                reader.native_dimensions.insert(0, dimensions);
+                assert_eq!(
+                    reader.quality_width(0),
+                    width,
+                    "retained detail must not retry the same bounded target"
+                );
+            }
+            let dimensions = reader_engine::PageDimensions {
+                width: 1920,
+                height: 5760,
+            };
+            reader.target_width = 4096;
+            let (width, (start, end), budget) = reader.window_request(0, dimensions).unwrap();
+            assert!(width < 1920);
+            assert!(
+                reader_engine::plan_display_window(dimensions, width, start, end, budget).is_ok()
+            );
+            assert!(
+                reader_engine::plan_display_window(dimensions, width + 1, start, end, budget)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn paged_neighbor_previews_cover_every_row_within_the_existing_model_budget() {
+        let dimensions = reader_engine::PageDimensions {
+            width: 720,
+            height: 20000,
+        };
+        let mut reader = tall_reader();
+        for mode in [
+            ReadingMode::LeftToRight,
+            ReadingMode::RightToLeft,
+            ReadingMode::Vertical,
+        ] {
+            reader.mode = mode;
+            let (width, (start, end), budget) = reader.window_request(1, dimensions).unwrap();
+            assert_eq!((start, end), (0., 1.));
+            let plan =
+                reader_engine::plan_display_window(dimensions, width, start, end, budget).unwrap();
+            assert_eq!(plan.first_row, 0);
+            assert_eq!(
+                plan.rows, plan.full_height,
+                "a loaded neighbor cannot hide an uncaptured lower strip"
+            );
+            assert!(plan.byte_len() <= READER_MODEL_BYTES);
+            reader.native_dimensions.insert(1, dimensions);
+            assert_eq!(reader.quality_width(1), width);
+            reader.decoded_windows.insert(1, plan);
+            assert!(!reader.needs_window(1));
+        }
+    }
+
     #[test]
     fn windows_refresh_before_exhaustion_and_partial_pages_cannot_complete() {
         let dimensions = reader_engine::PageDimensions {
@@ -6377,6 +6528,37 @@ mod tests {
     }
 
     #[test]
+    fn zoomed_paged_capture_geometry_matches_scaled_contain_and_local_pan() {
+        let viewport = crate::ReaderCaptureViewport {
+            x: 12.,
+            y: 24.,
+            width: 390.,
+            height: 844.,
+            content_x: -195.,
+            content_y: -163.,
+        };
+        let row = PageRow {
+            ratio: 1.5,
+            ..Default::default()
+        };
+        for mode in [1, 2, 3] {
+            let rect = chapter_capture_rect_with_split(&viewport, 780., mode, &row, None, 2.);
+            assert_eq!(rect.width, 780.);
+            assert_eq!(rect.height, 1170.);
+            assert_eq!(rect.x, -183.);
+            assert_eq!(rect.y, -139.);
+        }
+        let split = PageRow {
+            ratio: 4.,
+            ..Default::default()
+        };
+        let rect = chapter_capture_rect_with_split(&viewport, 780., 1, &split, Some(1), 2.);
+        assert_eq!(rect.width, 780.);
+        assert_eq!(rect.height, 3120.);
+        assert_eq!(rect.y, 24. - 163. - 1560.);
+    }
+
+    #[test]
     fn chapter_screencap_geometry_keeps_scroll_pan_and_contain_letterboxing() {
         let viewport = crate::ReaderCaptureViewport {
             x: 0.,
@@ -6400,7 +6582,7 @@ mod tests {
             let contained = chapter_capture_rect(&viewport, 600., mode, &row);
             assert_eq!(
                 (contained.x, contained.y, contained.width, contained.height),
-                (0., -476., 400., 800.)
+                (-100., -476., 400., 800.)
             );
         }
         let viewport = crate::ReaderCaptureViewport {

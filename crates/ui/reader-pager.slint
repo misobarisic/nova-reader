@@ -1,0 +1,80 @@
+// Paged artwork follows the pointer, then settles onto the adjacent page.
+// Image interactions retain tap/hold ownership; zoomed artwork pans instead.
+export component ReaderPagerMotion inherits Rectangle {
+    in property <bool> enabled;
+    in property <bool> animate: true;
+    in property <int> mode;
+    in property <int> page;
+    in property <bool> can-previous;
+    in property <bool> can-next;
+    in property <length> viewport-width;
+    in property <length> viewport-height;
+    out property <length> offset-x;
+    out property <length> offset-y;
+    private property <bool> dragging;
+    private property <bool> settling;
+    private property <int> pending-step;
+    private property <bool> wheel-blocked;
+    callback step(int);
+    width: 0px; height: 0px;
+
+    function allowed(step: int) -> bool {
+        return step > 0 ? root.can-next : root.can-previous;
+    }
+    function direction(delta: length) -> int {
+        return (delta < 0px ? 1 : -1) * (root.mode == 2 ? -1 : 1);
+    }
+    public function cancel() {
+        settle.stop(); root.settling = false; root.dragging = false;
+        root.pending-step = 0; root.offset-x = 0px; root.offset-y = 0px;
+    }
+    public function moved(dx: length, dy: length) {
+        if !root.enabled || root.settling { return; }
+        let delta = root.mode == 3 ? dy : dx;
+        let cross = root.mode == 3 ? dx : dy;
+        if !root.dragging && (abs(delta) < 12px || abs(delta) < abs(cross) * 1.2) { return; }
+        root.dragging = true;
+        let extent = root.mode == 3 ? root.viewport-height : root.viewport-width;
+        let displacement = clamp(delta, -extent, extent) * (root.allowed(root.direction(delta)) ? 1 : 0.2);
+        if root.mode == 3 { root.offset-y = displacement; }
+        else { root.offset-x = displacement; }
+    }
+    public function released(dx: length, dy: length) {
+        if !root.enabled || !root.dragging || root.settling { return; }
+        let delta = root.mode == 3 ? dy : dx;
+        let cross = root.mode == 3 ? dx : dy;
+        let extent = root.mode == 3 ? root.viewport-height : root.viewport-width;
+        let direction = root.direction(delta);
+        root.pending-step = abs(delta) >= min(96px, extent * 0.18) && abs(delta) > abs(cross) * 1.2 && root.allowed(direction) ? direction : 0;
+        root.dragging = false; root.settling = true;
+        let destination = root.pending-step == 0 ? 0px : (delta < 0px ? -extent : extent);
+        if root.mode == 3 { root.offset-y = destination; }
+        else { root.offset-x = destination; }
+        settle.start();
+    }
+    public function wheel(dx: length, dy: length) {
+        if !root.enabled || root.settling || root.wheel-blocked { return; }
+        let delta = root.mode == 3 || abs(dy) > abs(dx) ? dy : dx;
+        if abs(delta) < 1px { return; }
+        // Vertical wheels advance reading order; horizontal tracks follow the
+        // physical gallery direction, including RTL.
+        let direction = root.mode != 3 && abs(dx) >= abs(dy) ? root.direction(delta) : (delta < 0px ? 1 : -1);
+        if !root.allowed(direction) { return; }
+        root.wheel-blocked = true; wheel-delay.start(); root.step(direction);
+    }
+    changed enabled => { if !root.enabled { root.cancel(); } }
+    changed mode => { root.cancel(); }
+    changed page => { root.cancel(); }
+    animate offset-x { duration: root.settling && root.animate ? 160ms : 0ms; easing: ease-out; }
+    animate offset-y { duration: root.settling && root.animate ? 160ms : 0ms; easing: ease-out; }
+    settle := Timer {
+        interval: root.animate ? 160ms : 1ms;
+        triggered => {
+            self.stop();
+            let step = root.pending-step;
+            root.cancel();
+            if step != 0 { root.step(step); }
+        }
+    }
+    wheel-delay := Timer { interval: 200ms; triggered => { self.stop(); root.wheel-blocked = false; } }
+}

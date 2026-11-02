@@ -381,3 +381,187 @@ fn render_reader_settings_previews() {
     worker.join().unwrap();
     ui.hide().unwrap();
 }
+
+/// Exercise first-frame quality through the production chapter/image worker,
+/// rather than constructing a model with textures already at the desired size.
+#[test]
+fn paged_first_frame_and_zoom_keep_native_detail_at_android_density() {
+    const CHILD: &str = "READER_PAGED_NATIVE_DENSITY_CHILD";
+    let Ok(selection) = std::env::var(CHILD) else {
+        for mode in ["1", "2"] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "app::reader_preview::paged_first_frame_and_zoom_keep_native_detail_at_android_density", "--nocapture"])
+                .env(CHILD, mode).output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        return;
+    };
+    let selection: i32 = selection.parse().unwrap();
+    let mode = if selection == 1 {
+        ReadingMode::LeftToRight
+    } else {
+        ReadingMode::RightToLeft
+    };
+    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+        mock_time: false,
+        threading: true,
+        renderer_name: Some("software".into()),
+    })))
+    .unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    nova_storage::init_at(temp.path());
+    crate::reader_settings::init().unwrap();
+    let ui = AppWindow::new().unwrap();
+    ui.global::<crate::Anim>().set_enabled(false);
+    let input = temp.path().join("Native detail fixture");
+    std::fs::create_dir_all(&input).unwrap();
+    let original = image::RgbImage::from_fn(1920, 5760, |x, y| {
+        let line = if x % 8 < 4 { 20 } else { 235 };
+        image::Rgb([line, if y % 8 < 4 { 20 } else { 235 }, line])
+    });
+    original.save(input.join("01.png")).unwrap();
+    drop(original);
+    for page in ["02.png", "03.png"] {
+        std::fs::copy(input.join("01.png"), input.join(page)).unwrap();
+    }
+    let services = Services::open(&temp.path().join("data")).unwrap();
+    let series = services.import_local(&input, true).unwrap();
+    reader_modes::save(&series, ModeChoice::Manual(mode)).unwrap();
+    let chapter = services
+        .domain
+        .snapshot()
+        .unwrap()
+        .chapters
+        .into_iter()
+        .find(|chapter| chapter.id.series == series)
+        .unwrap()
+        .id;
+    let page_id = services.downloads.job(&chapter).unwrap().pages[1]
+        .resource
+        .id
+        .clone();
+    services
+        .domain
+        .update_checkpoint(|state| {
+            state.progress.push(ReadingProgress {
+                chapter: chapter.clone(),
+                anchor: ResumeAnchor::new(page_id, 1, 0.).unwrap(),
+                mode,
+                last_read_at: 1,
+                completed: false,
+            });
+            Ok(())
+        })
+        .unwrap();
+    let (images, receiver) = mpsc::channel();
+    let app = Arc::new(Controller {
+        progress_checkpoint: crate::progress_checkpoint::ProgressWriter::new(
+            services.domain.clone(),
+        )
+        .unwrap(),
+        artwork: crate::artwork::ArtworkLoader::new(
+            services.clone(),
+            ui.as_weak(),
+            temp.path().join("cache/posters"),
+        ),
+        services,
+        chapter_cache: Arc::new(crate::chapter_cache::ChapterCache::new(
+            temp.path().join("cache/chapters"),
+        )),
+        image_worker_live: AtomicBool::new(true),
+        view: Mutex::new(View::default()),
+        generation: AtomicU64::new(0),
+        cancel: Mutex::new(CancelToken::default()),
+        images,
+        download_serial: Mutex::new(()),
+        active_image: Mutex::new(None),
+        metadata_refresh: Arc::default(),
+    });
+    reader_controls::wire(&app, &ui);
+    // Simulate Android layout policy and actual device-pixel density separately.
+    ui.set_reader_platform_android(true);
+    ui.on_reader_reflow({
+        let app = app.clone();
+        let weak = ui.as_weak();
+        move |width, height| {
+            if let Some(ui) = weak.upgrade() {
+                app.reflow(&ui, width, height);
+            }
+        }
+    });
+    let worker = {
+        let weak = Arc::downgrade(&app);
+        let ui = ui.as_weak();
+        std::thread::spawn(move || Controller::image_worker(weak, receiver, ui))
+    };
+    ui.show().unwrap();
+    ui.window()
+        .dispatch_event(slint::platform::WindowEvent::ScaleFactorChanged { scale_factor: 2.75 });
+    // TestingBackend's set_size path assumes DPR1; emit the physical surface
+    // and logical resize separately, as an Android window backend does.
+    ui.window().set_size(slint::PhysicalSize::new(1073, 2321));
+    ui.window()
+        .dispatch_event(slint::platform::WindowEvent::Resized {
+            size: slint::LogicalSize::new(390., 844.),
+        });
+    app.open_chapter(&ui, chapter);
+    let stage = Rc::new(Cell::new(0));
+    let start = Instant::now();
+    let timer = slint::Timer::default();
+    timer.start(slint::TimerMode::Repeated,Duration::from_millis(10),{
+        let app=app.clone();let weak=ui.as_weak();move||{
+            let ui=weak.upgrade().unwrap();
+            assert!(start.elapsed()<Duration::from_secs(30),"paged fixture stalled: {}",ui.get_status());
+            if ui.get_busy() || !ui.get_pages().row_data(1).is_some_and(|row|row.loaded) {return;}
+            assert_eq!(ui.get_current_page(),1);
+            assert_eq!(ui.get_reading_mode(),selection);
+            let artwork=ElementHandle::find_by_accessible_label(&ui,"Page 2 image").find(|element|element.accessible_role()==Some(AccessibleRole::Button)).unwrap();
+            let logical_width=artwork.size().width;
+            let density=ui.window().scale_factor();
+            let expected_physical=(logical_width*density).ceil() as u32;
+            let nominal_physical=(ui.get_reader_width()*density).ceil() as u32;
+            let view=app.view();let reader=view.reader.as_ref().unwrap();
+            let plan=reader.decoded_windows[&1];
+            eprintln!("paged mode={selection} stage={} zoom={} viewport={}x{} artwork={}px DPR={} decoded={} native=1920",stage.get(),ui.get_zoom(),ui.get_reader_viewport_width(),ui.get_reader_viewport_height(),logical_width,density,plan.width);
+            assert!((ui.get_reader_viewport_width()-390.).abs()<0.5);
+            assert!((ui.get_reader_viewport_height()-844.).abs()<0.5);
+            assert!(logical_width>250.);
+            // Keep the previous texture while zoom replacement is in flight;
+            // the very first resident frame must already cover initial DPR.
+            if stage.get()==1 && plan.width<expected_physical.min(1920) {return;}
+            assert!(plan.width>=expected_physical.min(1920),"first visible texture must cover actual physical artwork width; {} < {}",plan.width,expected_physical.min(1920));
+            assert!(plan.width<=1920,"CPU display buffers must never upscale originals");
+            if stage.get()==0 {assert!(plan.width>=nominal_physical.min(1920),"height-limited paged fit must preserve the same source-column detail as Webtoon");}
+            assert!(plan.byte_len()<=READER_MODEL_BYTES);
+            assert!(reader.retained.iter().map(|index|reader.decoded_bytes.get(index).copied().unwrap_or(0)).sum::<usize>()<=READER_MODEL_BYTES);
+            assert!(ui.get_scroll_y()<=0. && -ui.get_scroll_y()<= (ui.get_reader_paged_height()-ui.get_reader_viewport_height()).max(0.)+0.01);
+            drop(view);
+            if !reader_loaded(&app,&ui){return;}
+            if stage.get()==0 {
+                assert_eq!(ui.get_zoom(),1.);
+                assert!(ui.get_scroll_x().abs()<0.01 && ui.get_scroll_y().abs()<0.01,"initial paged resume must use page-local coordinates");
+                stage.set(1);
+                app.reader_zoom(&ui,2.,0.5,0.5);
+                return;
+            }
+            assert_eq!(ui.get_zoom(),2.);
+            assert!(plan.width>=expected_physical.min(1920));
+            let dimensions=reader_engine::PageDimensions{width:1920,height:5760};
+            let next=reader_engine::plan_display_window(dimensions,plan.width+1,0.,1.,READER_MODEL_BYTES);
+            assert!(next.is_err(),"zoomed detail should use the largest full-page width fitting32MiB");
+            slint::quit_event_loop().unwrap();
+        }
+    });
+    slint::run_event_loop().unwrap();
+    timer.stop();
+    app.image_worker_live.store(false, Ordering::Release);
+    app.invalidate();
+    app.flush();
+    worker.join().unwrap();
+    ui.hide().unwrap();
+}

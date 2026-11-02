@@ -8,12 +8,18 @@ export component ReaderImageInteraction inherits ControlTouchArea {
     in property <bool> context-enabled: true;
     in property <bool> long-press-enabled: true;
     in property <bool> double-tap-enabled: false;
+    in property <bool> page-drag-enabled: false;
+    callback page-drag-moved(length, length);
+    callback page-drag-ended(length, length);
+    callback page-drag-cancelled;
+    callback page-scrolled(length, length);
     callback tapped;
     callback positioned-tap(length, length);
     callback double-tapped(length, length);
     callback context-requested(length, length);
     private property <bool> suppress-tap;
     private property <bool> dragged;
+    private property <bool> primary-press;
     private property <bool> pending-tap;
     private property <length> pending-window-x;
     private property <length> pending-window-y;
@@ -47,6 +53,7 @@ export component ReaderImageInteraction inherits ControlTouchArea {
     pointer-event(event) => {
         if event.kind == PointerEventKind.down {
             root.dragged = false;
+            root.primary-press = event.button == PointerEventButton.left;
             root.suppress-tap = event.button != PointerEventButton.left;
             root.press-window-x = root.absolute-position.x + root.mouse-x;
             root.press-window-y = root.absolute-position.y + root.mouse-y;
@@ -58,6 +65,10 @@ export component ReaderImageInteraction inherits ControlTouchArea {
             if event.button == PointerEventButton.left && root.context-enabled && root.long-press-enabled { hold.start(); }
         } else if event.kind == PointerEventKind.up {
             hold.stop();
+            if event.button == PointerEventButton.left && root.dragged && root.page-drag-enabled {
+                root.page-drag-ended(root.absolute-position.x + root.mouse-x - root.press-window-x, root.absolute-position.y + root.mouse-y - root.press-window-y);
+            }
+            root.primary-press = false;
             if event.button == PointerEventButton.right && !root.dragged && root.context-enabled {
                 root.cancel-pending();
                 root.suppress-tap = true;
@@ -73,6 +84,8 @@ export component ReaderImageInteraction inherits ControlTouchArea {
         } else if event.kind == PointerEventKind.cancel {
             hold.stop(); root.cancel-pending();
             root.dragged = true; root.suppress-tap = true;
+            root.primary-press = false;
+            root.page-drag-cancelled();
         }
     }
     moved => {
@@ -80,7 +93,17 @@ export component ReaderImageInteraction inherits ControlTouchArea {
             + Math.abs(root.absolute-position.y + root.mouse-y - root.press-window-y) > 12px {
             hold.stop(); root.cancel-pending();
             root.dragged = true; root.suppress-tap = true;
+            if root.page-drag-enabled && root.primary-press {
+                root.page-drag-moved(root.absolute-position.x + root.mouse-x - root.press-window-x, root.absolute-position.y + root.mouse-y - root.press-window-y);
+            }
         }
+    }
+    scroll-event(event) => {
+        if root.page-drag-enabled {
+            root.page-scrolled(event.delta-x, event.delta-y);
+            return accept;
+        }
+        return reject;
     }
     changed enabled => { if !root.enabled { hold.stop(); root.cancel-pending(); } }
     changed double-tap-enabled => { root.cancel-pending(); }

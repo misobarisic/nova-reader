@@ -153,7 +153,8 @@ fn reader_shared_edges_cover_fractional_scroll_at_each_device_scale() {
             assert_eq!(ui.get_pages().row_data(0).unwrap().position, 0.);
             assert_eq!(ui.get_pages().row_data(1).unwrap().position, first.ratio);
         }
-        // Paged modes retain aspect-preserving, centered logical containment.
+        // Paged modes fit before zooming, then center within their local pan
+        // extent. The nominal Webtoon canvas width must not shift a slim page.
         for mode in [1, 2, 3] {
             ui.set_reading_mode(mode);
             ui.set_current_page(0);
@@ -166,17 +167,23 @@ fn reader_shared_edges_cover_fractional_scroll_at_each_device_scale() {
             let position = page_image.absolute_position();
             let viewport = element(&ui, "AppWindow::reader");
             assert!((size.height / size.width - first.ratio).abs() < 0.001);
+            let fitted = ui
+                .get_reader_fit_width()
+                .min(viewport.size().height / first.ratio);
+            assert!((size.width - fitted * ui.get_zoom()).abs() < 0.01);
             assert!(
                 (position.x + size.width / 2.
                     - viewport.absolute_position().x
-                    - viewport.size().width.max(ui.get_reader_width()) / 2.)
+                    - ui.get_scroll_x()
+                    - viewport.size().width.max(size.width) / 2.)
                     .abs()
                     < 0.01
             );
             assert!(
                 (position.y + size.height / 2.
                     - viewport.absolute_position().y
-                    - viewport.size().height / 2.)
+                    - ui.get_scroll_y()
+                    - viewport.size().height.max(size.height) / 2.)
                     .abs()
                     < 0.01
             );
