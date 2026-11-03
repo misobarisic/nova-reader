@@ -1278,6 +1278,16 @@ export component AppWindow inherits Window {
                 }
                 return accept;
             }
+            if event.text == Key.Back && root.section == 0
+                && !ReaderSettingsSync.open && !SyncContent.sync_remove_prompt_visible
+                && !root.entry-menu-visible && !root.reader-context-visible
+                && !root.library-search-open {
+                // Slint's Android backend finishes the Activity for an
+                // unhandled system Back. Flush before yielding to that path.
+                root.remember-library-position();
+                root.flush-progress();
+                return reject;
+            }
             if event.text == Key.Escape || event.text == Key.Back || event.text == Key.Backspace {
                 root.go-back();
                 return accept;

@@ -105,7 +105,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `crates/reader-sources/tests/cookies.rs`, `.github/scripts/test_package_cookie_permissions.py` | Cookie permissions, isolated/concurrent sessions, cache identity, update re-enabling and native/Python manifest parity |
 | `tests/reader_settings.rs`, `tests/reader_gestures.rs`, `src/reader_preview.rs` | Process-restart defaults/overrides and validation, actual touch gesture cancellation, and optional production phone/desktop raster previews (including the 96px chapter separator via `READER_UI_PREVIEW_BOUNDARIES_ONLY=1`) |
 | `tests/reader_modes.rs` | Per-series mode restart persistence, explicit Automatic/legacy migration, source identity isolation and accessible short-viewport mode options |
-| `tests/library_navigation.rs`, `tests/library_preview.rs`, `tests/source_paging.rs` | Pinned Library categories, stable row restoration, search/focus and retained detail context; native Library previews; automatic viewport paging, short-page fill, Retry and saved catalogue scroll |
+| `tests/library_navigation.rs`, `tests/library_preview.rs`, `tests/android_back.rs`, `tests/source_paging.rs` | Pinned Library categories, stable row restoration, search/focus and retained detail context; native Library previews; automatic viewport paging, short-page fill, Retry and saved catalogue scroll |
 | `tests/library_progress.rs` | Phone/desktop grid/list progress geometry from unread through complete, including small left-anchored fills |
 | `tests/entry_menu.rs`, `tests/reading_preferences.rs` | Per-title gestures/category identity, durable source visibility/chapter ordering and failed-write behavior |
 | `tests/reader_pixel_edges.rs`, `crates/reader-engine/tests` | Physical-pixel shared tile/page edges across fractional scroll/scales, plus AVIF fixtures and decode admission |
@@ -578,7 +578,11 @@ URLs; restore resolves the current index and clamps after layout/resize. Scroll
 callbacks update memory without storing row positions. Category changes queue
 background writes; navigation/lifecycle flushes preserve the last selected
 category. Search retains its existing narrow and wide reveal placement and
-keyboard viewport handling.
+keyboard viewport handling. System Back on the unobstructed Library root captures
+and flushes state, then yields to Slint Android's native Activity-finish fallback.
+Search, menus and dialogs consume Back first; desktop Escape/Backspace retain
+ordinary navigation. `tests/android_back.rs` verifies dispatch acceptance rather
+than introducing a separate exit route or JNI bridge.
 
 `reader-domain/src/library_status.rs` adapts Nova's actual `WatchStatus` and
 progress bucket decision order to Reading, Plan to read, Completed, Dropped and On hold.
