@@ -36,7 +36,9 @@ fn action(ui: &AppWindow, label: &str) -> ElementHandle {
                 direction = 100.;
             }
         }
-        let id = if ui.get_section() == 4 {
+        let id = if ui.get_section() == 0 {
+            "LibraryPage::lib-scroll"
+        } else if ui.get_section() == 4 {
             "MorePage::landing-scroll"
         } else if [11, 12, 14, 15, 16].contains(&ui.get_section()) {
             "MorePage::detail-scroll"
@@ -502,9 +504,12 @@ fn nova_navigation_more_and_responsive_controls() {
     }
     ui.global::<Theme>().set_transparent_navbar(true);
 
-    // Ordinary page switches reset scroll; loading more rows on the same page does not.
+    // Browse still uses the ordinary page scroller: page switches reset it,
+    // while loading more rows preserves it. Library has its own retained view.
     ui.window().set_size(LogicalSize::new(390., 720.));
-    ui.set_section(0);
+    ui.set_section(3);
+    ui.set_catalogue_scroll_y(0.);
+    ui.set_source_catalog_open(true);
     ui.set_items(ModelRc::new(VecModel::from(vec![ItemRow::default(); 30])));
     settle();
     let scroll = ElementHandle::find_by_element_id(&ui, "AppWindow::page-scroll")
@@ -528,6 +533,7 @@ fn nova_navigation_more_and_responsive_controls() {
         heading.absolute_position().y >= 0.,
         "new section must start at its header"
     );
+    ui.set_source_catalog_open(false);
 
     ui.set_section(0);
     ui.window().set_size(LogicalSize::new(1120., 780.));
