@@ -49,6 +49,7 @@ export component DetailHero inherits Rectangle {
     in property <string> title;
     in property <string> description;
     in property <string> resume-chapter;
+    in property <string> action-label: root.resume-chapter == "" ? @tr("Continue") : @tr("Continue chapter {}",root.resume-chapter);
     in property <string> metadata;
     in property <[string]> genres;
     in property <image> poster;
@@ -132,7 +133,7 @@ export component DetailHero inherits Rectangle {
                 }
                 HorizontalLayout {
                     spacing: 12px;
-                    HeroAction { horizontal-stretch: 1; primary: true; narrow: root.narrow; enabled: root.can-resume; label: root.resume-chapter == "" ? @tr("Continue") : @tr("Continue chapter {}",root.resume-chapter); clicked => { root.resume(); } }
+                    HeroAction { horizontal-stretch: 1; primary: true; narrow: root.narrow; enabled: root.can-resume; label: root.action-label; clicked => { root.resume(); } }
                     HeroAction { width: root.narrow ? 56px : 62px; narrow: root.narrow; saved: root.in-library; label: root.in-library ? @tr("Remove from library") : @tr("Add to library"); clicked => { root.toggle-library(); } }
                 }
             }

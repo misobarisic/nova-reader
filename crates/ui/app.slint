@@ -214,6 +214,7 @@ export component AppWindow inherits Window {
     }
     in property <string> series-description;
     in property <string> resume-chapter;
+    in property <string> resume-action-label: root.resume-chapter == "" ? @tr("Continue") : @tr("Continue chapter {}",root.resume-chapter);
     in property <string> series-metadata;
     in property <[string]> series-genres;
     in property <string> series-artwork-key;
@@ -822,6 +823,7 @@ export component AppWindow inherits Window {
                                     safe-top: root.safe-area-insets.top;
                                     safe-left: root.safe-area-insets.left; safe-right: root.safe-area-insets.right;
                                     title: root.series-title; description: root.series-description; resume-chapter: root.resume-chapter;
+                                    action-label: root.resume-action-label;
                                     metadata: root.series-metadata; genres: root.series-genres;
                                     poster: root.series-poster; in-library: root.in-library; can-resume: root.items.length > 0;
                                     narrow: root.mobile-ui; scroll-y: page-scroll.content-y;

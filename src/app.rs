@@ -996,13 +996,16 @@ impl EncodedPages {
         Ok(bytes)
     }
 }
+fn has_saved_reading_position(progress: &ReadingProgress) -> bool {
+    !progress.completed && !progress.anchor.is_cleared() && !progress.anchor.page_id.is_empty()
+}
 fn resume_chapter<'a>(
     chapters: &'a [Chapter],
     progress: &[ReadingProgress],
 ) -> Option<&'a Chapter> {
     progress
         .iter()
-        .filter(|p| !p.completed)
+        .filter(|p| has_saved_reading_position(p))
         .filter_map(|p| {
             chapters
                 .iter()
@@ -1028,6 +1031,41 @@ fn chapter_progress_label(progress: &ReadingProgress, gallery: bool) -> Option<S
             progress.anchor.page_index.saturating_add(1)
         )
     })
+}
+fn resume_action_label(
+    chapters: &[Chapter],
+    progress: &[ReadingProgress],
+    gallery: bool,
+) -> String {
+    let target = resume_chapter(chapters, progress);
+    // Keep the collection viewer's established terminology and behavior.
+    if gallery {
+        return if chapters.len() == 1 {
+            text::tr("Continue")
+        } else {
+            target.map_or_else(
+                || text::tr("Continue"),
+                |chapter| format!("{} {}", text::tr("Continue chapter"), resume_label(chapter)),
+            )
+        };
+    }
+    let Some(chapter) = target else {
+        return text::tr("Start reading");
+    };
+    if chapters.iter().all(|chapter| {
+        progress
+            .iter()
+            .any(|p| p.chapter == chapter.id && p.completed)
+    }) {
+        text::tr("Read again")
+    } else if progress.iter().any(|p| {
+        (p.completed || has_saved_reading_position(p))
+            && chapters.iter().any(|chapter| chapter.id == p.chapter)
+    }) {
+        format!("{} {}", text::tr("Continue chapter"), resume_label(chapter))
+    } else {
+        format!("{} {}", text::tr("Start chapter"), resume_label(chapter))
+    }
 }
 fn resume_label(chapter: &Chapter) -> String {
     chapter
@@ -1637,11 +1675,12 @@ impl Controller {
                     ui.set_detail_series_key(detail_key.into());
                     ui.set_heading(series.title.clone().into());
                     ui.set_series_title(series.title.clone().into());
+                    let gallery = crate::content_presentation::Settings::load(&series.id)
+                        .unwrap_or_default()
+                        .effective()
+                        == crate::content_presentation::Presentation::Gallery;
                     ui.set_detail_gallery_single(
-                        crate::content_presentation::Settings::load(&series.id)
-                            .unwrap_or_default()
-                            .effective()
-                            == crate::content_presentation::Presentation::Gallery
+                        gallery
                             && snapshot
                                 .chapters
                                 .iter()
@@ -1685,6 +1724,9 @@ impl Controller {
                                 .unwrap_or_default()
                         }
                         .into(),
+                    );
+                    ui.set_resume_action_label(
+                        resume_action_label(&view.chapters, &snapshot.progress, gallery).into(),
                     );
                     view.rows = view.chapters.iter().cloned().map(Row::Chapter).collect();
                 }
@@ -7972,13 +8014,19 @@ mod tests {
             .collect::<Vec<_>>();
         let mut progress = vec![];
         assert_eq!(
+            resume_action_label(&chapters, &progress, false),
+            "Start chapter 0"
+        );
+        assert_eq!(resume_action_label(&[], &progress, false), "Start reading");
+        assert_eq!(
             resume_chapter(&chapters, &progress).unwrap().id,
             chapters[0].id
         );
         for (i, completed, last_read_at) in [(0, true, 20), (1, false, 10), (2, false, 30)] {
             progress.push(ReadingProgress {
                 chapter: chapters[i].id.clone(),
-                anchor: ResumeAnchor::default(),
+                // A real saved page zero is still a valid Continue position.
+                anchor: ResumeAnchor::new(format!("page-{i}"), 0, 0.).unwrap(),
                 mode: ReadingMode::Webtoon,
                 last_read_at,
                 completed,
@@ -7987,15 +8035,61 @@ mod tests {
         let target = resume_chapter(&chapters, &progress).unwrap();
         assert_eq!(target.id, chapters[2].id);
         assert_eq!(resume_label(target), "106.1");
+        assert_eq!(
+            resume_action_label(&chapters, &progress, false),
+            "Continue chapter 106.1"
+        );
+        // Manual unread/reset can be newer than real reading without creating
+        // a saved position or stealing the Continue action.
+        progress[1].anchor = ResumeAnchor::cleared();
+        progress[1].last_read_at = 999;
+        assert_eq!(
+            resume_chapter(&chapters, &progress).unwrap().id,
+            chapters[2].id
+        );
+        assert_eq!(
+            resume_action_label(&chapters, &progress, false),
+            "Continue chapter 106.1"
+        );
         progress[2].completed = true;
+        progress[2].anchor = ResumeAnchor::cleared();
         assert_eq!(
             resume_chapter(&chapters, &progress).unwrap().id,
             chapters[1].id
+        );
+        assert_eq!(
+            resume_action_label(&chapters, &progress, false),
+            "Continue chapter 1"
         );
         progress[1].completed = true;
         assert_eq!(
             resume_chapter(&chapters, &progress).unwrap().id,
             chapters[0].id
+        );
+        assert_eq!(
+            resume_action_label(&chapters, &progress, false),
+            "Read again"
+        );
+        for record in &mut progress {
+            record.completed = false;
+            record.anchor = ResumeAnchor::cleared();
+        }
+        assert_eq!(
+            resume_action_label(&chapters, &progress, false),
+            "Start chapter 0"
+        );
+        progress[0].anchor = ResumeAnchor::default();
+        assert_eq!(
+            resume_action_label(&chapters, &progress, false),
+            "Start chapter 0"
+        );
+        assert_eq!(
+            resume_action_label(&chapters[..1], &progress, true),
+            "Continue"
+        );
+        assert_eq!(
+            resume_action_label(&chapters, &progress, true),
+            "Continue chapter 0"
         );
     }
 
@@ -8527,6 +8621,7 @@ mod tests {
         assert_eq!(ui.get_detail_origin(), 3);
         assert_eq!(ui.get_items().row_count(), 0);
         assert!(ui.get_resume_chapter().is_empty());
+        assert_eq!(ui.get_resume_action_label(), "Start reading");
         assert!(ui.get_busy());
         assert!(ui.get_status().is_empty());
         app.invalidate();

@@ -543,6 +543,25 @@ fn poster_layout_timelines_chapters_and_reader_controls() {
     ui.set_series_description("A synopsis that stays readable over the shaded artwork.".into());
     ui.set_section(5);
     settle();
+    // Backend chooses the caption while the chapter target remains numeric.
+    ui.set_resume_action_label("Start chapter 106.1".into());
+    settle();
+    assert_eq!(
+        ElementHandle::find_by_accessible_label(&ui, "Start chapter 106.1")
+            .filter(|e| e.accessible_role() == Some(AccessibleRole::Button))
+            .count(),
+        1
+    );
+    ui.set_resume_action_label("Read again".into());
+    settle();
+    assert_eq!(
+        ElementHandle::find_by_accessible_label(&ui, "Read again")
+            .filter(|e| e.accessible_role() == Some(AccessibleRole::Button))
+            .count(),
+        1
+    );
+    ui.set_resume_action_label("Continue chapter 106.1".into());
+    settle();
     let continue_actions = ElementHandle::find_by_accessible_label(&ui, "Continue chapter 106.1")
         .filter(|e| e.accessible_role() == Some(AccessibleRole::Button))
         .collect::<Vec<_>>();

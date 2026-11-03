@@ -446,6 +446,15 @@ fn render_downloads_previews() {
     ui.set_section(5);
     settle();
     save_preview(&ui, &output, "phone-detail");
+    ui.set_resume_chapter("1".into());
+    ui.set_resume_action_label("Start chapter 1".into());
+    ui.set_items(ModelRc::new(VecModel::from(vec![ItemRow {
+        title: "Chapter 1".into(),
+        chapter_meta: "Preview fixture".into(),
+        ..Default::default()
+    }])));
+    settle();
+    save_preview(&ui, &output, "phone-detail-unread");
 }
 
 fn save_preview(ui: &AppWindow, output: &std::path::Path, name: &str) {
