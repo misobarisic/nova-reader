@@ -102,7 +102,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `tests/reader_capture_editor.rs`, `crates/reader-capture/src/selection.rs` | Phone/desktop handle, keyboard, edge-extension, menu visibility and source-selection/epoch regressions; ignored native screenshot harness |
 | `tests/reader_mode_controls.rs` | Effective-mode chapter/page actions, RTL progress pointer/keyboard/accessibility behavior and right-origin progress rendering |
 | `crates/reader-sources/tests/cookies.rs`, `.github/scripts/test_package_cookie_permissions.py` | Cookie permissions, isolated/concurrent sessions, cache identity, update re-enabling and native/Python manifest parity |
-| `tests/reader_settings.rs`, `tests/reader_gestures.rs`, `src/reader_preview.rs` | Process-restart defaults/overrides and validation, actual touch gesture cancellation, and optional production phone/desktop raster previews |
+| `tests/reader_settings.rs`, `tests/reader_gestures.rs`, `src/reader_preview.rs` | Process-restart defaults/overrides and validation, actual touch gesture cancellation, and optional production phone/desktop raster previews (including the 96px chapter separator via `READER_UI_PREVIEW_BOUNDARIES_ONLY=1`) |
 | `tests/reader_modes.rs` | Per-series mode restart persistence, explicit Automatic/legacy migration, source identity isolation and accessible short-viewport mode options |
 | `tests/library_navigation.rs`, `tests/source_paging.rs` | Search reveal/focus and retained detail context; automatic viewport paging, short-page fill, Retry and saved catalogue scroll |
 | `tests/library_progress.rs` | Phone/desktop grid/list progress geometry from unread through complete, including small left-anchored fills |

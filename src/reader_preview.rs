@@ -1,5 +1,6 @@
 //! Opt-in raster previews of the production reader, controls and preferences.
 //! Run this ignored test alone: Nova storage owns one directory per process.
+//! Set READER_UI_PREVIEW_BOUNDARIES_ONLY=1 for just the chapter-separator PNGs.
 use super::*;
 use i_slint_backend_testing::{
     AccessibleRole, ElementHandle, TestingBackend, TestingBackendOptions,
@@ -21,6 +22,11 @@ enum PreviewFrame {
         tab: &'static str,
         name: &'static str,
     },
+    Boundary {
+        width: u32,
+        height: u32,
+        name: &'static str,
+    },
     Global {
         width: u32,
         height: u32,
@@ -30,9 +36,10 @@ enum PreviewFrame {
 impl PreviewFrame {
     fn name(self) -> &'static str {
         match self {
-            Self::Osd { name, .. } | Self::ReaderTab { name, .. } | Self::Global { name, .. } => {
-                name
-            }
+            Self::Osd { name, .. }
+            | Self::ReaderTab { name, .. }
+            | Self::Boundary { name, .. }
+            | Self::Global { name, .. } => name,
         }
     }
 }
@@ -76,6 +83,74 @@ fn reader_loaded(app: &Controller, ui: &AppWindow) -> bool {
                 .row_data(i)
                 .is_some_and(|page| page.loaded && page.tiles.row_count() > 0)
         })
+}
+
+fn prepare_separator_preview(app: &Arc<Controller>, ui: &AppWindow) {
+    ui.set_reader_osd(false);
+    ui.invoke_mode_changed(0);
+    app.reader_zoom(ui, 1., 0.5, 0.5);
+    // Keep the real imported image-worker output. Only partition its page
+    // inventory into two fixture chapters to expose the production separator.
+    let identities = {
+        let mut view = app.view();
+        let reader = view.reader.as_mut().unwrap();
+        assert!(reader.pages.len() >= 2);
+        if reader.segments.len() < 2 {
+            let mut next = reader.chapter.clone();
+            next.local_id = "separator-preview-next".into();
+            reader.segments = vec![
+                reader_continuity::ChapterSegment {
+                    chapter: reader.chapter.clone(),
+                    title: "Chapter 1".into(),
+                    start: 0,
+                    end: 1,
+                    source: reader.source.clone(),
+                    completed: false,
+                },
+                reader_continuity::ChapterSegment {
+                    chapter: next,
+                    title: "Chapter 2".into(),
+                    start: 1,
+                    end: reader.pages.len(),
+                    source: reader.source.clone(),
+                    completed: false,
+                },
+            ];
+        }
+        (0..reader.pages.len())
+            .map(|index| reader.row_page_id(index))
+            .collect::<Vec<_>>()
+    };
+    let pages = ui.get_pages();
+    for (index, identity) in identities.into_iter().enumerate() {
+        let mut row = pages.row_data(index).unwrap();
+        row.page_id = identity.into();
+        pages.set_row_data(index, row);
+    }
+    app.reflow(ui, ui.get_reader_width(), ui.get_reader_viewport_height());
+    app.update_reader_geometry(ui);
+    app.publish_reader_controls(ui);
+    center_separator_preview(app, ui);
+}
+
+fn center_separator_preview(app: &Arc<Controller>, ui: &AppWindow) {
+    let width = ui.get_reader_width();
+    let height = ui.get_reader_viewport_height();
+    let progress = {
+        let view = app.view();
+        let reader = view.reader.as_ref().unwrap();
+        assert_eq!(reader.gap_after(0), 96., "preview the doubled chapter gap");
+        let page_height = reader.ratios[0] * width;
+        let offset = page_height + reader.gap_after(0) / 2. - height / 2.;
+        assert!(
+            offset >= 0. && offset < page_height,
+            "use portrait preview artwork"
+        );
+        offset / page_height
+    };
+    // Explicit seek requests the actual decoded rows on either side; it also
+    // bypasses ordinary-scroll admission while the preview viewport is loading.
+    app.reader_seek(ui, progress);
 }
 
 fn assert_live_inheritance(ui: &AppWindow) {
@@ -156,6 +231,9 @@ fn render_reader_settings_previews() {
     }
     std::fs::write(output.join("preview-source.txt"), format!(
         "Actual AppWindow, production Controller.open_chapter, local import, image worker, ReaderEngine and reader_controls wiring.\nSource image: {}\nDefault sample when available: Winsor McCay, Little Nemo in Slumberland, October 15, 1905 (public domain).\nhttps://commons.wikimedia.org/wiki/File:Little_Nemo_1905-10-15.jpg\nThe fixture uses Webtoon metadata to exercise Automatic vertical reading and repeats the sample across three local pages.\n", comic.display(),
+    )).unwrap();
+    std::fs::write(output.join("separator-preview-source.txt"), format!(
+        "Actual production AppWindow software raster, local-import image worker and chapter-boundary model.\nSource image: {}\nThe imported three-page inventory is partitioned into two fixture ChapterSegments; existing decoded image tiles are retained. This exercises separator rendering, not cross-chapter source preparation.\nOutputs: phone-reader-chapter-separator.png (390x844), desktop-reader-chapter-separator.png (1120x780).\nThe 96px production gap is centered between adjacent real image rows with reader controls hidden.\n", comic.display(),
     )).unwrap();
     let services = Services::open(&temp.path().join("data")).unwrap();
     let series = services.import_local(&input, true).unwrap();
@@ -260,6 +338,7 @@ fn render_reader_settings_previews() {
     ui.window().set_size(slint::PhysicalSize::new(390, 844));
     app.open_chapter(&ui, chapter);
 
+    let boundaries_only = std::env::var_os("READER_UI_PREVIEW_BOUNDARIES_ONLY").is_some();
     let frames = [
         PreviewFrame::Osd {
             width: 390,
@@ -295,6 +374,16 @@ fn render_reader_settings_previews() {
             tab: "Filters",
             name: "desktop-reader-filters",
         },
+        PreviewFrame::Boundary {
+            width: 390,
+            height: 844,
+            name: "phone-reader-chapter-separator",
+        },
+        PreviewFrame::Boundary {
+            width: 1120,
+            height: 780,
+            name: "desktop-reader-chapter-separator",
+        },
         PreviewFrame::Global {
             width: 390,
             height: 844,
@@ -305,7 +394,10 @@ fn render_reader_settings_previews() {
             height: 780,
             name: "desktop-global-reader-settings",
         },
-    ];
+    ]
+    .into_iter()
+    .filter(|frame| !boundaries_only || matches!(frame, PreviewFrame::Boundary { .. }))
+    .collect::<Vec<_>>();
     let next = Rc::new(Cell::new(0usize));
     let pending = Rc::new(Cell::new(false));
     let inheritance_checked = Rc::new(Cell::new(false));
@@ -357,6 +449,12 @@ fn render_reader_settings_previews() {
                             activate(&ui, tab, AccessibleRole::Tab);
                         }
                     }
+                    PreviewFrame::Boundary { width, height, .. } => {
+                        ui.window()
+                            .set_size(slint::PhysicalSize::new(width, height));
+                        ui.set_touch_menus(width < 700);
+                        prepare_separator_preview(&app, &ui);
+                    }
                     PreviewFrame::Global { width, height, .. } => {
                         ui.window()
                             .set_size(slint::PhysicalSize::new(width, height));
@@ -370,6 +468,9 @@ fn render_reader_settings_previews() {
             }
             if Instant::now() < ready_at.get() {
                 return;
+            }
+            if matches!(frame, PreviewFrame::Boundary { .. }) {
+                center_separator_preview(&app, &ui);
             }
             snapshot(&ui, &output, frame.name());
             pending.set(false);
