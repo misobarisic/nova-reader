@@ -589,6 +589,7 @@ mod tests {
             images,
             download_serial: Mutex::new(()),
             active_image: Mutex::new(None),
+            continuation_work: Default::default(),
             metadata_refresh: Arc::default(),
         });
         ui.set_pages(ModelRc::new(VecModel::from(vec![

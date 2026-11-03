@@ -1038,11 +1038,19 @@ export component AppWindow inherits Window {
                                     visible: root.reading-mode == 0 && ReaderSettings.chapter-transition && !root.reader-context-capturing;
                                     x: (max(reader.width,root.reader-width) - root.reader-width) / 2;
                                     y: boundary.position * root.reader-width;
-                                    width: root.reader-width; height: 48px;
+                                    // Match Reader::gap_after's chapter-boundary extent.
+                                    width: root.reader-width; height: 96px;
                                     HorizontalLayout {
                                         padding-left: 12px; padding-right: 12px; spacing: 12px;
                                         Text { min-width: 0px; text: boundary.previous; color: Theme.current.text_muted; font-size: 12px; overflow: elide; vertical-alignment: center; horizontal-alignment: right; }
-                                        Path { width: 20px; height: 20px; viewbox-width: 24; viewbox-height: 24; commands: "M4 12h16M14 6l6 6-6 6"; stroke: Theme.current.accent_soft; stroke-width: 1.5px; fill: transparent; }
+                                        Rectangle {
+                                            width: 20px; height: 100%;
+                                            Path {
+                                                y: (parent.height - self.height) / 2;
+                                                width: 20px; height: 20px; viewbox-width: 24; viewbox-height: 24;
+                                                commands: "M4 12h16M14 6l6 6-6 6"; stroke: Theme.current.accent_soft; stroke-width: 1.5px; fill: transparent;
+                                            }
+                                        }
                                         Text { min-width: 0px; text: boundary.next; color: Theme.current.text_secondary; font-size: 12px; overflow: elide; vertical-alignment: center; }
                                     }
                                 }
@@ -1176,7 +1184,7 @@ export component AppWindow inherits Window {
                             if root.reader-transition-open && root.reading-mode != 0 && ReaderSettings.chapter-transition: Rectangle {
                                 x: (parent.width - self.width) / 2;
                                 y: root.safe-area-insets.top + 68px;
-                                width: min(480px, max(1px, parent.width - 32px)); height: 48px;
+                                width: min(480px, max(1px, parent.width - 32px)); height: 96px;
                                 border-radius: 12px; background: Theme.current.player_menu;
                                 Text {
                                     x: 12px; width: parent.width - 24px; height: 100%;

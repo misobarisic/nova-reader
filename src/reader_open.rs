@@ -36,51 +36,16 @@ fn prepare(app: &Arc<Controller>, chapter: ChapterId, cancel: &CancelToken) -> R
     prepare_inventory(app, chapter, cancel, inventory.pages, None, collection)
 }
 
-fn prepare_inventory(
-    app: &Arc<Controller>,
-    chapter: ChapterId,
-    cancel: &CancelToken,
-    resources: Arc<Vec<crate::page_inventory::Resource>>,
-    selected: Option<String>,
-    collection: bool,
-) -> Result<Prepared> {
+/// Metadata-only projection shared by direct entry and seamless continuation.
+/// Originals are verified/probed only when their image worker selects them.
+pub(super) fn inventory_inputs(
+    resources: &[crate::page_inventory::Resource],
+) -> (Option<Source>, Vec<PageInput>, Vec<f32>) {
     use crate::page_inventory::ResourceKind;
-    cancel.check().map_err(error)?;
-    let state = app.services.domain.snapshot().map_err(error)?;
-    let progress = state
-        .progress
-        .iter()
-        .find(|p| p.chapter == chapter)
-        .cloned();
-    let completed = progress.as_ref().is_some_and(|p| p.completed);
-    if let Err(error) = crate::reader_settings::load_series(&chapter.series) {
-        eprintln!("Nova Reader: reader settings unavailable: {error}");
-    }
-    let mode_choice = reader_modes::load(
-        &chapter.series,
-        reader_modes::legacy_mode(&state, &chapter.series),
-    )
-    .map_err(error)?;
     let source = resources.iter().find_map(|resource| match &resource.kind {
         ResourceKind::Remote { source, .. } => Some((**source).clone()),
         _ => None,
     });
-    let source_name = source.as_ref().map(|s| s.descriptor().name.clone());
-    let automatic_mode =
-        reader_modes::automatic_for_state(&state, &chapter.series, source_name.as_deref());
-    let mode = if collection && mode_choice == reader_modes::ModeChoice::Default {
-        ReadingMode::LeftToRight
-    } else {
-        mode_choice.resolve(automatic_mode)
-    };
-    let mut anchor = progress.map(|p| p.anchor).unwrap_or_default();
-    if let Some(id) = selected {
-        let index = resources
-            .iter()
-            .position(|r| r.id == id)
-            .ok_or_else(|| text::tr("Image is no longer available"))?;
-        anchor = ResumeAnchor::new(id, index, 0.).map_err(error)?;
-    }
     let ratios = resources
         .iter()
         .map(|resource| match &resource.kind {
@@ -100,6 +65,50 @@ fn prepare_inventory(
             _ => PageInput::Verified(Box::new(resource.clone())),
         })
         .collect();
+    (source, pages, ratios)
+}
+
+fn prepare_inventory(
+    app: &Arc<Controller>,
+    chapter: ChapterId,
+    cancel: &CancelToken,
+    resources: Arc<Vec<crate::page_inventory::Resource>>,
+    selected: Option<String>,
+    collection: bool,
+) -> Result<Prepared> {
+    cancel.check().map_err(error)?;
+    let state = app.services.domain.snapshot().map_err(error)?;
+    let progress = state
+        .progress
+        .iter()
+        .find(|p| p.chapter == chapter)
+        .cloned();
+    let completed = progress.as_ref().is_some_and(|p| p.completed);
+    if let Err(error) = crate::reader_settings::load_series(&chapter.series) {
+        eprintln!("Nova Reader: reader settings unavailable: {error}");
+    }
+    let mode_choice = reader_modes::load(
+        &chapter.series,
+        reader_modes::legacy_mode(&state, &chapter.series),
+    )
+    .map_err(error)?;
+    let (source, pages, ratios) = inventory_inputs(&resources);
+    let source_name = source.as_ref().map(|s| s.descriptor().name.clone());
+    let automatic_mode =
+        reader_modes::automatic_for_state(&state, &chapter.series, source_name.as_deref());
+    let mode = if collection && mode_choice == reader_modes::ModeChoice::Default {
+        ReadingMode::LeftToRight
+    } else {
+        mode_choice.resolve(automatic_mode)
+    };
+    let mut anchor = progress.map(|p| p.anchor).unwrap_or_default();
+    if let Some(id) = selected {
+        let index = resources
+            .iter()
+            .position(|r| r.id == id)
+            .ok_or_else(|| text::tr("Image is no longer available"))?;
+        anchor = ResumeAnchor::new(id, index, 0.).map_err(error)?;
+    }
     let mut reader = Reader {
         chapter,
         source,
@@ -110,8 +119,12 @@ fn prepare_inventory(
         desired: BTreeSet::new(),
         failed: BTreeSet::new(),
         image_retries: BTreeMap::new(),
+        image_retry_due: BTreeMap::new(),
         budget_blocked: BTreeSet::new(),
         desired_anchor: usize::MAX,
+        reverse_demand: None,
+        window_demand: None,
+        chapter_navigation: None,
         decoded_bytes: BTreeMap::new(),
         decoded_widths: BTreeMap::new(),
         decoded_windows: BTreeMap::new(),
@@ -125,6 +138,9 @@ fn prepare_inventory(
         preload_epoch: 0,
         segments: Vec::new(),
         preloading: None,
+        preload_nonce: 0,
+        continuity_backwards: false,
+        continuity_failures: BTreeMap::new(),
         continuity_error: None,
         bookmarked_chapters: BTreeSet::new(),
         target_width: 0,
@@ -416,6 +432,7 @@ mod tests {
             images,
             download_serial: Mutex::default(),
             active_image: Mutex::default(),
+            continuation_work: Default::default(),
             metadata_refresh: Arc::default(),
         });
         ui.on_navigate({

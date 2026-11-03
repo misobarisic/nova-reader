@@ -4,6 +4,74 @@ use super::*;
 
 const MAX_SEGMENTS: usize = 3;
 
+type MetadataWork = Box<dyn FnOnce() + Send>;
+#[derive(Default)]
+struct MetadataQueue {
+    running: bool,
+    active: Option<CancelToken>,
+    pending: Option<(CancelToken, MetadataWork)>,
+}
+
+/// One actual metadata worker and one latest pending request. A source that
+/// ignores cancellation can delay the next request, but cannot create an
+/// unbounded number of threads or concurrent provider operations.
+#[derive(Default)]
+pub(super) struct ContinuationWork {
+    queue: Arc<Mutex<MetadataQueue>>,
+}
+impl ContinuationWork {
+    pub(super) fn cancel(&self) {
+        let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(cancel) = &queue.active {
+            cancel.cancel();
+        }
+        if let Some((cancel, _)) = queue.pending.take() {
+            cancel.cancel();
+        }
+    }
+
+    fn submit(&self, cancel: CancelToken, work: MetadataWork) {
+        let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(active) = &queue.active {
+            active.cancel();
+        }
+        if let Some((old, _)) = queue.pending.replace((cancel, work)) {
+            old.cancel();
+        }
+        if queue.running {
+            return;
+        }
+        queue.running = true;
+        let shared = self.queue.clone();
+        drop(queue);
+        std::thread::spawn(move || {
+            loop {
+                let work = {
+                    let mut queue = shared.lock().unwrap_or_else(|e| e.into_inner());
+                    match queue.pending.take() {
+                        Some((cancel, work)) => {
+                            queue.active = Some(cancel.clone());
+                            Some((cancel, work))
+                        }
+                        None => {
+                            queue.running = false;
+                            queue.active = None;
+                            None
+                        }
+                    }
+                };
+                let Some((cancel, work)) = work else {
+                    break;
+                };
+                if !cancel.is_cancelled() {
+                    work();
+                }
+                shared.lock().unwrap_or_else(|e| e.into_inner()).active = None;
+            }
+        });
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct ChapterSegment {
     pub chapter: ChapterId,
@@ -19,6 +87,7 @@ impl Reader {
     fn sync_continuation_epoch(&mut self, generation: u64) -> bool {
         if self.preload_epoch != generation {
             self.preloading = None;
+            self.preload_nonce = self.preload_nonce.wrapping_add(1);
             self.continuity_error = None;
             self.preload_epoch = generation;
             true
@@ -84,7 +153,7 @@ impl Reader {
             .expect("page identity serializes")
     }
     fn near_continuation(&self, segment: &ChapterSegment) -> bool {
-        if self.anchor.page_index.saturating_add(2) >= segment.end {
+        if self.visible_end().saturating_add(2) >= segment.end {
             return true;
         }
         if self.mode != ReadingMode::Webtoon {
@@ -108,22 +177,112 @@ impl Reader {
             && self.viewport_width > 0.
             && distance * self.viewport_width <= self.viewport_height.max(0.) * 2.
     }
+
+    fn continuation_candidates(
+        &self,
+        chapters: &[Chapter],
+    ) -> Vec<(ChapterId, ChapterId, String, bool)> {
+        let tail = self.segments.last().filter(|tail| {
+            (self.mode == ReadingMode::Webtoon
+                || (tail.start..tail.end).contains(&self.anchor.page_index))
+                && self.near_continuation(tail)
+                && self.prune_for_append().is_some()
+        });
+        let head = self.segments.first().filter(|head| {
+            (head.start..head.end).contains(&self.anchor.page_index)
+                && self.near_previous(head)
+                && self.prune_for_prepend().is_some()
+        });
+        let edges = if self.continuity_backwards {
+            [(head, true), (tail, false)]
+        } else {
+            [(tail, false), (head, true)]
+        };
+        let mut candidates = edges
+            .into_iter()
+            .filter_map(|(edge, backwards)| {
+                let edge = edge?;
+                let position = chapters.iter().position(|c| c.id == edge.chapter)?;
+                let adjacent = if backwards {
+                    position.checked_sub(1)?
+                } else {
+                    position + 1
+                };
+                let chapter = chapters.get(adjacent)?;
+                (!self.segments.iter().any(|s| s.chapter == chapter.id)).then(|| {
+                    (
+                        edge.chapter.clone(),
+                        chapter.id.clone(),
+                        chapter.title.clone(),
+                        backwards,
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        if let Some((chapter, backwards)) = self.navigation_metadata_target() {
+            let edge = if backwards {
+                self.segments.first()
+            } else {
+                self.segments.last()
+            };
+            if let Some(edge) = edge
+                && let Some(target) = chapters.iter().find(|c| &c.id == chapter)
+            {
+                candidates.retain(|(_, id, _, _)| id != chapter);
+                candidates.insert(
+                    0,
+                    (
+                        edge.chapter.clone(),
+                        chapter.clone(),
+                        target.title.clone(),
+                        backwards,
+                    ),
+                );
+            }
+        }
+        candidates
+    }
     /// Return the retained prefix length, never dropping visible artwork.
     fn prune_for_prepend(&self) -> Option<usize> {
         if self.segments.len() < MAX_SEGMENTS {
             return Some(self.pages.len());
         }
-        let keep = self.segments[MAX_SEGMENTS - 1].start;
-        (keep > self.visible_end()).then_some(keep)
+        let visible_segment = self
+            .segments
+            .iter()
+            .position(|s| (s.start..s.end).contains(&self.visible_end()))?;
+        let count = (visible_segment + 2)
+            .max(MAX_SEGMENTS - 1)
+            .min(self.segments.len());
+        Some(
+            self.segments
+                .get(count)
+                .map_or(self.pages.len(), |s| s.start),
+        )
     }
     fn prune_for_append(&self) -> Option<usize> {
         if self.segments.len() < MAX_SEGMENTS {
             return Some(0);
         }
-        let remove = self.segments[self.segments.len() - (MAX_SEGMENTS - 1) - 1].end;
-        // Never remove any page intersecting the current viewport. A user who
-        // scrolled back during metadata loading can keep reading existing art.
-        (remove <= self.anchor.page_index).then_some(remove)
+        let current = self
+            .segments
+            .iter()
+            .position(|s| (s.start..s.end).contains(&self.anchor.page_index))?;
+        let count = self
+            .segments
+            .len()
+            .saturating_sub(MAX_SEGMENTS - 1)
+            .min(current.saturating_sub(1));
+        if count > 0 {
+            Some(self.segments[count - 1].end)
+        } else {
+            // More than three segments are justified only by visible content;
+            // stop speculative expansion once the tail leaves the viewport.
+            self.segments
+                .last()
+                .filter(|tail| tail.start <= self.visible_end())
+                .map(|_| 0)
+        }
     }
     /// Rebase metadata by moving entries, preserving image/model allocations.
     /// Requested tasks are cleared: their generation is cancelled by the caller.
@@ -192,55 +351,8 @@ fn prepare_chapter(
         .iter()
         .find(|progress| progress.chapter == chapter)
         .is_some_and(|progress| progress.completed);
-    let (source, pages, ratios) = if let Ok(offline) = services.downloads.offline(&chapter) {
-        let job = services.downloads.job(&chapter).map_err(error)?;
-        if offline.pages.len() != job.pages.len() || offline.pages.is_empty() {
-            return Err(text::tr("This chapter has no pages"));
-        }
-        let pages = offline
-            .pages
-            .into_iter()
-            .zip(job.pages)
-            .map(|(path, page)| PageInput::Local {
-                path,
-                id: page.resource.id,
-            })
-            .collect::<Vec<_>>();
-        // Same original probing as ordinary chapter opening, using the bounded
-        // page reader. No decoded originals or prepared display pixels here.
-        let ratios = pages
-            .iter()
-            .map(|page| {
-                cancel.check().map_err(error)?;
-                Ok(page
-                    .read(None, cancel)
-                    .ok()
-                    .and_then(|bytes| {
-                        reader_engine::inspect_image(&bytes, reader_engine::current_limits()).ok()
-                    })
-                    .map_or(1.5, |dimensions| {
-                        dimensions.height as f32 / dimensions.width as f32
-                    }))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        (None, pages, ratios)
-    } else {
-        let (source, pages) = services.pages(&chapter, cancel)?;
-        let ratios = pages
-            .iter()
-            .map(|page| {
-                page.width
-                    .zip(page.height)
-                    .filter(|(width, height)| *width > 0 && *height > 0)
-                    .map_or(1.5, |(width, height)| height as f32 / width as f32)
-            })
-            .collect();
-        (
-            Some(source),
-            pages.into_iter().map(PageInput::Remote).collect(),
-            ratios,
-        )
-    };
+    let inventory = crate::page_inventory::load(services, &chapter, cancel).map_err(error)?;
+    let (source, pages, ratios) = reader_open::inventory_inputs(&inventory.pages);
     cancel.check().map_err(error)?;
     if source
         .as_ref()
@@ -264,6 +376,7 @@ fn append_rows(
     prepared: PreparedChapter,
     remove: usize,
 ) -> f32 {
+    let prepared_chapter = prepared.chapter.clone();
     let shift = if remove > 0 {
         reader.prune_prefix(remove)
     } else {
@@ -280,8 +393,16 @@ fn append_rows(
         source: prepared.source,
         completed: prepared.completed,
     });
-    reader.continuity_error = None;
+    reader.continuity_failures.remove(&prepared_chapter);
+    if reader
+        .continuity_error
+        .as_ref()
+        .is_some_and(|(chapter, _)| chapter == &prepared_chapter)
+    {
+        reader.continuity_error = None;
+    }
     reader.desired_anchor = usize::MAX;
+    reader.prune_retry_deadlines();
     for index in (0..remove).rev() {
         rows.remove(index);
     }
@@ -310,6 +431,7 @@ fn prepend_rows(
     prepared: PreparedChapter,
     keep: usize,
 ) -> f32 {
+    let prepared_chapter = prepared.chapter.clone();
     reader.pages.truncate(keep);
     reader.ratios.truncate(keep);
     reader.segments.retain(|segment| segment.start < keep);
@@ -350,7 +472,15 @@ fn prepend_rows(
         presentations,
         image_retries
     );
-    reader.continuity_error = None;
+    reader.prune_retry_deadlines();
+    reader.continuity_failures.remove(&prepared_chapter);
+    if reader
+        .continuity_error
+        .as_ref()
+        .is_some_and(|(chapter, _)| chapter == &prepared_chapter)
+    {
+        reader.continuity_error = None;
+    }
     for index in 0..count {
         rows.insert(
             index,
@@ -391,220 +521,198 @@ impl Controller {
             if reader.collection || reader.mode_switching || reader.pages.is_empty() {
                 return;
             }
-            if reader.preloading.is_some() {
-                return;
-            }
-            let tail = reader
-                .segments
-                .last()
-                .filter(|tail| {
-                    (tail.start..tail.end).contains(&reader.anchor.page_index)
-                        && reader.near_continuation(tail)
-                        && reader.prune_for_append().is_some()
-                })
-                .map(|edge| edge.chapter.clone());
-            let head = reader
-                .segments
-                .first()
-                .filter(|head| {
-                    (head.start..head.end).contains(&reader.anchor.page_index)
-                        && reader.near_previous(head)
-                        && reader.prune_for_prepend().is_some()
-                })
-                .map(|edge| edge.chapter.clone());
-            let continuity_error = reader.continuity_error.clone();
-            // source_order is canonical reading order; display sorting never
-            // reverses this list. Prepare both neighbors when opening chapter 2.
+            let candidates = view
+                .reader
+                .as_ref()
+                .unwrap()
+                .continuation_candidates(&view.chapters);
+            let reader = view.reader.as_mut().unwrap();
             let mut failure = None;
-            let candidate =
-                [(tail, false), (head, true)]
-                    .into_iter()
-                    .find_map(|(edge, backwards)| {
-                        let edge = edge?;
-                        let index = view
-                            .chapters
-                            .iter()
-                            .position(|chapter| chapter.id == edge)?;
-                        let adjacent = if backwards {
-                            index.checked_sub(1)?
-                        } else {
-                            index + 1
-                        };
-                        let chapter = view.chapters.get(adjacent)?;
-                        if let Some((failed, message)) = &continuity_error
-                            && failed == &chapter.id
-                        {
-                            failure = Some(message.clone());
-                            return None;
-                        }
-                        Some((edge, chapter.id.clone(), chapter.title.clone(), backwards))
-                    });
+            let candidate = candidates.into_iter().find(|(_, chapter, _, _)| {
+                if let Some(message) = reader.continuity_failures.get(chapter) {
+                    if failure.is_none() {
+                        failure = Some((chapter.clone(), message.clone()));
+                    }
+                    false
+                } else {
+                    true
+                }
+            });
             let Some((previous, chapter, title, backwards)) = candidate else {
-                ui.set_reader_continuation_error(failure.unwrap_or_default().into());
+                reader.continuity_error = failure.clone();
+                ui.set_reader_continuation_error(
+                    failure
+                        .map(|(_, message)| message)
+                        .unwrap_or_default()
+                        .into(),
+                );
                 return;
             };
-            let reader = view.reader.as_mut().unwrap();
-            if reader
-                .segments
-                .iter()
-                .any(|segment| segment.chapter == chapter)
-            {
-                return;
+            if let Some(active) = reader.preloading.as_ref() {
+                let explicit = reader
+                    .navigation_metadata_target()
+                    .is_some_and(|(id, _)| id == &chapter);
+                if active == &chapter || (backwards != reader.continuity_backwards && !explicit) {
+                    return;
+                }
+                // One logical metadata slot: a newly demanded edge supersedes
+                // an opposite speculative job. Cooperative source cancellation
+                // and the nonce reject its late completion independently.
+                self.continuation_work.cancel();
             }
+            reader.preload_nonce = reader.preload_nonce.wrapping_add(1);
+            let nonce = reader.preload_nonce;
             reader.preloading = Some(chapter.clone());
-            (previous, chapter, title, generation, backwards)
+            let cancel = CancelToken::default();
+            (
+                previous, chapter, title, generation, backwards, nonce, cancel,
+            )
         };
-        let (previous, chapter, title, generation, backwards) = request;
-        let cancel = self
-            .cancel
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone();
+        let (previous, chapter, title, generation, backwards, nonce, cancel) = request;
         let services = self.services.clone();
         let app = Arc::downgrade(self);
         let weak = ui.as_weak();
-        std::thread::spawn(move || {
-            let result = prepare_chapter(&services, chapter.clone(), title, &cancel);
-            let _ = weak.upgrade_in_event_loop(move |ui| {
-                let Some(app) = app.upgrade() else {
-                    return;
-                };
-                if app.generation.load(Ordering::Acquire) != generation {
-                    return;
-                }
-                let mut view = app.view();
-                if view.section != 6 {
-                    return;
-                }
-                let Some(reader) = view.reader.as_mut() else {
-                    return;
-                };
-                if reader.preloading.as_ref() != Some(&chapter)
-                    || (if backwards {
-                        reader.segments.first()
-                    } else {
-                        reader.segments.last()
-                    })
-                    .is_none_or(|segment| segment.chapter != previous)
-                {
-                    return;
-                }
-                reader.preloading = None;
-                let prepared = match result {
-                    Ok(prepared)
+        self.continuation_work.submit(
+            cancel.clone(),
+            Box::new(move || {
+                let result = prepare_chapter(&services, chapter.clone(), title, &cancel);
+                let _ = weak.upgrade_in_event_loop(move |ui| {
+                    let Some(app) = app.upgrade() else {
+                        return;
+                    };
+                    if app.generation.load(Ordering::Acquire) != generation {
+                        return;
+                    }
+                    let mut view = app.view();
+                    if view.section != 6 {
+                        return;
+                    }
+                    let Some(reader) = view.reader.as_mut() else {
+                        return;
+                    };
+                    if reader.preloading.as_ref() != Some(&chapter)
+                        || reader.preload_nonce != nonce
+                        || (if backwards {
+                            reader.segments.first()
+                        } else {
+                            reader.segments.last()
+                        })
+                        .is_none_or(|segment| segment.chapter != previous)
+                    {
+                        return;
+                    }
+                    reader.preloading = None;
+                    let result = result.and_then(|prepared| {
                         if prepared
                             .source
                             .as_ref()
-                            .is_none_or(|source| source.availability().is_available()) =>
-                    {
-                        prepared
-                    }
-                    Ok(_) => {
-                        let message = text::tr("Source unavailable");
-                        reader.continuity_error = Some((chapter, message.clone()));
-                        if (if backwards {
-                            reader.segments.first()
+                            .is_none_or(|source| source.availability().is_available())
+                        {
+                            Ok(prepared)
                         } else {
-                            reader.segments.last()
-                        })
-                        .is_some_and(|edge| {
-                            if backwards {
-                                reader.near_previous(edge)
-                            } else {
-                                reader.near_continuation(edge)
-                            }
-                        }) {
-                            ui.set_reader_continuation_error(message.into());
+                            Err(text::tr("Source unavailable"))
                         }
+                    });
+                    let prepared = match result {
+                        Ok(prepared) => prepared,
+                        Err(message) => {
+                            let message = format!(
+                                "{}: {message}",
+                                text::tr(if backwards {
+                                    "Could not load previous chapter"
+                                } else {
+                                    "Could not load next chapter"
+                                })
+                            );
+                            reader
+                                .continuity_failures
+                                .insert(chapter.clone(), message.clone());
+                            reader.continuity_error = Some((chapter, message.clone()));
+                            ui.set_reader_continuation_error(message.into());
+                            drop(view);
+                            app.apply_chapter_navigation(&ui);
+                            // A failed speculative direction cannot leave the other
+                            // eligible edge waiting for a gesture or image event.
+                            app.maybe_preload_next(&ui);
+                            return;
+                        }
+                    };
+                    let Some(remove) = (if backwards {
+                        reader.prune_for_prepend()
+                    } else {
+                        reader.prune_for_append()
+                    }) else {
+                        return;
+                    };
+                    let model = ui.get_pages();
+                    let Some(rows) = model.as_any().downcast_ref::<VecModel<PageRow>>() else {
+                        return;
+                    };
+                    if rows.row_count() != reader.pages.len() {
                         return;
                     }
-                    Err(message) => {
-                        let message = format!(
-                            "{}: {message}",
-                            text::tr(if backwards {
-                                "Could not load previous chapter"
-                            } else {
-                                "Could not load next chapter"
-                            })
+                    let old_mode_switching = reader.mode_switching;
+                    reader.mode_switching = true;
+                    if backwards || remove > 0 {
+                        reader.progressive_job = None;
+                        // Old image tasks carry absolute list indices. Change their
+                        // generation before rebasing, then retain surviving pixels.
+                        app.invalidate();
+                        reader.preload_epoch = app.generation.load(Ordering::Acquire);
+                        app.active_image
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .take();
+                    }
+                    let shift = if backwards {
+                        prepend_rows(reader, rows, prepared, remove)
+                    } else {
+                        append_rows(reader, rows, prepared, remove)
+                    };
+                    ui.set_total_ratio(reader.total_extent());
+                    ui.set_current_page(reader.anchor.page_index as i32);
+                    let webtoon = reader.mode == ReadingMode::Webtoon;
+                    let anchor = reader.anchor.page_index;
+                    if webtoon && shift != 0. {
+                        ui.set_scroll_y(ui.get_scroll_y() + shift * ui.get_reader_width());
+                    }
+                    reader.mode_switching = old_mode_switching;
+                    drop(view);
+                    ui.set_reader_continuation_error("".into());
+                    // The scroll shift above fires Slint's position callback while mode
+                    // switching still suppressed it. Re-derive the anchor from the
+                    // adjusted scroll so the visual page cannot drift into a
+                    // neighbouring chapter (especially a backward prepend).
+                    if webtoon {
+                        app.position_internal(
+                            &ui,
+                            -ui.get_scroll_y(),
+                            ui.get_reader_width(),
+                            ui.get_reader_viewport_height(),
+                            PositionOrigin::Restoration,
                         );
-                        reader.continuity_error = Some((chapter, message.clone()));
-                        if (if backwards {
-                            reader.segments.first()
-                        } else {
-                            reader.segments.last()
-                        })
-                        .is_some_and(|edge| {
-                            if backwards {
-                                reader.near_previous(edge)
-                            } else {
-                                reader.near_continuation(edge)
-                            }
-                        }) {
-                            ui.set_reader_continuation_error(message.into());
-                        }
-                        return;
                     }
-                };
-                let Some(remove) = (if backwards {
-                    reader.prune_for_prepend()
-                } else {
-                    reader.prune_for_append()
-                }) else {
-                    return;
-                };
-                let model = ui.get_pages();
-                let Some(rows) = model.as_any().downcast_ref::<VecModel<PageRow>>() else {
-                    return;
-                };
-                if rows.row_count() != reader.pages.len() {
-                    return;
-                }
-                let old_mode_switching = reader.mode_switching;
-                reader.mode_switching = true;
-                if backwards || remove > 0 {
-                    reader.progressive_job = None;
-                    // Old image tasks carry absolute list indices. Change their
-                    // generation before rebasing, then retain surviving pixels.
-                    app.invalidate();
-                    reader.preload_epoch = app.generation.load(Ordering::Acquire);
-                    app.active_image
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner())
-                        .take();
-                }
-                let shift = if backwards {
-                    prepend_rows(reader, rows, prepared, remove)
-                } else {
-                    append_rows(reader, rows, prepared, remove)
-                };
-                ui.set_total_ratio(reader.total_extent());
-                ui.set_current_page(reader.anchor.page_index as i32);
-                if shift != 0. {
-                    ui.set_scroll_y(ui.get_scroll_y() + shift * ui.get_reader_width());
-                }
-                reader.mode_switching = old_mode_switching;
-                drop(view);
-                ui.set_reader_continuation_error("".into());
-                // The scroll shift above fires Slint's position callback while mode
-                // switching still suppressed it. Re-derive the anchor from the
-                // adjusted scroll so the visual page cannot drift into a
-                // neighbouring chapter (especially a backward prepend).
-                app.position(
-                    &ui,
-                    -ui.get_scroll_y(),
-                    ui.get_reader_width(),
-                    ui.get_reader_viewport_height(),
-                );
-                // The opposite neighbor may also be needed on initial open;
-                // do not require a second scroll just to start its preparation.
-                app.maybe_preload_next(&ui);
-            });
-        });
+                    app.apply_chapter_navigation(&ui);
+                    app.publish_reader_controls(&ui);
+                    let anchor = app
+                        .view()
+                        .reader
+                        .as_ref()
+                        .map_or(anchor, |r| r.anchor.page_index);
+                    app.request_images(&ui, anchor);
+                    // The opposite neighbor may also be needed on initial open;
+                    // do not require a second scroll just to start its preparation.
+                    app.maybe_preload_next(&ui);
+                });
+            }),
+        );
     }
     pub(super) fn retry_continuation(self: &Arc<Self>, ui: &AppWindow) {
         let mut view = self.view();
-        if let Some(reader) = view.reader.as_mut() {
-            reader.continuity_error = None;
+        if let Some(reader) = view.reader.as_mut()
+            && let Some((chapter, _)) = reader.continuity_error.take()
+        {
+            reader.continuity_failures.remove(&chapter);
         }
         drop(view);
         ui.set_reader_continuation_error("".into());
@@ -740,7 +848,7 @@ mod tests {
             .unwrap();
         let ui = AppWindow::new().unwrap();
         ui.window().set_size(slint::LogicalSize::new(1000., 600.));
-        let (images, _receiver) = mpsc::channel();
+        let (images, receiver) = mpsc::channel();
         let app = Arc::new(Controller {
             progress_checkpoint: crate::progress_checkpoint::ProgressWriter::new(
                 services.domain.clone(),
@@ -764,6 +872,7 @@ mod tests {
             images,
             download_serial: Mutex::default(),
             active_image: Mutex::default(),
+            continuation_work: Default::default(),
             metadata_refresh: Arc::default(),
         });
         fn pump_until(mut ready: impl FnMut() -> bool + 'static) {
@@ -811,6 +920,14 @@ mod tests {
                         reader.segments.len() == 3 && reader.preloading.is_none()
                     })
                 });
+                let current = app.view().reader.as_ref().unwrap().anchor.page_index;
+                let generation = app.generation.load(Ordering::Acquire);
+                assert!(
+                    receiver
+                        .try_iter()
+                        .any(|task| task.generation == generation && task.index == current),
+                    "attachment must explicitly restart current-generation pixels in {mode:?}"
+                );
                 {
                     let view = app.view();
                     let reader = view.reader.as_ref().expect("opened chapter 2");
@@ -1269,7 +1386,130 @@ mod tests {
         assert_eq!(changes.resets.get(), 0);
         // A tall viewport reaching the last chapter prevents its eviction.
         reader.viewport_height = 5000.;
-        assert!(reader.prune_for_prepend().is_none());
+        assert_eq!(reader.prune_for_prepend(), Some(reader.pages.len()));
+    }
+
+    #[test]
+    fn stable_retry_deadlines_survive_rebase_with_attempts_and_drop_pruned_pages() {
+        let mut reader = reader();
+        let due = std::time::Instant::now() + Duration::from_secs(5);
+        let identity = reader.row_page_id(4);
+        let pruned = reader.row_page_id(0);
+        reader.failed.extend([0, 3, 4]);
+        reader.image_retries.insert(4, 2);
+        reader.image_retry_due.insert(identity.clone(), due);
+        reader.image_retry_due.insert(pruned.clone(), due);
+        reader.prune_prefix(2);
+        reader.prune_retry_deadlines();
+        assert_eq!(reader.retry_index(&identity, due), Some(2));
+        assert_eq!(reader.image_retries[&2], 2);
+        assert_eq!(reader.image_retry_due[&identity], due);
+        assert!(!reader.image_retry_due.contains_key(&pruned));
+        assert!(
+            reader.failed.contains(&1),
+            "terminal failures survive without a retry ticket"
+        );
+        let rows = VecModel::from(
+            (0..reader.pages.len())
+                .map(|_| PageRow::default())
+                .collect::<Vec<_>>(),
+        );
+        let previous = next(&reader);
+        let keep = reader.pages.len();
+        prepend_rows(&mut reader, &rows, previous, keep);
+        assert_eq!(reader.retry_index(&identity, due), Some(4));
+        assert_eq!(reader.image_retries[&4], 2);
+        assert_eq!(reader.image_retry_due[&identity], due);
+        assert!(
+            reader
+                .retry_index(&identity, due + Duration::from_millis(1))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn pending_retry_timer_delivers_once_after_rebase_and_overview_with_original_deadline() {
+        const CHILD: &str = "READER_REBOUND_RETRY_TIMER_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "app::reader_continuity::tests::pending_retry_timer_delivers_once_after_rebase_and_overview_with_original_deadline", "--nocapture"])
+                .env(CHILD, "1").output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        i_slint_backend_testing::init_integration_test_with_system_time();
+        let ui = AppWindow::new().unwrap();
+        ui.set_section(6);
+        ui.window().set_size(slint::LogicalSize::new(400., 600.));
+        let dir = tempfile::tempdir().unwrap();
+        let mut reader = reader();
+        reader.failed = (0..6).collect();
+        reader.image_retries.insert(4, 2);
+        let identity = reader.row_page_id(4);
+        let due = std::time::Instant::now() + Duration::from_millis(300);
+        reader.image_retry_due.insert(identity.clone(), due);
+        let (app, receiver) =
+            super::super::reader_handoff_tests::fixture_app(&ui, dir.path(), reader, false);
+        app.schedule_image_retry(&ui, identity.clone(), due);
+        let generation = app.invalidate().0;
+        {
+            let mut view = app.view();
+            let reader = view.reader.as_mut().unwrap();
+            reader.prune_prefix(2);
+            reader.prune_retry_deadlines();
+            assert_eq!(reader.retry_index(&identity, due), Some(2));
+            assert_eq!(reader.image_retries[&2], 2);
+            view.section = 23;
+        }
+        ui.set_section(23);
+        app.mount_pages(&ui);
+        let owner = app.clone();
+        let weak = ui.as_weak();
+        let resume = slint::Timer::default();
+        resume.start(
+            slint::TimerMode::SingleShot,
+            Duration::from_millis(30),
+            move || {
+                let ui = weak.upgrade().unwrap();
+                owner.view().section = 6;
+                ui.set_section(6);
+                owner.resume_image_retries(&ui);
+                owner.resume_image_retries(&ui);
+            },
+        );
+        let delivered = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let observed = delivered.clone();
+        let timer = slint::Timer::default();
+        timer.start(
+            slint::TimerMode::Repeated,
+            Duration::from_millis(5),
+            move || {
+                for task in receiver.try_iter() {
+                    assert!(
+                        std::time::Instant::now() >= due,
+                        "rebase/return cannot restart or shorten remaining backoff"
+                    );
+                    observed.borrow_mut().push((task.generation, task.index));
+                }
+                if std::time::Instant::now() >= due + Duration::from_millis(100) {
+                    slint::quit_event_loop().unwrap();
+                }
+            },
+        );
+        slint::run_event_loop().unwrap();
+        timer.stop();
+        resume.stop();
+        assert_eq!(*delivered.borrow(), vec![(generation, 2)]);
+        let view = app.view();
+        let reader = view.reader.as_ref().unwrap();
+        assert_eq!(reader.image_retries[&2], 2);
+        assert!(!reader.image_retry_due.contains_key(&identity));
+        assert!(!reader.failed.contains(&2));
     }
 
     #[test]
@@ -1467,7 +1707,327 @@ mod tests {
         let mut reader = self::reader();
         reader.anchor.page_index = 1;
         assert!(reader.prune_for_append().is_none());
-        reader.anchor.page_index = 2;
+        reader.anchor.page_index = 4;
         assert_eq!(reader.prune_for_append(), Some(2));
+    }
+
+    #[test]
+    fn one_physical_metadata_worker_coalesces_repeated_opposite_demands() {
+        let work = ContinuationWork::default();
+        let (started, starts) = mpsc::channel();
+        let (release, held) = mpsc::channel();
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let maximum = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let first = CancelToken::default();
+        let (count, max, signal) = (active.clone(), maximum.clone(), started.clone());
+        work.submit(
+            first.clone(),
+            Box::new(move || {
+                let running = count.fetch_add(1, Ordering::AcqRel) + 1;
+                max.fetch_max(running, Ordering::AcqRel);
+                signal.send(0).unwrap();
+                // Deliberately ignore cancellation, as an uncooperative provider
+                // might do until its blocking network operation returns.
+                held.recv_timeout(Duration::from_secs(5)).unwrap();
+                count.fetch_sub(1, Ordering::AcqRel);
+            }),
+        );
+        assert_eq!(starts.recv_timeout(Duration::from_secs(5)).unwrap(), 0);
+        let mut tokens = Vec::new();
+        for direction in 1..=20 {
+            let token = CancelToken::default();
+            tokens.push(token.clone());
+            let (count, max, signal) = (active.clone(), maximum.clone(), started.clone());
+            work.submit(
+                token,
+                Box::new(move || {
+                    let running = count.fetch_add(1, Ordering::AcqRel) + 1;
+                    max.fetch_max(running, Ordering::AcqRel);
+                    signal.send(direction).unwrap();
+                    count.fetch_sub(1, Ordering::AcqRel);
+                }),
+            );
+        }
+        assert!(first.is_cancelled());
+        assert!(tokens[..19].iter().all(CancelToken::is_cancelled));
+        assert!(!tokens[19].is_cancelled());
+        assert!(
+            starts.try_recv().is_err(),
+            "held canceled job still owns the only physical slot"
+        );
+        release.send(()).unwrap();
+        assert_eq!(starts.recv_timeout(Duration::from_secs(5)).unwrap(), 20);
+        assert!(starts.recv_timeout(Duration::from_millis(50)).is_err());
+        assert_eq!(maximum.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn metadata_failure_advances_other_edge_and_reverse_demand_supersedes_forward() {
+        const CHILD: &str = "READER_METADATA_DIRECTION_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "app::reader_continuity::tests::metadata_failure_advances_other_edge_and_reverse_demand_supersedes_forward", "--nocapture"])
+                .env(CHILD, "1").output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        i_slint_backend_testing::init_integration_test_with_system_time();
+        let directory = tempfile::tempdir().unwrap();
+        let services = Services::open(&directory.path().join("data")).unwrap();
+        let ui = AppWindow::new().unwrap();
+        ui.set_section(6);
+        ui.window().set_size(slint::LogicalSize::new(400., 600.));
+        let mut reader = super::super::tests::tall_reader();
+        reader.initialise_segments("Current".into());
+        reader.preload_epoch = 7;
+        let current = reader.chapter.clone();
+        let previous = ChapterId::new(current.series.clone(), "previous");
+        let next = ChapterId::new(current.series.clone(), "unavailable-next");
+        let chapters = [&previous, &current, &next]
+            .into_iter()
+            .enumerate()
+            .map(|(i, id)| Chapter {
+                id: id.clone(),
+                title: i.to_string(),
+                number: Some(i.to_string()),
+                source_order: i as i64,
+                label: String::new(),
+                volume: None,
+                uploaded_at: None,
+                language: None,
+                scanlator: None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(reader.continuation_candidates(&chapters)[0].1, next);
+        reader.continuity_backwards = true;
+        assert_eq!(reader.continuation_candidates(&chapters)[0].1, previous);
+        reader.continuity_backwards = false;
+        let folder = directory.path().join("originals");
+        std::fs::create_dir(&folder).unwrap();
+        image::RgbaImage::from_pixel(10, 20, image::Rgba([35, 81, 210, 255]))
+            .save(folder.join("one.png"))
+            .unwrap();
+        services
+            .downloads
+            .import_folder(previous.clone(), &folder)
+            .unwrap();
+        let (images, _receiver) = mpsc::channel();
+        let app = Arc::new(Controller {
+            progress_checkpoint: crate::progress_checkpoint::ProgressWriter::new(
+                services.domain.clone(),
+            )
+            .unwrap(),
+            artwork: crate::artwork::ArtworkLoader::new(
+                services.clone(),
+                ui.as_weak(),
+                directory.path().join("posters"),
+            ),
+            services,
+            chapter_cache: Arc::new(crate::chapter_cache::ChapterCache::new(
+                directory.path().join("cache"),
+            )),
+            capture_originals: Mutex::default(),
+            thumbnail_service: OnceLock::new(),
+            image_worker_live: AtomicBool::new(false),
+            view: Mutex::new(View {
+                section: 6,
+                reader: Some(reader),
+                chapters,
+                ..Default::default()
+            }),
+            generation: AtomicU64::new(7),
+            cancel: Mutex::default(),
+            images,
+            download_serial: Mutex::default(),
+            active_image: Mutex::default(),
+            continuation_work: Default::default(),
+            metadata_refresh: Arc::default(),
+        });
+        app.mount_pages(&ui);
+        app.maybe_preload_next(&ui);
+        assert_eq!(
+            app.view().reader.as_ref().unwrap().preloading.as_ref(),
+            Some(&next)
+        );
+        let finished = std::rc::Rc::new(Cell::new(false));
+        let complete = finished.clone();
+        let owner = app.clone();
+        let wanted_previous = previous.clone();
+        let wanted_next = next.clone();
+        let timer = slint::Timer::default();
+        let start = std::time::Instant::now();
+        timer.start(
+            slint::TimerMode::Repeated,
+            Duration::from_millis(5),
+            move || {
+                let view = owner.view();
+                let r = view.reader.as_ref().unwrap();
+                if r.segments.iter().any(|s| s.chapter == wanted_previous)
+                    && r.preloading.is_none()
+                    && r.continuity_failures.contains_key(&wanted_next)
+                {
+                    complete.set(true);
+                    slint::quit_event_loop().unwrap();
+                } else if start.elapsed() > Duration::from_secs(5) {
+                    slint::quit_event_loop().unwrap();
+                }
+            },
+        );
+        slint::run_event_loop().unwrap();
+        timer.stop();
+        assert!(
+            finished.get(),
+            "failure must immediately advance the other edge without input"
+        );
+        assert_eq!(app.view().reader.as_ref().unwrap().chapter, current);
+        for mode in [
+            ReadingMode::LeftToRight,
+            ReadingMode::RightToLeft,
+            ReadingMode::Vertical,
+        ] {
+            let mut reader = super::super::tests::tall_reader();
+            reader.mode = mode;
+            reader.anchor = ResumeAnchor::new("page-1", 1, 0.).unwrap();
+            reader.initialise_segments("Current".into());
+            reader.preload_epoch = app.generation.load(Ordering::Acquire);
+            reader.preload_nonce = 100;
+            reader.preloading = Some(next.clone());
+            app.view().reader = Some(reader);
+            ui.set_reading_mode(mode_index(mode));
+            ui.set_current_page(1);
+            app.mount_pages(&ui);
+            let (started, began) = mpsc::channel();
+            let (release, held) = mpsc::channel();
+            let cancel = CancelToken::default();
+            app.continuation_work.submit(
+                cancel.clone(),
+                Box::new(move || {
+                    started.send(()).unwrap();
+                    held.recv_timeout(Duration::from_secs(5)).unwrap();
+                }),
+            );
+            began.recv_timeout(Duration::from_secs(5)).unwrap();
+            app.step_page(&ui, -1);
+            {
+                let view = app.view();
+                let reader = view.reader.as_ref().unwrap();
+                assert!(reader.continuity_backwards);
+                assert_eq!(reader.preloading.as_ref(), Some(&previous));
+                assert!(reader.preload_nonce > 100);
+            }
+            assert!(
+                cancel.is_cancelled(),
+                "paged backward input supersedes held Next preparation"
+            );
+            release.send(()).unwrap();
+            let wanted = previous.clone();
+            super::super::reader_handoff_tests::pump_reader_until(&app, move |r| {
+                r.segments.iter().any(|s| s.chapter == wanted) && r.preloading.is_none()
+            });
+        }
+        app.invalidate();
+    }
+
+    #[test]
+    fn visible_short_tail_can_continue_without_becoming_the_top_anchor() {
+        let mut reader = reader();
+        reader.chapter_boundaries = false;
+        reader.ratios = vec![0.1; 6];
+        reader.anchor = ResumeAnchor::new(reader.page_id(0), 0, 0.).unwrap();
+        reader.viewport_height = 600.;
+        let chapters = (0..5)
+            .map(|i| Chapter {
+                id: ChapterId::new(reader.chapter.series.clone(), format!("chapter-{i}")),
+                title: format!("Chapter {i}"),
+                number: Some(i.to_string()),
+                source_order: i,
+                label: String::new(),
+                volume: None,
+                uploaded_at: None,
+                language: None,
+                scanlator: None,
+            })
+            .collect::<Vec<_>>();
+        assert!(reader.visible_end() >= reader.segments[2].start);
+        let candidates = reader.continuation_candidates(&chapters);
+        assert_eq!(candidates[0].1, chapters[3].id);
+        assert!(!candidates[0].3);
+        assert_eq!(reader.prune_for_append(), Some(0));
+        // Independent directional failure records survive successful attachment.
+        let previous = ChapterId::new(reader.chapter.series.clone(), "previous");
+        reader
+            .continuity_failures
+            .insert(previous.clone(), "previous failed".into());
+        let rows = VecModel::from((0..6).map(|_| PageRow::default()).collect::<Vec<_>>());
+        let prepared = next(&reader);
+        append_rows(&mut reader, &rows, prepared, 0);
+        assert_eq!(reader.segments.len(), 4);
+        assert!(reader.continuity_failures.contains_key(&previous));
+        assert_eq!(reader.anchor.page_index, 0);
+    }
+
+    #[test]
+    fn tiny_chapters_walk_beyond_three_both_directions_without_pruning_visible_ids() {
+        let mut reader = reader();
+        reader.pages.truncate(1);
+        reader.ratios = vec![0.125];
+        reader.segments.truncate(1);
+        reader.segments[0].start = 0;
+        reader.segments[0].end = 1;
+        reader.chapter_boundaries = false;
+        reader.anchor = ResumeAnchor::new(reader.page_id(0), 0, 0.).unwrap();
+        let rows = VecModel::from(vec![PageRow::default()]);
+        let chapter = |reader: &Reader, number: i32| PreparedChapter {
+            chapter: ChapterId::new(reader.chapter.series.clone(), format!("walk-{number}")),
+            title: number.to_string(),
+            source: None,
+            pages: vec![PageInput::Local {
+                path: PathBuf::new(),
+                id: "same-source-page-id".into(),
+            }],
+            ratios: vec![0.125],
+            completed: false,
+        };
+        let visible = |r: &Reader| {
+            (r.anchor.page_index..=r.visible_end())
+                .map(|i| r.row_page_id(i))
+                .collect::<BTreeSet<_>>()
+        };
+        for number in 1..=24 {
+            while reader.prune_for_append().is_none() {
+                let index = (reader.anchor.page_index + 2).min(reader.pages.len() - 1);
+                reader.anchor = ResumeAnchor::new(reader.page_id(index), index, 0.).unwrap();
+            }
+            let before = visible(&reader);
+            let remove = reader.prune_for_append().unwrap();
+            let prepared = chapter(&reader, number);
+            append_rows(&mut reader, &rows, prepared, remove);
+            let after = (0..reader.pages.len())
+                .map(|i| reader.row_page_id(i))
+                .collect::<BTreeSet<_>>();
+            assert!(before.is_subset(&after));
+            assert!(reader.segments.len() <= visible(&reader).len() + 2);
+        }
+        assert!(
+            reader.segments.len() > MAX_SEGMENTS,
+            "one viewport really contains more than three tiny chapters"
+        );
+        for number in (-24..0).rev() {
+            reader.anchor = ResumeAnchor::new(reader.page_id(0), 0, 0.).unwrap();
+            let before = visible(&reader);
+            let keep = reader.prune_for_prepend().unwrap();
+            let prepared = chapter(&reader, number);
+            prepend_rows(&mut reader, &rows, prepared, keep);
+            let after = (0..reader.pages.len())
+                .map(|i| reader.row_page_id(i))
+                .collect::<BTreeSet<_>>();
+            assert!(before.is_subset(&after));
+            assert!(reader.segments.len() <= visible(&reader).len() + 3);
+        }
     }
 }

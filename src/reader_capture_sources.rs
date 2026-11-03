@@ -17,6 +17,7 @@ pub(super) enum Scope {
 }
 pub(super) fn scope(input: &PageInput, source: Option<&Source>) -> Result<Option<Scope>> {
     match input {
+        #[cfg(test)]
         PageInput::Local { path, .. } => {
             let metadata = std::fs::metadata(path).map_err(error)?;
             Ok(Some(Scope::Local(

@@ -25,7 +25,8 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `src/thumbnail_cache_settings.rs` | Thumbnail usage/clear callbacks; invalidates live work and UI references while preserving originals and downloads |
 | `src/reader_settings.rs`, `src/reader_settings_ui.rs` | Durable global reader defaults, device-local desktop webtoon column width, source-local series layout/orientation overrides, cached effective snapshots and fallible UI rollback |
 | `src/reader_controls.rs`, `src/reader_navigation.rs` | Nova-style OSD actions, source-anchored 0.5×–8× zoom/seek, motion-setting-aware double-tap animation, zoomed tap-zone bypass, Mihon tap maps, mode inheritance and Android/desktop preference projection |
-| `src/reader_continuity.rs` | Bidirectional near-boundary chapter preparation, source-order navigation, per-chapter source ownership/progress, anchor-preserving append/prepend and bounded three-chapter retention |
+| `src/reader_continuity.rs`, `src/reader_handoff_tests.rs` | Demand-prioritized bidirectional chapter preparation on one physical metadata worker, per-chapter source ownership/progress, anchor-preserving attachment, visible-segment retention and deterministic reverse-demand scheduling/admission regressions |
+| `src/reader_chapter_navigation.rs`, `src/reader_scroll_admission.rs` | Stable chapter-button first/last viewport intent, retained-model entry after trusted destination pixels, and ordinary Webtoon decoded-range edge admission/overlapping replacement demand |
 | `src/reader_desktop.rs` | Nova-derived latest-state native keep-awake worker; Linux portal/screensaver, Windows execution state and macOS caffeinate lifetime |
 | `crates/ui/reader-osd.slint`, `crates/ui/reader-settings.slint` | Responsive bottom OSD with fixed 44px chapter buttons and a single expanding bottom progress slider, aligned compact actions labeled with the effective mode, one More action per layout, animated phone-sheet/desktop-panel controls and shared global settings form under More → Settings → Reader |
 | `src/progress_checkpoint.rs` | One background checkpoint writer, latest offsets coalesced per chapter, failure retry and ordered durable navigation/lifecycle barriers; the 600 ms UI timer only queues progress |
@@ -386,7 +387,9 @@ event loop updates UI models. Download status hints come from bounded manifests
 on a coalesced worker and are cached in the view; rendering never hashes page
 payloads. Opening offline chapters and recovery still verify stored bytes. Navigation work uses cancellation/generation checks.
 The reader covers the complete visible page window plus one prefetch page on
-each side, cancels obsolete fetches and leaves failed pages waiting for Retry.
+each side and cancels obsolete fetches. A blocked reverse gesture keeps a stable
+chapter/page demand separate from the admitted resume anchor. While it waits,
+the visible pages and demanded previous tail replace ordinary neighbor speculation.
 Retained display/model pixel buffers use 32 MiB, with another 32 MiB reserved
 within their 64 MiB accounting budget for replacement references. Display output
 uses bounded visible-row windows at the requested physical width, rather than
@@ -411,7 +414,18 @@ scopes cannot reuse old pixels. A different response releases that original
 before decoding; a full native-size display transfers ownership instead of
 retaining duplicate original pixels. Offscreen decode/prefetch waits until visible
 long pages reach their final window, preserving that one-original cache across
-scrolling; queued tasks recheck the same rule before fetching. This remains full CPU decoding, rather than
+scrolling. Reverse boundary demand instead reserves at most 16 MiB for the
+previous tail from the hard 32 MiB model allowance, using trusted effective
+presentation dimensions to preserve each visible page's physical-width row
+coverage. Visible overscan shrinks first; only its publication releases the
+previous-tail phase. Unknown visible geometry defers that phase until a visible
+completion explicitly restarts scheduling. Queued tasks and publications
+recheck current generation, stable identity, phase and per-page allocation.
+Demand survives tail completion until crossing, reversal or explicit navigation.
+If a visible replacement fails, its surviving retained bytes become a pinned
+allocation floor and the previous tail uses the remaining headroom. Zero legal
+tail rows run normal display admission and expose a terminal limit error.
+This remains full CPU decoding, rather than
 region/streaming decoding or a total process-memory bound. Decoder/native
 conversion and original-RGBA-plus-window-output phases are admitted separately
 within the device decoder allowance (128 MiB by default). Eight-bit RGB/gray
@@ -426,9 +440,11 @@ Prefetch does not mark a chapter read. Transient page-image failures (5xx, 408,
 (0.8s, 2.5s, 6s, 15s; rate limits wait five times longer) so a source blip no
 longer requires leaving and reopening the chapter. Auth, not-found, cancelled,
 unsupported/corrupt images and admission-limit errors never retry. Retries are
-generation- and page-scoped: `Controller::retry_failed_image` re-queues only the
-failed page, navigation/generation changes drop pending retries, and success
-resets the per-page budget; exhausted retries leave the visible failure in place.
+scoped by stable chapter/page identity and deadline: surviving pages keep their
+remaining backoff and consumed attempts across prepend/prune, and overview return
+rebinds suspended deadlines. Removed/replaced readers and pruned pages discard
+old tickets; exhausted/permanent failures stay terminal. Success resets the
+per-page budget.
 Resume stores logical page ID/index and
 intra-page offset, independent of row windows, texture tiles and reflow.
 Automatic in-place chapter crossings enter the destination's first image rather
@@ -503,7 +519,8 @@ generate all installable ZIPs; Reader does not depend on a sibling checkout.
 - Adult visibility and per-series chapter order: `src/reading_preferences.rs`, `tests/reading_preferences.rs`.
 - AVIF image admission/encoding: `crates/reader-engine/src/avif.rs`, `src/reader_export.rs`, `src/image_storage.rs`.
 - Stable ARMv7 AVIF build fix and provenance: Kit `vendor/ferri-pdf-rav1d/PATCHES.md`; AppImage download pins: `docs/packaging.md`.
-- Tall-page row windows and display admission: `crates/reader-engine/src/display.rs`, `src/app.rs` (`request_images`).
+- Tall-page row windows, bounded boundary/entry demand and display admission: `crates/reader-engine/src/display.rs`, `src/app.rs` (`request_images`), `src/reader_scroll_admission.rs`, `src/reader_handoff_tests.rs`.
+- Explicit previous-last/next-first chapter entry: `src/reader_chapter_navigation.rs`; normal Detail/History resume remains `src/reader_open.rs`.
 - Tall-page CPU performance and Mihon comparison: `docs/tall-scroll-performance.md`, `crates/reader-engine/examples/tall_scroll.rs`.
 - Reader tile seams and physical-pixel edges: `crates/ui/app.slint`, `tests/reader_pixel_edges.rs`.
 - Series/chapter layouts, timeline/source groups and reader controls: `crates/ui/library-cards.slint`, `crates/ui/detail-hero.slint`, `crates/ui/timeline.slint`, `crates/ui/source-list.slint`, `tests/reader_design.rs`.
@@ -635,10 +652,44 @@ an unloaded page boundary instead of anchoring into its estimated height. The
 forward viewport may reveal a 48px loading edge; reverse scrolling waits at the
 start of loaded artwork. Real geometry/pixels release the boundary on the next
 scroll, without consuming a wheel/touch overshoot or moving past unread art.
+Ordinary Webtoon gestures also stop at contiguous final decoded-row edges.
+An intra-page edge demand requests an adjacent overlapping strip while keeping
+the admitted viewport covered; completion never replays wheel/touch overshoot.
+Float round trips stay just inside the covered physical row. Actual lack of
+even one spare output row follows the established terminal admission error path.
+Explicit seek/resume may still select an immediate loading anchor, where later
+ordinary gestures wait for its replacement pixels. Chapter gaps and the 48px
+unknown-page loading edge remain separate coordinate cases.
 Terminal image errors remain visible and skippable. Explicit seek/resume anchors
 remain authoritative; no scroll hot path reads KV.
 
+Previous/Next chapter buttons use stable edge intent in the retained model.
+Previous prepares the destination's last paged image/half or exact Webtoon tail
+viewport; Next prepares its first image/start viewport. Short entry images are
+measured and retained sequentially across the needed viewport, sharing at most
+16 MiB of handoff headroom after old-visible floors within the hard 32 MiB model.
+The reader keeps its admitted viewport until actual effective geometry and pixels
+permit entry. Settling zoom reconciles that live source anchor for byte planning
+without committing destination progress. Terminal errors clear pending intent;
+transient retries preserve it. Mode remains stable; every chapter enters at 1×,
+and explicit page input cancels pending chapter intent. These buttons ignore arbitrary saved destination
+resumes; ordinary Detail/History opens keep their normal resume policy.
+The target is captured relative to the chapter active at the button press.
+Active zoom first settles to reconcile the actual old source viewport, then
+returns to 1× before destination layout. The same preparation runs before an
+asynchronous entry commits; programmatic settlement cannot cancel its intent.
+Opening Pages cancels pending chapter/boundary intent and snapshots settled zoom,
+so Back restores the original reader route even if destination pixels arrive late.
+Collection viewers route directional group actions through their existing group
+overview controller instead of manga continuation.
+
 Continuous reading attaches prepared chapters to the same page model in Webtoon and paged modes.
+Continuation uses the same metadata-only stable page inventory as direct entry,
+including usable partial downloads and individually unavailable offline pages;
+original verification and geometry probing occur only for selected image work.
+Every prepend/prune explicitly restarts current-generation image scheduling in
+all modes. Returning from Pages clears cancelled request markers and explicitly
+resumes image and continuation scheduling while retaining existing pixels.
 Paged frames use local image pan coordinates; Webtoon's chapter-stacked resume
 offset never translates a paged frame. Both viewport dimensions bind directly
 to the live reader frame, including its initial mount. Paged zoom scales the contained image
@@ -653,10 +704,24 @@ unchanged. Above 1.01×, single taps only toggle controls, bypassing all tap zon
 and inversion choices; double tap still toggles fit/2× and long press opens the
 image menu. Pinch entry cancels pending taps/holds/gallery motion, and its
 remaining finger is consumed through release.
+Webtoon zoom follows a stable page and local image fraction rather than scaling
+fixed chapter gaps as image content. Animation frames share one cached page
+index; settled width changes reproject rows/boundaries in place before restoring
+the source point. Duplicate logical-size reflow callbacks refresh detail without
+restoring stale pan or replacing retained tile handles.
 Per-page chapter/source ownership keeps caches, export filenames and progress
-canonical; old segments are pruned in place to retain previous/current/next,
-with a fresh generation rejecting old indexed tasks. A small boundary row names
-both chapters in Webtoon; paged crossings show a brief caption with both names. Completion is tracked per chapter and split spreads complete only after their second half. Periodic checkpoint storage remains off the UI thread.
+canonical; old segments are pruned in place toward previous/current/next,
+retaining additional segments while the viewport genuinely spans tiny chapters.
+Tail eligibility follows the visible bottom instead of requiring a short tail
+to become the top anchor. Offscreen excess is pruned first while preserving the
+nearest neighbors. Metadata work uses one actual worker and one latest pending
+request: reverse demand cancels opposite speculation and replaces pending work;
+an uncooperative cancelled provider retains the sole slot until it returns.
+Per-chapter directional errors remain independent, and a failure immediately
+advances the other eligible edge. Tokens/nonces discard superseded results,
+with a fresh generation rejecting old indexed tasks. A 96px boundary row names
+both chapters in Webtoon, with its arrow centered vertically; paged crossings
+use the same 96px caption extent. Completion is tracked per chapter and split spreads complete only after their second half. Periodic checkpoint storage remains off the UI thread.
 
 Reader sync stores one record per source-scoped identity under
 `profile_domain("reader", "reader_<kind>")`, never a replicated whole-state

@@ -111,6 +111,24 @@ Display crop/split/rotation and tint/grayscale/inversion operate on bounded
 windows from the immutable source. Source-resolution screencaps use the same
 geometry/filter mappings; saving an original page preserves original bytes.
 
+Chapter buttons preserve the current mode and start the destination at **1×**.
+**Previous chapter** enters
+the last image (the last spread half when split), or the exact trailing chapter
+viewport in Webtoon; **Next chapter** enters the first image/start. They prepare
+the destination in the existing reader and wait for real geometry/pixels before
+entering it. Opening through Detail or History still resumes the
+chapter's saved position.
+An active zoom settles the old source position, then returns to 1× before chapter
+positioning. Opening Pages cancels a pending chapter change and reconciles the
+actual settled source position without writing progress or history or changing
+completion flags. Back restores that same position, pan and zoom.
+In collection viewers, group buttons return to the selected group's gallery grid.
+
+Ordinary Webtoon gestures stop at loaded page and decoded strip edges while
+the next overlapping strip loads. Completion keeps the admitted source point
+and does not replay a large gesture. Explicit seek/resume may select a loading
+position immediately. Chapter separators and transition captions are 96px high.
+
 
 ## Desktop webtoon sizing
 

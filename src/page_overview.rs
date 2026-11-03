@@ -92,10 +92,32 @@ impl Controller {
         }
     }
     pub(super) fn open_page_overview(self: &Arc<Self>, ui: &AppWindow) {
-        let (series, chapter, start, inventory, snapshot) = {
-            let view = self.view();
+        {
+            let mut view = self.view();
             if view.section != 6 {
                 return;
+            }
+            if let Some(reader) = view.reader.as_mut() {
+                reader.chapter_navigation = None;
+                reader.reverse_demand = None;
+                reader.window_demand = None;
+            }
+        }
+        // Clear destination intent before zoom settlement can reflow; snapshot
+        // the resulting source anchor and geometry, with no view lock held by
+        // the callback itself.
+        self.settle_reader_zoom(ui, PositionOrigin::OverviewSettlement);
+        let (series, chapter, start, inventory, snapshot) = {
+            let mut view = self.view();
+            if view.section != 6 {
+                return;
+            }
+            if let Some(reader) = view.reader.as_mut() {
+                // Settling may emit a normal scroll callback; Pages owns a
+                // neutral return route rather than its boundary demand.
+                reader.chapter_navigation = None;
+                reader.reverse_demand = None;
+                reader.window_demand = None;
             }
             let Some(reader) = &view.reader else {
                 return;
@@ -137,6 +159,7 @@ impl Controller {
                             },
                         ),
                         // Verified local metadata is filled on the worker below.
+                        #[cfg(test)]
                         PageInput::Local { .. } => ResourceKind::Unavailable {
                             message: text::tr("Full-resolution image is unavailable offline"),
                         },
@@ -482,7 +505,7 @@ impl Controller {
             reader.anchor = snapshot.anchor;
             reader.viewport_width = snapshot.width;
             reader.viewport_height = snapshot.height;
-            reader.requested = reader.retained.clone();
+            reader.requested.clear();
             if let Some(index) = index {
                 reader.anchor =
                     ResumeAnchor::new(reader.page_id(index), index, 0.).unwrap_or_default();
@@ -501,6 +524,8 @@ impl Controller {
         }
         let index = self.view().reader.as_ref().unwrap().anchor.page_index;
         self.request_images(ui, index);
+        self.resume_image_retries(ui);
+        self.maybe_preload_next(ui);
         self.view().overview = Some(o);
     }
     pub(super) fn overview_check_current(self: &Arc<Self>, ui: &AppWindow) {
@@ -611,7 +636,7 @@ mod tests {
         crate::reader_settings::init().unwrap();
         let ui = AppWindow::new().unwrap();
         let services = Services::open(&directory.path().join("reader")).unwrap();
-        let (images, _receiver) = mpsc::channel();
+        let (images, receiver) = mpsc::channel();
         let app = Arc::new(Controller {
             progress_checkpoint: crate::progress_checkpoint::ProgressWriter::new(
                 services.domain.clone(),
@@ -635,6 +660,7 @@ mod tests {
             images,
             download_serial: Mutex::new(()),
             active_image: Mutex::new(None),
+            continuation_work: Default::default(),
             metadata_refresh: Arc::default(),
         });
         ui.global::<crate::Anim>().set_enabled(false);
@@ -703,6 +729,21 @@ mod tests {
             }
             let pan = (ui.get_scroll_x(), ui.get_scroll_y());
             let anchor = app.view().reader.as_ref().unwrap().anchor.clone();
+            {
+                let mut view = app.view();
+                let r = view.reader.as_mut().unwrap();
+                r.retained.insert(0);
+                r.decoded_widths.insert(0, 16384);
+                let window = reader_engine::DisplayWindowPlan {
+                    width: 720,
+                    full_height: 20000,
+                    first_row: 6000,
+                    rows: 4096,
+                };
+                r.decoded_windows.insert(0, window);
+                r.decoded_bytes.insert(0, window.byte_len());
+            }
+            while receiver.try_recv().is_ok() {}
             let state = app.services.domain.snapshot().unwrap();
             ui.invoke_reader_action("pages".into());
             assert_eq!(ui.get_section(), 23);
@@ -738,6 +779,19 @@ mod tests {
             assert_eq!(ui.get_zoom(), 2.);
             assert_eq!(ui.get_scroll_x(), pan.0);
             assert_eq!(ui.get_scroll_y(), pan.1);
+            // The retained strip needs a different source window on return.
+            // Retained pixels must never masquerade as a current-generation task.
+            if mode == ReadingMode::Webtoon {
+                app.view().reader.as_mut().unwrap().anchor =
+                    ResumeAnchor::new("page-0", 0, 0.8).unwrap();
+                app.request_images(&ui, 0);
+            }
+            let generation = app.generation.load(Ordering::Acquire);
+            assert!(
+                receiver
+                    .try_iter()
+                    .any(|task| task.generation == generation && task.index == 0)
+            );
             ui.invoke_reader_action("pages".into());
             for _ in 0..8 {
                 i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));

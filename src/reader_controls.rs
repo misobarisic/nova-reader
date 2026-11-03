@@ -11,11 +11,73 @@ const MIN_ZOOM: f32 = 0.5;
 const MAX_ZOOM: f32 = 8.;
 
 /// A fixed source anchor avoids drift while an axis changes from contained to
-/// pannable during an animated zoom. Webtoon y is in fit-column widths.
-#[derive(Clone, Copy)]
+/// pannable during an animated zoom. Webtoon image points are page-local so
+/// fixed chapter gaps can be reprojected independently of image scaling.
+#[derive(Clone)]
 struct ZoomAnchor {
     source: (f32, f32),
     target: (f32, f32),
+    webtoon: Option<WebtoonZoomAnchor>,
+}
+
+#[derive(Clone)]
+struct WebtoonZoomAnchor {
+    page_id: slint::SharedString,
+    fraction: f32,
+    // Frame snapshots share the rebase cache without holding an animation
+    // RefCell borrow across Slint callbacks. Missing pages stay unresolved.
+    index: Rc<Cell<Option<usize>>>,
+}
+
+impl WebtoonZoomAnchor {
+    fn capture(ui: &AppWindow, source_y: f32) -> Option<Self> {
+        let rows = ui.get_pages();
+        let (mut low, mut high) = (0, rows.row_count());
+        while low < high {
+            let mid = low + (high - low) / 2;
+            if rows.row_data(mid)?.position <= source_y {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        let index = low.checked_sub(1)?;
+        let row = rows.row_data(index)?;
+        let fraction = (source_y - row.position) / row.ratio;
+        // A gap has no image point. Preserve the established global fallback.
+        if row.page_id.is_empty()
+            || row.ratio <= 0.
+            || !fraction.is_finite()
+            || !(0. ..1.).contains(&fraction)
+        {
+            return None;
+        }
+        Some(Self {
+            page_id: row.page_id,
+            fraction,
+            index: Rc::new(Cell::new(Some(index))),
+        })
+    }
+
+    fn source_y(&self, ui: &AppWindow, width: f32) -> Option<f32> {
+        let rows = ui.get_pages();
+        let index = self.index.get()?;
+        let row = rows
+            .row_data(index)
+            .filter(|row| row.page_id == self.page_id)
+            .or_else(|| {
+                // Prepend/prune can move the stable page. Search once, then
+                // use its new index in every subsequent animation snapshot.
+                let found = (0..rows.row_count()).find_map(|index| {
+                    rows.row_data(index)
+                        .filter(|row| row.page_id == self.page_id)
+                        .map(|row| (index, row))
+                });
+                self.index.set(found.as_ref().map(|(index, _)| *index));
+                found.map(|(_, row)| row)
+            })?;
+        Some((row.position + self.fraction * row.ratio) * width)
+    }
 }
 
 fn zoom_geometry(ui: &AppWindow) -> (f32, f32, f32) {
@@ -45,16 +107,20 @@ impl ZoomAnchor {
         let vw = ui.get_reader_viewport_width().max(1.);
         let vh = ui.get_reader_viewport_height().max(1.);
         let (width, height, margin) = zoom_geometry(ui);
+        let source = (
+            (from.0.clamp(0., 1.) * vw - ui.get_scroll_x() - (vw - width).max(0.) / 2.) / width,
+            (from.1.clamp(0., 1.) * vh - ui.get_scroll_y() - margin) / height,
+        );
         Self {
-            source: (
-                (from.0.clamp(0., 1.) * vw - ui.get_scroll_x() - (vw - width).max(0.) / 2.) / width,
-                (from.1.clamp(0., 1.) * vh - ui.get_scroll_y() - margin) / height,
-            ),
+            source,
             target: (to.0.clamp(0., 1.), to.1.clamp(0., 1.)),
+            webtoon: (ui.get_reading_mode() == 0)
+                .then(|| WebtoonZoomAnchor::capture(ui, source.1))
+                .flatten(),
         }
     }
 
-    fn apply(self, ui: &AppWindow, zoom: f32) {
+    fn apply(&self, ui: &AppWindow, zoom: f32) {
         ui.set_zoom(zoom.clamp(MIN_ZOOM, MAX_ZOOM));
         let vw = ui.get_reader_viewport_width().max(1.);
         let vh = ui.get_reader_viewport_height().max(1.);
@@ -68,26 +134,37 @@ impl ZoomAnchor {
         } else {
             ui.get_total_ratio() * width
         };
+        let source_y = self
+            .webtoon
+            .as_ref()
+            .filter(|_| ui.get_reading_mode() == 0)
+            .and_then(|anchor| anchor.source_y(ui, width))
+            .unwrap_or(self.source.1 * height);
         ui.set_scroll_y(
-            -(margin + self.source.1 * height - self.target.1 * vh)
-                .clamp(0., (content_height - vh).max(0.)),
+            -(margin + source_y - self.target.1 * vh).clamp(0., (content_height - vh).max(0.)),
         );
     }
 }
 
 /// Keep the source point beneath moving fingers, including contained margins.
-fn apply_zoom_transform(ui: &AppWindow, zoom: f32, from: (f32, f32), to: (f32, f32)) -> bool {
+fn apply_zoom_transform(
+    ui: &AppWindow,
+    zoom: f32,
+    from: (f32, f32),
+    to: (f32, f32),
+) -> Option<ZoomAnchor> {
     if ![zoom, from.0, from.1, to.0, to.1]
         .into_iter()
         .all(f32::is_finite)
     {
-        return false;
+        return None;
     }
-    ZoomAnchor::capture(ui, from, to).apply(ui, zoom);
-    true
+    let anchor = ZoomAnchor::capture(ui, from, to);
+    anchor.apply(ui, zoom);
+    Some(anchor)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct ZoomAnimation {
     anchor: ZoomAnchor,
     start: f32,
@@ -265,7 +342,7 @@ pub(super) fn wire(app: &Arc<Controller>, ui: &AppWindow) {
         let weak = ui.as_weak();
         let animation = zoom_animation.clone();
         move |progress| {
-            let frame = *animation.borrow();
+            let frame = animation.borrow().clone();
             if let Some(ui) = weak.upgrade()
                 && let Some(frame) = frame
             {
@@ -314,6 +391,7 @@ pub(super) fn wire(app: &Arc<Controller>, ui: &AppWindow) {
             if let Some(ui) = weak.upgrade() {
                 let previous_target = animation
                     .borrow()
+                    .as_ref()
                     .map(|frame| frame.target)
                     .unwrap_or(ui.get_zoom());
                 ui.invoke_cancel_reader_zoom();
@@ -582,6 +660,10 @@ impl Controller {
         let Some(reader) = view.reader.as_mut() else {
             return;
         };
+        reader.reverse_demand = None;
+        reader.window_demand = None;
+        reader.chapter_navigation = None;
+        let previous_index = reader.anchor.page_index;
         let start = reader
             .chapter_segment(reader.anchor.page_index)
             .map(|s| s.start)
@@ -605,6 +687,9 @@ impl Controller {
         let fraction = (remaining / reader.ratios[index]).clamp(0., 1.);
         reader.anchor = ResumeAnchor::new(reader.page_id(index), index, f64::from(fraction))
             .unwrap_or_default();
+        if index != previous_index {
+            reader.continuity_backwards = index < previous_index;
+        }
         view.pending = Some(reader.progress_record());
         drop(view);
         ui.set_current_page(index as i32);
@@ -653,8 +738,11 @@ impl Controller {
 
     pub(super) fn reader_zoom(&self, ui: &AppWindow, zoom: f32, x: f32, y: f32) {
         ui.invoke_cancel_reader_zoom();
-        if apply_zoom_transform(ui, zoom, (x, y), (x, y)) && ui.get_reading_mode() != 0 {
+        if let Some(anchor) = apply_zoom_transform(ui, zoom, (x, y), (x, y)) {
             self.reflow(ui, ui.get_reader_width(), ui.get_reader_viewport_height());
+            // Fixed gaps are reprojected at settled widths. Slint's width
+            // notification can arrive later, so settle explicitly first.
+            anchor.apply(ui, zoom);
         }
     }
 
@@ -663,9 +751,10 @@ impl Controller {
         if !factor.is_finite() || factor <= 0. {
             return;
         }
-        if apply_zoom_transform(ui, ui.get_zoom() * factor, from, to) && ui.get_reading_mode() != 0
-        {
+        let zoom = ui.get_zoom() * factor;
+        if let Some(anchor) = apply_zoom_transform(ui, zoom, from, to) {
             self.reflow(ui, ui.get_reader_width(), ui.get_reader_viewport_height());
+            anchor.apply(ui, zoom);
         }
     }
 
@@ -849,6 +938,168 @@ mod tests {
         ((x - origin.x) / size.width, (y - origin.y) / size.height)
     }
 
+    fn chapter_gap_zoom_anchors_use_reprojected_image_points(
+        ui: &AppWindow,
+        app: &Arc<Controller>,
+    ) {
+        ui.set_reading_mode(0);
+        ui.set_reader_platform_android(false);
+        ui.set_zoom(1.);
+        let mut reader = super::super::tests::tall_reader();
+        reader.ratios = vec![3.; 2];
+        reader.retained = (0..2).collect();
+        reader.requested = (0..2).collect();
+        reader.anchor = ResumeAnchor::new("page-1", 1, 0.35).unwrap();
+        let next = ChapterId::new(reader.chapter.series.clone(), "next");
+        reader.segments = vec![
+            super::super::reader_continuity::ChapterSegment {
+                chapter: reader.chapter.clone(),
+                title: "First".into(),
+                start: 0,
+                end: 1,
+                source: None,
+                completed: false,
+            },
+            super::super::reader_continuity::ChapterSegment {
+                chapter: next.clone(),
+                title: "Next".into(),
+                start: 1,
+                end: 2,
+                source: None,
+                completed: false,
+            },
+        ];
+        reader.chapter = next;
+        reader.viewport_width = ui.get_reader_width();
+        let rows = Rc::new(VecModel::from(
+            (0..2)
+                .map(|index| PageRow {
+                    page_id: reader.row_page_id(index).into(),
+                    position: reader.page_position(index),
+                    ratio: reader.ratios[index],
+                    loaded: true,
+                    tiles: ModelRc::new(VecModel::from(vec![TileRow {
+                        image: slint::Image::from_rgb8(slint::SharedPixelBuffer::new(200, 600)),
+                        fraction: 1.,
+                        ..Default::default()
+                    }])),
+                    ..Default::default()
+                })
+                .collect::<Vec<_>>(),
+        ));
+        ui.set_total_ratio(reader.total_extent());
+        app.view().reader = Some(reader);
+        ui.set_pages(ModelRc::from(rows.clone()));
+        ui.set_current_page(1);
+        // Include the real delayed Slint width callback as well as the explicit
+        // settlement in reader_transform; neither may undo the final anchor.
+        ui.on_reader_reflow({
+            let app = app.clone();
+            let weak = ui.as_weak();
+            move |width, height| {
+                if let Some(ui) = weak.upgrade() {
+                    app.reflow(&ui, width, height);
+                }
+            }
+        });
+        ui.global::<crate::Anim>().set_enabled(true);
+        ui.global::<crate::ReaderSettings>()
+            .set_page_animations(true);
+        for (width, height) in [(390., 844.), (1280., 800.)] {
+            ui.window().set_size(LogicalSize::new(width, height));
+            advance(100);
+            app.reader_zoom(ui, 1., 0.5, 0.4);
+            let (vw, vh) = (
+                ui.get_reader_viewport_width(),
+                ui.get_reader_viewport_height(),
+            );
+            let point = (vw * 0.5, vh * 0.4);
+            let row = rows.row_data(1).unwrap();
+            ui.set_scroll_y(-(row.position + row.ratio * 0.35) * ui.get_reader_width() + point.1);
+            advance(20);
+            let expected = source_at(ui, point.0, point.1);
+            for factor in [2., 0.5, 1.5, 2. / 3.] {
+                ui.invoke_reader_zoom_by(factor, 0.5, 0.4);
+                advance(40);
+                let actual = source_at(ui, point.0, point.1);
+                assert!(
+                    (expected.1 - actual.1).abs() < 0.003,
+                    "fixed-gap zoom {factor} at {width}x{height}: {expected:?} -> {actual:?}"
+                );
+                let gap = (rows.row_data(1).unwrap().position - rows.row_data(0).unwrap().ratio)
+                    * ui.get_reader_width();
+                assert!((gap - 96.).abs() < 0.01, "chapter gap stays 96px");
+            }
+            ui.invoke_reader_transform(1.5, 0.5, 0.4, 0.5, 0.55);
+            advance(40);
+            let moved = source_at(ui, point.0, vh * 0.55);
+            assert!(
+                (expected.1 - moved.1).abs() < 0.003,
+                "moving pinch midpoint"
+            );
+            ui.invoke_reader_transform(2. / 3., 0.5, 0.55, 0.5, 0.4);
+            advance(40);
+            for _ in 0..2 {
+                ui.invoke_reader_double_tap(0.5, 0.4);
+                advance(80);
+                let frame = source_at(ui, point.0, point.1);
+                assert!((expected.1 - frame.1).abs() < 0.003, "animated image point");
+                advance(180);
+                let settled = source_at(ui, point.0, point.1);
+                assert!(
+                    (expected.1 - settled.1).abs() < 0.003,
+                    "settled image point"
+                );
+            }
+        }
+
+        // A pointer in the gap has no page-local image point to preserve.
+        let width = ui.get_reader_width();
+        let boundary = rows.row_data(0).unwrap().ratio * width;
+        ui.set_scroll_y(-(boundary + 48.) + ui.get_reader_viewport_height() * 0.4);
+        assert!(
+            ZoomAnchor::capture(ui, (0.5, 0.4), (0.5, 0.4))
+                .webtoon
+                .is_none()
+        );
+
+        let row = rows.row_data(1).unwrap();
+        ui.set_scroll_y(
+            -(row.position + row.ratio * 0.35) * width + ui.get_reader_viewport_height() * 0.4,
+        );
+        let anchor = ZoomAnchor::capture(ui, (0.5, 0.4), (0.5, 0.4));
+        let snapshot = anchor.clone();
+        let prefix = 1. + 96. / width;
+        let mut rebased = vec![PageRow {
+            page_id: "prepended-page".into(),
+            ratio: 1.,
+            ..Default::default()
+        }];
+        for mut row in rows.iter() {
+            row.position += prefix;
+            rebased.push(row);
+        }
+        ui.set_pages(ModelRc::new(VecModel::from(rebased.clone())));
+        ui.set_total_ratio(ui.get_total_ratio() + prefix);
+        anchor.apply(ui, ui.get_zoom());
+        let cached = snapshot.webtoon.as_ref().unwrap();
+        assert_eq!(
+            cached.index.get(),
+            Some(2),
+            "frame snapshots share the rebased index"
+        );
+        let resolved = cached.source_y(ui, width).unwrap();
+        assert!((resolved - (rebased[2].position + 0.35 * rebased[2].ratio) * width).abs() < 0.01);
+        rebased.pop();
+        ui.set_pages(ModelRc::new(VecModel::from(rebased)));
+        assert!(cached.source_y(ui, width).is_none());
+        assert_eq!(
+            cached.index.get(),
+            None,
+            "a pruned anchor does not rescan every frame"
+        );
+    }
+
     #[test]
     fn native_zoom_and_zoomed_taps_use_production_controller() {
         const CHILD: &str = "READER_ZOOM_CONTROL_CHILD";
@@ -905,6 +1156,7 @@ mod tests {
             images,
             download_serial: Mutex::new(()),
             active_image: Mutex::new(None),
+            continuation_work: Default::default(),
             capture_originals: Mutex::default(),
             thumbnail_service: OnceLock::new(),
             metadata_refresh: Arc::default(),
@@ -1244,6 +1496,7 @@ mod tests {
                 }
             }
         }
+        chapter_gap_zoom_anchors_use_reprojected_image_points(&ui, &app);
         app.invalidate();
     }
 }

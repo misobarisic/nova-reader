@@ -210,6 +210,7 @@ fn render_reader_settings_previews() {
         images,
         download_serial: Mutex::new(()),
         active_image: Mutex::new(None),
+        continuation_work: Default::default(),
         metadata_refresh: Arc::default(),
     });
     reader_controls::wire(&app, &ui);
@@ -484,6 +485,7 @@ fn paged_first_frame_and_zoom_keep_native_detail_at_android_density() {
         images,
         download_serial: Mutex::new(()),
         active_image: Mutex::new(None),
+        continuation_work: Default::default(),
         metadata_refresh: Arc::default(),
     });
     reader_controls::wire(&app, &ui);

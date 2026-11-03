@@ -681,6 +681,7 @@ mod tests {
             images,
             download_serial: Mutex::default(),
             active_image: Mutex::default(),
+            continuation_work: Default::default(),
             metadata_refresh: Arc::default(),
         });
         let owner = Arc::downgrade(&app);
@@ -1001,6 +1002,67 @@ mod tests {
             app.view().overview.as_ref().unwrap().chapter.local_id,
             "multi-a"
         );
+        ui.invoke_overview_selected("stable-0".into());
+        let owner = Arc::downgrade(&app);
+        pump(&ui, move |ui| {
+            ui.get_section() == 6
+                && !ui.get_reader_opening()
+                && owner.upgrade().is_some_and(|app| {
+                    app.view()
+                        .reader
+                        .as_ref()
+                        .is_some_and(|reader| reader.collection && reader.has_visible_pixels(0))
+                })
+        });
+        assert!(
+            app.view()
+                .reader
+                .as_ref()
+                .unwrap()
+                .chapter_navigation
+                .is_none()
+        );
+        ui.invoke_reader_action("next-chapter".into());
+        assert_eq!(
+            ui.get_section(),
+            23,
+            "viewer Next group uses the gallery route"
+        );
+        assert!(
+            app.view().reader.is_none(),
+            "a collection action cannot wait on manga continuation"
+        );
+        pump(&ui, |ui| !ui.get_overview_busy());
+        assert_eq!(
+            app.view().overview.as_ref().unwrap().chapter.local_id,
+            "multi-b"
+        );
+        assert_eq!(ui.get_overview_tiles().row_count(), 1);
+        ui.invoke_overview_selected("stable-0".into());
+        let owner = Arc::downgrade(&app);
+        pump(&ui, move |ui| {
+            ui.get_section() == 6
+                && !ui.get_reader_opening()
+                && owner.upgrade().is_some_and(|app| {
+                    app.view()
+                        .reader
+                        .as_ref()
+                        .is_some_and(|reader| reader.collection && reader.has_visible_pixels(0))
+                })
+        });
+        ui.invoke_reader_action("previous-chapter".into());
+        assert_eq!(
+            ui.get_section(),
+            23,
+            "viewer Previous group uses the gallery route"
+        );
+        assert!(app.view().reader.is_none());
+        pump(&ui, |ui| !ui.get_overview_busy());
+        assert_eq!(
+            app.view().overview.as_ref().unwrap().chapter.local_id,
+            "multi-a"
+        );
+        assert_eq!(ui.get_overview_tiles().row_count(), 3);
         ui.invoke_overview_group_selected(1);
         assert!(ui.get_overview_busy());
         pump(&ui, |ui| !ui.get_overview_busy());
