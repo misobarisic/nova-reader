@@ -61,6 +61,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `crates/ui/media-models.slint` | Shared series/chapter/timeline/source/extension/filter row models |
 | `crates/ui/library-cards.slint`, `crates/ui/display-settings.slint` | Nova poster/list painting and left-anchored progress fill shown after a chapter is read, per-entry context gestures, viewport admission, grid/list switch and persisted display choices |
 | `../nova-kit/crates/cache`, `../nova-kit/crates/ui-base/slint/cache-settings-controls.slint` | Actual Nova cache/settings implementations and NumericSetting/cache controls shared by Nova and Reader; app persistence/search/sync adapters remain local |
+| `src/library_navigation.rs`, `crates/ui/library-page.slint` | Device-local `reader:library-navigation:v1` last selected stable category; session-only per-category SeriesId/row-fraction anchors and Nova's pinned sibling header/native LibraryScroll |
 | `crates/ui/library-search.slint` | Retained Nova search reveal, deferred focus, live filtering and viewport-aware field exposure |
 | `crates/ui/entry-menu.slint`, `crates/ui/status-menu.slint` | Per-title Kit action sheet/anchored desktop menu, copied Nova Change status picker, stable-identity category editing, series mark-all read/unread, series clear-all chapter positions and library/refresh actions, Default/Reader/Gallery presentation and collection Metadata/Download actions |
 | `crates/ui/detail-hero.slint`, `crates/ui/title-artwork.slint`, `crates/ui/chapter-row.slint` | Nova detail artwork/title/metadata/actions, retained synopsis state, chapter-ready Continue gating, compact chapter rows and accessible action popup |
@@ -104,7 +105,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `crates/reader-sources/tests/cookies.rs`, `.github/scripts/test_package_cookie_permissions.py` | Cookie permissions, isolated/concurrent sessions, cache identity, update re-enabling and native/Python manifest parity |
 | `tests/reader_settings.rs`, `tests/reader_gestures.rs`, `src/reader_preview.rs` | Process-restart defaults/overrides and validation, actual touch gesture cancellation, and optional production phone/desktop raster previews (including the 96px chapter separator via `READER_UI_PREVIEW_BOUNDARIES_ONLY=1`) |
 | `tests/reader_modes.rs` | Per-series mode restart persistence, explicit Automatic/legacy migration, source identity isolation and accessible short-viewport mode options |
-| `tests/library_navigation.rs`, `tests/source_paging.rs` | Search reveal/focus and retained detail context; automatic viewport paging, short-page fill, Retry and saved catalogue scroll |
+| `tests/library_navigation.rs`, `tests/library_preview.rs`, `tests/source_paging.rs` | Pinned Library categories, stable row restoration, search/focus and retained detail context; native Library previews; automatic viewport paging, short-page fill, Retry and saved catalogue scroll |
 | `tests/library_progress.rs` | Phone/desktop grid/list progress geometry from unread through complete, including small left-anchored fills |
 | `tests/entry_menu.rs`, `tests/reading_preferences.rs` | Per-title gestures/category identity, durable source visibility/chapter ordering and failed-write behavior |
 | `tests/reader_pixel_edges.rs`, `crates/reader-engine/tests` | Physical-pixel shared tile/page edges across fractional scroll/scales, plus AVIF fixtures and decode admission |
@@ -502,7 +503,7 @@ generate all installable ZIPs; Reader does not depend on a sibling checkout.
 - Progressive JPEG XL reader previews and strict final handoff: `src/reader_progressive.rs`, `src/app.rs::image_worker`, `src/chapter_cache.rs::read_with_chunks`; neutral streamed-EOF regressions live with the progressive module.
 - Addon icons and source filters: `src/addon_icons.rs`, `crates/ui/addon-icon.slint`, `src/source_filters.rs`, `crates/reader-sources/src/package.rs`; optional `manifest.icon` must name a declared PNG asset. Multiple/include/exclude groups use existing Nova setting rows with typed JSON output.
 - Shared cache implementation/settings: Kit `crates/cache` and `crates/ui-base/slint/cache-settings-controls.slint`; Reader `src/chapter_cache.rs`, `src/image_storage.rs` and `tests/image_storage.rs`.
-- Library search, retained details and per-title actions: `crates/ui/library-search.slint`, `crates/ui/entry-menu.slint`, `src/app.rs`, `tests/library_navigation.rs`, `tests/entry_menu.rs`.
+- Library location, pinned controls, search and per-title actions: `src/library_navigation.rs`, `crates/ui/library-page.slint`, `crates/ui/library-search.slint`, `crates/ui/entry-menu.slint`, `tests/library_navigation.rs`, `tests/entry_menu.rs`.
 - Automatic source paging and Retry: `src/app.rs` (`browse`/`complete_browse`), `crates/ui/app.slint`, `tests/source_paging.rs`.
 - Per-entry Reader/Gallery preferences and optional addon hints: `src/content_presentation.rs`, `src/services.rs::Services::series`, `tests/content_presentation.rs`.
 - Automatic/manual reader mode and per-series overrides: `src/reader_modes.rs`, `docs/reader-modes.md`, `tests/reader_modes.rs`.
@@ -566,8 +567,18 @@ mouse hover. Rows, navigation, hero actions and context sheets use Kit's exact
 feedback. Reader image/card gestures keep their existing drag/hold cancellation.
 
 Library follows Nova’s control order: category rail (the default tab is “All”),
-then sorting and the grid/list/search icons. Search retains its existing narrow
-and wide reveal placement and keyboard viewport handling.
+then sorting and the grid/list/search icons. The category/sort/search controls
+reuse Nova's sibling overlay and native `LibraryScroll`; only the hero scrolls
+away. The category lane pans horizontally, outside the vertical content scroller.
+Per-category row positions survive navigation only during the current app
+session. Only the last selected category survives restart in the device-local
+`reader:library-navigation:v1` record, outside backups and sync.
+Anchors use complete serialized SeriesIds and row fractions, independent of cover
+URLs; restore resolves the current index and clamps after layout/resize. Scroll
+callbacks update memory without storing row positions. Category changes queue
+background writes; navigation/lifecycle flushes preserve the last selected
+category. Search retains its existing narrow and wide reveal placement and
+keyboard viewport handling.
 
 `reader-domain/src/library_status.rs` adapts Nova's actual `WatchStatus` and
 progress bucket decision order to Reading, Plan to read, Completed, Dropped and On hold.

@@ -23,6 +23,9 @@ use std::{
 #[path = "downloads.rs"]
 mod downloads;
 
+#[path = "library_navigation.rs"]
+mod library_navigation;
+
 static LIFECYCLE: OnceLock<Weak<Controller>> = OnceLock::new();
 #[path = "gallery_presentation.rs"]
 mod gallery_presentation;
@@ -1020,7 +1023,7 @@ struct View {
     has_more: bool,
     catalogue_page_error: String,
     pending: Option<ReadingProgress>,
-    category: usize,
+    library_navigation: library_navigation::State,
     settings_package: Option<String>,
     source_filters: crate::source_filters::FilterSet,
     source_browser: crate::source_browser::SourceBrowser,
@@ -1269,6 +1272,10 @@ impl Controller {
         });
     }
     fn flush(&self) {
+        self.checkpoint_library();
+        if let Err(error) = library_navigation::flush() {
+            eprintln!("Nova Reader: could not save Library location: {error}");
+        }
         self.checkpoint_progress();
         if let Err(error) = self.progress_checkpoint.flush(None) {
             eprintln!("Nova Reader: could not save reading position: {error}");
@@ -1426,17 +1433,15 @@ impl Controller {
             ui.set_series_title(reader_series_title(&view).unwrap_or("Series").into());
         }
         let builtins = reader_domain::ReadingStatus::BUILTINS;
-        if view.category > builtins.len() + snapshot.categories.len() {
-            view.category = 0;
-        }
-        ui.set_category_index(view.category as i32);
-        let category_id = view
-            .category
+        view.library_navigation
+            .reconcile_categories(&snapshot.categories);
+        let category = view.library_navigation.category_index(&snapshot.categories);
+        ui.set_category_index(category as i32);
+        let category_id = category
             .checked_sub(builtins.len() + 1)
             .and_then(|index| snapshot.categories.get(index))
             .map(|category| category.id.clone());
-        let status_filter = view
-            .category
+        let status_filter = category
             .checked_sub(1)
             .and_then(|index| builtins.get(index))
             .copied();
@@ -1873,6 +1878,20 @@ impl Controller {
         if view.section != 7 {
             ui.set_items(ModelRc::new(VecModel::from(items)));
         }
+        if view.section == 0 {
+            let position = view.library_navigation.position(&snapshot.categories);
+            let index = view.rows.iter().position(|row| {
+                matches!(row, Row::Series(series) if !position.series_key.is_empty() && serde_json::to_string(&series.id).ok().as_deref() == Some(position.series_key.as_str()))
+            });
+            ui.set_library_scroll_y(position.scroll_y);
+            ui.set_library_restore_index(
+                index
+                    .and_then(|index| i32::try_from(index).ok())
+                    .unwrap_or(-1),
+            );
+            ui.set_library_restore_fraction(position.fraction);
+            ui.set_library_restore_serial(ui.get_library_restore_serial().wrapping_add(1));
+        }
         ui.set_has_more(view.section == 3 && view.has_more);
         ui.set_catalogue_page_error(view.catalogue_page_error.clone().into());
         ui.set_sources(ModelRc::new(VecModel::from(
@@ -2105,6 +2124,7 @@ impl Controller {
         }
     }
     fn navigate(self: &Arc<Self>, ui: &AppWindow, section: i32) {
+        ui.invoke_remember_library_position();
         if section == 23 && self.gallery_return(ui) {
             return;
         }
@@ -2383,6 +2403,7 @@ impl Controller {
         self.render(ui);
     }
     fn open_series(self: &Arc<Self>, ui: &AppWindow, series: Series) {
+        ui.invoke_remember_library_position();
         if crate::content_presentation::Settings::load(&series.id)
             .unwrap_or_default()
             .effective()
@@ -5409,6 +5430,7 @@ pub fn run(services: Services) -> Result<()> {
         image_worker_live: AtomicBool::new(true),
         view: Mutex::new(View {
             source_browser: crate::source_browser::SourceBrowser::load(),
+            library_navigation: library_navigation::State::load(),
             ..View::default()
         }),
         generation: AtomicU64::new(0),
@@ -5627,7 +5649,13 @@ pub fn run(services: Services) -> Result<()> {
     });
     wire!(on_search, |app, ui, query| {
         if app.view().section == 0 || app.view().section == 2 {
-            app.view().query = query.to_string();
+            {
+                let mut view = app.view();
+                if view.section == 0 && view.query.as_str() != query.as_str() {
+                    view.library_navigation.reset_position();
+                }
+                view.query = query.to_string();
+            }
             app.render(&ui);
         } else {
             app.browse(&ui, "", Some(query.to_string()), false);
@@ -5904,10 +5932,11 @@ pub fn run(services: Services) -> Result<()> {
             }
         }
     });
-    wire!(on_category_selected, |app, ui, index| {
-        app.view().category = index.max(0) as usize;
-        app.render(&ui);
-    });
+    wire!(on_category_selected, |app, ui, index| app
+        .select_library_category(&ui, index));
+    wire!(on_library_viewport_changed, |app, ui, key, fraction, y| app
+        .remember_library_position(&ui, key.to_string(), fraction, y));
+    wire!(on_library_checkpoint, |app, _ui| app.checkpoint_library());
     wire!(on_entry_menu_requested, |_app, ui, key| {
         let settings = serde_json::from_str::<reader_domain::SeriesId>(&key)
             .map_err(error)

@@ -46,6 +46,7 @@ fn rows(count: usize) -> ModelRc<ItemRow> {
         (0..count)
             .map(|index| ItemRow {
                 title: format!("Chapter {index}").into(),
+                series_key: format!("entry-{index}").into(),
                 ..Default::default()
             })
             .collect::<Vec<_>>(),
@@ -160,7 +161,7 @@ fn library_search_reveals_focuses_filters_and_closes_like_nova() {
         ui.window().set_size(LogicalSize::new(width, height));
         settle();
         assert!(
-            ElementHandle::find_by_element_id(&ui, "AppWindow::library-search")
+            ElementHandle::find_by_element_id(&ui, "LibraryPage::library-search")
                 .next()
                 .is_none()
         );
@@ -184,9 +185,12 @@ fn library_search_reveals_focuses_filters_and_closes_like_nova() {
         );
         button(&ui, "Search library").mock_single_click(PointerEventButton::Left);
         settle();
-        assert_eq!(element(&ui, "AppWindow::library-search").size().height, 58.);
+        assert_eq!(
+            element(&ui, "LibraryPage::library-search").size().height,
+            58.
+        );
         let field = element(&ui, "LibrarySearchReveal::search-line");
-        let viewport = element(&ui, "AppWindow::page-scroll");
+        let viewport = element(&ui, "LibraryPage::lib-scroll");
         assert!(field.absolute_position().y >= viewport.absolute_position().y - 0.5);
         assert!(
             field.absolute_position().y + field.size().height
@@ -221,7 +225,7 @@ fn library_search_reveals_focuses_filters_and_closes_like_nova() {
         assert!(ui.get_library_query().is_empty());
         assert_eq!(searches.borrow().last().unwrap(), "");
         assert!(
-            ElementHandle::find_by_element_id(&ui, "AppWindow::library-search")
+            ElementHandle::find_by_element_id(&ui, "LibraryPage::library-search")
                 .next()
                 .is_none()
         );
@@ -231,7 +235,7 @@ fn library_search_reveals_focuses_filters_and_closes_like_nova() {
             "first Escape closes search without navigating"
         );
         // Keyboard opening reveals the search even after a long grid scroll.
-        element(&ui, "AppWindow::page-scroll").scroll(0., -900.);
+        element(&ui, "LibraryPage::lib-scroll").scroll(0., -900.);
         settle();
         control_f(&ui);
         key(&ui, "a");
@@ -474,4 +478,265 @@ fn synopsis_uses_nova_tap_drag_and_borderless_keyboard_behavior() {
             );
         }
     }
+}
+
+// Real single-contact input follows the same native Flickable path as Android.
+fn library_touch(ui: &AppWindow, x: f32, y: f32, phase: i_slint_core::input::TouchPhase) {
+    ui.window().dispatch_event(WindowEvent::internal(
+        i_slint_core::platform::InternalEvent::Touch {
+            id: 1,
+            position: i_slint_core::lengths::LogicalPoint::new(x, y),
+            phase,
+        },
+    ));
+}
+fn library_drag(ui: &AppWindow, x: f32, y: f32, dx: f32, dy: f32) {
+    use i_slint_core::input::TouchPhase;
+    library_touch(ui, x, y, TouchPhase::Started);
+    i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(120));
+    for step in 1..=6 {
+        library_touch(
+            ui,
+            x + dx * step as f32 / 6.,
+            y + dy * step as f32 / 6.,
+            TouchPhase::Moved,
+        );
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(16));
+    }
+    library_touch(ui, x + dx, y + dy, TouchPhase::Ended);
+    settle();
+}
+fn restore_library(ui: &AppWindow, anchor: &(String, f32, f32)) {
+    let index = anchor
+        .0
+        .strip_prefix("entry-")
+        .and_then(|s| s.parse::<i32>().ok())
+        .unwrap_or(-1);
+    ui.set_library_scroll_y(anchor.2);
+    ui.set_library_restore_index(index);
+    ui.set_library_restore_fraction(anchor.1);
+    ui.set_library_restore_serial(ui.get_library_restore_serial() + 1);
+    settle();
+}
+fn assert_library_anchor(ui: &AppWindow, anchor: &(String, f32, f32)) {
+    let index = anchor.0.strip_prefix("entry-").unwrap();
+    let card = button(ui, &format!("Chapter {index}"));
+    let controls = button(ui, "Search library");
+    let uncovered_top = controls.absolute_position().y + controls.size().height;
+    let stride = card.size().height + ui.global::<nova_reader::Theme>().get_card_spacing();
+    let fraction = (uncovered_top - card.absolute_position().y) / stride;
+    assert!(
+        (fraction - anchor.1).abs() < 0.025,
+        "stable item {} should retain row fraction {} (actual {fraction})",
+        anchor.0,
+        anchor.1
+    );
+}
+
+#[test]
+fn library_pins_controls_and_restores_stable_rows_across_details_and_reflow() {
+    i_slint_backend_testing::init_no_event_loop();
+    for (width, height) in [(390., 844.), (1120., 780.)] {
+        let ui = AppWindow::new().unwrap();
+        let positions = Rc::new(RefCell::new(Vec::<(String, f32, f32)>::new()));
+        ui.on_library_viewport_changed({
+            let positions = positions.clone();
+            move |key, fraction, y| positions.borrow_mut().push((key.to_string(), fraction, y))
+        });
+        ui.on_navigate({
+            let weak = ui.as_weak();
+            move |section| {
+                let ui = weak.unwrap();
+                ui.invoke_remember_library_position();
+                ui.set_section(section);
+            }
+        });
+        ui.on_open_item({
+            let weak = ui.as_weak();
+            move |_| {
+                let ui = weak.unwrap();
+                ui.invoke_remember_library_position();
+                ui.set_section(5);
+            }
+        });
+        ui.set_items(rows(180));
+        ui.set_categories(ModelRc::new(VecModel::from(vec![
+            "All".into(),
+            "Reading".into(),
+        ])));
+        ui.show().unwrap();
+        ui.window().set_size(LogicalSize::new(width, height));
+        settle();
+        element(&ui, "LibraryPage::lib-scroll").scroll(0., -1100.);
+        settle();
+        let category_y = button(&ui, "All").absolute_position().y;
+        let grid_y = element(&ui, "LibraryPage::library-grid")
+            .absolute_position()
+            .y;
+        element(&ui, "LibraryPage::lib-scroll").scroll(0., -317.);
+        settle();
+        assert!((button(&ui, "All").absolute_position().y - category_y).abs() < 0.5);
+        assert!(
+            element(&ui, "LibraryPage::library-grid")
+                .absolute_position()
+                .y
+                < grid_y - 100.
+        );
+        ui.invoke_remember_library_position();
+        let anchor = positions.borrow().last().unwrap().clone();
+        assert!(!anchor.0.is_empty());
+        assert!((0. ..1.).contains(&anchor.1));
+        ui.invoke_open_item(0);
+        settle();
+        assert_eq!(ui.get_section(), 5);
+        ui.invoke_go_back();
+        restore_library(&ui, &anchor);
+        assert_eq!(ui.get_section(), 0);
+        assert_library_anchor(&ui, &anchor);
+        // The persisted identity is resolved to the same model item after a
+        // layout change; the containing row may start at a different index.
+        ui.window().set_size(LogicalSize::new(
+            if width < 700. { 1120. } else { 390. },
+            height,
+        ));
+        restore_library(&ui, &anchor);
+        assert_library_anchor(&ui, &anchor);
+        button(&ui, "List view").invoke_accessible_default_action();
+        restore_library(&ui, &anchor);
+        assert_library_anchor(&ui, &anchor);
+    }
+}
+
+#[test]
+fn library_category_lane_rejects_vertical_pan_and_reveals_selected_pill() {
+    i_slint_backend_testing::init_no_event_loop();
+    for (width, height) in [(390., 844.), (1120., 780.)] {
+        let ui = AppWindow::new().unwrap();
+        ui.set_touch_menus(true);
+        ui.set_items(rows(100));
+        ui.set_categories(ModelRc::new(VecModel::from(
+            (0..24)
+                .map(|i| format!("Category {i}").into())
+                .collect::<Vec<_>>(),
+        )));
+        ui.on_category_selected({
+            let weak = ui.as_weak();
+            move |i| weak.unwrap().set_category_index(i)
+        });
+        ui.show().unwrap();
+        ui.window().set_size(LogicalSize::new(width, height));
+        settle();
+        element(&ui, "LibraryPage::lib-scroll").scroll(0., -900.);
+        settle();
+        let first = button(&ui, "Category 0");
+        let first_y = first.absolute_position().y;
+        let rail = element(&ui, "LibraryPage::filter-rail");
+        let x = rail.absolute_position().x + rail.size().width / 2.;
+        let y = rail.absolute_position().y + 22.;
+        for (dx, dy) in [(0., -100.), (-40., 90.), (-90., -40.)] {
+            library_drag(&ui, x, y, dx, dy);
+            assert!(
+                (first.absolute_position().y - first_y).abs() < 0.5,
+                "vertical/diagonal touch must leave categories in their lane"
+            );
+        }
+        rail.scroll(-300., 0.);
+        settle();
+        assert!((first.absolute_position().y - first_y).abs() < 0.5);
+        let grid_x = element(&ui, "LibraryPage::library-grid")
+            .absolute_position()
+            .x;
+        let viewport = element(&ui, "LibraryPage::lib-scroll");
+        library_drag(
+            &ui,
+            viewport.absolute_position().x + viewport.size().width / 2.,
+            viewport.absolute_position().y + viewport.size().height * 0.7,
+            -100.,
+            0.,
+        );
+        viewport.scroll(-250., 0.);
+        settle();
+        assert!(
+            (element(&ui, "LibraryPage::library-grid")
+                .absolute_position()
+                .x
+                - grid_x)
+                .abs()
+                < 0.5,
+            "the native library viewport must have no horizontal pan"
+        );
+        ui.set_category_index(23);
+        settle();
+        for next_width in [width, 320., 1120.] {
+            ui.window().set_size(LogicalSize::new(next_width, height));
+            settle();
+            let last = button(&ui, "Category 23");
+            let rail = element(&ui, "LibraryPage::filter-rail");
+            assert!(last.absolute_position().x >= rail.absolute_position().x - 0.5);
+            assert!(
+                last.absolute_position().x + last.size().width
+                    <= rail.absolute_position().x + rail.size().width + 0.5,
+                "selected last category remains revealed after resize"
+            );
+        }
+    }
+}
+
+#[test]
+fn library_navigation_captures_synchronously_and_restore_clamps_a_smaller_model() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().unwrap();
+    let events = Rc::new(RefCell::new(Vec::<String>::new()));
+    let positions = Rc::new(RefCell::new(Vec::<(String, f32, f32)>::new()));
+    ui.on_library_viewport_changed({
+        let events = events.clone();
+        let positions = positions.clone();
+        move |key, fraction, y| {
+            events.borrow_mut().push("capture".into());
+            positions.borrow_mut().push((key.to_string(), fraction, y));
+        }
+    });
+    ui.on_navigate({
+        let weak = ui.as_weak();
+        let events = events.clone();
+        move |section| {
+            let ui = weak.unwrap();
+            ui.invoke_remember_library_position();
+            events.borrow_mut().push("navigate".into());
+            ui.set_section(section);
+        }
+    });
+    ui.set_items(rows(150));
+    ui.set_categories(ModelRc::new(VecModel::from(vec!["All".into()])));
+    ui.show().unwrap();
+    ui.window().set_size(LogicalSize::new(390., 844.));
+    settle();
+    element(&ui, "LibraryPage::lib-scroll").scroll(0., -1900.);
+    settle();
+    events.borrow_mut().clear();
+    let count = positions.borrow().len();
+    ui.invoke_remember_library_position();
+    assert_eq!(
+        positions.borrow().len(),
+        count + 1,
+        "capture runs before returning to Rust"
+    );
+    let anchor = positions.borrow().last().unwrap().clone();
+    assert!((anchor.2 - ui.get_library_scroll_y()).abs() < 0.5);
+    events.borrow_mut().clear();
+    ui.invoke_navigate(5);
+    assert_eq!(&*events.borrow(), &["capture", "navigate"]);
+    ui.set_items(rows(1));
+    ui.set_section(0);
+    restore_library(&ui, &anchor);
+    assert_eq!(
+        ui.get_library_scroll_y(),
+        0.,
+        "short content clamps an obsolete distant offset"
+    );
+    assert!(positions.borrow().last().unwrap().0.is_empty());
+    // Header-only positions retain their raw offset and carry no card identity.
+    restore_library(&ui, &(String::new(), 0., -12.));
+    // A short viewport may not permit all 12px, but the result is always bounded.
+    assert!(ui.get_library_scroll_y() >= -12. && ui.get_library_scroll_y() <= 0.);
 }

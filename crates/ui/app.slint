@@ -32,7 +32,7 @@ import { ReaderSettings, ReaderSettingsPanel } from "reader-settings.slint";
 export { ReaderSettings } from "reader-settings.slint";
 import { SaveConflictSheet } from "save-conflict-sheet.slint";
 import { LibraryFilterChip } from "@NovaUiBase/filter-chip.slint";
-import { LibrarySearchReveal } from "library-search.slint";
+import { LibraryPage } from "library-page.slint";
 import { EntryMenu, EntryCategoryRow } from "entry-menu.slint";
 export { EntryCategoryRow } from "entry-menu.slint";
 export { ReaderSyncSettings, SyncPeer, SyncInvite, SyncInspectorRow } from "sync-bridge.slint";
@@ -486,6 +486,15 @@ export component AppWindow inherits Window {
     callback request-artwork(int,int);
     callback library-sort-changed;
     in-out property <string> library-query;
+    in-out property <length> library-scroll-y: 0px;
+    in-out property <int> library-restore-index: -1;
+    in-out property <float> library-restore-fraction: 0;
+    in-out property <int> library-restore-serial: 0;
+    callback library-viewport-changed(string,float,float);
+    callback library-checkpoint();
+    public function remember-library-position() {
+        if root.section == 0 { library-page.remember-position(); root.library-checkpoint(); }
+    }
     private property <bool> library-search-open: false;
     private property <int> library-search-focus-request: 0;
     public function focus-library-search() {
@@ -638,7 +647,30 @@ export component AppWindow inherits Window {
                     page-content := Rectangle {
                         min-width: 0px;
                         opacity: root.section == 5 ? root.detail-opacity : 1;
-                        if root.section != 6 && root.section != 4 && root.section != 7 && root.section != 8 && root.section < 9: page-scroll := ScrollView {
+                        library-page := LibraryPage {
+                            visible: root.section == 0;
+                            items: root.section == 0 ? root.items : []; categories: root.categories; category-index: root.category-index;
+                            heading: root.heading; caption: root.caption; status: root.status; busy: root.busy;
+                            narrow: root.mobile-ui; touch-menus: root.touch-menus;
+                            list-view: Appearance.library-list-view; min-cols: Appearance.library-min-cols;
+                            bottom-padding: Theme.transparent_navbar ? root.bottom-navigation-height : 0px;
+                            search-open: root.section == 0 && root.library-search-open; search-focus-request: root.library-search-focus-request;
+                            query <=> root.library-query; scroll-y <=> root.library-scroll-y;
+                            restore-index: root.library-restore-index; restore-fraction: root.library-restore-fraction;
+                            restore-serial: root.library-restore-serial;
+                            viewport-changed(key,fraction,y) => { root.library-viewport-changed(key,fraction,y); }
+                            checkpoint => { root.library-checkpoint(); }
+                            category-selected(i) => { root.category-selected(i); }
+                            sort-changed => { root.library-sort-changed(); }
+                            picked(i) => { root.open-item(i); }
+                            context-requested(key,title,in-library,x,y) => { root.open-entry-menu(key,title,in-library,x,y); }
+                            request-artwork(first,last) => { root.request-artwork(first,last); }
+                            close-search => { root.close-library-search(); }
+                            toggle-search => { root.toggle-library-search(); }
+                            search(query) => { root.search(query); }
+                            submitted => { if !root.mobile-ui { keyboard.focus(); } }
+                        }
+                        if root.section != 0 && root.section != 6 && root.section != 4 && root.section != 7 && root.section != 8 && root.section < 9: page-scroll := ScrollView {
                             private property <int> control-focus-request: SettingsStyle.focus-request;
                             changed control-focus-request => {
                                 if SettingsStyle.keyboard-mode {
@@ -772,65 +804,6 @@ export component AppWindow inherits Window {
                                         ActionButton { text: @tr("Settings"); clicked => { root.source-action("settings"); } }
                                     }
                                 }
-                                if root.section == 0: VerticalLayout {
-                                    spacing: 12px;
-                                    library-controls := Rectangle {
-                                        min-width: 0px;
-                                        height: library-search.height + library-toolbar.preferred-height;
-                                        library-search := LibrarySearchReveal {
-                                            x: 0px; y: root.mobile-ui ? library-toolbar.preferred-height : 0px;
-                                            width: 100%; open: root.library-search-open;
-                                            viewport-height: page-scroll.visible-height;
-                                            query <=> root.library-query;
-                                            focus-request: root.library-search-focus-request;
-                                            reveal-requested => {
-                                                let top = library-search.absolute-position.y - page-scroll.absolute-position.y;
-                                                if top < 0px || top + 44px > page-scroll.visible-height {
-                                                    let target = root.mobile-ui ? min(library-toolbar.preferred-height, max(0px, page-scroll.visible-height - 44px)) : 0px;
-                                                    page-scroll.content-y += target - top;
-                                                }
-                                            }
-                                            close-requested => { root.close-library-search(); }
-                                            search(query) => { root.search(query); }
-                                            submitted => { if !root.mobile-ui { keyboard.focus(); } }
-                                        }
-                                        library-toolbar := VerticalLayout {
-                                            x: 0px; y: root.mobile-ui ? 0px : library-search.height;
-                                            width: 100%; height: self.preferred-height; spacing: 12px;
-                                            ScrollView {
-                                                height: 44px; content-height: 44px;
-                                                content-width: categories-row.preferred-width;
-                                                mouse-drag-pan-enabled: true;
-                                                categories-row := HorizontalLayout {
-                                                    spacing: 8px; alignment: start;
-                                                    for category[i] in root.categories: LibraryFilterChip { touch_feedback: root.touch-menus;
-                                                        keyboard-focusable: true;
-                                                        label: category; selected: i == root.category-index;
-                                                        accessible-action-default => { root.category-index = i; root.category-selected(i); }
-                                                        picked => { root.category-index = i; root.category-selected(i); }
-                                                    }
-                                                }
-                                            }
-                                            HorizontalLayout {
-                                                spacing: 10px;
-                                                ComboBox {
-                                                    model: [@tr("Recently added"), @tr("Title"), @tr("Unread chapters")];
-                                                    current-index: Appearance.library-sort; min-width: 0px; max-width: 190px;
-                                                    placeholder-text: @tr("Sort library");
-                                                    selected(_) => { Appearance.setting-changed("library_sort", self.current-index); root.library-sort-changed(); }
-                                                }
-                                                Rectangle { min-width: 0px; horizontal-stretch: 1; }
-                                                LibraryViewSwitch { list-view: Appearance.library-list-view; picked(list) => { Appearance.setting-changed("library_list_view", list ? 1 : 0); } }
-                                                IconAction {
-                                                    width: 44px;
-                                                    text: root.library-search-open ? @tr("Close library search") : @tr("Search library");
-                                                    icon: root.library-search-open ? @image-url("../../assets/icons/navigation/close.svg") : @image-url("../../assets/icons/navigation/search.svg");
-                                                    clicked => { root.toggle-library-search(); }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
                                 if root.section == 1: ActionButton { text: @tr("Refresh library"); clicked => { root.browse("refresh"); } }
                                 if root.section == 2: HorizontalLayout {
                                     spacing: 8px;
@@ -856,7 +829,7 @@ export component AppWindow inherits Window {
                                     resume => { root.detail-scroll-y = page-scroll.content-y; root.chapter-step(0); } toggle-library => { root.toggle-library(); }
                                     request-artwork => { root.request-artwork(-1,-1); }
                                 }
-                                if (root.section == 0 || (root.section == 3 && root.source-catalog-open)) && root.items.length > 0: SeriesGrid {
+                                if root.section == 3 && root.source-catalog-open && root.items.length > 0: SeriesGrid {
                                     items: root.items; list-view: Appearance.library-list-view;
                                     min-cols: root.section == 3 ? Appearance.browse-min-cols : Appearance.library-min-cols;
                                     overlay-caption: root.section == 3;

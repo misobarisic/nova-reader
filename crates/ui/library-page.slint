@@ -1,0 +1,254 @@
+// Header overlay, horizontal category rail and native scroll adapted directly
+// from Nova crates/ui/library.slint; Reader owns its models and native controls.
+import { Theme, SettingsStyle } from "@NovaUiShared";
+import { LibraryScroll } from "@NovaUiBase/library-scroll.slint";
+import { LibraryFilterChip } from "@NovaUiBase/filter-chip.slint";
+import { Spinner } from "std-widgets.slint";
+import { ItemRow } from "media-models.slint";
+import { PageHeader } from "page-header.slint";
+import { ReaderSelect as ComboBox, IconAction } from "controls.slint";
+import { Appearance } from "appearance.slint";
+import { SeriesGrid, LibraryViewSwitch } from "library-cards.slint";
+import { LibrarySearchReveal } from "library-search.slint";
+
+export component LibraryPage inherits Rectangle {
+    in property <[ItemRow]> items;
+    in property <[string]> categories;
+    in property <int> category-index;
+    in property <string> heading;
+    in property <string> caption;
+    in property <string> status;
+    in property <bool> busy;
+    in property <bool> narrow;
+    in property <bool> list-view;
+    in property <int> min-cols: 2;
+    in property <bool> touch-menus;
+    in property <length> bottom-padding;
+    in property <bool> search-open;
+    in property <int> search-focus-request;
+    in-out property <string> query;
+    in-out property <length> scroll-y;
+    in property <int> restore-index: -1;
+    in property <float> restore-fraction;
+    in property <int> restore-serial;
+    callback category-selected(int);
+    callback sort-changed();
+    callback search(string);
+    callback close-search();
+    callback toggle-search();
+    callback submitted();
+    callback picked(int);
+    callback context-requested(string,string,bool,length,length);
+    callback request-artwork(int,int);
+    callback viewport-changed(string,float,float);
+    callback checkpoint();
+
+    background: Theme.current.artwork_canvas;
+    clip: true;
+    // Nova scrolls only the hero away. The live controls are a sibling overlay,
+    // so dragging or overscrolling the grid never pans the category strip.
+    private property <length> header-shift: max(-library-hero.height - 14px, min(0px, root.scroll-y));
+    private property <length> header-cover: library-header.height + root.header-shift;
+    private property <length> grid-top: library-header.height + 8px;
+    private property <bool> restoring: true;
+    private property <int> restore-pass: 0;
+    private property <int> pending-index: -1;
+    private property <float> pending-fraction;
+    private property <length> pending-y;
+    private property <int> remembered-index: -1;
+    private property <float> remembered-fraction;
+    private property <length> remembered-y;
+    private property <int> control-focus-request: SettingsStyle.focus-request;
+    changed control-focus-request => {
+        if SettingsStyle.keyboard-mode && !root.restoring {
+            let top = SettingsStyle.focus-y - lib-scroll.absolute-position.y;
+            if top < root.header-cover { lib-scroll.content-y += root.header-cover - top; }
+            else if top + SettingsStyle.focus-height > lib-scroll.visible-height {
+                lib-scroll.content-y -= top + SettingsStyle.focus-height - lib-scroll.visible-height;
+            }
+        }
+    }
+    function bounded(y: length) -> length {
+        return Math.clamp(y, min(0px, lib-scroll.visible-height - lib-scroll.content-height), 0px);
+    }
+    public function remember-position() {
+        if root.restoring { return; }
+        let relative = root.header-cover - lib-scroll.content-y - root.grid-top - 4px;
+        root.remembered-y = root.bounded(lib-scroll.content-y);
+        root.remembered-index = -1;
+        root.remembered-fraction = 0;
+        if root.items.length > 0 && relative >= 0px && root.header-cover < lib-scroll.visible-height && relative < library-grid.height {
+            let row = max(0, Math.floor(relative / library-grid.row-stride));
+            root.remembered-index = min(root.items.length - 1, row * library-grid.columns);
+            root.remembered-fraction = Math.clamp((relative - row * library-grid.row-stride) / library-grid.row-stride, 0, 1);
+            root.viewport-changed(root.items[root.remembered-index].series-key, root.remembered-fraction, root.remembered-y / 1px);
+        } else { root.viewport-changed("", 0, root.remembered-y / 1px); }
+    }
+    function defer-restore(index: int, fraction: float, y: length) {
+        root.restoring = true;
+        root.restore-pass = 0;
+        root.pending-index = index;
+        root.pending-fraction = fraction;
+        root.pending-y = y;
+        checkpoint-timer.stop();
+        restore-timer.stop(); restore-timer.start();
+    }
+    changed restore-serial => { root.defer-restore(root.restore-index, root.restore-fraction, root.scroll-y); }
+    changed width => { if !root.restoring { root.defer-restore(root.remembered-index, root.remembered-fraction, root.remembered-y); } }
+    changed height => { if !root.restoring { root.defer-restore(root.remembered-index, root.remembered-fraction, root.remembered-y); } }
+    init => { root.defer-restore(root.restore-index, root.restore-fraction, root.scroll-y); }
+    restore-timer := Timer {
+        interval: 16ms; running: false;
+        triggered => {
+            self.stop();
+            if root.pending-index >= 0 && root.pending-index < root.items.length {
+                let pinned-cover = library-header.height - library-hero.height - 14px;
+                lib-scroll.content-y = root.bounded(pinned-cover - root.grid-top - 4px
+                    - (Math.floor(root.pending-index / library-grid.columns) + Math.clamp(root.pending-fraction, 0, 1)) * library-grid.row-stride);
+            } else { lib-scroll.content-y = root.bounded(root.pending-y); }
+            lib-scroll.stop();
+            // Two layout turns settle model dimensions and the native offset.
+            if root.restore-pass < 2 { root.restore-pass += 1; self.start(); }
+            else { root.restoring = false; root.remember-position(); }
+        }
+    }
+    checkpoint-timer := Timer { interval: 250ms; running: false; triggered => { self.stop(); if !root.restoring { root.checkpoint(); } } }
+    function pick-category(index: int) {
+        root.remember-position(); root.checkpoint();
+        lib-scroll.stop();
+        root.category-selected(index);
+    }
+    private property <length> selected-filter-left;
+    private property <length> selected-filter-width;
+    function reveal-filter(left: length, w: length) {
+        root.selected-filter-left = left;
+        root.selected-filter-width = w;
+        let min-x = min(0px, filter-rail.width - filter-rail.content-width);
+        filter-rail.content-x = max(min-x, min(0px, filter-rail.content-x));
+        if left < -filter-rail.content-x { filter-rail.content-x = -left; }
+        else if left + w > -filter-rail.content-x + filter-rail.width {
+            filter-rail.content-x = max(filter-rail.width - filter-rail.content-width, filter-rail.width - left - w);
+        }
+    }
+    library-body := Rectangle {
+        x: 18px; y: 18px;
+        width: max(1px, parent.width - 36px); height: max(1px, parent.height - 18px);
+        clip: true;
+        lib-scroll := LibraryScroll {
+            width: 100%; height: 100%;
+            content-height: library-content.preferred-height;
+            content-y <=> root.scroll-y;
+            changed content-y => {
+                if !root.restoring { root.remember-position(); checkpoint-timer.stop(); checkpoint-timer.start(); }
+            }
+            library-content := VerticalLayout {
+                width: 100%; spacing: 16px; alignment: start;
+                padding-top: root.grid-top;
+                padding-bottom: 18px + root.bottom-padding;
+                library-grid := SeriesGrid {
+                    items: root.items; list-view: root.list-view;
+                    min-cols: root.min-cols; context-enabled: true;
+                    viewport-top: lib-scroll.absolute-position.y + root.header-cover;
+                    viewport-height: max(0px, lib-scroll.visible-height - root.header-cover);
+                    changed columns => { if !root.restoring { root.defer-restore(root.remembered-index, root.remembered-fraction, root.remembered-y); } }
+                    changed row-stride => { if !root.restoring { root.defer-restore(root.remembered-index, root.remembered-fraction, root.remembered-y); } }
+                    picked(i) => { root.remember-position(); root.checkpoint(); root.picked(i); }
+                    context-requested(key,title,in-library,x,y) => { root.context-requested(key,title,in-library,x,y); }
+                    request-artwork(first,last) => { root.request-artwork(first,last); }
+                }
+                if root.status != "": Rectangle {
+                    min-height: status-text.preferred-height + 24px;
+                    background: Theme.current.selection_wash; border-radius: 8px;
+                    status-text := Text { text: root.status; color: Theme.current.text_settings; wrap: word-wrap; x: 12px; y: 12px; width: max(0px, parent.width - 24px); }
+                }
+                if root.busy: HorizontalLayout {
+                    Spinner { width: 24px; height: 24px; }
+                    Text { min-width: 0px; text: @tr("Loading…"); color: Theme.current.text_secondary; }
+                }
+                if root.items.length == 0 && !root.busy: Rectangle {
+                    min-height: 220px;
+                    VerticalLayout {
+                        alignment: center; spacing: 12px;
+                        Rectangle {
+                            height: 56px;
+                            Image { source: @image-url("../../assets/icons/navigation/library.svg"); width: 48px; height: 48px; x: (parent.width - self.width) / 2; y: 4px; image-fit: contain; colorize: Theme.current.text_muted; }
+                        }
+                        Text { min-width: 0px; text: @tr("Your next story starts here"); color: Theme.current.text_bright; font-size: 19px; wrap: word-wrap; horizontal-alignment: center; }
+                        Text { min-width: 0px; text: @tr("Install a source in Browse, or import a local chapter in More."); color: Theme.current.text_secondary; wrap: word-wrap; horizontal-alignment: center; }
+                    }
+                }
+            }
+        }
+        // Nova's fixed viewport paints the live header over its placeholder.
+        library-header := Rectangle {
+            y: root.header-shift; width: 100%; height: library-toolbar.preferred-height;
+            background: Theme.current.artwork_canvas;
+            TouchArea {}
+            library-toolbar := VerticalLayout {
+                width: 100%; spacing: 14px;
+                library-hero := VerticalLayout {
+                    vertical-stretch: 0; spacing: 14px;
+                    PageHeader { title: root.heading; subtitle: root.caption; narrow: root.narrow; show-back: false; }
+                }
+                library-controls := Rectangle {
+                    height: library-search.height + library-filter-and-sort.height;
+                    library-search := LibrarySearchReveal {
+                        x: 0px; y: root.narrow ? library-filter-and-sort.height : 0px;
+                        width: 100%; open: root.search-open; query <=> root.query;
+                        viewport-height: lib-scroll.visible-height; focus-request: root.search-focus-request;
+                        reveal-requested => {
+                            let top = library-search.absolute-position.y - lib-scroll.absolute-position.y;
+                            if top < 0px { lib-scroll.content-y -= top; }
+                            else if top + 44px > lib-scroll.visible-height { lib-scroll.content-y -= top + 44px - lib-scroll.visible-height; }
+                        }
+                        close-requested => { root.close-search(); }
+                        search(query) => { root.search(query); }
+                        submitted => { root.submitted(); }
+                    }
+                    library-filter-and-sort := VerticalLayout {
+                        y: root.narrow ? 0px : library-search.height;
+                        width: 100%; height: self.preferred-height; spacing: 14px;
+                        filter-rail := Flickable {
+                            visible: root.categories.length > 0;
+                            height: root.categories.length > 0 ? 44px : 0px; vertical-stretch: 0;
+                            content-width: filter-chips.preferred-width; content-height: self.height;
+                            // The rail has one horizontal axis. Native overshoot
+                            // must never pull a category above/below its lane.
+                            content-y: 0px;
+                            changed content-y => { if self.content-y != 0px { self.content-y = 0px; } }
+                            changed width => { root.reveal-filter(root.selected-filter-left, root.selected-filter-width); }
+                            changed content-width => { root.reveal-filter(root.selected-filter-left, root.selected-filter-width); }
+                            filter-chips := HorizontalLayout {
+                                spacing: 8px; alignment: start;
+                                for category[i] in root.categories: LibraryFilterChip {
+                                    touch_feedback: root.touch-menus; keyboard-focusable: true;
+                                    label: category; selected: i == root.category-index;
+                                    picked => { root.pick-category(i); }
+                                    accessible-action-default => { root.pick-category(i); }
+                                    reveal(left,w) => { root.reveal-filter(left,w); }
+                                }
+                            }
+                        }
+                        HorizontalLayout {
+                            height: 44px; vertical-stretch: 0; spacing: 10px;
+                            ComboBox {
+                                model: [@tr("Recently added"), @tr("Title"), @tr("Unread chapters")];
+                                current-index: Appearance.library-sort; min-width: 0px; max-width: 190px;
+                                placeholder-text: @tr("Sort library");
+                                selected(_) => { root.remember-position(); Appearance.setting-changed("library_sort", self.current-index); root.sort-changed(); }
+                            }
+                            Rectangle { min-width: 0px; horizontal-stretch: 1; }
+                            LibraryViewSwitch { list-view: root.list-view; picked(list) => { root.remember-position(); Appearance.setting-changed("library_list_view", list ? 1 : 0); } }
+                            IconAction {
+                                width: 44px;
+                                text: root.search-open ? @tr("Close library search") : @tr("Search library");
+                                icon: root.search-open ? @image-url("../../assets/icons/navigation/close.svg") : @image-url("../../assets/icons/navigation/search.svg");
+                                clicked => { root.toggle-search(); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

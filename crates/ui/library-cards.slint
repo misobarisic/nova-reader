@@ -123,6 +123,7 @@ export component SeriesGrid inherits Rectangle {
     private property <length> item-width: max(1px, min(root.list-view ? root.width : 230px, (root.width - (root.columns - 1) * Theme.card_spacing) / root.columns));
     private property <length> card-height: root.list-view ? 138px : root.item-width * 3 / 2 + (root.overlay-caption ? 0px : 76px);
     private property <length> stride: root.card-height + Theme.card_spacing;
+    out property <length> row-stride: root.stride;
     private property <int> first-row: max(0, Math.floor((root.viewport-top - root.absolute-position.y) / root.stride) - 2);
     private property <int> last-row: max(0, Math.ceil((root.viewport-top + root.viewport-height - root.absolute-position.y) / root.stride) + 2);
     height: root.items.length > 0 ? Math.ceil(root.items.length / root.columns) * root.stride - Theme.card_spacing + 4px : 0px;
