@@ -10,6 +10,12 @@ use crate::lengths::{LogicalPx, LogicalVector};
 use core::time::Duration;
 use euclid::Vector2D;
 
+/// Input timestamps have millisecond precision and may describe UI-thread delivery
+/// rather than physical motion. A batch drained across one clock tick is not a
+/// reliable fling sample. Require at least two 240 Hz intervals (rounded down);
+/// a full five-sample history at that rate still covers about 16 milliseconds.
+const MIN_VELOCITY_SAMPLE_DURATION: Duration = Duration::from_millis(8);
+
 /// Simple ringbuffer storing time and delta tuples
 #[derive(Debug)]
 pub(crate) struct VelocityRingBuffer<const N: usize> {
@@ -68,7 +74,7 @@ impl<const N: usize> VelocityRingBuffer<N> {
         let oldest_index = if self.full { self.curr_index } else { 0 };
         let newest_index = self.latest_index();
         let duration = self.values[newest_index].0.duration_since(self.values[oldest_index].0);
-        if duration == Duration::ZERO {
+        if duration < MIN_VELOCITY_SAMPLE_DURATION {
             return Default::default();
         }
 
@@ -195,5 +201,58 @@ mod tests {
         assert_eq!(buffer.last_time(), Some(base_time + Duration::from_millis(400)));
 
         assert_eq!(buffer.mean_velocity(), Vector2D::new(30.0, -20.0));
+    }
+
+    #[test]
+    fn test_delivery_batch_does_not_start_a_fling() {
+        // The last event crossing a millisecond tick must not turn a queued
+        // 100 px drag into an 80,000 px/s release velocity.
+        for times in [[100, 100, 100, 100, 100], [100, 100, 100, 100, 101]] {
+            let mut buffer: VelocityRingBuffer<5> = VelocityRingBuffer::default();
+            for time in times {
+                buffer.push(Instant(time), Vector2D::new(0.0, -20.0));
+            }
+            assert_eq!(buffer.mean_velocity(), Vector2D::default());
+        }
+    }
+
+    #[test]
+    fn test_minimum_sample_duration() {
+        let mut buffer: VelocityRingBuffer<5> = VelocityRingBuffer::default();
+        buffer.push(Instant(100), Vector2D::new(0.0, -20.0));
+        buffer.push(Instant(107), Vector2D::new(0.0, -20.0));
+        assert_eq!(buffer.mean_velocity(), Vector2D::default());
+
+        buffer.push(Instant(108), Vector2D::new(0.0, -20.0));
+        assert_eq!(buffer.mean_velocity(), Vector2D::new(0.0, -5000.0));
+    }
+
+    #[test]
+    fn test_regular_motion_preserves_velocity_and_direction() {
+        // Full histories at approximately 240, 120 and 60 Hz remain usable.
+        for interval in [4, 8, 16] {
+            let mut buffer: VelocityRingBuffer<5> = VelocityRingBuffer::default();
+            for index in 0..5 {
+                buffer.push(Instant(100 + index * interval), Vector2D::new(12.0, -20.0));
+            }
+            let expected = Vector2D::new(12_000.0 / interval as f32, -20_000.0 / interval as f32);
+            assert!((buffer.mean_velocity() - expected).square_length() < 0.001);
+        }
+    }
+
+    #[test]
+    fn test_slow_motion_and_reversal_use_recent_history() {
+        let mut buffer: VelocityRingBuffer<5> = VelocityRingBuffer::default();
+        for index in 0..10 {
+            buffer.push(Instant(100 + index * 100), Vector2D::new(0.0, -1.0));
+        }
+        assert_eq!(buffer.mean_velocity(), Vector2D::new(0.0, -10.0));
+
+        // Once the older deltas leave the ring, the reversed gesture has the
+        // same speed in the opposite direction, regardless of gesture length.
+        for index in 10..15 {
+            buffer.push(Instant(100 + index * 100), Vector2D::new(0.0, 1.0));
+        }
+        assert_eq!(buffer.mean_velocity(), Vector2D::new(0.0, 10.0));
     }
 }

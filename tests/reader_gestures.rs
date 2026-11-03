@@ -182,3 +182,70 @@ fn reader_distinguishes_single_double_drag_hold_and_right_click() {
         assert_eq!(doubles.borrow().len(), 1);
     }
 }
+
+#[test]
+fn webtoon_delivery_burst_keeps_drag_without_manufacturing_a_fling() {
+    i_slint_backend_testing::init_no_event_loop();
+    for (width, height) in [(390., 844.), (1200., 800.)] {
+        let ui = AppWindow::new().unwrap();
+        let image = slint::Image::from_rgb8(slint::SharedPixelBuffer::new(2, 80));
+        ui.set_pages(ModelRc::new(VecModel::from(vec![PageRow {
+            page_id: "fling-page".into(),
+            ratio: 40.,
+            loaded: true,
+            tiles: ModelRc::new(VecModel::from(vec![TileRow {
+                image,
+                fraction: 1.,
+                ..Default::default()
+            }])),
+            ..Default::default()
+        }])));
+        ui.set_reading_mode(0);
+        ui.set_total_ratio(40.);
+        ui.set_section(6);
+        ui.show().unwrap();
+        ui.window().set_size(LogicalSize::new(width, height));
+        advance(400);
+        ui.set_scroll_y(-1000.);
+        advance(20);
+        let (x, y) = (width / 2., height / 2.);
+        let before_drag = ui.get_scroll_y();
+        touch(&ui, x, y, TouchPhase::Started);
+        advance(150);
+        for step in 1..=4 {
+            touch(&ui, x, y - step as f32 * 20., TouchPhase::Moved);
+        }
+        advance(1);
+        touch(&ui, x, y - 100., TouchPhase::Moved);
+        let after_drag = ui.get_scroll_y();
+        assert!(
+            (after_drag - before_drag + 100.).abs() < 0.5,
+            "the queued input still applies its actual 100 px drag"
+        );
+        touch(&ui, x, y - 100., TouchPhase::Ended);
+        for elapsed in [16, 50, 100, 400, 1000] {
+            advance(elapsed);
+            assert!(
+                (ui.get_scroll_y() - after_drag).abs() < 0.5,
+                "a 1 ms delivery window must not create a release fling"
+            );
+        }
+
+        // Real cadence remains eligible for native inertia in both layouts.
+        touch(&ui, x, y, TouchPhase::Started);
+        advance(150);
+        for step in 1..=5 {
+            advance(16);
+            touch(&ui, x, y - step as f32 * 20., TouchPhase::Moved);
+        }
+        let ordinary_release = ui.get_scroll_y();
+        touch(&ui, x, y - 100., TouchPhase::Ended);
+        advance(16);
+        let fling_delta = ui.get_scroll_y() - ordinary_release;
+        assert!(
+            fling_delta < -1. && fling_delta > -40.,
+            "ordinary 16 ms motion retains a forward native fling: {fling_delta}"
+        );
+        advance(1000);
+    }
+}

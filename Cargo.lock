@@ -4934,6 +4934,7 @@ dependencies = [
  "anyhow",
  "arboard",
  "directories",
+ "euclid",
  "i-slint-backend-testing",
  "i-slint-core",
  "image",

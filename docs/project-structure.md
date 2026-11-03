@@ -76,7 +76,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `crates/ui/about.slint`, `crates/ui/about-models.slint`, `crates/ui/about-controls.slint` | Nova’s copied About/source/license viewer with Reader shell routing and shared header adapter |
 | `crates/ui/appearance.slint`, `crates/ui/theme-settings.slint`, `crates/ui/settings-row.slint`, `crates/ui/src/appearance.rs` | Nova theme/motion settings controls, responsive setting rows and adapted Nova palette derivation |
 | `crates/ui/build.rs` | Kit source aliases, embedded resources, debug layout metadata and narrow Kit dropdown/segmented keyboard/accessibility adaptations |
-| `vendor/i-slint-core`, `vendor/i-slint-core/NOVA_PATCH.md` | Exact Slint 1.18.0 registry source with a relative raw-pinch-delta fix, coincident-finger scale floor, source regression and retained upstream licenses; selected through the root Cargo patch |
+| `vendor/i-slint-core`, `vendor/i-slint-core/NOVA_PATCH.md` | Pinned Slint 1.18.0 registry source with raw-pinch/lift corrections and a minimum Flickable velocity observation window, source regressions and retained upstream licenses; selected through the root Cargo patch |
 | `assets/fonts` | Nova’s bundled Roboto faces and Apache notices; More/settings artwork comes directly from Kit |
 | `assets/open_source_*.hbs`, `assets/open_source_project_sources.tsv`, `assets/open_source_vendors.txt` | Nova catalogue templates and Reader-specific source/vendor attribution; full local notices are appended by `build.rs` |
 | `assets/icons/navigation` | Embedded SVG navigation and reader controls, independent of system font glyph coverage |
@@ -104,6 +104,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `tests/reader_mode_controls.rs` | Effective-mode chapter/page actions, RTL progress pointer/keyboard/accessibility behavior and right-origin progress rendering |
 | `crates/reader-sources/tests/cookies.rs`, `.github/scripts/test_package_cookie_permissions.py` | Cookie permissions, isolated/concurrent sessions, cache identity, update re-enabling and native/Python manifest parity |
 | `tests/reader_settings.rs`, `tests/reader_gestures.rs`, `src/reader_preview.rs` | Process-restart defaults/overrides and validation, actual touch gesture cancellation, and optional production phone/desktop raster previews (including the 96px chapter separator via `READER_UI_PREVIEW_BOUNDARIES_ONLY=1`) |
+| `tests/flick_velocity.rs` | Workspace adapter compiles the actual vendored private velocity estimator/tests with upstream core/Euclid types; rejects under-observed input bursts while retaining ordinary fling cadence |
 | `tests/reader_modes.rs` | Per-series mode restart persistence, explicit Automatic/legacy migration, source identity isolation and accessible short-viewport mode options |
 | `tests/library_navigation.rs`, `tests/library_preview.rs`, `tests/android_back.rs`, `tests/source_paging.rs` | Pinned Library categories, stable row restoration, search/focus and retained detail context; native Library previews; automatic viewport paging, short-page fill, Retry and saved catalogue scroll |
 | `tests/library_progress.rs` | Phone/desktop grid/list progress geometry from unread through complete, including small left-anchored fills |
@@ -515,7 +516,7 @@ generate all installable ZIPs; Reader does not depend on a sibling checkout.
 - Lazy thumbnail admission, gallery square recipes/adaptive reflow recycling, direct progressive JXL prefixes and pixel leases: `src/page_thumbnails.rs`, `src/decode_admission.rs`, `crates/reader-sources/src/lib.rs::Source::fetch_page_until`.
 - Shared chapter/thumbnail disk quota and independent thumbnail clear: `src/chapter_cache.rs`, `src/thumbnail_cache_settings.rs`, `crates/ui/image-storage-settings.slint`.
 - Desktop Ctrl+wheel, Android pinch, source-point anchoring and magnified tap behavior: `crates/ui/reader-zoom.slint`, `crates/ui/reader-context-menu.slint`, `src/reader_controls.rs` (native production-controller regression).
-- Pinned Slint raw pinch scale correction and provenance: `vendor/i-slint-core/NOVA_PATCH.md`, `vendor/i-slint-core/input.rs`.
+- Pinned Slint pinch/lift corrections, Flickable velocity observation window and provenance: `vendor/i-slint-core/NOVA_PATCH.md`, `vendor/i-slint-core/input.rs`, `vendor/i-slint-core/items/flickable/data_ringbuffer.rs`; real reader touch regression: `tests/reader_gestures.rs`.
 - Unfinished chapter page labels and manual read/unread History behavior: `src/app.rs` (`render`, `toggle_chapter_read`), `tests/reader_design.rs` and app unit tests.
 - Adult visibility and per-series chapter order: `src/reading_preferences.rs`, `tests/reading_preferences.rs`.
 - AVIF image admission/encoding: `crates/reader-engine/src/avif.rs`, `src/reader_export.rs`, `src/image_storage.rs`.
