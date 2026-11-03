@@ -583,11 +583,18 @@ impl Controller {
                     ui.set_scroll_y(ui.get_scroll_y() + shift * ui.get_reader_width());
                 }
                 reader.mode_switching = old_mode_switching;
-                let index = reader.anchor.page_index;
                 drop(view);
                 ui.set_reader_continuation_error("".into());
-                app.publish_reader_controls(&ui);
-                app.request_images(&ui, index);
+                // The scroll shift above fires Slint's position callback while mode
+                // switching still suppressed it. Re-derive the anchor from the
+                // adjusted scroll so the visual page cannot drift into a
+                // neighbouring chapter (especially a backward prepend).
+                app.position(
+                    &ui,
+                    -ui.get_scroll_y(),
+                    ui.get_reader_width(),
+                    ui.get_reader_viewport_height(),
+                );
                 // The opposite neighbor may also be needed on initial open;
                 // do not require a second scroll just to start its preparation.
                 app.maybe_preload_next(&ui);
