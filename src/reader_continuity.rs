@@ -152,6 +152,7 @@ impl Reader {
         rebase_map(&mut self.decoded_responses, remove);
         rebase_map(&mut self.native_dimensions, remove);
         rebase_map(&mut self.presentations, remove);
+        rebase_map(&mut self.image_retries, remove);
         distance
     }
 }
@@ -346,7 +347,8 @@ fn prepend_rows(
         decoded_windows,
         decoded_responses,
         native_dimensions,
-        presentations
+        presentations,
+        image_retries
     );
     reader.continuity_error = None;
     for index in 0..count {

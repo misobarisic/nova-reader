@@ -418,7 +418,15 @@ encoded-page cache; a miss can temporarily add a fetched response up to the
 configured per-image byte limit. Larger responses are not retained in that cache.
 Replacement model references are released before constructing new Slint buffers;
 the reserve covers a previous image still held by the renderer during replacement.
-Prefetch does not mark a chapter read. Resume stores logical page ID/index and
+Prefetch does not mark a chapter read. Transient page-image failures (5xx, 408,
+429, timeouts and connection resets) retry automatically with bounded backoff
+(0.8s, 2.5s, 6s, 15s; rate limits wait five times longer) so a source blip no
+longer requires leaving and reopening the chapter. Auth, not-found, cancelled,
+unsupported/corrupt images and admission-limit errors never retry. Retries are
+generation- and page-scoped: `Controller::retry_failed_image` re-queues only the
+failed page, navigation/generation changes drop pending retries, and success
+resets the per-page budget; exhausted retries leave the visible failure in place.
+Resume stores logical page ID/index and
 intra-page offset, independent of row windows, texture tiles and reflow.
 Automatic in-place chapter crossings enter the destination's first image rather
 than restoring its old resume. Subsequent checkpoints and exit flush replace

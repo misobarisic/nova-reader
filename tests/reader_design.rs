@@ -708,10 +708,7 @@ fn poster_layout_timelines_chapters_and_reader_controls() {
     );
     ui.set_section(5);
     settle();
-    assert!(
-        !immersive.get(),
-        "leaving reader restores both system bars"
-    );
+    assert!(!immersive.get(), "leaving reader restores both system bars");
 }
 
 #[test]

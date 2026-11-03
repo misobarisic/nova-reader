@@ -124,6 +124,82 @@ impl PageInput {
 // Leave half of the 64MiB display allowance for replacements: renderer/model
 // references can survive until the next frame even after a model update.
 const READER_MODEL_BYTES: usize = 32 * 1024 * 1024;
+// Reader images come from flaky sources; a transient 5xx/network blip should
+// not force the reader to leave and reopen the chapter. Attempts are bounded
+// so a genuinely broken page settles into the visible, manual-retry state.
+const IMAGE_RETRY_DELAYS_MS: [u64; 4] = [800, 2_500, 6_000, 15_000];
+// 429 is a rate limit, not a blip: wait considerably longer before retrying so
+// the reader does not amplify the source's throttling.
+const RATE_LIMITED_RETRY_FACTOR: u64 = 5;
+fn http_status(message: &str) -> Option<u16> {
+    let start = message.find("http ")? + "http ".len();
+    message[start..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .ok()
+}
+/// Auth, not-found, unsupported/corrupt images and admission limits need a
+/// different action than waiting; only transport-level failures are retried.
+fn transient_image_error(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    // Checked before the permanent markers: "rate limited" also contains
+    // "limit", but throttling is exactly the case bounded backoff should handle.
+    if message.contains("rate limited") {
+        return true;
+    }
+    for permanent in [
+        "not found",
+        "authentication required",
+        "challenge required",
+        "unavailable",
+        "cancelled",
+        "unsupported",
+        "exceeds",
+        "limit",
+        "corrupt",
+        "invalid image",
+        "could not decode",
+    ] {
+        if message.contains(permanent) {
+            return false;
+        }
+    }
+    if let Some(status) = http_status(&message) {
+        return status == 408 || status == 429 || (500..600).contains(&status);
+    }
+    [
+        "network request failed",
+        "timed out",
+        "timeout",
+        "connection reset",
+        "connection refused",
+        "connection closed",
+        "broken pipe",
+        "unexpected eof",
+        "transfer failed",
+    ]
+    .iter()
+    .any(|transient| message.contains(transient))
+}
+fn rate_limited_image_error(message: &str) -> bool {
+    message.to_ascii_lowercase().contains("rate limited")
+}
+/// Next backoff for `attempt` (0 = first retry). `None` exhausts the budget or
+/// marks the failure permanent.
+fn image_retry_delay(message: &str, attempt: usize) -> Option<std::time::Duration> {
+    if !transient_image_error(message) {
+        return None;
+    }
+    let base = *IMAGE_RETRY_DELAYS_MS.get(attempt)?;
+    let millis = if rate_limited_image_error(message) {
+        base.saturating_mul(RATE_LIMITED_RETRY_FACTOR)
+    } else {
+        base
+    };
+    Some(std::time::Duration::from_millis(millis))
+}
 struct Reader {
     chapter: ChapterId,
     source: Option<Source>,
@@ -133,6 +209,8 @@ struct Reader {
     retained: BTreeSet<usize>,
     desired: BTreeSet<usize>,
     failed: BTreeSet<usize>,
+    /// Automatic transient-failure retries already spent, per page.
+    image_retries: BTreeMap<usize, u8>,
     budget_blocked: BTreeSet<usize>,
     desired_anchor: usize,
     decoded_bytes: BTreeMap<usize, usize>,
@@ -2209,6 +2287,27 @@ impl Controller {
         self.request_images(ui, index);
         self.maybe_preload_next(ui);
     }
+    /// Re-queue one page after a transient failure. Only the page that actually
+    /// failed is cleared; a page already scrolled out of the request window
+    /// stays failed until the reader returns to it.
+    fn retry_failed_image(self: &Arc<Self>, ui: &AppWindow, index: usize, generation: u64) {
+        if self.generation.load(Ordering::Acquire) != generation || ui.get_section() != 6 {
+            return;
+        }
+        let anchor = {
+            let mut view = self.view();
+            let Some(reader) = view.reader.as_mut() else {
+                return;
+            };
+            if !reader.failed.remove(&index) {
+                return;
+            }
+            reader.requested.remove(&index);
+            reader.budget_blocked.remove(&index);
+            reader.anchor.page_index
+        };
+        self.request_images(ui, anchor);
+    }
     fn request_images(&self, ui: &AppWindow, index: usize) {
         let generation = self.generation.load(Ordering::Acquire);
         let mut view = self.view();
@@ -2705,6 +2804,7 @@ impl Controller {
                 }
                 let mut loaded = false;
                 let mut geometry_updated = false;
+                let mut image_retries = Vec::new();
                 match result {
                     Ok((
                         dimensions,
@@ -2821,6 +2921,7 @@ impl Controller {
                         row.tiles = tiles;
                         row.loaded = true;
                         row.preview = false;
+                        reader.image_retries.remove(&task.index);
                         if reader
                             .progressive_job
                             .is_some_and(|(index, _)| index == task.index)
@@ -2863,10 +2964,31 @@ impl Controller {
                         }
                         reader.failed.insert(task.index);
                         row.error = error.into();
+                        // Transient source failures retry themselves with
+                        // backoff instead of requiring the chapter to reopen.
+                        let attempt = usize::from(
+                            reader.image_retries.get(&task.index).copied().unwrap_or(0),
+                        );
+                        if let Some(delay) = image_retry_delay(row.error.as_str(), attempt) {
+                            *reader.image_retries.entry(task.index).or_insert(0) += 1;
+                            image_retries.push((task.index, delay, task.generation));
+                        }
                         model.set_row_data(task.index, row);
                     }
                 }
                 drop(view);
+                for (index, delay, generation) in image_retries {
+                    let app = Arc::downgrade(&app);
+                    let weak = ui.as_weak();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(delay);
+                        let _ = weak.upgrade_in_event_loop(move |ui| {
+                            if let Some(app) = app.upgrade() {
+                                app.retry_failed_image(&ui, index, generation);
+                            }
+                        });
+                    });
+                }
                 if geometry_updated {
                     app.restore_position(&ui);
                 }
@@ -2943,6 +3065,7 @@ impl Controller {
         };
         if step == 0 {
             reader.failed.remove(&index);
+            reader.image_retries.remove(&index);
             reader.budget_blocked.remove(&index);
         }
         let departing = reader.activate_page(index);
@@ -5564,6 +5687,129 @@ mod tests {
     }
 
     #[test]
+    fn transient_image_failures_back_off_and_permanent_ones_do_not() {
+        use std::time::Duration;
+        for transient in [
+            "network request failed: HTTP 500",
+            "network request failed: HTTP 503",
+            "network request failed: HTTP 408",
+            "source rate limited the request",
+            "network request failed: error sending request: operation timed out",
+            "network request failed: connection reset by peer",
+        ] {
+            assert!(transient_image_error(transient), "{transient}");
+        }
+        for permanent in [
+            "source resource not found",
+            "authentication required",
+            "interactive challenge required",
+            "source is disabled or unavailable",
+            "image exceeds byte limit",
+            "decoded image exceeds memory limits",
+            "could not decode image",
+            "operation cancelled",
+            "unsupported image format",
+        ] {
+            assert!(!transient_image_error(permanent), "{permanent}");
+            assert_eq!(image_retry_delay(permanent, 0), None, "{permanent}");
+        }
+        // Exponential-ish backoff, then the page stays failed for a manual
+        // seek/retry rather than hammering the source forever.
+        assert_eq!(
+            image_retry_delay("network request failed: HTTP 502", 0),
+            Some(Duration::from_millis(800))
+        );
+        assert_eq!(
+            image_retry_delay("network request failed: HTTP 502", 3),
+            Some(Duration::from_millis(15_000))
+        );
+        assert_eq!(
+            image_retry_delay("network request failed: HTTP 502", 4),
+            None
+        );
+        // Throttling waits much longer than a one-off 5xx.
+        assert_eq!(
+            image_retry_delay("source rate limited the request", 0),
+            Some(Duration::from_millis(4_000))
+        );
+    }
+
+    #[test]
+    fn retry_requeues_only_the_failed_page_in_the_same_generation() {
+        // nova-storage allows one application directory per process; isolate
+        // this Controller fixture like the other storage-backed unit tests.
+        const CHILD: &str = "READER_IMAGE_RETRY_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "app::tests::retry_requeues_only_the_failed_page_in_the_same_generation",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = AppWindow::new().unwrap();
+        let mut reader = tall_reader();
+        reader.failed = BTreeSet::from([0]);
+        reader.requested = BTreeSet::from([0, 1]);
+        reader.budget_blocked = BTreeSet::from([0]);
+        ui.set_section(6);
+        let (images, _receiver) = mpsc::channel();
+        let dir = tempfile::tempdir().unwrap();
+        let services = Services::open(&dir.path().join("data")).unwrap();
+        let app = Arc::new(Controller {
+            progress_checkpoint: crate::progress_checkpoint::ProgressWriter::new(
+                services.domain.clone(),
+            )
+            .unwrap(),
+            artwork: crate::artwork::ArtworkLoader::new(
+                services.clone(),
+                ui.as_weak(),
+                dir.path().join("posters"),
+            ),
+            services,
+            chapter_cache: Arc::new(crate::chapter_cache::ChapterCache::new(
+                dir.path().join("cache"),
+            )),
+            capture_originals: Mutex::default(),
+            thumbnail_service: OnceLock::new(),
+            image_worker_live: AtomicBool::new(false),
+            view: Mutex::new(View {
+                section: 6,
+                reader: Some(reader),
+                ..View::default()
+            }),
+            generation: AtomicU64::new(7),
+            cancel: Mutex::default(),
+            images,
+            download_serial: Mutex::default(),
+            active_image: Mutex::default(),
+            metadata_refresh: Arc::default(),
+        });
+        // A stale generation never retries the old failure.
+        app.retry_failed_image(&ui, 0, 6);
+        assert!(app.view().reader.as_ref().unwrap().failed.contains(&0));
+        app.retry_failed_image(&ui, 0, 7);
+        let reader = app.view();
+        let reader = reader.reader.as_ref().unwrap();
+        assert!(!reader.failed.contains(&0), "retry clears the hard failure");
+        assert!(
+            reader.requested.contains(&0),
+            "the cleared page is queued again for this generation"
+        );
+    }
+
+    #[test]
     #[ignore = "isolated process for Nova's single application directory"]
     fn installed_adult_source_child() {
         use std::io::{Cursor, Write};
@@ -5753,6 +5999,7 @@ mod tests {
             retained: BTreeSet::new(),
             desired: BTreeSet::new(),
             failed: BTreeSet::new(),
+            image_retries: BTreeMap::new(),
             budget_blocked: BTreeSet::new(),
             desired_anchor: usize::MAX,
             decoded_bytes: BTreeMap::new(),
@@ -6710,6 +6957,7 @@ mod tests {
             retained: BTreeSet::new(),
             desired: BTreeSet::new(),
             failed: BTreeSet::new(),
+            image_retries: BTreeMap::new(),
             budget_blocked: BTreeSet::new(),
             desired_anchor: usize::MAX,
             decoded_bytes: BTreeMap::new(),

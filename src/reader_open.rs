@@ -88,6 +88,7 @@ fn prepare_inventory(
         retained: BTreeSet::new(),
         desired: BTreeSet::new(),
         failed: BTreeSet::new(),
+        image_retries: BTreeMap::new(),
         budget_blocked: BTreeSet::new(),
         desired_anchor: usize::MAX,
         decoded_bytes: BTreeMap::new(),
