@@ -137,6 +137,9 @@ pub struct ResumeAnchor {
     pub page_index: usize,
     pub offset_millionths: u32,
 }
+/// Distinguishable from any real source page identity while remaining a
+/// valid non-empty wire value.
+const CLEARED_PAGE_ID: &str = "\u{2063}reader-cleared";
 impl ResumeAnchor {
     pub fn new(page_id: impl Into<String>, page_index: usize, offset: f64) -> Result<Self> {
         if !offset.is_finite() || !(0.0..=1.0).contains(&offset) {
@@ -150,6 +153,19 @@ impl ResumeAnchor {
     }
     pub fn offset(&self) -> f64 {
         f64::from(self.offset_millionths) / 1_000_000.0
+    }
+    /// An explicit "no saved position" marker. Completed and explicitly cleared
+    /// chapters use it so they are not pinned to page one in progress labels or
+    // resume, without adding a wire field older peers would reject.
+    pub fn cleared() -> Self {
+        Self {
+            page_id: CLEARED_PAGE_ID.into(),
+            page_index: 0,
+            offset_millionths: 0,
+        }
+    }
+    pub fn is_cleared(&self) -> bool {
+        self.page_id == CLEARED_PAGE_ID
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

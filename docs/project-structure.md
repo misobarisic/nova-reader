@@ -439,16 +439,21 @@ restore the latest saved anchor.
 
 The existing library long-press/right-click and detail top-right title menus
 expose **Mark all read** / **Mark all unread**. The batch targets the full
-source-local series, preserves chapter anchors and actual History, and uses
-manual completion sync records; marking read respects device download cleanup.
+source-local series, drops saved chapter pages (read state is not a reading
+position), preserves actual History, and uses manual completion sync records;
+marking read respects device download cleanup.
 The same menus expose **Clear all chapter positions**: one durable local edit
-resets every saved resume in the series to image one, leaving read/unread state,
-History, bookmarks and other source-local identities untouched. It needs no
+clears every saved resume in the series (reopening starts at image one), leaving
+read/unread state, History, bookmarks and other source-local identities untouched. It needs no
 chapter-list refresh because it only rewrites existing resume records; the
 changed resume values publish through the normal snapshot prepare.
 Chapter three-dot menus also expose **Clear progress**: pending checkpoints are
-drained before resetting resume to image one, preserving read status, History
-and bookmarks. The reset uses the existing resume sync record, not a new domain.
+drained before removing the saved page, preserving read status, History and
+bookmarks. Every chapter that becomes read (manually or by finishing it) keeps
+its read flag but loses its saved page, so the detail list shows no "Page: N"
+marker and reopening starts at image one. Cleared resumes use a non-empty
+sentinel anchor, so older peers accept and open them at page one; the existing
+resume sync record is reused, not a new domain.
 Controller regressions live beside `src/reader_continuity.rs`; native menu
 reachability/dispatch lives in `tests/entry_menu.rs`.
 Retained previews upgrade when physical-pixel width grows without losing their

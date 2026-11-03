@@ -1017,8 +1017,10 @@ mod tests {
             .iter()
             .filter(|p| p.chapter.series == series)
         {
-            assert_eq!(progress.anchor.page_index, 0);
-            assert_eq!(progress.anchor.offset(), 0.);
+            assert!(
+                progress.anchor.is_cleared(),
+                "cleared chapters have no saved page"
+            );
         }
         assert_eq!(
             cleared
@@ -1041,7 +1043,7 @@ mod tests {
                     .unwrap();
                 let shared: ReadingProgress =
                     serde_json::from_str(record.value.as_deref().unwrap()).unwrap();
-                assert_eq!(shared.anchor.page_index, 0);
+                assert!(shared.anchor.is_cleared());
             }
         }
         let anchor = cleared
@@ -1169,12 +1171,13 @@ mod tests {
         reader.completed = false;
         let previous = reader.activate_page(2).unwrap();
         assert_eq!(previous.chapter, reader.segments[0].chapter);
-        assert_eq!(previous.anchor.page_id, "canonical-1");
-        assert_eq!(previous.anchor.page_index, 1);
-        assert_eq!(previous.anchor.offset(), 0.875);
         assert!(
             previous.completed,
             "crossing forward finishes the chapter left behind"
+        );
+        assert!(
+            previous.anchor.is_cleared(),
+            "a finished chapter keeps no resume page"
         );
         reader.anchor = ResumeAnchor::new(reader.page_id(2), 2, 0.125).unwrap();
         let next = reader.progress_record();
@@ -1194,11 +1197,13 @@ mod tests {
         reader.anchor = ResumeAnchor::new(reader.page_id(1), 1, 0.75).unwrap();
         let back = reader.progress_record();
         assert_eq!(back.chapter, reader.segments[0].chapter);
-        assert_eq!(back.anchor.page_index, 1);
-        assert_eq!(back.anchor.page_id, "canonical-1");
         assert!(
             back.completed,
             "already completed retained chapters stay completed when revisited"
+        );
+        assert!(
+            back.anchor.is_cleared(),
+            "revisiting a completed chapter still has no resume page"
         );
         assert!(
             reader.activate_page(0).is_none(),

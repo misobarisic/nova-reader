@@ -300,12 +300,18 @@ impl Reader {
         let index = self.anchor.page_index;
         ReadingProgress {
             chapter: self.owner(index).clone(),
-            anchor: ResumeAnchor::new(
-                self.page_id(index),
-                self.local_index(index),
-                self.anchor.offset(),
-            )
-            .unwrap_or_default(),
+            // A completed chapter keeps its read flag but no resume page, so the
+            // next open starts at image one instead of the last page finished.
+            anchor: if self.completed {
+                ResumeAnchor::cleared()
+            } else {
+                ResumeAnchor::new(
+                    self.page_id(index),
+                    self.local_index(index),
+                    self.anchor.offset(),
+                )
+                .unwrap_or_default()
+            },
             mode: self.mode,
             last_read_at: now(),
             completed: self.completed,
@@ -318,6 +324,10 @@ impl Reader {
         }
         let mut old = self.progress_record();
         old.completed |= index > self.anchor.page_index;
+        if old.completed {
+            // Finishing a chapter keeps its read flag but drops the resume page.
+            old.anchor = ResumeAnchor::cleared();
+        }
         self.source = self.source_for(index);
         self.chapter = owner;
         self.completed = self.continuity_completion(index, old.completed);
@@ -675,6 +685,17 @@ fn resume_chapter<'a>(
                 .find(|c| !progress.iter().any(|p| p.chapter == c.id && p.completed))
         })
         .or_else(|| chapters.first())
+}
+/// A cleared or completed chapter has no reading position, so the detail
+/// list shows no page marker even when History records a visit.
+fn chapter_progress_label(progress: &ReadingProgress, gallery: bool) -> Option<String> {
+    (!progress.completed && !progress.anchor.is_cleared()).then(|| {
+        format!(
+            "{}: {}",
+            text::tr(if gallery { "Image" } else { "Page" }),
+            progress.anchor.page_index.saturating_add(1)
+        )
+    })
 }
 fn resume_label(chapter: &Chapter) -> String {
     chapter
@@ -1486,18 +1507,10 @@ impl Controller {
                         meta.push(clock.release_date(c.uploaded_at));
                     }
                     if view.section == 5
-                        && let Some(progress) = progress.filter(|p| {
-                            !p.completed
-                                && (p.anchor.page_index > 0
-                                    || p.anchor.offset_millionths > 0
-                                    || snapshot.history.iter().any(|h| h.chapter == c.id))
-                        })
+                        && let Some(progress) = progress
+                        && let Some(label) = chapter_progress_label(progress, gallery)
                     {
-                        meta.push(format!(
-                            "{}: {}",
-                            text::tr(if gallery { "Image" } else { "Page" }),
-                            progress.anchor.page_index.saturating_add(1)
-                        ));
+                        meta.push(label);
                     }
                     if let Some(scanlator) = &c.scanlator {
                         meta.push(scanlator.clone());
@@ -1520,6 +1533,7 @@ impl Controller {
                         subtitle: if view.section == 1 || view.section == 2 {
                             if gallery {
                                 progress
+                                    .filter(|p| !p.anchor.is_cleared())
                                     .map(|p| {
                                         format!(
                                             "{} · {} {}",
@@ -3553,7 +3567,9 @@ impl Controller {
                             if let Some(progress) =
                                 state.progress.iter_mut().find(|p| p.chapter == chapter)
                             {
-                                progress.anchor = ResumeAnchor::new("0", 0, 0.)?;
+                                // No saved page: reopening starts at image one without
+                                // read/unread or History changing.
+                                progress.anchor = ResumeAnchor::cleared();
                                 progress.last_read_at = now();
                             }
                             Ok(())
@@ -3794,11 +3810,14 @@ fn set_series_read(
         }
         let mut progress = prior.unwrap_or(ReadingProgress {
             chapter: chapter.clone(),
-            anchor: ResumeAnchor::new("0", 0, 0.)?,
+            anchor: ResumeAnchor::cleared(),
             mode: state.preferences.mode,
             last_read_at: at,
             completed,
         });
+        // Mark-all is an explicit read-state edit, not a reading position:
+        // completed and unread chapters both lose any saved page.
+        progress.anchor = ResumeAnchor::cleared();
         progress.completed = completed;
         progress.last_read_at = at;
         state.progress.retain(|p| p.chapter != chapter);
@@ -3819,10 +3838,10 @@ fn reset_series_positions(
         .iter_mut()
         .filter(|progress| &progress.chapter.series == series)
     {
-        if progress.anchor.page_index == 0 && progress.anchor.offset() == 0. {
+        if progress.anchor.is_cleared() {
             continue;
         }
-        progress.anchor = ResumeAnchor::new("0", 0, 0.)?;
+        progress.anchor = ResumeAnchor::cleared();
         progress.last_read_at = at;
         cleared += 1;
     }
@@ -3836,11 +3855,14 @@ pub(crate) fn toggle_chapter_read(
     chapter: ChapterId,
     at: i64,
 ) -> reader_domain::Result<()> {
-    let prior = state.progress.iter().find(|p| p.chapter == chapter);
-    let completed = !prior.is_some_and(|p| p.completed);
-    let anchor = prior
-        .map(|p| p.anchor.clone())
-        .unwrap_or(ResumeAnchor::new("0", 0, 0.)?);
+    let completed = !state
+        .progress
+        .iter()
+        .find(|p| p.chapter == chapter)
+        .is_some_and(|p| p.completed);
+    // Read state is not a reading position: whichever direction this toggles,
+    // the chapter has no saved page to resume from.
+    let anchor = ResumeAnchor::cleared();
     state.progress.retain(|p| p.chapter != chapter);
     state.progress.push(ReadingProgress {
         chapter,
@@ -5605,7 +5627,7 @@ mod tests {
         let anchor = ResumeAnchor::new("source-page-3", 2, 0.4).unwrap();
         state.set_progress(ReadingProgress {
             chapter: visited.clone(),
-            anchor: anchor.clone(),
+            anchor,
             mode: ReadingMode::Webtoon,
             last_read_at: 42,
             completed: false,
@@ -5617,14 +5639,15 @@ mod tests {
                 state.history, actual_history,
                 "manual flags cannot reorder actual visits"
             );
-            assert_eq!(
+            assert!(
                 state
                     .progress
                     .iter()
                     .find(|p| p.chapter == visited)
                     .unwrap()
-                    .anchor,
-                anchor
+                    .anchor
+                    .is_cleared(),
+                "read state is not a reading position"
             );
         }
     }
@@ -5677,7 +5700,14 @@ mod tests {
                     progress.chapter.series == series && completed
                 );
                 if progress.chapter.local_id == "one" {
-                    assert_eq!(progress.anchor, anchor);
+                    if progress.chapter.series == series {
+                        assert!(
+                            progress.anchor.is_cleared(),
+                            "mark-all drops the saved page"
+                        );
+                    } else {
+                        assert_eq!(progress.anchor, anchor, "other sources keep their page");
+                    }
                     assert_eq!(progress.mode, ReadingMode::RightToLeft);
                 }
             }
@@ -5706,8 +5736,7 @@ mod tests {
         assert_eq!(reset_series_positions(&mut state, &series, 20).unwrap(), 2);
         for progress in &state.progress {
             if progress.chapter.series == series {
-                assert_eq!(progress.anchor.page_index, 0);
-                assert_eq!(progress.anchor.offset(), 0.);
+                assert!(progress.anchor.is_cleared());
                 assert_eq!(progress.mode, ReadingMode::Webtoon);
             } else {
                 assert_eq!(
@@ -5802,6 +5831,36 @@ mod tests {
             None
         );
         assert_eq!(download_retry_delay("source resource not found", 0), None);
+    }
+
+    #[test]
+    fn completed_and_cleared_chapters_have_no_page_marker_or_resume() {
+        let chapter = ChapterId::new(reader_domain::SeriesId::new("s", "x"), "c");
+        let mut progress = ReadingProgress {
+            chapter,
+            anchor: ResumeAnchor::new("page-7", 6, 0.5).unwrap(),
+            mode: ReadingMode::Webtoon,
+            last_read_at: 1,
+            completed: false,
+        };
+        assert_eq!(
+            chapter_progress_label(&progress, false).as_deref(),
+            Some("Page: 7")
+        );
+        progress.completed = true;
+        assert_eq!(chapter_progress_label(&progress, false), None);
+        progress.completed = false;
+        progress.anchor = ResumeAnchor::cleared();
+        assert_eq!(chapter_progress_label(&progress, false), None);
+        assert_eq!(chapter_progress_label(&progress, true), None);
+
+        let mut reader = tall_reader();
+        reader.completed = true;
+        let saved = reader.progress_record();
+        assert!(saved.completed);
+        assert!(saved.anchor.is_cleared());
+        reader.completed = false;
+        assert!(!reader.progress_record().anchor.is_cleared());
     }
 
     #[test]
