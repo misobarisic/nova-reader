@@ -98,6 +98,7 @@ impl Controller {
                 return;
             }
             if let Some(reader) = view.reader.as_mut() {
+                reader.completion_eligible = false;
                 reader.chapter_navigation = None;
                 reader.reverse_demand = None;
                 reader.window_demand = None;
@@ -115,6 +116,7 @@ impl Controller {
             if let Some(reader) = view.reader.as_mut() {
                 // Settling may emit a normal scroll callback; Pages owns a
                 // neutral return route rather than its boundary demand.
+                reader.completion_eligible = false;
                 reader.chapter_navigation = None;
                 reader.reverse_demand = None;
                 reader.window_demand = None;
@@ -496,12 +498,16 @@ impl Controller {
         let index = selected
             .and_then(|id| o.inventory.iter().position(|r| r.id == id))
             .map(|i| o.start + i);
-        {
+        let switching = {
             let mut view = self.view();
             view.section = 6;
             let Some(reader) = view.reader.as_mut() else {
                 return;
             };
+            let switching = reader.mode_switching;
+            // Restoring the retained viewport can emit ordinary content-y
+            // callbacks. They are not a new reader selection.
+            reader.mode_switching = true;
             reader.anchor = snapshot.anchor;
             reader.viewport_width = snapshot.width;
             reader.viewport_height = snapshot.height;
@@ -510,17 +516,26 @@ impl Controller {
                 reader.anchor =
                     ResumeAnchor::new(reader.page_id(index), index, 0.).unwrap_or_default();
             }
-        }
+            switching
+        };
         ui.set_overview_tiles(ModelRc::default());
         ui.set_section(6);
         ui.set_zoom(snapshot.zoom);
         ui.set_current_page(self.view().reader.as_ref().unwrap().anchor.page_index as i32);
         if index.is_some() {
+            if let Some(reader) = self.view().reader.as_mut() {
+                reader.mode_switching = switching;
+            }
+            // Picking a thumbnail is an explicit image selection; cancelling
+            // Pages deliberately takes the neutral restoration branch below.
             self.step_page(ui, 0);
         } else {
             ui.set_scroll_x(snapshot.x);
             ui.set_scroll_y(snapshot.y);
             self.publish_reader_controls(ui);
+        }
+        if let Some(reader) = self.view().reader.as_mut() {
+            reader.mode_switching = switching;
         }
         let index = self.view().reader.as_ref().unwrap().anchor.page_index;
         self.request_images(ui, index);

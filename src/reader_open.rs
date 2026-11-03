@@ -153,6 +153,7 @@ fn prepare_inventory(
         mode_switching: false,
         completed,
         collection,
+        completion_eligible: false,
     };
     let ids = (0..reader.pages.len())
         .map(|i| reader.page_id(i))

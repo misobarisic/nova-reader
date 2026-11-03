@@ -660,6 +660,7 @@ impl Controller {
         let Some(reader) = view.reader.as_mut() else {
             return;
         };
+        reader.completion_eligible = true;
         reader.reverse_demand = None;
         reader.window_demand = None;
         reader.chapter_navigation = None;
@@ -690,6 +691,8 @@ impl Controller {
         if index != previous_index {
             reader.continuity_backwards = index < previous_index;
         }
+        reader.completed |=
+            reader.chapter_finished() || reader.selected_image_finishes_chapter(index);
         view.pending = Some(reader.progress_record());
         drop(view);
         ui.set_current_page(index as i32);

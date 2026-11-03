@@ -295,6 +295,9 @@ struct Reader {
     mode_switching: bool,
     collection: bool,
     completed: bool,
+    /// Only a real reader selection may infer completion or replace progress.
+    /// Neutral Pages settlement keeps this false across checkpoints and exit.
+    completion_eligible: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -369,12 +372,56 @@ impl Reader {
     fn is_split(&self, index: usize) -> bool {
         self.presentations.get(&index).is_some_and(|p| p.split)
     }
+    /// Mihon marks a chapter read when its final source image is selected;
+    /// selecting the first half of a split image is enough. Loading is allowed,
+    /// but an explicitly failed image cannot newly finish a chapter.
+    fn selected_image_finishes_chapter(&self, index: usize) -> bool {
+        self.completion_eligible
+            && !self.collection
+            && index < self.pages.len()
+            && self
+                .chapter_segment(index)
+                .map_or(self.pages.len(), |s| s.end)
+                == index + 1
+            && !self.failed.contains(&index)
+    }
     fn paged_chapter_finished(&self) -> bool {
-        let index = self.anchor.page_index;
         self.mode != ReadingMode::Webtoon
-            && self.local_index(index) + 1 == self.active_count()
-            && (!self.is_split(index) || self.anchor.offset() >= 0.5)
-            && self.has_visible_pixels(index)
+            && self.selected_image_finishes_chapter(self.anchor.page_index)
+    }
+    /// Webtoon tracks the last image whose bottom is visible or whose top has
+    /// passed the viewport top (Mihon's WebtoonLayoutManager rule). The anchor
+    /// stays at our top visible source point, so a short final image can be
+    /// selected below it. Adjacent retained chapters never extend this chapter.
+    fn chapter_finished(&self) -> bool {
+        if self.collection
+            || self.pages.is_empty()
+            || self.chapter_navigation.is_some()
+            || self.mode_switching
+        {
+            return false;
+        }
+        if self.mode != ReadingMode::Webtoon {
+            return self.paged_chapter_finished();
+        }
+        if self.viewport_width <= 0. || self.viewport_height <= 0. {
+            return false;
+        }
+        let index = self.anchor.page_index;
+        let last = self
+            .chapter_segment(index)
+            .map_or(self.pages.len(), |segment| segment.end)
+            - 1;
+        let viewport_start = (self.page_position(index)
+            + self.ratios[index] * self.anchor.offset() as f32)
+            * self.viewport_width;
+        let viewport_end = viewport_start + self.viewport_height;
+        let image_start = self.page_position(last) * self.viewport_width;
+        let image_end = image_start + self.ratios[last] * self.viewport_width;
+        self.selected_image_finishes_chapter(last)
+            && image_start < viewport_end
+            && image_end > viewport_start
+            && (image_end <= viewport_end || image_start < viewport_start)
     }
     fn decode_width(width: f32, scale_factor: f32) -> u32 {
         // Small layout changes share a decode, while high-density screens get
@@ -1286,6 +1333,16 @@ impl Controller {
         // lifecycle flushes. Enqueue only changes memory; the blocking barrier
         // in flush() runs after this view guard has been released.
         let mut view = self.view();
+        // Selection provenance belongs to the reader, not pending progress or
+        // the overview lifetime: both can disappear before a later exit flush.
+        if view.section == 6
+            && let Some(reader) = view.reader.as_mut()
+            && !reader.completed
+            && reader.chapter_finished()
+        {
+            reader.completed = true;
+            view.pending = Some(reader.progress_record());
+        }
         if let Some(progress) = view.pending.take()
             && let Err(error) = self.progress_checkpoint.enqueue(progress)
         {
@@ -2598,6 +2655,9 @@ impl Controller {
         let Some(reader) = &mut view.reader else {
             return;
         };
+        if origin == PositionOrigin::OverviewSettlement {
+            reader.completion_eligible = false;
+        }
         if reader.mode != ReadingMode::Webtoon || reader.mode_switching {
             return;
         }
@@ -2613,10 +2673,10 @@ impl Controller {
 
         let rows = ui.get_pages();
         let requested_offset = offset;
+        let current = (reader.page_position(reader.anchor.page_index)
+            + reader.ratios[reader.anchor.page_index] * reader.anchor.offset() as f32)
+            * width;
         if origin == PositionOrigin::User {
-            let current = (reader.page_position(reader.anchor.page_index)
-                + reader.ratios[reader.anchor.page_index] * reader.anchor.offset() as f32)
-                * width;
             if (offset - current).abs() > 0.5 {
                 reader.continuity_backwards = offset < current;
                 reader.retain_window_direction(offset > current);
@@ -2634,6 +2694,11 @@ impl Controller {
         });
         if origin == PositionOrigin::User {
             offset = reader.decoded_scroll_offset(offset, width, viewport);
+        }
+        if origin == PositionOrigin::User && (offset - current).abs() > 0.5 {
+            // Restoring scroll-y can emit this same callback. Only an admitted
+            // new source position starts reading again after neutral Pages.
+            reader.completion_eligible = true;
         }
         // Keep Flickable itself at the admitted position, not just the durable
         // anchor; otherwise loading would reveal content above a blank scroll.
@@ -2666,24 +2731,25 @@ impl Controller {
                     && reader
                         .navigation_target_chapter()
                         .is_none_or(|target| target != &reader.chapter)));
-        let (departing, changed_chapter) = if origin == PositionOrigin::OverviewSettlement {
-            let owner = reader.owner(index).clone();
-            let changed = owner != reader.chapter;
-            if changed {
-                let completed = reader.completed;
-                // Carry existing manual/visit flags between live owners; a
-                // neutral overview snapshot does not finish the chapter left.
-                let source = reader.source_for(index);
-                reader.completed = reader.continuity_completion(index, completed);
-                reader.chapter = owner;
-                reader.source = source;
-            }
-            (None, changed)
-        } else {
-            let departing = reader.activate_page(index);
-            let changed = departing.is_some();
-            (departing, changed)
-        };
+        let (departing, changed_chapter) =
+            if origin == PositionOrigin::OverviewSettlement || !reader.completion_eligible {
+                let owner = reader.owner(index).clone();
+                let changed = owner != reader.chapter;
+                if changed {
+                    let completed = reader.completed;
+                    // Carry existing manual/visit flags between live owners; a
+                    // neutral overview snapshot does not finish the chapter left.
+                    let source = reader.source_for(index);
+                    reader.completed = reader.continuity_completion(index, completed);
+                    reader.chapter = owner;
+                    reader.source = source;
+                }
+                (None, changed)
+            } else {
+                let departing = reader.activate_page(index);
+                let changed = departing.is_some();
+                (departing, changed)
+            };
         if let Some(previous) = departing
             && settlement_progress
         {
@@ -2694,15 +2760,13 @@ impl Controller {
         if reader.reverse_demand.is_some() && reader.reverse_target().is_none() {
             reader.reverse_demand = None;
         }
-        if !reader.collection && origin != PositionOrigin::OverviewSettlement {
-            let last = reader.pages.len() - 1;
-            let complete = (index..=last).all(|i| reader.has_visible_pixels(i))
-                && offset + viewport >= reader.total_extent() * width - 2.;
-            reader.completed |= complete;
+        if origin != PositionOrigin::OverviewSettlement {
+            reader.completed |= reader.chapter_finished();
         }
         // Chapter preparation reconciles the live viewport for pixel admission,
         // but only the eventual covered entry commits destination progress.
-        let record = (!reader.collection || reader.has_visible_pixels(reader.anchor.page_index))
+        let record = reader.completion_eligible
+            && (!reader.collection || reader.has_visible_pixels(reader.anchor.page_index))
             && !matches!(
                 origin,
                 PositionOrigin::ZoomSettlement | PositionOrigin::OverviewSettlement
@@ -3549,6 +3613,7 @@ impl Controller {
                         let mut view = app.view();
                         if let Some(reader) = &mut view.reader
                             && reader.chapter_navigation.is_none()
+                            && reader.completion_eligible
                         {
                             if !reader.collection {
                                 reader.completed |= reader.paged_chapter_finished();
@@ -3588,6 +3653,7 @@ impl Controller {
         let Some(reader) = &mut view.reader else {
             return;
         };
+        reader.completion_eligible = true;
         reader.reverse_demand = None;
         reader.window_demand = None;
         reader.chapter_navigation = None;
@@ -3628,7 +3694,8 @@ impl Controller {
         reader.anchor =
             ResumeAnchor::new(reader.page_id(index), index, fraction).unwrap_or_default();
         if !reader.collection {
-            reader.completed |= reader.paged_chapter_finished();
+            reader.completed |= reader.chapter_finished()
+                || reader.selected_image_finishes_chapter(reader.anchor.page_index);
         }
         let record = !reader.collection || reader.has_visible_pixels(reader.anchor.page_index);
         let progress = reader.progress_record();
@@ -6690,6 +6757,7 @@ mod tests {
             mode_switching: false,
             collection: false,
             completed: false,
+            completion_eligible: true,
         }
     }
     #[test]
@@ -6732,8 +6800,9 @@ mod tests {
     }
 
     #[test]
-    fn paged_completion_waits_for_the_second_spread_half_and_uses_chapter_local_end() {
+    fn paged_completion_uses_the_final_source_image_and_chapter_local_end() {
         let mut reader = tall_reader();
+        reader.completion_eligible = true;
         reader.mode = ReadingMode::LeftToRight;
         reader.anchor = ResumeAnchor::new("page-1", 1, 0.).unwrap();
         let presentation = reader_engine::page_presentation(
@@ -6756,8 +6825,8 @@ mod tests {
             },
         );
         assert!(
-            !reader.paged_chapter_finished(),
-            "the first half cannot complete a spread"
+            reader.paged_chapter_finished(),
+            "Mihon marks the final source image read on its first split half"
         );
         reader.anchor = ResumeAnchor::new("page-1", 1, 0.5).unwrap();
         assert!(reader.paged_chapter_finished());
@@ -6797,10 +6866,342 @@ mod tests {
         );
         reader.retained.remove(&0);
         assert!(
-            !reader.paged_chapter_finished(),
-            "unloaded pages cannot complete a chapter"
+            reader.paged_chapter_finished(),
+            "Mihon allows a selected loading image to complete a chapter"
         );
     }
+    #[test]
+    fn webtoon_completion_follows_mihon_visible_image_selection() {
+        let mut reader = tall_reader();
+        reader.completion_eligible = true;
+        reader.viewport_width = 100.;
+        reader.viewport_height = 200.;
+        reader.ratios = vec![1., 10.];
+        reader.anchor = ResumeAnchor::new("page-1", 1, 0.).unwrap();
+        assert!(
+            !reader.chapter_finished(),
+            "a tall image entering at its top is not yet selected by scrolling"
+        );
+        reader.anchor = ResumeAnchor::new("page-1", 1, 0.01).unwrap();
+        assert!(
+            reader.chapter_finished(),
+            "Mihon selects a tall image once its top passes the viewport top"
+        );
+        assert!(
+            reader.decoded_windows.is_empty(),
+            "selection allows loading images, like Mihon"
+        );
+
+        let next = ChapterId::new(reader.chapter.series.clone(), "next");
+        reader.segments = vec![
+            reader_continuity::ChapterSegment {
+                chapter: reader.chapter.clone(),
+                title: "Current".into(),
+                start: 0,
+                end: 2,
+                source: None,
+                completed: false,
+            },
+            reader_continuity::ChapterSegment {
+                chapter: next,
+                title: "Next".into(),
+                start: 2,
+                end: 3,
+                source: None,
+                completed: false,
+            },
+        ];
+        reader.pages.push(PageInput::Local {
+            path: PathBuf::new(),
+            id: "next-page".into(),
+        });
+        reader.ratios.push(10.);
+        reader.failed.insert(2);
+        assert!(
+            reader.chapter_finished(),
+            "a retained next chapter cannot postpone completion"
+        );
+        reader.failed.insert(1);
+        assert!(
+            !reader.chapter_finished(),
+            "an explicitly failed final image cannot finish a chapter"
+        );
+        reader.failed.remove(&1);
+        reader.anchor = ResumeAnchor::new("page-0", 0, 0.).unwrap();
+        assert!(
+            !reader.chapter_finished(),
+            "merely prefetching the final image does not select it"
+        );
+        reader.ratios[1] = 0.5;
+        assert!(
+            reader.chapter_finished(),
+            "a short final image below the top anchor is selected when its bottom is visible"
+        );
+        reader.ratios[0] = 10.;
+        assert!(
+            !reader.chapter_finished(),
+            "an offscreen final image does not count"
+        );
+    }
+
+    #[test]
+    fn reader_exit_reconciles_live_completion_before_flushing_pending_progress() {
+        // nova-storage has one application directory per process.
+        const CHILD: &str = "READER_EXIT_COMPLETION_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "app::tests::reader_exit_reconciles_live_completion_before_flushing_pending_progress",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = AppWindow::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let services = Services::open(&dir.path().join("data")).unwrap();
+        let chapter = tall_reader().chapter;
+        let next = ChapterId::new(chapter.series.clone(), "next");
+        services
+            .domain
+            .update(|state| {
+                state.series.push(Series {
+                    id: chapter.series.clone(),
+                    title: "Completion fixture".into(),
+                    publication_status: Default::default(),
+                    description: String::new(),
+                    authors: vec![],
+                    genres: vec![],
+                    cover_url: None,
+                    canonical_url: None,
+                });
+                for id in [chapter.clone(), next.clone()] {
+                    state.chapters.push(Chapter {
+                        id,
+                        title: "Chapter".into(),
+                        label: "1".into(),
+                        number: None,
+                        volume: None,
+                        source_order: 0,
+                        language: None,
+                        scanlator: None,
+                        uploaded_at: None,
+                    });
+                }
+                Ok(())
+            })
+            .unwrap();
+        let (images, _receiver) = mpsc::channel();
+        let app = Arc::new(Controller {
+            progress_checkpoint: crate::progress_checkpoint::ProgressWriter::new(
+                services.domain.clone(),
+            )
+            .unwrap(),
+            artwork: crate::artwork::ArtworkLoader::new(
+                services.clone(),
+                ui.as_weak(),
+                dir.path().join("posters"),
+            ),
+            services,
+            chapter_cache: Arc::new(crate::chapter_cache::ChapterCache::new(
+                dir.path().join("cache"),
+            )),
+            capture_originals: Mutex::default(),
+            thumbnail_service: OnceLock::new(),
+            image_worker_live: AtomicBool::new(false),
+            view: Mutex::default(),
+            generation: AtomicU64::new(0),
+            cancel: Mutex::default(),
+            images,
+            download_serial: Mutex::default(),
+            active_image: Mutex::default(),
+            continuation_work: Default::default(),
+            metadata_refresh: Arc::default(),
+        });
+        for case in 0..25 {
+            // Clearing History creates a sync tombstone that intentionally
+            // rejects same-second checkpoints for that identity. Each case
+            // represents a fresh chapter, not reading after a History clear.
+            let chapter = ChapterId::new(chapter.series.clone(), format!("chapter-{case}"));
+            let next = ChapterId::new(chapter.series.clone(), format!("next-{case}"));
+            app.services
+                .domain
+                .update(|state| {
+                    state.progress.clear();
+                    state.history.clear();
+                    for id in [chapter.clone(), next.clone()] {
+                        let mut metadata = state.chapters[0].clone();
+                        metadata.id = id;
+                        state.chapters.push(metadata);
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            let mut reader = tall_reader();
+            reader.chapter = chapter.clone();
+            reader.completion_eligible = case != 14;
+            reader.mode = match case {
+                1 | 12 | 13 | 16 => ReadingMode::RightToLeft,
+                2 | 17 => ReadingMode::Vertical,
+                7 | 8 | 11 | 18..=20 | 23 | 24 => ReadingMode::Webtoon,
+                _ => ReadingMode::LeftToRight,
+            };
+            reader.viewport_width = 100.;
+            reader.viewport_height = 200.;
+            reader.ratios = vec![1., 10.];
+            reader.retained.insert(1);
+            reader.decoded_windows.insert(
+                1,
+                reader_engine::DisplayWindowPlan {
+                    width: 1,
+                    full_height: 100,
+                    first_row: 0,
+                    rows: 100,
+                },
+            );
+            let previous = reader.progress_record();
+            reader.anchor = ResumeAnchor::new("page-1", 1, 0.).unwrap();
+            match case {
+                4 | 22 => reader.collection = true,
+                5 | 21 => {
+                    reader.failed.insert(1);
+                }
+                6 | 15 | 23 => {
+                    reader.retained.clear();
+                }
+                8 => {
+                    reader.anchor = ResumeAnchor::new("page-1", 1, 0.8).unwrap();
+                    reader.segments = vec![
+                        reader_continuity::ChapterSegment {
+                            chapter: chapter.clone(),
+                            title: "Current".into(),
+                            start: 0,
+                            end: 2,
+                            source: None,
+                            completed: false,
+                        },
+                        reader_continuity::ChapterSegment {
+                            chapter: next.clone(),
+                            title: "Next".into(),
+                            start: 2,
+                            end: 3,
+                            source: None,
+                            completed: false,
+                        },
+                    ];
+                    reader.pages.push(PageInput::Local {
+                        path: PathBuf::new(),
+                        id: "next-page".into(),
+                    });
+                    reader.ratios.push(10.);
+                    reader.failed.insert(2);
+                }
+                10 => {
+                    reader.completed = true;
+                }
+                11 => {
+                    reader.anchor = ResumeAnchor::new("page-1", 1, 0.8).unwrap();
+                    reader.decoded_windows.get_mut(&1).unwrap().rows = 50;
+                }
+                12 | 13 | 16 => {
+                    let presentation = reader_engine::page_presentation(
+                        &image::RgbaImage::new(2, 1),
+                        reader_engine::DisplayOptions {
+                            split_wide: true,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                    reader.presentations.insert(1, presentation);
+                    if case == 13 {
+                        reader.anchor = ResumeAnchor::new("page-1", 1, 0.5).unwrap();
+                    }
+                }
+                19 => {
+                    reader.ratios = vec![1., 0.5];
+                    reader.anchor = ResumeAnchor::new("page-0", 0, 0.).unwrap();
+                }
+                20 => {
+                    reader.ratios = vec![10., 1.];
+                    reader.anchor = ResumeAnchor::new("page-0", 0, 0.).unwrap();
+                }
+                _ => {}
+            }
+            let pending = match case {
+                3 | 9 => None,
+                // Neutral settlement may move the viewport without permission
+                // to replace the last actual reading position.
+                14 => Some(previous),
+                _ => Some(reader.progress_record()),
+            };
+            let section = if case == 9 { 23 } else { 6 };
+            ui.set_section(section);
+            {
+                let mut view = app.view();
+                view.section = section;
+                view.reader = Some(reader);
+                view.pending = pending;
+            }
+            if case >= 15 {
+                app.mount_pages(&ui);
+                if matches!(case, 18..=20) {
+                    let rows = ui.get_pages();
+                    for index in 0..rows.row_count() {
+                        let mut row = rows.row_data(index).unwrap();
+                        row.loaded = true;
+                        rows.set_row_data(index, row);
+                    }
+                    // Actual scroll callback: tall image early, short final
+                    // below the top anchor, or a merely prefetched final image.
+                    app.position(&ui, if case == 18 { 110. } else { 0. }, 100., 200.);
+                } else if case == 24 {
+                    // Opening/resuming explicitly selects the requested image.
+                    app.step_page(&ui, 0);
+                } else {
+                    app.reader_seek(&ui, if case == 16 { 0.1 } else { 1. });
+                }
+                let view = app.view();
+                let expected = matches!(case, 15..=19 | 23 | 24);
+                assert_eq!(
+                    view.reader.as_ref().unwrap().completed,
+                    expected,
+                    "case {case}: update on selection, before exit"
+                );
+                assert_eq!(
+                    view.pending.as_ref().unwrap().completed,
+                    expected,
+                    "case {case}: current pending progress"
+                );
+            }
+            // This is the same durable exit path used by Back.
+            app.navigate(&ui, 4);
+            assert!(app.view().reader.is_none());
+            let state = app.services.domain.snapshot().unwrap();
+            if case == 9 {
+                assert!(state.progress.is_empty(), "Pages must not infer completion");
+                assert!(state.history.is_empty(), "Pages must not create history");
+                continue;
+            }
+            assert_eq!(state.progress.len(), 1, "case {case}");
+            let saved = &state.progress[0];
+            let completed = matches!(case, 0..=3 | 6 | 8 | 10..=13 | 15..=19 | 23 | 24);
+            assert_eq!(saved.chapter, chapter, "case {case}: canonical owner");
+            assert_eq!(saved.completed, completed, "case {case}");
+            assert_eq!(saved.anchor.is_cleared(), completed, "case {case}");
+            assert_eq!(state.history.len(), 1, "case {case}");
+        }
+    }
+
     #[test]
     fn native_width_windows_follow_each_mode_density_and_zoom() {
         let dimensions = reader_engine::PageDimensions {
@@ -7655,6 +8056,7 @@ mod tests {
             mode_switching: false,
             collection: false,
             completed: false,
+            completion_eligible: false,
         };
         let services = Services::open(&dir.path().join("data")).unwrap();
         let app = Arc::new(Controller {

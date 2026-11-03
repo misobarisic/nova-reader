@@ -397,11 +397,11 @@ impl Controller {
             reader.reverse_demand = None;
             reader.desired_anchor = usize::MAX;
             reader.budget_blocked.clear();
+            reader.completion_eligible = true;
+            reader.completed |=
+                reader.chapter_finished() || reader.selected_image_finishes_chapter(index);
             let old_switching = reader.mode_switching;
             reader.mode_switching = true;
-            if !reader.collection {
-                reader.completed |= reader.paged_chapter_finished();
-            }
             let progress = reader.progress_record();
             view.pending = Some(progress);
             (index, layout.position, old_switching)
@@ -1180,6 +1180,7 @@ mod tests {
             retain(reader, 1, 0, 100, 100);
             reader.anchor = ResumeAnchor::new(reader.page_id(1), 1, 0.95).unwrap();
             reader.completed = false;
+            reader.completion_eligible = false;
             reader.segments[0].completed = true;
             reader.segments[1].completed = false;
             reader.segments[2].completed = false;
@@ -1254,6 +1255,129 @@ mod tests {
         let returned = app.services.domain.snapshot().unwrap();
         assert_eq!(returned.progress, before.progress);
         assert_eq!(returned.history, before.history);
+        assert!(!app.view().reader.as_ref().unwrap().completion_eligible);
+        // Periodic checkpoints drain pending state. Exit also clears Overview
+        // before its flush; neither operation is a genuine reader selection.
+        app.checkpoint_progress();
+        app.checkpoint_progress();
+        app.navigate(&ui, 4);
+        let exited = app.services.domain.snapshot().unwrap();
+        assert_eq!(exited.progress, before.progress);
+        assert_eq!(exited.history, before.history);
+    }
+
+    #[test]
+    fn real_reader_actions_reenable_completion_after_neutral_pages_return() {
+        const CHILD: &str = "READER_PAGES_COMPLETION_REAL_INPUT_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // Independent app directories keep each follow-up free of the
+            // previous case's intentional History-clear sync tombstones.
+            for action in 0..3 {
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "app::reader_chapter_navigation::tests::real_reader_actions_reenable_completion_after_neutral_pages_return",
+                        "--nocapture",
+                    ])
+                    .env(CHILD, action.to_string())
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            return;
+        }
+        let (app, ui, _directory, _receiver) = zoom_fixture();
+        let action: usize = std::env::var(CHILD).unwrap().parse().unwrap();
+        {
+            mount_zoom_fixture(&app, &ui);
+            app.services
+                .domain
+                .update(|state| {
+                    state.progress.clear();
+                    state.history.clear();
+                    Ok(())
+                })
+                .unwrap();
+            {
+                let mut view = app.view();
+                let reader = view.reader.as_mut().unwrap();
+                measure(reader, 1, 100, 100, false);
+                retain(reader, 1, 0, 100, 100);
+                reader.anchor = ResumeAnchor::new(reader.page_id(1), 1, 0.95).unwrap();
+                reader.completed = false;
+                reader.completion_eligible = false;
+            }
+            app.update_reader_geometry(&ui);
+            app.restore_position(&ui);
+            ui.invoke_reader_double_tap(0.5, 0.9);
+            ui.invoke_reader_zoom_frame(0.4);
+            app.open_page_overview(&ui);
+            app.overview_back(&ui);
+            let chapter = app.view().reader.as_ref().unwrap().chapter.clone();
+            assert_eq!(chapter.local_id, "chapter-2");
+            assert!(!app.view().reader.as_ref().unwrap().completion_eligible);
+            app.checkpoint_progress();
+            app.checkpoint_progress();
+            app.progress_checkpoint.flush(None).unwrap();
+            let before = app.services.domain.snapshot().unwrap();
+            // Decode/restoration may publish again after returning from Pages;
+            // a duplicate position callback is still neutral.
+            app.position_internal(
+                &ui,
+                -ui.get_scroll_y(),
+                ui.get_reader_width(),
+                ui.get_reader_viewport_height(),
+                PositionOrigin::Restoration,
+            );
+            app.position(
+                &ui,
+                -ui.get_scroll_y(),
+                ui.get_reader_width(),
+                ui.get_reader_viewport_height(),
+            );
+            assert!(!app.view().reader.as_ref().unwrap().completion_eligible);
+            app.checkpoint_progress();
+            app.progress_checkpoint.flush(None).unwrap();
+            let restored = app.services.domain.snapshot().unwrap();
+            assert_eq!(restored.progress, before.progress);
+            assert_eq!(restored.history, before.history);
+            match action {
+                0 => app.reader_seek(&ui, 1.),
+                1 => {
+                    // Move further into the already selected tall final image.
+                    app.position(
+                        &ui,
+                        -ui.get_scroll_y() + 20.,
+                        ui.get_reader_width(),
+                        ui.get_reader_viewport_height(),
+                    );
+                }
+                _ => {
+                    app.open_page_overview(&ui);
+                    let id = app.view().reader.as_ref().unwrap().page_id(2);
+                    app.overview_select(&ui, &id);
+                    assert_eq!(ui.get_section(), 6);
+                }
+            }
+            assert!(app.view().reader.as_ref().unwrap().completion_eligible);
+            assert!(app.view().reader.as_ref().unwrap().completed);
+            assert!(app.view().pending.as_ref().unwrap().completed);
+            app.flush();
+            let after = app.services.domain.snapshot().unwrap();
+            let progress = after
+                .progress
+                .iter()
+                .find(|p| p.chapter == chapter)
+                .unwrap();
+            assert!(progress.completed);
+            assert!(progress.anchor.is_cleared());
+            assert!(after.history.iter().any(|h| h.chapter == chapter));
+        }
     }
 
     #[test]
@@ -1587,14 +1711,15 @@ mod tests {
                 );
                 assert_eq!(reader.preload_nonce, nonce.wrapping_add(1));
                 let pending = view.pending.as_ref().unwrap();
-                if mode == ReadingMode::Webtoon {
-                    assert_eq!(pending.anchor.page_index, 2);
-                } else {
-                    assert!(
-                        pending.completed,
-                        "the last displayed half completes a paged chapter"
-                    );
-                }
+                assert_eq!(pending.chapter, reader.chapter);
+                assert!(
+                    pending.completed,
+                    "selecting the final source image completes the chapter"
+                );
+                assert!(
+                    pending.anchor.is_cleared(),
+                    "completed chapters have no resume page"
+                );
                 assert!(ui.get_pages() == model, "navigation retains the page model");
                 assert_eq!(app.generation.load(Ordering::Acquire), 17);
             }

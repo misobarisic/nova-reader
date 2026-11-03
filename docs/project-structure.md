@@ -732,7 +732,13 @@ Per-chapter directional errors remain independent, and a failure immediately
 advances the other eligible edge. Tokens/nonces discard superseded results,
 with a fresh generation rejecting old indexed tasks. A 96px boundary row names
 both chapters in Webtoon, with its arrow centered vertically; paged crossings
-use the same 96px caption extent. Completion is tracked per chapter and split spreads complete only after their second half. Periodic checkpoint storage remains off the UI thread.
+use the same 96px caption extent. Manga completion follows Mihon's selected
+source-image policy: selecting the final image counts, including its first split
+half and loading state; an explicitly failed image cannot newly complete. Webtoon
+uses the active chapter's last image when fully visible or passed at the top of
+the viewport. Gallery completion remains explicit. Reader selection provenance
+keeps neutral Pages/zoom restoration from creating progress, history or completion
+across checkpoints and exit. Periodic checkpoint storage remains off the UI thread.
 
 Reader sync stores one record per source-scoped identity under
 `profile_domain("reader", "reader_<kind>")`, never a replicated whole-state
