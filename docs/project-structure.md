@@ -621,8 +621,9 @@ is in `docs/reader-modes.md`.
 
 Continuous reading prepares the previous chapter near the active head and the
 next chapter near the active tail, including when opening a middle chapter
-from detail/History. Both directions follow ascending source-provided
-`source_order`, independently of newest/oldest-first chapter-list display.
+from detail/History. Both directions follow ascending parsed chapter numbers, so a newest-first
+`source_order` listing cannot invert navigation; `source_order` is only the
+fallback for unnumbered chapters. Chapter-list display sorting stays independent.
 Prepending shifts the live anchor/model indices and scroll distance without
 resetting delegates or copying existing pixels; suffix pruning protects every
 visible page, just as forward prefix pruning does. Native regressions beside

@@ -1,6 +1,27 @@
 //! Immediate reader route; preparation, persistence barriers and metadata stay on workers.
 use super::*;
 
+/// Ascending natural reading order: numeric chapter numbers first, then the
+/// source-provided order for unnumbered or equal chapters. Never trust
+/// source_order alone, because several sites list newest first.
+fn reading_order(a: &Chapter, b: &Chapter) -> std::cmp::Ordering {
+    let number = |chapter: &Chapter| {
+        chapter
+            .number
+            .as_deref()
+            .and_then(|value| value.trim().parse::<f64>().ok())
+    };
+    let source_order = a.source_order.cmp(&b.source_order);
+    match (number(a), number(b)) {
+        (Some(left), Some(right)) => left
+            .partial_cmp(&right)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(source_order),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => source_order,
+    }
+}
 pub(super) struct Prepared {
     reader: Reader,
     series: Option<Series>,
@@ -141,7 +162,10 @@ fn prepare_inventory(
         .into_iter()
         .filter(|c| c.id.series == reader.chapter.series)
         .collect::<Vec<_>>();
-    chapters.sort_by_key(|c| c.source_order);
+    // Sources can expose a newest-first chapter list whose source_order is
+    // display order, not reading order. Chapter numbers are the canonical
+    // progression when present; source_order only breaks ties or fills gaps.
+    chapters.sort_by(reading_order);
     reader.initialise_segments(
         chapters
             .iter()
@@ -309,6 +333,42 @@ mod tests {
         rc::Rc,
         time::{Duration, Instant},
     };
+
+    #[test]
+    fn chapters_follow_numbers_even_when_the_source_lists_newest_first() {
+        let series = reader_domain::SeriesId::new("source", "series");
+        let chapter = |number: Option<&str>, source_order: i64| Chapter {
+            id: ChapterId::new(series.clone(), format!("id-{number:?}-{source_order}")),
+            title: String::new(),
+            label: String::new(),
+            number: number.map(str::to_owned),
+            volume: None,
+            source_order,
+            language: None,
+            scanlator: None,
+            uploaded_at: None,
+        };
+        let mut chapters = vec![
+            chapter(Some("107"), 0),
+            chapter(Some("106"), 1),
+            chapter(Some("105.5"), 2),
+            chapter(Some("105"), 3),
+        ];
+        chapters.sort_by(reading_order);
+        assert_eq!(
+            chapters
+                .iter()
+                .map(|c| c.number.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("105"), Some("105.5"), Some("106"), Some("107")]
+        );
+        let mut unnumbered = vec![chapter(None, 5), chapter(None, 2)];
+        unnumbered.sort_by(reading_order);
+        assert_eq!(
+            unnumbered[0].source_order, 2,
+            "source_order is the fallback"
+        );
+    }
 
     #[test]
     fn chapter_open_is_immediate_cancellable_and_reports_errors_inside_reader() {
