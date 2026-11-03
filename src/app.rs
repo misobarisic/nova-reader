@@ -183,6 +183,7 @@ fn transient_image_error(message: &str) -> bool {
     .iter()
     .any(|transient| message.contains(transient))
 }
+const DOWNLOAD_RETRY_DELAYS_MS: [u64; 3] = [2_000, 6_000, 15_000];
 fn rate_limited_image_error(message: &str) -> bool {
     message.to_ascii_lowercase().contains("rate limited")
 }
@@ -199,6 +200,35 @@ fn image_retry_delay(message: &str, attempt: usize) -> Option<std::time::Duratio
         base
     };
     Some(std::time::Duration::from_millis(millis))
+}
+/// Downloads see the same source failures as reader images but run on a shared
+/// queue thread; a short in-place backoff keeps a 5xx/network blip from failing
+/// a chapter that would otherwise need a manual Retry.
+fn download_retry_delay(message: &str, attempt: usize) -> Option<std::time::Duration> {
+    if !transient_image_error(message) {
+        return None;
+    }
+    let base = *DOWNLOAD_RETRY_DELAYS_MS.get(attempt)?;
+    let millis = if rate_limited_image_error(message) {
+        base.saturating_mul(RATE_LIMITED_RETRY_FACTOR)
+    } else {
+        base
+    };
+    Some(std::time::Duration::from_millis(millis))
+}
+/// Sleep in bounded slices so pause/cancel/shutdown release the queue quickly.
+fn sleep_cancellable(cancel: &CancelToken, delay: std::time::Duration) -> bool {
+    let step = std::time::Duration::from_millis(100);
+    let mut remaining = delay;
+    while !remaining.is_zero() {
+        if cancel.is_cancelled() {
+            return false;
+        }
+        let slice = remaining.min(step);
+        std::thread::sleep(slice);
+        remaining -= slice;
+    }
+    !cancel.is_cancelled()
 }
 struct Reader {
     chapter: ChapterId,
@@ -3191,6 +3221,7 @@ impl Controller {
                 }
                 let owner = app.clone();
                 let _ = weak.upgrade_in_event_loop(move |ui| owner.refresh_download_states(&ui));
+                let mut download_attempts: BTreeMap<ChapterId, u8> = BTreeMap::new();
                 loop {
                     let before = app
                         .services
@@ -3207,6 +3238,31 @@ impl Controller {
                         Ok(None) => break,
                         Err(failure) => {
                             eprintln!("Nova Reader download: {failure}");
+                            // Transient source failures are retried in place with
+                            // backoff before the queue advances; a permanently
+                            // failed job still moves on instead of blocking.
+                            if let Some(chapter) = before.clone()
+                                && transient_image_error(&failure)
+                                && let Some(delay) = download_retry_delay(
+                                    &failure,
+                                    usize::from(*download_attempts.get(&chapter).unwrap_or(&0)),
+                                )
+                            {
+                                *download_attempts.entry(chapter.clone()).or_insert(0) += 1;
+                                if sleep_cancellable(&cancel, delay)
+                                    && let Ok(()) = app
+                                        .services
+                                        .downloads
+                                        .resume(&chapter)
+                                        .map_err(error)
+                                        .and_then(|()| {
+                                            app.services.run_queued_download(&chapter, &cancel)
+                                        })
+                                {
+                                    download_attempts.remove(&chapter);
+                                    continue;
+                                }
+                            }
                             // A transport failure is persisted as Failed and
                             // advances the queue. A failed metadata write must
                             // not retry the same queued identity indefinitely.
@@ -5732,6 +5788,20 @@ mod tests {
             image_retry_delay("source rate limited the request", 0),
             Some(Duration::from_millis(4_000))
         );
+        // The download queue shares the classifier but has its own budget.
+        assert_eq!(
+            download_retry_delay("network request failed: HTTP 500", 0),
+            Some(Duration::from_millis(2_000))
+        );
+        assert_eq!(
+            download_retry_delay("network request failed: HTTP 500", 2),
+            Some(Duration::from_millis(15_000))
+        );
+        assert_eq!(
+            download_retry_delay("network request failed: HTTP 500", 3),
+            None
+        );
+        assert_eq!(download_retry_delay("source resource not found", 0), None);
     }
 
     #[test]

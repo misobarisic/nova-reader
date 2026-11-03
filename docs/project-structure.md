@@ -369,7 +369,10 @@ manifest-commit crash windows are covered by real killed-process tests.
 `DownloadStore::snapshot` supplies lightweight job metadata to the Downloads page.
 `move_before` persists queue order only for inactive queued jobs; `run_next` claims
 the next admissible job under that same lock, so a reorder affects the next
-dispatch. Batch preparation and transfers share one serialized worker path.
+dispatch. Batch preparation and transfers share one serialized worker path. Transient
+source failures (5xx, 408, 429, timeouts, connection resets) retry in place with
+bounded backoff (2s, 6s, 15s; rate limits wait five times longer) before the job
+is left Failed for a manual Retry; cancel/pause/shutdown interrupt the sleep.
 Completed chapters and partial/failed queue jobs remain separate. Download actions
 use full chapter identities; deleting bundles preserves reading progress and
 History, and local imports are protected. Detail polling patches transfer fields
