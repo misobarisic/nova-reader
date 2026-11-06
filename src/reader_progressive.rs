@@ -349,7 +349,7 @@ impl Stream {
                     self.render_disabled = true;
                     return;
                 }
-                let tiles = prepare_display_tiles(
+                let tiles = prepare_display_tiles_from_pixels(
                     preview.image.as_raw(),
                     preview.image.width(),
                     preview.image.height(),

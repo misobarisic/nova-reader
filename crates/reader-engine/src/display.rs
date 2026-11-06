@@ -450,6 +450,103 @@ impl DisplayDecoder {
         };
         Ok(DisplayWindow { image, plan })
     }
+
+    /// Plan the same window as `decode_window_with_options`, but render nothing
+    /// up front. `render` receives a [`WindowRenderer`] that samples any
+    /// sub-rectangle of the window straight into a caller-owned buffer (for
+    /// example a GPU upload buffer), so a one-strip viewport shift pays only for
+    /// the strip that actually enters. Pixels are identical to the full window.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_window_tiles<R>(
+        &mut self,
+        bytes: &Arc<Vec<u8>>,
+        limits: DecodeLimits,
+        target_width: u32,
+        start: f64,
+        end: f64,
+        max_bytes: usize,
+        options: DisplayOptions,
+        render: impl FnOnce(&WindowRenderer<'_>) -> Result<R>,
+    ) -> Result<(DisplayWindowPlan, R)> {
+        let presentation = self.presentation(bytes, limits, options)?;
+        let plan =
+            plan_display_window(presentation.effective, target_width, start, end, max_bytes)?;
+        self.ensure_original(bytes, limits)?;
+        let original = &self.cached.as_ref().unwrap().image;
+        // A whole-page native identity output used to hand over its allocation
+        // without a second admission phase; keep that exemption.
+        let whole_native =
+            presentation.is_identity() && !options.has_filters() && is_original(plan, original);
+        if !whole_native
+            && (original.as_raw().len() as u64)
+                .checked_add(plan.byte_len() as u64)
+                .is_none_or(|n| n > limits.max_decoded_bytes)
+        {
+            return Err(Error::Limit);
+        }
+        let renderer = WindowRenderer {
+            original,
+            presentation,
+            options,
+            plan,
+        };
+        let result = render(&renderer)?;
+        if whole_native {
+            // Mirrors decode_window_with_options, which gives the original away.
+            self.cached = None;
+        }
+        Ok((plan, result))
+    }
+}
+/// Samples rectangles of one planned display window out of a decoded original.
+pub struct WindowRenderer<'a> {
+    original: &'a image::RgbaImage,
+    presentation: PagePresentation,
+    options: DisplayOptions,
+    plan: DisplayWindowPlan,
+}
+impl WindowRenderer<'_> {
+    pub fn plan(&self) -> DisplayWindowPlan {
+        self.plan
+    }
+    /// Render the output rectangle `[left, left + width) x [top, top + height)`,
+    /// in full-page output coordinates, into tightly packed RGBA `out`. The
+    /// rectangle must lie inside the planned window.
+    pub fn render_rect(
+        &self,
+        top: u32,
+        height: u32,
+        left: u32,
+        width: u32,
+        out: &mut [u8],
+    ) -> Result<()> {
+        let plan = self.plan;
+        let rect = Rect { top, left, width };
+        if height == 0
+            || width == 0
+            || top < plan.first_row
+            || u64::from(top) + u64::from(height) > u64::from(plan.first_row + plan.rows)
+            || u64::from(left) + u64::from(width) > u64::from(plan.width)
+            || out.len() != width as usize * height as usize * 4
+        {
+            return Err(Error::Layout);
+        }
+        if self.presentation.is_identity() {
+            render_rect(
+                self.original,
+                SourceView::whole(self.original),
+                plan,
+                rect,
+                out,
+            );
+        } else {
+            render_presentation_rect(self.original, self.presentation, plan, rect, out);
+        }
+        if self.options.has_filters() {
+            apply_filters_raw(out, self.options);
+        }
+        Ok(())
+    }
 }
 fn visible_rows(height: u32, start: f64, end: f64) -> (u32, u32) {
     let first = (start.clamp(0., 1.) * f64::from(height)).floor() as u32;
@@ -587,49 +684,24 @@ fn render_window(
         return Err(Error::Limit);
     }
     if original.width() == plan.width && original.height() == plan.full_height {
+        // Native rows: one allocation-and-copy, no zero fill first.
         let stride = plan.width as usize * 4;
         let start = plan.first_row as usize * stride;
         let bytes = original.as_raw()[start..start + plan.byte_len()].to_vec();
         return image::RgbaImage::from_raw(plan.width, plan.rows, bytes).ok_or(Error::Limit);
     }
-    // Bilinear sampling uses the FULL page's coordinate transform, so two
-    // windows sample identical source pixels at a shared row. No giant float
-    // intermediate, nearest-neighbour aliasing, or artificial source upscaling.
     let mut image = image::RgbaImage::new(plan.width, plan.rows);
-    let source_stride = original.width() as usize * 4;
-    for (y, row) in image
-        .as_mut()
-        .chunks_exact_mut(plan.width as usize * 4)
-        .enumerate()
-    {
-        // Source row selection is shared by every pixel in this output row.
-        let sy = ((f64::from(plan.first_row + y as u32) + 0.5) * f64::from(original.height())
-            / f64::from(plan.full_height)
-            - 0.5)
-            .max(0.);
-        let y0 = (sy.floor() as u32).min(original.height() - 1);
-        let y1 = (y0 + 1).min(original.height() - 1);
-        let fy = sy - f64::from(y0);
-        let upper = &original.as_raw()[y0 as usize * source_stride..][..source_stride];
-        let lower = &original.as_raw()[y1 as usize * source_stride..][..source_stride];
-        for (x, pixel) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-            let sx = ((x as f64 + 0.5) * f64::from(original.width()) / f64::from(plan.width) - 0.5)
-                .max(0.);
-            let x0 = (sx.floor() as u32).min(original.width() - 1);
-            let x1 = (x0 + 1).min(original.width() - 1);
-            let fx = sx - f64::from(x0);
-            let a = &upper[x0 as usize * 4..][..4];
-            let b = &upper[x1 as usize * 4..][..4];
-            let c = &lower[x0 as usize * 4..][..4];
-            let d = &lower[x1 as usize * 4..][..4];
-            for i in 0..4 {
-                pixel[i] = ((f64::from(a[i]) * (1. - fx) + f64::from(b[i]) * fx) * (1. - fy)
-                    + (f64::from(c[i]) * (1. - fx) + f64::from(d[i]) * fx) * fy)
-                    .round()
-                    .clamp(0., 255.) as u8;
-            }
-        }
-    }
+    render_rect(
+        original,
+        SourceView::whole(original),
+        plan,
+        Rect {
+            top: plan.first_row,
+            left: 0,
+            width: plan.width,
+        },
+        image.as_mut(),
+    );
     Ok(image)
 }
 fn render_presentation(
@@ -645,73 +717,259 @@ fn render_presentation(
         return Err(Error::Limit);
     }
     let mut output = image::RgbaImage::new(plan.width, plan.rows);
-    // Native cropped rows remain contiguous. Copy directly rather than paying
-    // per-pixel transform/sampling cost on a long cropped page.
+    render_presentation_rect(
+        original,
+        presentation,
+        plan,
+        Rect {
+            top: plan.first_row,
+            left: 0,
+            width: plan.width,
+        },
+        output.as_mut(),
+    );
+    Ok(output)
+}
+
+/// Output rectangle in full-page output coordinates.
+#[derive(Clone, Copy)]
+struct Rect {
+    top: u32,
+    left: u32,
+    width: u32,
+}
+/// A rectangle of the decoded original that forms the (untransformed) virtual
+/// page: the whole image, or the crop of a page with only cropping applied.
+#[derive(Clone, Copy)]
+struct SourceView {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+impl SourceView {
+    fn whole(original: &image::RgbaImage) -> Self {
+        Self {
+            x: 0,
+            y: 0,
+            width: original.width(),
+            height: original.height(),
+        }
+    }
+}
+/// Bilinear weights are 8-bit fixed point: 256 is exactly the second sample.
+const WEIGHT_ONE: u32 = 256;
+fn weight(fraction: f64) -> u32 {
+    (fraction * f64::from(WEIGHT_ONE)).round() as u32
+}
+/// Horizontal sample positions, shared by every output row of a rectangle.
+struct XTaps {
+    x0: Vec<u32>,
+    x1: Vec<u32>,
+    weight: Vec<u32>,
+}
+impl XTaps {
+    /// Source columns for output columns `left..left + width`, using the FULL
+    /// page's coordinate transform so tiles agree on shared pixels.
+    fn new(source_width: u32, output_width: u32, left: u32, width: u32) -> Self {
+        let mut taps = Self {
+            x0: Vec::with_capacity(width as usize),
+            x1: Vec::with_capacity(width as usize),
+            weight: Vec::with_capacity(width as usize),
+        };
+        for x in left..left + width {
+            let sx = ((f64::from(x) + 0.5) * f64::from(source_width) / f64::from(output_width)
+                - 0.5)
+                .clamp(0., f64::from(source_width - 1));
+            let x0 = sx.floor() as u32;
+            taps.x0.push(x0);
+            taps.x1.push((x0 + 1).min(source_width - 1));
+            taps.weight.push(weight(sx - f64::from(x0)));
+        }
+        taps
+    }
+}
+/// Vertical sample position of one output row.
+fn y_tap(row: u32, source_height: u32, output_height: u32) -> (u32, u32, u32) {
+    let sy = ((f64::from(row) + 0.5) * f64::from(source_height) / f64::from(output_height) - 0.5)
+        .clamp(0., f64::from(source_height - 1));
+    let y0 = sy.floor() as u32;
+    (
+        y0,
+        (y0 + 1).min(source_height - 1),
+        weight(sy - f64::from(y0)),
+    )
+}
+#[inline(always)]
+fn blend(a: &[u8], b: &[u8], c: &[u8], d: &[u8], wx: u32, wy: u32, out: &mut [u8]) {
+    for i in 0..4 {
+        let top = u32::from(a[i]) * (WEIGHT_ONE - wx) + u32::from(b[i]) * wx;
+        let bottom = u32::from(c[i]) * (WEIGHT_ONE - wx) + u32::from(d[i]) * wx;
+        out[i] = vertical(top, bottom, wy);
+    }
+}
+/// Combine two horizontally interpolated samples (8.8 fixed point) vertically.
+#[inline(always)]
+fn vertical(top: u32, bottom: u32, wy: u32) -> u8 {
+    ((top * (WEIGHT_ONE - wy) + bottom * wy + WEIGHT_ONE * WEIGHT_ONE / 2)
+        / (WEIGHT_ONE * WEIGHT_ONE)) as u8
+}
+/// Horizontally interpolated source rows. Neighbouring output rows of a
+/// downsampled page share source rows, so the last two are kept.
+struct HorizontalRows<'a> {
+    raw: &'a [u8],
+    source_stride: usize,
+    view: SourceView,
+    taps: XTaps,
+    rows: [(u32, Vec<u16>); 2],
+}
+impl<'a> HorizontalRows<'a> {
+    const NONE: u32 = u32::MAX;
+    fn new(original: &'a image::RgbaImage, view: SourceView, taps: XTaps) -> Self {
+        let len = taps.x0.len() * 4;
+        Self {
+            raw: original.as_raw(),
+            source_stride: original.width() as usize * 4,
+            view,
+            taps,
+            rows: [(Self::NONE, vec![0; len]), (Self::NONE, vec![0; len])],
+        }
+    }
+    /// Slot holding `y`, filling one other than `keep` on a miss.
+    fn slot(&mut self, y: u32, keep: Option<usize>) -> usize {
+        if let Some(found) = self.rows.iter().position(|(row, _)| *row == y) {
+            return found;
+        }
+        let slot = usize::from(keep == Some(0));
+        let source =
+            &self.raw[(self.view.y + y) as usize * self.source_stride..][..self.source_stride];
+        let (row, target) = &mut self.rows[slot];
+        *row = y;
+        for (x, pixel) in target.chunks_exact_mut(4).enumerate() {
+            let wx = self.taps.weight[x];
+            let a = &source[(self.view.x + self.taps.x0[x]) as usize * 4..][..4];
+            let b = &source[(self.view.x + self.taps.x1[x]) as usize * 4..][..4];
+            for i in 0..4 {
+                pixel[i] = (u32::from(a[i]) * (WEIGHT_ONE - wx) + u32::from(b[i]) * wx) as u16;
+            }
+        }
+        slot
+    }
+    fn blend_row(&mut self, y0: u32, y1: u32, wy: u32, out: &mut [u8]) {
+        let first = self.slot(y0, None);
+        let second = if y1 == y0 {
+            first
+        } else {
+            self.slot(y1, Some(first))
+        };
+        let (top, bottom) = (&self.rows[first].1, &self.rows[second].1);
+        for ((out, top), bottom) in out.iter_mut().zip(top).zip(bottom) {
+            *out = vertical(u32::from(*top), u32::from(*bottom), wy);
+        }
+    }
+}
+/// Sample a rectangle of an untransformed (identity or crop-only) page.
+/// Bilinear sampling uses the FULL page's coordinate transform, so two windows
+/// or tiles sample identical source pixels at a shared row. No giant float
+/// intermediate, nearest-neighbour aliasing, or artificial source upscaling.
+fn render_rect(
+    original: &image::RgbaImage,
+    view: SourceView,
+    plan: DisplayWindowPlan,
+    rect: Rect,
+    out: &mut [u8],
+) {
+    let source_stride = original.width() as usize * 4;
+    let raw = original.as_raw();
+    let out_stride = rect.width as usize * 4;
+    if view.width == plan.width && view.height == plan.full_height {
+        // Native rows stay contiguous: copy directly.
+        if view.x == 0
+            && view.width == original.width()
+            && rect.left == 0
+            && rect.width == plan.width
+        {
+            let start = (view.y + rect.top) as usize * source_stride;
+            out.copy_from_slice(&raw[start..start + out.len()]);
+            return;
+        }
+        for (row, target) in out.chunks_exact_mut(out_stride).enumerate() {
+            let start = (view.y as usize + rect.top as usize + row) * source_stride
+                + (view.x + rect.left) as usize * 4;
+            target.copy_from_slice(&raw[start..start + out_stride]);
+        }
+        return;
+    }
+    let mut rows = HorizontalRows::new(
+        original,
+        view,
+        XTaps::new(view.width, plan.width, rect.left, rect.width),
+    );
+    for (row, target) in out.chunks_exact_mut(out_stride).enumerate() {
+        // Source row selection is shared by every pixel in this output row.
+        let (y0, y1, wy) = y_tap(rect.top + row as u32, view.height, plan.full_height);
+        rows.blend_row(y0, y1, wy, target);
+    }
+}
+fn render_presentation_rect(
+    original: &image::RgbaImage,
+    presentation: PagePresentation,
+    plan: DisplayWindowPlan,
+    rect: Rect,
+    out: &mut [u8],
+) {
+    // Cropped rows remain contiguous: skip the per-pixel transform.
     if !presentation.split
         && !presentation.reverse_page
         && presentation.rotation == PageRotation::None
-        && plan.width == presentation.effective.width
-        && plan.full_height == presentation.effective.height
     {
-        let stride = original.width() as usize * 4;
-        let width_bytes = plan.width as usize * 4;
-        for (y, row) in output.as_mut().chunks_exact_mut(width_bytes).enumerate() {
-            let start = (presentation.crop_y as usize + plan.first_row as usize + y) * stride
-                + presentation.crop_x as usize * 4;
-            row.copy_from_slice(&original.as_raw()[start..start + width_bytes]);
-        }
-        return Ok(output);
+        render_rect(
+            original,
+            SourceView {
+                x: presentation.crop_x,
+                y: presentation.crop_y,
+                width: presentation.effective.width,
+                height: presentation.effective.height,
+            },
+            plan,
+            rect,
+            out,
+        );
+        return;
     }
     let width = presentation.effective.width;
     let height = presentation.effective.height;
-    for (y, row) in output
-        .as_mut()
-        .chunks_exact_mut(plan.width as usize * 4)
-        .enumerate()
-    {
-        let sy = ((f64::from(plan.first_row + y as u32) + 0.5) * f64::from(height)
-            / f64::from(plan.full_height)
-            - 0.5)
-            .clamp(0., f64::from(height - 1));
-        let y0 = sy.floor() as u32;
+    let taps = XTaps::new(width, plan.width, rect.left, rect.width);
+    for (row, target) in out.chunks_exact_mut(rect.width as usize * 4).enumerate() {
+        let (y0, mut y1, wy) = y_tap(rect.top + row as u32, height, plan.full_height);
         // Clamp interpolation at the split seam: separate paper halves must
         // never mix the bottom of one page with the top of its neighbour.
-        let section_end = if presentation.split && y0 < presentation.half_height {
-            presentation.half_height - 1
-        } else {
-            height - 1
-        };
-        let y1 = (y0 + 1).min(section_end);
-        let fy = sy - f64::from(y0);
-        for (x, pixel) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-            let sx = ((x as f64 + 0.5) * f64::from(width) / f64::from(plan.width) - 0.5)
-                .clamp(0., f64::from(width - 1));
-            let x0 = sx.floor() as u32;
-            let x1 = (x0 + 1).min(width - 1);
-            let fx = sx - f64::from(x0);
+        if presentation.split && y0 < presentation.half_height {
+            y1 = y1.min(presentation.half_height - 1);
+        }
+        for (x, pixel) in target.chunks_exact_mut(4).enumerate() {
             let sample = |x, y| {
                 let (sx, sy) = presentation.source_pixel(x, y);
-                original.get_pixel(sx, sy)
+                &original.as_raw()[(sy as usize * original.width() as usize + sx as usize) * 4..]
             };
-            let (a, b, c, d) = (
-                sample(x0, y0),
-                sample(x1, y0),
-                sample(x0, y1),
-                sample(x1, y1),
+            blend(
+                sample(taps.x0[x], y0),
+                sample(taps.x1[x], y0),
+                sample(taps.x0[x], y1),
+                sample(taps.x1[x], y1),
+                taps.weight[x],
+                wy,
+                pixel,
             );
-            for i in 0..4 {
-                pixel[i] = ((f64::from(a[i]) * (1. - fx) + f64::from(b[i]) * fx) * (1. - fy)
-                    + (f64::from(c[i]) * (1. - fx) + f64::from(d[i]) * fx) * fy)
-                    .round()
-                    .clamp(0., 255.) as u8;
-            }
         }
     }
-    Ok(output)
 }
 fn apply_filters(image: &mut image::RgbaImage, options: DisplayOptions) {
-    for pixel in image.pixels_mut() {
-        filter_pixel(&mut pixel.0, options);
+    apply_filters_raw(image.as_mut(), options);
+}
+fn apply_filters_raw(pixels: &mut [u8], options: DisplayOptions) {
+    for pixel in pixels.as_chunks_mut::<4>().0 {
+        filter_pixel(pixel, options);
     }
 }
 /// Apply the display color chain to one RGBA sample, preserving alpha.
@@ -1319,11 +1577,167 @@ mod tests {
                         .clamp(0., 255.) as u8
                 }))
             });
-            assert_eq!(
-                render_window(&original, plan, DecodeLimits::default()).unwrap(),
-                expected
-            );
+            // Weights are 8-bit fixed point (1/256 steps) rather than f64, so a
+            // sample may differ from the exact formula by one level, never more.
+            let actual = render_window(&original, plan, DecodeLimits::default()).unwrap();
+            assert_eq!(actual.dimensions(), expected.dimensions());
+            let worst = actual
+                .as_raw()
+                .iter()
+                .zip(expected.as_raw())
+                .map(|(a, b)| a.abs_diff(*b))
+                .max()
+                .unwrap();
+            assert!(worst <= 1, "width {width}: fixed point drifted by {worst}");
         }
+    }
+    #[test]
+    fn window_renderer_tiles_match_the_full_window_for_every_presentation() {
+        let original = image::RgbaImage::from_fn(61, 140, |x, y| {
+            image::Rgba([
+                (x * 37 + y * 5) as u8,
+                (x * 3 + y * 29) as u8,
+                (x * 11 + y * 7) as u8,
+                255 - (x + y) as u8,
+            ])
+        });
+        let bytes = encoded(&original);
+        let limits = DecodeLimits::default();
+        let variants = [
+            DisplayOptions::default(),
+            DisplayOptions {
+                grayscale: true,
+                invert_colors: true,
+                ..Default::default()
+            },
+            DisplayOptions {
+                crop_borders: true,
+                ..Default::default()
+            },
+            DisplayOptions {
+                split_wide: true,
+                rtl: true,
+                reverse_page: true,
+                ..Default::default()
+            },
+            DisplayOptions {
+                rotate_wide: true,
+                flip_wide: true,
+                ..Default::default()
+            },
+        ];
+        // The wide variants need a landscape source.
+        let wide = image::RgbaImage::from_fn(140, 61, |x, y| *original.get_pixel(y, x));
+        let wide_bytes = encoded(&wide);
+        for (options, bytes) in variants
+            .iter()
+            .flat_map(|options| [(*options, bytes.clone()), (*options, wide_bytes.clone())])
+        {
+            for width in [23, 140] {
+                let mut decoder = DisplayDecoder::default();
+                let window = decoder
+                    .decode_window_with_options(&bytes, limits, width, 0.2, 0.8, 1 << 20, options)
+                    .unwrap();
+                let plan = window.plan;
+                let (tiled_plan, tiles) = decoder
+                    .render_window_tiles(&bytes, limits, width, 0.2, 0.8, 1 << 20, options, |r| {
+                        // Awkward rectangles, including a column split and a
+                        // single row, must agree with the whole-window render.
+                        let mut tiles = Vec::new();
+                        for (top, height, left, width) in [
+                            (plan.first_row, plan.rows, 0, plan.width),
+                            (plan.first_row + 1, 1, 0, plan.width),
+                            (
+                                plan.first_row + plan.rows / 2,
+                                plan.rows - plan.rows / 2,
+                                1,
+                                plan.width - 2,
+                            ),
+                            (plan.first_row, 3.min(plan.rows), plan.width - 1, 1),
+                        ] {
+                            let mut out = vec![0; width as usize * height as usize * 4];
+                            r.render_rect(top, height, left, width, &mut out)?;
+                            tiles.push((top, height, left, width, out));
+                        }
+                        let mut out = [0; 4];
+                        assert!(
+                            r.render_rect(plan.first_row + plan.rows, 1, 0, 1, &mut out)
+                                .is_err()
+                        );
+                        assert!(
+                            r.render_rect(plan.first_row, 1, plan.width, 1, &mut out)
+                                .is_err()
+                        );
+                        assert!(
+                            r.render_rect(plan.first_row, 1, 0, 1, &mut out[..3])
+                                .is_err()
+                        );
+                        Ok(tiles)
+                    })
+                    .unwrap();
+                assert_eq!(tiled_plan, plan);
+                for (top, height, left, width, out) in tiles {
+                    let expected = image::imageops::crop_imm(
+                        &window.image,
+                        left,
+                        top - plan.first_row,
+                        width,
+                        height,
+                    )
+                    .to_image();
+                    assert_eq!(out, expected.into_raw(), "{options:?} {width}");
+                }
+            }
+        }
+    }
+    #[test]
+    fn tile_rendering_keeps_window_admission_and_releases_whole_native_pages() {
+        let original = image::RgbaImage::from_fn(32, 40, pattern);
+        let bytes = encoded(&original);
+        let limits = DecodeLimits::default();
+        let mut decoder = DisplayDecoder::default();
+        let (plan, copy) = decoder
+            .render_window_tiles(
+                &bytes,
+                limits,
+                32,
+                0.,
+                1.,
+                1 << 20,
+                DisplayOptions::default(),
+                |r| {
+                    let mut out = vec![0; 32 * 40 * 4];
+                    r.render_rect(0, 40, 0, 32, &mut out)?;
+                    Ok(out)
+                },
+            )
+            .unwrap();
+        assert_eq!((plan.first_row, plan.rows), (0, 40));
+        assert_eq!(copy, original.as_raw().to_vec());
+        assert!(
+            decoder.cached.is_none(),
+            "a whole native page releases its original like decode_window"
+        );
+        // A resampled window is admitted against original + whole window bytes,
+        // exactly as in decode_window_with_options, even though only tiles render.
+        let tight = DecodeLimits {
+            max_decoded_bytes: original.as_raw().len() as u64 + 16 * 20 * 4 - 1,
+            ..limits
+        };
+        assert!(matches!(
+            decoder.render_window_tiles(
+                &bytes,
+                tight,
+                16,
+                0.,
+                1.,
+                1 << 20,
+                DisplayOptions::default(),
+                |_| Ok(())
+            ),
+            Err(Error::Limit)
+        ));
+        assert!(decoder.cached.is_some());
     }
     #[test]
     fn tall_small_letter_strokes_retain_native_width_and_exact_pixels() {

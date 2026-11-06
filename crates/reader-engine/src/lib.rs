@@ -5,8 +5,8 @@ mod display;
 mod jxl;
 pub use display::{
     DISPLAY_TILE_ROWS, DISPLAY_WINDOW_BYTES, DisplayDecoder, DisplayOptions, DisplayWindow,
-    DisplayWindowPlan, PagePresentation, PageRotation, decode_display_image, decode_display_window,
-    filter_pixel, page_presentation, plan_display_window,
+    DisplayWindowPlan, PagePresentation, PageRotation, WindowRenderer, decode_display_image,
+    decode_display_window, filter_pixel, page_presentation, plan_display_window,
 };
 pub use nova_image::is_jpeg_xl;
 pub use nova_image::{DecodeLimits, PageDimensions};

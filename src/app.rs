@@ -3571,18 +3571,6 @@ impl Controller {
                     .max_decoded_bytes
                     .saturating_sub(native_bytes)
                     / 2) as usize;
-                let window = decoded
-                    .decode_window_with_options(
-                        &bytes,
-                        reader_engine::current_limits(),
-                        display_width,
-                        start,
-                        end,
-                        budget.min(copy_budget),
-                        options,
-                    )
-                    .map_err(error)?;
-                cancel.check().map_err(error)?;
                 let response = Arc::downgrade(&bytes);
                 let reuse = {
                     let view = app.view();
@@ -3592,16 +3580,31 @@ impl Controller {
                             .flatten()
                     })
                 };
-                let prepared = prepare_display_tiles(
-                    window.image.as_raw(),
-                    window.image.width(),
-                    window.image.height(),
-                    window.plan.first_row,
-                    window.plan.full_height,
-                    reuse,
-                );
-                let plan = window.plan;
-                drop(window);
+                // Surviving strips keep their images, so render only the strips
+                // entering the window, straight into their upload buffers.
+                let (plan, prepared) = decoded
+                    .render_window_tiles(
+                        &bytes,
+                        reader_engine::current_limits(),
+                        display_width,
+                        start,
+                        end,
+                        budget.min(copy_budget),
+                        options,
+                        |renderer| {
+                            prepare_display_tiles(renderer.plan(), reuse, |rect, out| {
+                                renderer.render_rect(
+                                    rect.top,
+                                    rect.height,
+                                    rect.left,
+                                    rect.width,
+                                    out,
+                                )
+                            })
+                        },
+                    )
+                    .map_err(error)?;
+                cancel.check().map_err(error)?;
                 let write = pending_write.map(|pending| (pending, bytes));
                 Ok((
                     dimensions,
@@ -4865,12 +4868,13 @@ fn display_window_tiles(
     first_row: u32,
     full_height: u32,
 ) -> Vec<TileRow> {
-    prepare_display_tiles(pixels, width, height, first_row, full_height, None)
+    prepare_display_tiles_from_pixels(pixels, width, height, first_row, full_height, None)
         .into_iter()
         .map(mount_tile)
         .collect()
 }
-fn prepare_display_tiles(
+/// Copy tiles out of an already rendered window (progressive previews, fixtures).
+fn prepare_display_tiles_from_pixels(
     pixels: &[u8],
     width: u32,
     height: u32,
@@ -4879,32 +4883,48 @@ fn prepare_display_tiles(
     previous: Option<reader_engine::DisplayWindowPlan>,
 ) -> Vec<PreparedTile> {
     let stride = width as usize * 4;
-    let old = previous.map(tile_rects).unwrap_or_default();
-    tile_rects(reader_engine::DisplayWindowPlan {
-        width,
-        full_height,
-        first_row,
-        rows: height,
-    })
-    .into_iter()
-    .map(|rect| {
-        let pixels = if old.contains(&rect) {
-            None
-        } else {
-            let mut buffer =
-                slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(rect.width, rect.height);
-            for row in 0..rect.height as usize {
+    prepare_display_tiles(
+        reader_engine::DisplayWindowPlan {
+            width,
+            full_height,
+            first_row,
+            rows: height,
+        },
+        previous,
+        |rect, out| {
+            let row_bytes = rect.width as usize * 4;
+            for (row, target) in out.chunks_exact_mut(row_bytes).enumerate() {
                 let source = (rect.top as usize - first_row as usize + row) * stride
                     + rect.left as usize * 4;
-                let target = row * rect.width as usize * 4;
-                buffer.make_mut_bytes()[target..target + rect.width as usize * 4]
-                    .copy_from_slice(&pixels[source..source + rect.width as usize * 4]);
+                target.copy_from_slice(&pixels[source..source + row_bytes]);
             }
-            Some(buffer)
-        };
-        PreparedTile { rect, pixels }
-    })
-    .collect()
+            Ok(())
+        },
+    )
+    .unwrap()
+}
+/// Allocate upload buffers for the strips that are not already mounted and let
+/// `render` fill each one. Strips present in `previous` stay untouched.
+fn prepare_display_tiles(
+    plan: reader_engine::DisplayWindowPlan,
+    previous: Option<reader_engine::DisplayWindowPlan>,
+    mut render: impl FnMut(&TileRect, &mut [u8]) -> reader_engine::Result<()>,
+) -> reader_engine::Result<Vec<PreparedTile>> {
+    let old = previous.map(tile_rects).unwrap_or_default();
+    tile_rects(plan)
+        .into_iter()
+        .map(|rect| {
+            let pixels = if old.contains(&rect) {
+                None
+            } else {
+                let mut buffer =
+                    slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(rect.width, rect.height);
+                render(&rect, buffer.make_mut_bytes())?;
+                Some(buffer)
+            };
+            Ok(PreparedTile { rect, pixels })
+        })
+        .collect()
 }
 
 /// Whether a page step lands on a different page or split half.
@@ -8009,7 +8029,7 @@ mod tests {
                 .into_iter()
                 .zip(model.iter().map(|row| row.image))
                 .collect::<BTreeMap<_, _>>();
-            let prepared = prepare_display_tiles(
+            let prepared = prepare_display_tiles_from_pixels(
                 &pixels,
                 720,
                 plan.rows,
@@ -8086,7 +8106,7 @@ mod tests {
             "same bytes in a new response must not reuse old tiles"
         );
         let plan = previous.unwrap();
-        let prepared = prepare_display_tiles(
+        let prepared = prepare_display_tiles_from_pixels(
             &vec![255; plan.byte_len()],
             plan.width,
             plan.rows,
@@ -8597,6 +8617,74 @@ mod tests {
         // Moving between the halves of one split page is movement.
         assert!(step_moves(3, false, 3, 0.5));
         assert!(step_moves(3, true, 3, 0.));
+    }
+
+    #[test]
+    fn direct_tile_rendering_matches_copying_a_full_window_and_skips_mounted_strips() {
+        let source = image::RgbaImage::from_fn(300, 9000, |x, y| {
+            image::Rgba([(x * 7 + y) as u8, (x + y * 3) as u8, (y / 5) as u8, 255])
+        });
+        let mut png = std::io::Cursor::new(Vec::new());
+        source.write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let bytes = Arc::new(png.into_inner());
+        let limits = reader_engine::DecodeLimits::default();
+        let options = reader_engine::DisplayOptions::default();
+        let mut decoder = reader_engine::DisplayDecoder::default();
+        let mut previous = None;
+        for (width, start) in [(300, 0.1), (212, 0.1), (212, 0.3), (212, 0.5)] {
+            let window = decoder
+                .decode_window_with_options(
+                    &bytes,
+                    limits,
+                    width,
+                    start,
+                    start + 0.05,
+                    1 << 26,
+                    options,
+                )
+                .unwrap();
+            let copied = prepare_display_tiles_from_pixels(
+                window.image.as_raw(),
+                window.image.width(),
+                window.image.height(),
+                window.plan.first_row,
+                window.plan.full_height,
+                previous,
+            );
+            let mut rendered_rects = 0;
+            let (plan, direct) = decoder
+                .render_window_tiles(
+                    &bytes,
+                    limits,
+                    width,
+                    start,
+                    start + 0.05,
+                    1 << 26,
+                    options,
+                    |r| {
+                        prepare_display_tiles(r.plan(), previous, |rect, out| {
+                            rendered_rects += 1;
+                            r.render_rect(rect.top, rect.height, rect.left, rect.width, out)
+                        })
+                    },
+                )
+                .unwrap();
+            assert_eq!(plan, window.plan);
+            assert_eq!(copied.len(), direct.len());
+            let entering = direct.iter().filter(|tile| tile.pixels.is_some()).count();
+            assert_eq!(
+                rendered_rects, entering,
+                "mounted strips must not be rendered"
+            );
+            for (a, b) in copied.iter().zip(&direct) {
+                assert_eq!(a.rect, b.rect);
+                assert_eq!(
+                    a.pixels.as_ref().map(|p| p.as_bytes().to_vec()),
+                    b.pixels.as_ref().map(|p| p.as_bytes().to_vec())
+                );
+            }
+            previous = Some(plan);
+        }
     }
 
     #[test]

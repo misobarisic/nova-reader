@@ -88,6 +88,25 @@ no reset or overlap row-change events and at most one entering 720×2,048 strip
 per window shift for a 720×25,000 page. These are deterministic work/retention
 checks; Android GPU frame times still require physical-device measurements.
 
+## Strip-shift rendering
+
+A viewport shift used to render the whole admitted window (about three
+2,048-row strips) and then copy only the entering strip into its upload buffer.
+The worker now computes the surviving-strip `reuse` before decoding, and
+`DisplayDecoder::render_window_tiles` hands a `WindowRenderer` to the app, which
+samples only the entering rectangles straight into their `SharedPixelBuffer`s.
+Resampling uses an x-tap table, 8-bit fixed-point weights and a two-row
+horizontal cache, so adjacent output rows share horizontally interpolated source
+rows. Pixels at a shared row are still identical between windows and tiles.
+Fixed point can differ from the old f64 formula by one level per channel; tests
+bound that difference.
+
+The `tall_scroll` example's strip-shift case (same machine, alternating runs of
+the old and new binaries, five one-strip shifts, 512 px output) went from about
+109 ms per shift to about 5 ms (6 ms for a shift that actually admits a strip;
+some shifts admit none and now cost nothing). Native-width shifts went from
+1.7 ms to 0.5 ms.
+
 ## Reproduce the CPU profile
 
 ```sh
