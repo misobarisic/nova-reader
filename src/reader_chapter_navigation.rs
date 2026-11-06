@@ -1799,6 +1799,53 @@ mod tests {
     }
 
     #[test]
+    fn paged_collection_progress_stores_the_selected_image_before_it_decodes() {
+        const CHILD: &str = "READER_COLLECTION_PROGRESS_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "app::reader_chapter_navigation::tests::paged_collection_progress_stores_the_selected_image_before_it_decodes", "--nocapture"])
+                .env(CHILD, "1").output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let (app, ui, _directory, _receiver) = zoom_fixture();
+        mount_zoom_fixture(&app, &ui);
+        let chapter = {
+            let mut view = app.view();
+            let reader = view.reader.as_mut().unwrap();
+            let chapter = reader.chapter.clone();
+            reader.segments.clear();
+            reader.mode = ReadingMode::LeftToRight;
+            reader.collection = true;
+            reader.retained.clear();
+            reader.decoded_windows.clear();
+            chapter
+        };
+        ui.set_reading_mode(mode_index(ReadingMode::LeftToRight));
+        app.step_page(&ui, 1);
+        app.flush();
+        let stored = app
+            .services
+            .domain
+            .snapshot()
+            .unwrap()
+            .progress
+            .into_iter()
+            .find(|p| p.chapter == chapter)
+            .map(|p| p.anchor.page_index);
+        assert_eq!(
+            stored,
+            Some(app.view().reader.as_ref().unwrap().anchor.page_index),
+            "stored position follows the selected image shown by the OSD"
+        );
+    }
+
+    #[test]
     fn retained_controller_navigation_and_terminal_errors_preserve_the_live_reader() {
         const CHILD: &str = "READER_EXPLICIT_CHAPTER_NAVIGATION_CHILD";
         if std::env::var_os(CHILD).is_none() {

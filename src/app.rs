@@ -3923,11 +3923,10 @@ impl Controller {
             reader.completed |= reader.chapter_finished()
                 || reader.selected_image_finishes_chapter(reader.anchor.page_index);
         }
-        let record = !reader.collection || reader.has_visible_pixels(reader.anchor.page_index);
+        // The selected image is what the OSD and gallery highlight show, so it
+        // is what progress stores even if its pixels have not decoded yet.
         let progress = reader.progress_record();
-        if record {
-            view.pending = Some(progress);
-        }
+        view.pending = Some(progress);
         drop(view);
         if changed_chapter {
             ui.invoke_cancel_reader_zoom();
