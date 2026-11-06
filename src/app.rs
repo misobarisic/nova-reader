@@ -97,6 +97,9 @@ enum Row {
     Series(Series),
     Chapter(Chapter),
 }
+/// Counts scroll frames that reached the reader, so a frame deferred by view
+/// contention is replayed only if nothing newer has been applied since.
+static POSITION_FRAME: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone)]
 enum PageInput {
     Verified(Box<crate::page_inventory::Resource>),
@@ -2874,8 +2877,21 @@ impl Controller {
             return;
         }
         let Ok(mut view) = self.view.try_lock() else {
+            // Another thread (the sync persistence barrier) owns the view. Do
+            // not lose this frame, which may be the last one of a fling:
+            // replay it on the UI thread unless a newer frame lands first.
+            let frame = POSITION_FRAME.load(Ordering::Acquire);
+            let (app, weak) = (self.clone(), ui.as_weak());
+            let _ = slint::invoke_from_event_loop(move || {
+                if POSITION_FRAME.load(Ordering::Acquire) == frame
+                    && let Some(ui) = weak.upgrade()
+                {
+                    app.position_internal(&ui, offset, width, viewport, origin);
+                }
+            });
             return;
         };
+        POSITION_FRAME.fetch_add(1, Ordering::AcqRel);
         if view.section != 6 {
             return;
         }

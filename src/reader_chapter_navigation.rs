@@ -1846,6 +1846,62 @@ mod tests {
     }
 
     #[test]
+    fn scroll_frame_during_view_contention_is_not_dropped() {
+        const CHILD: &str = "READER_CONTENDED_FRAME_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "app::reader_chapter_navigation::tests::scroll_frame_during_view_contention_is_not_dropped", "--nocapture"])
+                .env(CHILD, "1").output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let (app, ui, _directory, _receiver) =
+            zoom_fixture_with(i_slint_backend_testing::init_integration_test_with_system_time);
+        mount_zoom_fixture(&app, &ui);
+        // Let the mount's own deferred scroll callbacks settle first.
+        slint::invoke_from_event_loop(|| slint::quit_event_loop().unwrap()).unwrap();
+        slint::run_event_loop().unwrap();
+        let width = ui.get_reader_width();
+        let current = {
+            let view = app.view();
+            let reader = view.reader.as_ref().unwrap();
+            (reader.page_position(1) + reader.ratios[1] * reader.anchor.offset() as f32) * width
+        };
+        let before = app.view().reader.as_ref().unwrap().anchor.clone();
+        let (locked, wait_locked) = std::sync::mpsc::channel();
+        let (release, wait_release) = std::sync::mpsc::channel::<()>();
+        let holder = {
+            let app = app.clone();
+            std::thread::spawn(move || {
+                let _view = app.view();
+                locked.send(()).unwrap();
+                let _ = wait_release.recv();
+            })
+        };
+        wait_locked.recv().unwrap();
+        // The last fling frame arrives while another thread (the sync
+        // persistence barrier) briefly owns the view.
+        app.position(&ui, current + 300., width, ui.get_reader_viewport_height());
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        slint::invoke_from_event_loop(|| slint::quit_event_loop().unwrap()).unwrap();
+        slint::run_event_loop().unwrap();
+        app.flush();
+        let after = app.view().reader.as_ref().unwrap().anchor.clone();
+        assert_ne!(after, before, "the contended frame was replayed");
+        let stored = app.services.domain.snapshot().unwrap().progress;
+        assert!(
+            stored.iter().any(|p| p.anchor.offset_millionths != before.offset_millionths),
+            "the replayed frame is what flush persisted: {stored:?}"
+        );
+    }
+
+    #[test]
     fn retained_controller_navigation_and_terminal_errors_preserve_the_live_reader() {
         const CHILD: &str = "READER_EXPLICIT_CHAPTER_NAVIGATION_CHILD";
         if std::env::var_os(CHILD).is_none() {
