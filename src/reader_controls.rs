@@ -725,7 +725,10 @@ impl Controller {
         let Some(reader) = &view.reader else {
             return;
         };
-        if ui.get_zoom() > 1.01 {
+        // A zoomed image has no page-turn zones, and an image collection is a
+        // photo viewer: any tap shows or hides the chrome. Swipes, the wheel,
+        // keys and the filmstrip move between images instead of edge taps.
+        if ui.get_zoom() > 1.01 || ui.get_reader_collection() {
             drop(view);
             ui.set_reader_osd(!ui.get_reader_osd());
             return;

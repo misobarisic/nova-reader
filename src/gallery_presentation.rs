@@ -912,6 +912,17 @@ mod tests {
             app.view().reader.as_ref().unwrap().anchor.page_id,
             "stable-0"
         );
+        // A photo viewer: a tap in the old "next page" edge zone only toggles
+        // the chrome; it never turns the page.
+        let chrome = ui.get_reader_osd();
+        ui.invoke_reader_tap(0.95, 0.5);
+        assert_eq!(ui.get_reader_osd(), !chrome);
+        assert_eq!(
+            app.view().reader.as_ref().unwrap().anchor.page_id,
+            "stable-0"
+        );
+        ui.invoke_reader_tap(0.95, 0.5);
+        assert_eq!(ui.get_reader_osd(), chrome);
         ui.invoke_reader_action("pages".into());
         assert_eq!(ui.get_section(), 23);
         app.flush();

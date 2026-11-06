@@ -1061,7 +1061,9 @@ export component AppWindow inherits Window {
                             }
                         }
                         if root.section == 6: Rectangle {
-                            background: root.reader-initial-content ? root.reader-background : #000000;
+                            // Photographs are always viewed on black, whatever tone the
+                            // reader's page background preference gives manga.
+                            background: root.reader-initial-content && !root.reader-collection ? root.reader-background : #000000;
                             pager := ReaderPagerMotion {
                                 enabled: root.reading-mode != 0 && root.zoom <= 1 && !zoom-gesture.blocking && !root.capture-editor-visible && !root.reader-context-visible;
                                 mode: root.reading-mode; page: root.current-page;
@@ -1229,9 +1231,12 @@ export component AppWindow inherits Window {
                                 }
                             }
                             if root.reader-flash-active: Rectangle { width: 100%; height: 100%; background: #ffffff; }
-                            if ReaderSettings.show-page-number && root.pages.length > 0 && root.reader-entry-revealed && !root.reader-osd && !root.reader-context-capturing: Rectangle {
-                                x: parent.width - self.width - 12px; y: parent.height - root.safe-area-insets.bottom - 40px;
+                            // Collections always show an "N / M" counter while the
+                            // chrome is hidden; manga keeps it behind the setting.
+                            if (ReaderSettings.show-page-number || root.reader-collection) && root.pages.length > 0 && root.reader-entry-revealed && !root.reader-osd && !root.reader-context-capturing: reader-counter := Rectangle {
+                                x: root.reader-collection ? (parent.width - self.width) / 2 : parent.width - self.width - 12px; y: parent.height - root.safe-area-insets.bottom - 40px;
                                 width: 76px; height: 28px; border-radius: 10px; background: #000000a0;
+                                accessible-role: text; accessible-label: root.reader-collection ? @tr("Image {0} of {1}", root.reader-local-page, root.reader-page-count) : @tr("Page {0} of {1}", root.reader-local-page, root.reader-page-count);
                                 Text { width: 100%; height: 100%; text: root.reader-local-page + " / " + root.reader-page-count; color: #ffffff; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
                             }
                             if root.reader-osd && !root.reader-opening: ReaderOsd {
