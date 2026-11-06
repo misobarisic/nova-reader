@@ -715,6 +715,8 @@ The target is captured relative to the chapter active at the button press.
 Active zoom first settles to reconcile the actual old source viewport, then
 returns to 1× before destination layout. The same preparation runs before an
 asynchronous entry commits; programmatic settlement cannot cancel its intent.
+Scroll frames from a running fling do not cancel it either; a new press on the
+artwork (`reader-press`) does. Paged swipes commit their page step on release.
 Opening Pages cancels pending chapter/boundary intent and snapshots settled zoom,
 so Back restores the original reader route even if destination pixels arrive late.
 Collection viewers route directional group actions through their existing group
