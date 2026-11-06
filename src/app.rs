@@ -343,7 +343,9 @@ impl Reader {
             chapter: self.owner(index).clone(),
             // A completed chapter keeps its read flag but no resume page, so the
             // next open starts at image one instead of the last page finished.
-            anchor: if self.completed {
+            // The exception is a place the viewer is actively reading in a
+            // chapter already read (e.g. scrolled back up into it).
+            anchor: if self.completed && !self.keeps_place_in_read_chapter() {
                 ResumeAnchor::cleared()
             } else {
                 ResumeAnchor::new(
@@ -358,15 +360,29 @@ impl Reader {
             completed: self.completed,
         }
     }
+    /// True when a chapter already marked read is being read partway: live
+    /// reading (not a neutral overview), past the first image's top and short
+    /// of its end. The end of a read chapter restarts, like finishing it.
+    fn keeps_place_in_read_chapter(&self) -> bool {
+        let index = self.anchor.page_index;
+        let last = self
+            .chapter_segment(index)
+            .map_or(self.pages.len(), |segment| segment.end)
+            .saturating_sub(1);
+        self.completion_eligible
+            && (self.local_index(index) > 0 || self.anchor.offset() > 0.)
+            && index < last
+            && !self.chapter_finished()
+    }
     fn activate_page(&mut self, index: usize) -> Option<ReadingProgress> {
         let owner = self.owner(index).clone();
         if self.chapter == owner {
             return None;
         }
         let mut old = self.progress_record();
-        old.completed |= index > self.anchor.page_index;
-        if old.completed {
+        if index > self.anchor.page_index {
             // Finishing a chapter keeps its read flag but drops the resume page.
+            old.completed = true;
             old.anchor = ResumeAnchor::cleared();
         }
         self.source = self.source_for(index);
@@ -1342,6 +1358,9 @@ struct View {
     reader: Option<Reader>,
     overview: Option<page_overview::Overview>,
     reader_open: Option<ChapterId>,
+    /// Detail's "Read again": the next prepare for this chapter ignores its
+    /// stored place and starts at image one.
+    reread: Option<ChapterId>,
     catalogue: String,
     query: String,
     page: usize,
@@ -3990,6 +4009,14 @@ impl Controller {
             }
         };
         if let Some(chapter) = chapter {
+            if step == 0 {
+                let completed = self.services.domain.snapshot().is_ok_and(|s| {
+                    s.progress
+                        .iter()
+                        .any(|p| p.chapter == chapter && p.completed)
+                });
+                self.view().reread = completed.then(|| chapter.clone());
+            }
             self.open_chapter(ui, chapter);
         }
     }

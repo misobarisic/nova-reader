@@ -1741,9 +1741,13 @@ mod tests {
                     )
                 });
                 if completed {
-                    // Deliberate (84e8063): a chapter already read keeps its flag
-                    // but no resume page, even when re-entered by scrolling up.
-                    assert!(stored.anchor.is_cleared(), "{label}: {:?}", stored.anchor);
+                    // A chapter already read keeps its flag but also the place
+                    // reached by scrolling into it (no longer cleared).
+                    assert!(
+                        !stored.anchor.is_cleared() && stored.anchor.page_index == target_page % 3,
+                        "{label}: {:?}",
+                        stored.anchor
+                    );
                 } else {
                     assert!(
                         !stored.anchor.is_cleared() && stored.anchor.page_index == target_page % 3,

@@ -489,7 +489,11 @@ Chapter three-dot menus also expose **Clear progress**: pending checkpoints are
 drained before removing the saved page, preserving read status, History and
 bookmarks. Every chapter that becomes read (manually or by finishing it) keeps
 its read flag but loses its saved page, so the detail list shows no "Page: N"
-marker and reopening starts at image one. Cleared resumes use a non-empty
+marker and reopening starts at image one. The one exception is live reading
+partway through an already-read chapter (for example scrolling back up into
+it, `Reader::keeps_place_in_read_chapter`): it stays read but stores the place
+reached, so History reopens there; Detail's "Read again" still restarts it
+(`View::reread`), and reaching the last page or end clears it again. Cleared resumes use a non-empty
 sentinel anchor, so older peers accept and open them at page one; the existing
 resume sync record is reused, not a new domain.
 Controller regressions live beside `src/reader_continuity.rs`; native menu

@@ -785,6 +785,241 @@ mod tests {
         }
     }
     #[test]
+    fn scrolling_back_into_a_read_chapter_keeps_its_place_for_history() {
+        const CHILD: &str = "READER_READ_CHAPTER_KEEPS_PLACE_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "app::reader_continuity::tests::scrolling_back_into_a_read_chapter_keeps_its_place_for_history", "--nocapture"])
+                .env(CHILD, "1").output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        i_slint_backend_testing::init_integration_test_with_system_time();
+        let dir = tempfile::tempdir().unwrap();
+        let services = Services::open(&dir.path().join("data")).unwrap();
+        crate::reader_settings::init().unwrap();
+        crate::reader_settings::update("fullscreen", 0).unwrap();
+        let series = reader_domain::SeriesId::new("local", "natural-order");
+        let chapters = [1, 2, 3, 10].map(|number| reader_domain::Chapter {
+            id: ChapterId::new(series.clone(), format!("opaque-{number}")),
+            title: format!("Chapter {number}"),
+            number: Some(number.to_string()),
+            source_order: number,
+            label: String::new(),
+            volume: None,
+            uploaded_at: Some(100 - number),
+            language: None,
+            scanlator: None,
+        });
+        let folder = dir.path().join("pages");
+        std::fs::create_dir(&folder).unwrap();
+        for page in [1, 2] {
+            image::RgbaImage::from_pixel(10, 20, image::Rgba([30, 80, 210, 255]))
+                .save(folder.join(format!("{page}.png")))
+                .unwrap();
+        }
+        for chapter in &chapters {
+            services
+                .downloads
+                .import_folder(chapter.id.clone(), &folder)
+                .unwrap();
+        }
+        services
+            .domain
+            .update(|state| {
+                state.series.push(reader_domain::Series {
+                    id: series.clone(),
+                    title: "Natural order".into(),
+                    description: String::new(),
+                    authors: vec![],
+                    genres: vec![],
+                    cover_url: None,
+                    canonical_url: None,
+                    publication_status: Default::default(),
+                });
+                state.chapters = chapters.iter().rev().cloned().collect();
+                Ok(())
+            })
+            .unwrap();
+        let ui = AppWindow::new().unwrap();
+        ui.window().set_size(slint::LogicalSize::new(1000., 600.));
+        let (images, _receiver) = mpsc::channel();
+        let app = Arc::new(Controller {
+            progress_checkpoint: crate::progress_checkpoint::ProgressWriter::new(
+                services.domain.clone(),
+            )
+            .unwrap(),
+            artwork: crate::artwork::ArtworkLoader::new(
+                services.clone(),
+                ui.as_weak(),
+                dir.path().join("posters"),
+            ),
+            services,
+            chapter_cache: Arc::new(crate::chapter_cache::ChapterCache::new(
+                dir.path().join("cache"),
+            )),
+            capture_originals: Mutex::default(),
+            thumbnail_service: OnceLock::new(),
+            image_worker_live: AtomicBool::new(false),
+            view: Mutex::new(View::default()),
+            generation: AtomicU64::new(0),
+            cancel: Mutex::default(),
+            images,
+            download_serial: Mutex::default(),
+            active_image: Mutex::default(),
+            continuation_work: Default::default(),
+            metadata_refresh: Arc::default(),
+        });
+        fn pump_until(mut ready: impl FnMut() -> bool + 'static) {
+            let timer = slint::Timer::default();
+            let start = std::time::Instant::now();
+            timer.start(
+                slint::TimerMode::Repeated,
+                Duration::from_millis(5),
+                move || {
+                    if ready() || start.elapsed() > Duration::from_secs(5) {
+                        slint::quit_event_loop().unwrap();
+                    }
+                },
+            );
+            slint::run_event_loop().unwrap();
+            timer.stop();
+        }
+        crate::reader_modes::save(&series, ModeChoice::Manual(ReadingMode::Webtoon)).unwrap();
+        // Chapters 1 and 2 were read before; the user now re-reads 2 and scrolls
+        // up into 1, then later forward into 3 (never read).
+        app.services
+            .domain
+            .update(|state| {
+                for chapter in &chapters[..2] {
+                    state.set_progress(ReadingProgress {
+                        chapter: chapter.id.clone(),
+                        anchor: ResumeAnchor::cleared(),
+                        mode: ReadingMode::Webtoon,
+                        last_read_at: now() - 100,
+                        completed: true,
+                    });
+                }
+                Ok(())
+            })
+            .unwrap();
+        app.open_chapter(&ui, chapters[1].id.clone());
+        let wait = app.clone();
+        pump_until(move || {
+            wait.view()
+                .reader
+                .as_ref()
+                .is_some_and(|reader| reader.segments.len() == 3 && reader.preloading.is_none())
+        });
+        let rows = ui.get_pages();
+        for index in 0..rows.row_count() {
+            let mut row = rows.row_data(index).unwrap();
+            row.loaded = true;
+            rows.set_row_data(index, row);
+        }
+        let width = ui.get_reader_width();
+        // Half way down chapter 1's first image, from inside chapter 2.
+        app.position(&ui, 0.5 * 2. * width, width, 600.);
+        {
+            let view = app.view();
+            let r = view.reader.as_ref().unwrap();
+            assert_eq!(r.chapter, chapters[0].id);
+            assert_eq!(r.local_index(r.anchor.page_index), 0);
+        }
+        app.flush();
+        let stored = app
+            .services
+            .domain
+            .snapshot()
+            .unwrap()
+            .progress
+            .into_iter()
+            .find(|p| p.chapter == chapters[0].id)
+            .unwrap();
+        assert!(stored.completed, "reading again keeps the read flag");
+        assert!(
+            !stored.anchor.is_cleared()
+                && stored.anchor.page_index == 0
+                && stored.anchor.offset() > 0.2,
+            "the place reached in a read chapter is stored: {:?}",
+            stored.anchor
+        );
+        // Opening it the History way restores that place.
+        app.open_chapter(&ui, chapters[0].id.clone());
+        let wait = app.clone();
+        let target = chapters[0].id.clone();
+        pump_until(move || {
+            wait.view()
+                .reader
+                .as_ref()
+                .is_some_and(|r| r.chapter == target && r.preloading.is_none())
+        });
+        {
+            let view = app.view();
+            let r = view.reader.as_ref().unwrap();
+            assert_eq!(r.local_index(r.anchor.page_index), stored.anchor.page_index);
+            assert!((r.anchor.offset() - stored.anchor.offset()).abs() < 0.01);
+        }
+        // Symmetry: an unread chapter entered going forward stores its place.
+        app.open_chapter(&ui, chapters[1].id.clone());
+        let wait = app.clone();
+        pump_until(move || {
+            wait.view()
+                .reader
+                .as_ref()
+                .is_some_and(|reader| reader.segments.len() == 3 && reader.preloading.is_none())
+        });
+        let rows = ui.get_pages();
+        for index in 0..rows.row_count() {
+            let mut row = rows.row_data(index).unwrap();
+            row.loaded = true;
+            rows.set_row_data(index, row);
+        }
+        let width = ui.get_reader_width();
+        let into_next = {
+            let view = app.view();
+            let r = view.reader.as_ref().unwrap();
+            let start = r.segments[2].start;
+            (r.page_position(start) + 0.5 * r.ratios[start]) * width
+        };
+        app.position(&ui, into_next, width, 600.);
+        app.flush();
+        let next = app
+            .services
+            .domain
+            .snapshot()
+            .unwrap()
+            .progress
+            .into_iter()
+            .find(|p| p.chapter == chapters[2].id)
+            .unwrap();
+        assert!(!next.completed);
+        assert!(!next.anchor.is_cleared() && next.anchor.offset() > 0.2);
+        // Detail's "Read again" still starts the read chapter over.
+        app.view().reread = Some(chapters[0].id.clone());
+        app.open_chapter(&ui, chapters[0].id.clone());
+        let wait = app.clone();
+        let target = chapters[0].id.clone();
+        pump_until(move || {
+            wait.view()
+                .reader
+                .as_ref()
+                .is_some_and(|r| r.chapter == target && r.preloading.is_none())
+        });
+        {
+            let view = app.view();
+            let r = view.reader.as_ref().unwrap();
+            assert_eq!(r.local_index(r.anchor.page_index), 0);
+            assert_eq!(r.anchor.offset(), 0.);
+        }
+    }
+
+    #[test]
     fn direct_middle_chapter_opens_prepare_both_directions_in_every_reader_mode() {
         const CHILD: &str = "READER_BIDIRECTIONAL_CHAPTER_CHILD";
         if std::env::var_os(CHILD).is_none() {

@@ -101,7 +101,13 @@ fn prepare_inventory(
     } else {
         mode_choice.resolve(automatic_mode)
     };
-    let mut anchor = progress.map(|p| p.anchor).unwrap_or_default();
+    // "Read again" on a fully read series starts the chapter over even though
+    // History would resume the place last reached in it.
+    let reread = app.view().reread.take().is_some_and(|c| c == chapter);
+    let mut anchor = progress
+        .filter(|_| !reread)
+        .map(|p| p.anchor)
+        .unwrap_or_default();
     if let Some(id) = selected {
         let index = resources
             .iter()
