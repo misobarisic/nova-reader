@@ -333,6 +333,34 @@ impl Reader {
                 .map(|i| self.gap_after(i) / self.viewport_width.max(1.))
                 .sum::<f32>()
     }
+    /// `page_position(i)` for every page in one pass. The ratio and gap sums
+    /// accumulate left to right exactly like `page_position`'s two iterator
+    /// sums (which start at -0.0), so every value is bit-identical, but the
+    /// whole list costs O(n) instead of O(n^2).
+    fn page_positions(&self) -> Vec<f32> {
+        let positions = self.page_positions_unchecked();
+        debug_assert!(
+            positions
+                .iter()
+                .enumerate()
+                .all(|(i, p)| p.to_bits() == self.page_position(i).to_bits()),
+            "batched positions must equal page_position"
+        );
+        positions
+    }
+    fn page_positions_unchecked(&self) -> Vec<f32> {
+        let width = self.viewport_width.max(1.);
+        let (mut ratios, mut gaps) = (-0_f32, -0_f32);
+        (0..self.ratios.len())
+            .map(|i| {
+                if i > 0 {
+                    ratios += self.ratios[i - 1];
+                    gaps += self.gap_after(i - 1) / width;
+                }
+                ratios + gaps
+            })
+            .collect()
+    }
     fn total_extent(&self) -> f32 {
         self.page_position(self.ratios.len().saturating_sub(1))
             + self.ratios.last().copied().unwrap_or(0.)
@@ -2758,6 +2786,7 @@ impl Controller {
         let Some(reader) = &view.reader else {
             return;
         };
+        let positions = reader.page_positions();
         let rows = reader
             .ratios
             .iter()
@@ -2767,7 +2796,7 @@ impl Controller {
                 image: slint::Image::default(),
                 tiles: ModelRc::default(),
                 ratio: *ratio,
-                position: reader.page_position(i),
+                position: positions[i],
                 loaded: false,
                 preview: false,
                 error: "".into(),
@@ -3833,8 +3862,9 @@ impl Controller {
                         if geometry_changed {
                             reader.ratios[task.index] =
                                 dimensions.height as f32 / dimensions.width as f32;
+                            let positions = reader.page_positions();
                             for (i, ratio) in reader.ratios.iter().enumerate() {
-                                let position = reader.page_position(i);
+                                let position = positions[i];
                                 if let Some(mut row) = model.row_data(i)
                                     && (row.position != position || row.ratio != *ratio)
                                 {
@@ -8777,6 +8807,74 @@ mod tests {
         // Moving between the halves of one split page is movement.
         assert!(step_moves(3, false, 3, 0.5));
         assert!(step_moves(3, true, 3, 0.));
+    }
+
+    #[test]
+    fn batched_page_positions_are_bit_identical_to_page_position() {
+        let mut reader = tall_reader();
+        let count = 300;
+        reader.pages = (0..count)
+            .map(|i| PageInput::Local {
+                path: PathBuf::new(),
+                id: format!("page-{i}"),
+            })
+            .collect();
+        reader.ratios = (0..count)
+            .map(|i| 0.37 + (i * 7919 % 113) as f32 / 17.)
+            .collect();
+        reader.segments = (0..3)
+            .map(|n| reader_continuity::ChapterSegment {
+                chapter: ChapterId::new(
+                    reader_domain::SeriesId::new("fixture", "sharp"),
+                    format!("chapter-{n}"),
+                ),
+                title: format!("Chapter {n}"),
+                start: n * 100,
+                end: (n + 1) * 100,
+                source: None,
+                completed: false,
+            })
+            .collect();
+        for (mode, gap, boundaries, width) in [
+            (ReadingMode::Webtoon, 0., true, 512.),
+            (ReadingMode::Webtoon, 16., true, 387.5),
+            (ReadingMode::Webtoon, 16., false, 0.),
+            (ReadingMode::Webtoon, 3.3, true, 1.),
+            (ReadingMode::LeftToRight, 16., true, 512.),
+        ] {
+            reader.mode = mode;
+            reader.gap_pixels = gap;
+            reader.chapter_boundaries = boundaries;
+            reader.viewport_width = width;
+            let batched = reader.page_positions();
+            assert_eq!(batched.len(), count);
+            for (i, position) in batched.iter().enumerate() {
+                assert_eq!(position.to_bits(), reader.page_position(i).to_bits());
+            }
+        }
+        reader.ratios.clear();
+        assert!(reader.page_positions().is_empty());
+        // The O(n) pass is what keeps a dimensions update cheap in long chapters.
+        reader.ratios = vec![1.5; count];
+        reader.mode = ReadingMode::Webtoon;
+        reader.gap_pixels = 16.;
+        reader.chapter_boundaries = true;
+        reader.viewport_width = 512.;
+        let started = std::time::Instant::now();
+        for _ in 0..200 {
+            std::hint::black_box(reader.page_positions_unchecked());
+        }
+        let batched = started.elapsed().as_secs_f64() * 1e6 / 200.;
+        let started = std::time::Instant::now();
+        for _ in 0..200 {
+            std::hint::black_box(
+                (0..count)
+                    .map(|i| reader.page_position(i))
+                    .collect::<Vec<_>>(),
+            );
+        }
+        let each = started.elapsed().as_secs_f64() * 1e6 / 200.;
+        eprintln!("page_positions_us batched={batched:.1} per_page={each:.1}");
     }
 
     #[test]
