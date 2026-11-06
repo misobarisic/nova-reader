@@ -128,14 +128,25 @@ impl ExportImage {
                 CaptureFormat::JxlLossless | CaptureFormat::JxlLossy
             ) {
                 // Clipboard decoding and later Reader imports use the same bounds.
-                reader_engine::decode_image(&bytes, reader_engine::current_limits()).map_err(
-                    |error| {
-                        format!(
-                            "{}: {error}",
-                            text::tr("JPEG XL screencap exceeds decode admission")
-                        )
-                    },
-                )?;
+                // Header admission plus an exact dimension check replaces a full
+                // decode of the bytes this process just encoded (~17% of export).
+                let inspected =
+                    reader_engine::inspect_image(&bytes, reader_engine::current_limits()).map_err(
+                        |error| {
+                            format!(
+                                "{}: {error}",
+                                text::tr("JPEG XL screencap exceeds decode admission")
+                            )
+                        },
+                    )?;
+                if (inspected.width, inspected.height) != (width, height) {
+                    return Err(format!(
+                        "{}: {}x{}",
+                        text::tr("JPEG XL screencap exceeds decode admission"),
+                        inspected.width,
+                        inspected.height
+                    ));
+                }
             }
             let (mime, extension) = match preferences.format {
                 CaptureFormat::Png => ("image/png", "png"),
@@ -1098,6 +1109,50 @@ mod tests {
             if format == CaptureFormat::JxlLossless {
                 assert_eq!(decoded.as_raw(), &pixels);
             }
+        }
+    }
+
+    #[test]
+    fn jpeg_xl_export_cost_and_dimension_check() {
+        let (width, height) = (1080u32, 2340u32);
+        let pixels = (0..width * height)
+            .flat_map(|i| {
+                let (x, y) = (i % width, i / width);
+                let line = x.is_multiple_of(7) || y.is_multiple_of(11);
+                let tone = if line { 20 } else { 235 - (y / 40) as u8 };
+                [tone, tone, tone.wrapping_add((x / 9) as u8), 255]
+            })
+            .collect::<Vec<_>>();
+        for format in [CaptureFormat::JxlLossless, CaptureFormat::JxlLossy] {
+            let preferences = CapturePreferences {
+                format,
+                jxl_quality: 90,
+                ..Default::default()
+            };
+            let started = std::time::Instant::now();
+            let capture =
+                ExportImage::from_rgba_with_preferences(width, height, &pixels, &preferences)
+                    .unwrap();
+            eprintln!(
+                "jxl_export format={format:?} total_ms={:.1} bytes={}",
+                started.elapsed().as_secs_f64() * 1000.,
+                capture.bytes.len()
+            );
+            let limits = reader_engine::current_limits();
+            let started = std::time::Instant::now();
+            let inspected = reader_engine::inspect_image(&capture.bytes, limits).unwrap();
+            eprintln!(
+                "  inspect_ms={:.2}",
+                started.elapsed().as_secs_f64() * 1000.
+            );
+            assert_eq!((inspected.width, inspected.height), (width, height));
+            let started = std::time::Instant::now();
+            let decoded = reader_engine::decode_image(&capture.bytes, limits).unwrap();
+            eprintln!(
+                "  full_decode_ms={:.1}",
+                started.elapsed().as_secs_f64() * 1000.
+            );
+            assert_eq!(decoded.dimensions(), (width, height));
         }
     }
 

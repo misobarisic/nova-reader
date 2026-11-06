@@ -159,7 +159,10 @@ fn prepare(
             || capture.options.split_wide
             || capture.options.rotate_wide
         {
-            let image = reader_engine::decode_image(&bytes, limits).map_err(error)?;
+            let image = capture
+                .originals
+                .decode(index, &bytes, limits)
+                .map_err(error)?;
             check(cancel, ticket)?;
             let presentation =
                 reader_engine::page_presentation(&image, capture.options).map_err(error)?;
@@ -450,7 +453,7 @@ fn render_prepared(
         .values()
         .map(|bytes| bytes.len() as u64)
         .sum::<u64>();
-    let mut rendered = crate::chapter_capture::capture_at_scale_with_memory(
+    let mut rendered = crate::chapter_capture::capture_at_scale_with_decoder(
         capture.viewport,
         capture.reference,
         &capture.pages,
@@ -472,6 +475,7 @@ fn render_prepared(
                 .read(index, input, source.as_ref(), cancel)
                 .map(reader_capture_sources::Bytes)
         },
+        |index, bytes, limits| capture.originals.decode(index, &bytes.0, limits),
     )?;
     check(cancel, ticket)?;
     if capture.brightness < 100 {

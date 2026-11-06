@@ -1,6 +1,6 @@
 //! Compose the visible reader area from original chapter pixels, independently
 //! of the window's device scale factor or retained display textures.
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, sync::Arc};
 
 const PIXEL_LIMIT: u64 = 8_000_000;
 const MEMORY_LIMIT: u64 = 128 * 1024 * 1024;
@@ -80,6 +80,17 @@ fn budget_error() -> String {
     "Chapter capture exceeds supported image or memory limits. Use Device resolution.".into()
 }
 
+/// A decoded original, shareable with a caller-owned cache.
+pub type Decoded = Arc<image::RgbaImage>;
+type DecodeResult = Result<Decoded, reader_engine::Error>;
+fn plain_decode<B: AsRef<[u8]>>(
+    _: usize,
+    bytes: &B,
+    limits: reader_engine::DecodeLimits,
+) -> DecodeResult {
+    reader_engine::decode_image(bytes.as_ref(), limits).map(Arc::new)
+}
+
 /// Rectangles use one common logical coordinate space. Paint order follows
 /// `pages`; each intersecting source is fetched once. No device bitmap is used.
 pub fn capture(
@@ -135,7 +146,32 @@ fn capture_with_budget<B: AsRef<[u8]>>(
     options: reader_engine::DisplayOptions,
     memory_limit: u64,
     target_scale: Option<f64>,
+    fetch: impl FnMut(usize) -> Result<B, String>,
+) -> Result<Capture, String> {
+    capture_core(
+        viewport,
+        reference_index,
+        pages,
+        background,
+        options,
+        memory_limit,
+        target_scale,
+        fetch,
+        plain_decode,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capture_core<B: AsRef<[u8]>>(
+    viewport: Rect,
+    reference_index: usize,
+    pages: &[PageRect],
+    background: [u8; 4],
+    options: reader_engine::DisplayOptions,
+    memory_limit: u64,
+    target_scale: Option<f64>,
     mut fetch: impl FnMut(usize) -> Result<B, String>,
+    mut decode: impl FnMut(usize, &B, reader_engine::DecodeLimits) -> DecodeResult,
 ) -> Result<Capture, String> {
     reader_engine::with_current_limits(|| {
         if !viewport.valid() || pages.len() > 10_000 {
@@ -172,7 +208,7 @@ fn capture_with_budget<B: AsRef<[u8]>>(
         // later, admit its retained original plus output as a separate phase.
         // Default keeps the legacy probe-first/reduced-decode admission unchanged.
         let early_reference = if options.crop_borders || options.split_wide || options.rotate_wide {
-            let image = reader_engine::decode_image(reference_bytes.as_ref(), limits).map_err(|error| {
+            let image = decode(reference_index, &reference_bytes, limits).map_err(|error| {
             format!(
                 "Original chapter image exceeds capture admission: {error}. Use Device resolution."
             )
@@ -255,7 +291,7 @@ fn capture_with_budget<B: AsRef<[u8]>>(
             }
             reference_first.then_some(image)
         } else if reference_first {
-            Some(reader_engine::decode_image(reference_bytes.as_ref(), limits).map_err(|error| {
+            Some(decode(reference_index, &reference_bytes, limits).map_err(|error| {
             format!(
                 "Original chapter image exceeds capture admission: {error}. Use Device resolution."
             )
@@ -284,7 +320,7 @@ fn capture_with_budget<B: AsRef<[u8]>>(
                 if let Some(image) = reference_image.take() {
                     image
                 } else {
-                    reader_engine::decode_image(bytes.as_ref(), limits).map_err(|error| {
+                    decode(page.index, &bytes, limits).map_err(|error| {
                         format!(
                             "Cannot decode original chapter image: {error}. Use Device resolution."
                         )
@@ -304,7 +340,7 @@ fn capture_with_budget<B: AsRef<[u8]>>(
                         .min(reader_engine::current_limits().max_decoded_bytes),
                     ..limits
                 };
-                reader_engine::decode_image(bytes.as_ref(), limits).map_err(|error| {
+                decode(page.index, &bytes, limits).map_err(|error| {
                     format!("Cannot decode original chapter image: {error}. Use Device resolution.")
                 })?
             };
@@ -435,6 +471,12 @@ fn paint_geometry(
         offset_y,
     })
 }
+/// Horizontal sample position of one output column, shared by every row.
+struct XTap {
+    x0: u32,
+    x1: u32,
+    fx: f64,
+}
 fn paint(
     output: &mut [u8],
     raster: &Raster,
@@ -450,17 +492,42 @@ fn paint(
         && !presentation.split
         && presentation.rotation == reader_engine::PageRotation::None
         && !presentation.reverse_page;
+    // Row walk: columns depend only on x, so floor/fraction/neighbour are
+    // computed once per column instead of once per pixel.
+    let last_x = presentation.effective.width - 1;
+    let taps = (geometry.start_x..geometry.end_x)
+        .map(|x| {
+            let source_x = geometry.source_x(x, presentation.effective.width);
+            let x0 = source_x.floor() as u32;
+            XTap {
+                x0,
+                x1: (x0 + 1).min(last_x),
+                fx: source_x - f64::from(x0),
+            }
+        })
+        .collect::<Vec<_>>();
     for y in geometry.start_y..geometry.end_y {
         let source_y = geometry.source_y(y, presentation.effective.height);
-        for x in geometry.start_x..geometry.end_x {
-            let source_x = geometry.source_x(x, presentation.effective.width);
-            let target = ((u64::from(y) * u64::from(width) + u64::from(x)) * 4) as usize;
+        let y0 = source_y.floor() as u32;
+        let fy = source_y - f64::from(y0);
+        // Interpolation must stay on one paper half, including when reversed.
+        let section_end = if presentation.split && y0 < presentation.half_height {
+            presentation.half_height - 1
+        } else {
+            presentation.effective.height - 1
+        };
+        let y1 = (y0 + 1).min(section_end);
+        let row = ((u64::from(y) * u64::from(width) + u64::from(geometry.start_x)) * 4) as usize;
+        for (tap, target) in taps
+            .iter()
+            .zip(output[row..row + taps.len() * 4].chunks_exact_mut(4))
+        {
             blend(
-                &mut output[target..target + 4],
+                target,
                 image,
                 presentation,
-                source_x,
-                source_y,
+                tap,
+                (y0, y1, fy),
                 options,
                 identity,
             );
@@ -474,15 +541,12 @@ fn blend(
     target: &mut [u8],
     image: &image::RgbaImage,
     presentation: reader_engine::PagePresentation,
-    x: f64,
-    y: f64,
+    tap: &XTap,
+    (y0, y1, fy): (u32, u32, f64),
     options: reader_engine::DisplayOptions,
     identity: bool,
 ) {
-    let x0 = x.floor() as u32;
-    let y0 = y.floor() as u32;
-    let fx = x - f64::from(x0);
-    let fy = y - f64::from(y0);
+    let (x0, x1, fx) = (tap.x0, tap.x1, tap.fx);
     let sample = |x, y| {
         if identity {
             return image.get_pixel(x, y).0;
@@ -498,14 +562,6 @@ fn blend(
         target.copy_from_slice(&first);
         return;
     }
-    let x1 = (x0 + 1).min(presentation.effective.width - 1);
-    // Interpolation must stay on one paper half, including when reversed.
-    let section_end = if presentation.split && y0 < presentation.half_height {
-        presentation.half_height - 1
-    } else {
-        presentation.effective.height - 1
-    };
-    let y1 = (y0 + 1).min(section_end);
     let mut color = [0.; 3];
     let mut alpha = 0.;
     for (pixel, weight) in [
@@ -1277,5 +1333,35 @@ pub fn capture_at_scale_with_memory<B: AsRef<[u8]>>(
         memory_limit.min(MEMORY_LIMIT),
         scale,
         fetch,
+    )
+}
+
+/// Same compositor, decoding originals through `decode` so a caller can serve
+/// repeated renders from a decoded-original cache. The decoder receives the
+/// page index, the fetched bytes and the admission limits for that decode, and
+/// must enforce the limits for anything it returns. Pages the caller retains
+/// must be covered by `memory_limit`.
+#[allow(clippy::too_many_arguments)]
+pub fn capture_at_scale_with_decoder<B: AsRef<[u8]>>(
+    viewport: Rect,
+    reference: usize,
+    pages: &[PageRect],
+    background: [u8; 4],
+    options: reader_engine::DisplayOptions,
+    scale: Option<f64>,
+    memory_limit: u64,
+    fetch: impl FnMut(usize) -> Result<B, String>,
+    decode: impl FnMut(usize, &B, reader_engine::DecodeLimits) -> Result<Decoded, reader_engine::Error>,
+) -> Result<Capture, String> {
+    capture_core(
+        viewport,
+        reference,
+        pages,
+        background,
+        options,
+        memory_limit.min(MEMORY_LIMIT),
+        scale,
+        fetch,
+        decode,
     )
 }

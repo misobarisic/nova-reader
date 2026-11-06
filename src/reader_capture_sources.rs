@@ -9,6 +9,10 @@ impl AsRef<[u8]> for Bytes {
 }
 
 const RETAINED_BYTES: usize = 16 * 1024 * 1024;
+/// Decoded originals kept between editor refreshes. Reserved up front with the
+/// encoded retention (see `Session::reservation`), so every capture admission
+/// already accounts for them; `release` drops both when a tight render needs it.
+const DECODED_BYTES: usize = 40 * 1024 * 1024;
 
 #[derive(Clone, PartialEq, Eq)]
 pub(super) enum Scope {
@@ -117,7 +121,22 @@ impl Originals {
 struct Cache {
     originals: BTreeMap<usize, Original>,
     retained: BTreeMap<usize, Arc<Vec<u8>>>,
+    decoded: BTreeMap<usize, DecodedOriginal>,
+    clock: u64,
     disabled: bool,
+    /// Real (non-cached) decodes, for tests.
+    decodes: usize,
+}
+/// A decoded page, valid only for the exact encoded response it came from.
+struct DecodedOriginal {
+    bytes: Weak<Vec<u8>>,
+    image: reader_capture::Decoded,
+    used: u64,
+}
+impl Cache {
+    fn decoded_total(&self) -> usize {
+        self.decoded.values().map(|d| d.image.as_raw().len()).sum()
+    }
 }
 #[derive(Clone, Default)]
 pub(super) struct Session(Arc<Mutex<Cache>>);
@@ -129,13 +148,76 @@ impl Session {
         if self.0.lock().unwrap_or_else(|e| e.into_inner()).disabled {
             0
         } else {
-            RETAINED_BYTES as u64
+            (RETAINED_BYTES + DECODED_BYTES) as u64
         }
+    }
+    #[cfg(test)]
+    pub fn decodes(&self) -> usize {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).decodes
     }
     pub fn release(&self) {
         let mut cache = self.0.lock().unwrap_or_else(|e| e.into_inner());
         cache.retained.clear();
+        cache.decoded.clear();
         cache.disabled = true;
+    }
+    /// Decode `bytes`, or return the page decoded earlier from this same
+    /// response. A hit is admitted against the caller's current limits exactly
+    /// like a fresh decode of its RGBA allocation would be.
+    pub fn decode(
+        &self,
+        index: usize,
+        bytes: &Arc<Vec<u8>>,
+        limits: reader_engine::DecodeLimits,
+    ) -> std::result::Result<reader_capture::Decoded, reader_engine::Error> {
+        {
+            let mut cache = self.0.lock().unwrap_or_else(|e| e.into_inner());
+            cache.clock += 1;
+            let clock = cache.clock;
+            if let Some(hit) = cache.decoded.get_mut(&index).filter(|hit| {
+                hit.bytes.upgrade().is_some_and(|b| Arc::ptr_eq(&b, bytes))
+                    && hit.image.width() <= limits.max_width
+                    && hit.image.height() <= limits.max_height
+                    && hit.image.as_raw().len() as u64 <= limits.max_decoded_bytes
+            }) {
+                hit.used = clock;
+                return Ok(hit.image.clone());
+            }
+        }
+        let image = Arc::new(reader_engine::decode_image(bytes, limits)?);
+        let mut cache = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        cache.decodes += 1;
+        // Entries whose response is gone can never hit again; free them first.
+        cache
+            .decoded
+            .retain(|_, entry| entry.bytes.strong_count() > 0);
+        cache.decoded.remove(&index);
+        let size = image.as_raw().len();
+        if !cache.disabled && size <= DECODED_BYTES {
+            while cache.decoded_total() + size > DECODED_BYTES {
+                let Some(oldest) = cache
+                    .decoded
+                    .iter()
+                    .min_by_key(|(_, entry)| entry.used)
+                    .map(|(index, _)| *index)
+                else {
+                    break;
+                };
+                cache.decoded.remove(&oldest);
+            }
+            cache.clock += 1;
+            let used = cache.clock;
+            debug_assert!(cache.decoded_total() + size <= DECODED_BYTES);
+            cache.decoded.insert(
+                index,
+                DecodedOriginal {
+                    bytes: Arc::downgrade(bytes),
+                    image: image.clone(),
+                    used,
+                },
+            );
+        }
+        Ok(image)
     }
     pub fn read(
         &self,
@@ -406,6 +488,130 @@ mod tests {
             1,
             "real compositor preview/adjust/native export must share originals"
         );
+    }
+    #[test]
+    fn repeated_editor_refreshes_reuse_the_decoded_original() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("long.png");
+        let (width, height) = (720u32, 12000u32);
+        // Line art with a tint ramp: an ordinary few-megabyte chapter page.
+        image::RgbImage::from_fn(width, height, |x, y| {
+            if x.is_multiple_of(9) || y.is_multiple_of(13) || (x % 9 == 6 && y % 13 < 7) {
+                image::Rgb([0, 0, (y / 60) as u8])
+            } else {
+                image::Rgb([255, 255 - (y / 90) as u8, 255])
+            }
+        })
+        .save(&path)
+        .unwrap();
+        let mut capture = capture(
+            PageInput::Local {
+                path,
+                id: "long".into(),
+            },
+            None,
+            f64::from(width),
+            f64::from(height),
+        );
+        capture.output_scale = Some(0.5);
+        assert!(
+            std::fs::metadata(dir.path().join("long.png"))
+                .unwrap()
+                .len()
+                < 8 << 20,
+            "fixture must stay within encoded retention"
+        );
+        let cancel = CancelToken::default();
+        let mut reference_pixels = None;
+        // A/B on one binary: `release` turns the decoded cache (and the encoded
+        // retention) off, which is exactly the previous behaviour.
+        for cached in [false, true] {
+            capture.originals = Session::default();
+            if !cached {
+                capture.originals.release();
+            }
+            let mut timings = Vec::new();
+            for _ in 0..5 {
+                let started = Instant::now();
+                let (image, _) =
+                    reader_capture_editor::render_capture(&capture, &cancel, None).unwrap();
+                timings.push(started.elapsed().as_secs_f64() * 1000.);
+                match &reference_pixels {
+                    None => reference_pixels = Some(image.pixels),
+                    Some(pixels) => assert!(*pixels == image.pixels, "cached pixels must match"),
+                }
+            }
+            eprintln!(
+                "editor_refresh cached={cached} ms={timings:.1?} mean={:.1}",
+                timings.iter().sum::<f64>() / 5.
+            );
+            assert_eq!(
+                capture.originals.decodes(),
+                if cached { 1 } else { 5 },
+                "a cached session decodes one unchanged page once; a released one decodes every refresh"
+            );
+        }
+    }
+    #[test]
+    fn decoded_cache_is_keyed_by_response_bounded_and_admitted() {
+        let png = |width: u32, height: u32| {
+            let mut out = std::io::Cursor::new(Vec::new());
+            image::RgbaImage::from_pixel(width, height, image::Rgba([1, 2, 3, 255]))
+                .write_to(&mut out, image::ImageFormat::Png)
+                .unwrap();
+            Arc::new(out.into_inner())
+        };
+        let limits = reader_engine::DecodeLimits::default();
+        let session = Session::default();
+        let first = png(8, 8);
+        let a = session.decode(0, &first, limits).unwrap();
+        let b = session.decode(0, &first, limits).unwrap();
+        assert!(Arc::ptr_eq(&a, &b), "same response reuses the decoded page");
+        assert_eq!(session.decodes(), 1);
+        // Identical bytes in a new response are a new source: never trusted.
+        let replaced = Arc::new(first.as_ref().clone());
+        let c = session.decode(0, &replaced, limits).unwrap();
+        assert!(!Arc::ptr_eq(&a, &c));
+        assert_eq!(session.decodes(), 2);
+        // A hit is admitted like a fresh decode of its RGBA allocation.
+        let tight = reader_engine::DecodeLimits {
+            max_decoded_bytes: 8 * 8 * 4 - 1,
+            ..limits
+        };
+        assert!(session.decode(0, &replaced, tight).is_err());
+        let narrow = reader_engine::DecodeLimits {
+            max_width: 7,
+            ..limits
+        };
+        assert!(session.decode(0, &replaced, narrow).is_err());
+        // Total decoded retention never exceeds its reservation.
+        let pages = (0..6).map(|_| png(1000, 2600)).collect::<Vec<_>>();
+        for (index, page) in pages.iter().enumerate() {
+            session.decode(index + 10, page, limits).unwrap();
+            let cache = session.0.lock().unwrap();
+            assert!(cache.decoded_total() <= DECODED_BYTES);
+        }
+        assert!(
+            session.0.lock().unwrap().decoded.len() < 6,
+            "older pages are evicted least recently used first"
+        );
+        let newest = session.0.lock().unwrap().decoded.contains_key(&15);
+        assert!(newest, "the most recent page stays cached");
+        // Entries whose response is gone are dropped rather than held.
+        drop(pages);
+        session.decode(99, &png(4, 4), limits).unwrap();
+        assert_eq!(session.0.lock().unwrap().decoded.len(), 1);
+        assert_eq!(
+            session.reservation(),
+            (RETAINED_BYTES + DECODED_BYTES) as u64
+        );
+        session.release();
+        assert!(session.0.lock().unwrap().decoded.is_empty());
+        assert_eq!(session.reservation(), 0);
+        // After release nothing is cached any more.
+        let page = png(8, 8);
+        session.decode(0, &page, limits).unwrap();
+        assert!(session.0.lock().unwrap().decoded.is_empty());
     }
     #[test]
     fn tight_native_capture_releases_retention_instead_of_reducing_resolution() {
