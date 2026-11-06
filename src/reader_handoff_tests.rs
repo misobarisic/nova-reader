@@ -2,6 +2,9 @@
 //! the test, while the real controller, queue, admission and display planner run.
 use super::*;
 
+/// (controller, page) for every window the image worker rendered.
+pub(super) static DECODE_LOG: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
+
 pub(super) fn fixture_app(
     ui: &AppWindow,
     directory: &std::path::Path,
@@ -1084,6 +1087,137 @@ fn live_chapter_buttons_use_previous_tail_and_next_start_without_reader_teardown
     assert_eq!(app.view().reader.as_ref().unwrap().anchor.offset(), 0.);
     assert!(ui.get_pages() == model, "buttons keep the live model");
     assert_eq!(app.generation.load(Ordering::Acquire), generation);
+    app.image_worker_live.store(false, Ordering::Release);
+    app.invalidate();
+    worker.join().unwrap();
+}
+
+/// Scrolling down three pages, back up two and down two again must not decode
+/// any page twice: pages that left the read-ahead window stay retained until
+/// the model budget needs the space, and read-ahead follows the scroll direction.
+#[test]
+fn live_scripted_scroll_down_up_down_decodes_each_page_once() {
+    live_scripted_scroll(
+        "live_scripted_scroll_down_up_down_decodes_each_page_once",
+        768,
+        true,
+    );
+}
+
+/// Pages large enough that the model budget cannot hold the whole walk: the
+/// farthest pages go first, the budget is never exceeded (checked on every
+/// pump tick) and every gesture still lands with visible pixels.
+#[test]
+fn live_scripted_scroll_under_budget_pressure_evicts_farthest_first() {
+    live_scripted_scroll(
+        "live_scripted_scroll_under_budget_pressure_evicts_farthest_first",
+        4000,
+        false,
+    );
+}
+
+fn live_scripted_scroll(test: &str, page_height: u32, each_once: bool) {
+    const CHILD: &str = "READER_LIVE_SCRIPTED_SCROLL_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                &format!("app::reader_handoff_tests::{test}"),
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    i_slint_backend_testing::init_integration_test_with_system_time();
+    let ui = AppWindow::new().unwrap();
+    ui.set_section(6);
+    ui.set_reading_mode(0);
+    ui.set_reader_side_padding(0);
+    ui.window().set_size(slint::PhysicalSize::new(512, 800));
+    let dir = tempfile::tempdir().unwrap();
+    let mut reader = super::tests::tall_reader();
+    reader.pages.clear();
+    let count = 14;
+    for index in 0..count {
+        let path = dir.path().join(format!("{index}.png"));
+        image::RgbaImage::from_fn(512, page_height, |x, y| {
+            image::Rgba([(x % 251) as u8, (y % 251) as u8, 40 + index as u8, 255])
+        })
+        .save(&path)
+        .unwrap();
+        reader.pages.push(PageInput::Local {
+            path,
+            id: format!("page-{index}"),
+        });
+    }
+    reader.ratios = vec![page_height as f32 / 512.; count];
+    reader.viewport_width = 512.;
+    reader.viewport_height = 800.;
+    reader.target_width = 512;
+    reader.anchor = ResumeAnchor::new("page-0", 0, 0.).unwrap();
+    let (app, receiver) = fixture_app(&ui, dir.path(), reader, true);
+    app.mount_pages(&ui);
+    app.restore_position(&ui);
+    let worker = Arc::downgrade(&app);
+    let weak = ui.as_weak();
+    let worker = std::thread::spawn(move || Controller::image_worker(worker, receiver, weak));
+    app.request_images(&ui, 0);
+    let settled = || {
+        move |r: &Reader| {
+            r.requested.is_empty()
+                && r.desired
+                    .iter()
+                    .all(|i| r.retained.contains(i) || r.budget_blocked.contains(i))
+                && (r.anchor.page_index..=r.visible_end()).all(|i| r.has_visible_pixels(i))
+        }
+    };
+    pump_reader_until(&app, settled());
+    let me = Arc::as_ptr(&app) as usize;
+    for page in [1, 2, 3, 2, 1, 2, 3] {
+        // Scrolling toward an unloaded page is held back until it decodes, so
+        // retry the gesture until the anchor arrives.
+        let at = app.view().reader.as_ref().unwrap().page_position(page) * 512. + 1.;
+        for _ in 0..8 {
+            ui.set_scroll_y(-at);
+            app.position(&ui, at, 512., 800.);
+            pump_reader_until(&app, settled());
+            if app.view().reader.as_ref().unwrap().anchor.page_index == page {
+                break;
+            }
+        }
+        let view = app.view();
+        let r = view.reader.as_ref().unwrap();
+        assert_eq!(
+            r.anchor.page_index, page,
+            "at={at} anchor={:?} retained={:?} desired={:?} requested={:?} blocked={:?}",
+            r.anchor, r.retained, r.desired, r.requested, r.budget_blocked
+        );
+        assert!(r.retained_bytes_without(usize::MAX) <= READER_MODEL_BYTES);
+    }
+    let log = DECODE_LOG
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(owner, _)| *owner == me)
+        .map(|(_, page)| *page)
+        .collect::<Vec<_>>();
+    let mut seen = BTreeSet::new();
+    let repeats = log.iter().filter(|page| !seen.insert(**page)).count();
+    eprintln!(
+        "scripted_scroll pages={page_height} decodes={} repeats={repeats} log={log:?}",
+        log.len()
+    );
+    if each_once {
+        assert_eq!(repeats, 0, "re-decoded pages: {log:?}");
+    }
     app.image_worker_live.store(false, Ordering::Release);
     app.invalidate();
     worker.join().unwrap();

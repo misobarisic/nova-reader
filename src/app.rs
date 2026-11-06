@@ -3176,13 +3176,17 @@ impl Controller {
         }
         let end = reader.visible_end();
         let demand = reader.reverse_target();
+        // One page behind, and read-ahead in the scroll direction (about two
+        // viewport heights, within the model budget enforced at publication).
+        let backwards = reader.continuity_backwards;
+        let ahead = reader.read_ahead_pages(if backwards { index } else { end }, backwards);
         let first_desired = demand
             .map(|target| target.min(index))
-            .unwrap_or_else(|| index.saturating_sub(1));
+            .unwrap_or_else(|| index.saturating_sub(if backwards { ahead } else { 1 }));
         let last_desired = if let Some(target) = demand {
             target.max(end)
         } else {
-            (end + 1).min(reader.pages.len() - 1)
+            (end + if backwards { 1 } else { ahead }).min(reader.pages.len() - 1)
         };
         // Scroll ticks within already covered strips do no model, navigation,
         // set-allocation or task work. Visible coverage still gets checked on
@@ -3238,10 +3242,19 @@ impl Controller {
                 model.set_row_data(old, row);
             }
         }
+        // Pages that left the read-ahead window stay retained, farthest first to
+        // go when a completion needs the model budget. Pages decoded for a
+        // different width or display recipe are useless and dropped at once, as
+        // is everything outside a reverse handoff, whose budgets assume it.
         for old in reader
             .retained
             .difference(&keep)
             .copied()
+            .filter(|old| {
+                demand.is_some()
+                    || reader.decoded_widths.get(old).copied().unwrap_or(0)
+                        < reader.quality_width(*old)
+            })
             .collect::<Vec<_>>()
         {
             if let Some(mut row) = model.row_data(old) {
@@ -3254,8 +3267,8 @@ impl Controller {
             reader.decoded_widths.remove(&old);
             reader.decoded_windows.remove(&old);
             reader.decoded_responses.remove(&old);
+            reader.retained.remove(&old);
         }
-        reader.retained.retain(|i| keep.contains(i));
         // Visible images precede the one-page prefetch window.
         for target in (index..=end).chain(keep.iter().copied().filter(|i| *i < index || *i > end)) {
             if reader.defers_prefetch(target) {
@@ -3580,6 +3593,11 @@ impl Controller {
                             .flatten()
                     })
                 };
+                #[cfg(test)]
+                reader_handoff_tests::DECODE_LOG
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push((Arc::as_ptr(&app) as usize, task.index));
                 // Surviving strips keep their images, so render only the strips
                 // entering the window, straight into their upload buffers.
                 let (plan, prepared) = decoded
@@ -3717,14 +3735,27 @@ impl Controller {
                         }
                         let mut used = reader.retained_bytes_without(task.index);
                         let visible = reader.anchor.page_index..=reader.visible_end();
-                        if visible.contains(&task.index) {
+                        {
+                            // Visible work may reclaim any non-visible page.
+                            // Read-ahead only reclaims pages outside the
+                            // read-ahead window, never nearer prefetch.
+                            let urgent = visible.contains(&task.index);
                             let mut victims = reader
                                 .retained
                                 .iter()
                                 .copied()
-                                .filter(|i| *i != task.index && !visible.contains(i))
+                                .filter(|i| {
+                                    *i != task.index
+                                        && !visible.contains(i)
+                                        && (urgent || !reader.desired.contains(i))
+                                })
                                 .collect::<Vec<_>>();
-                            victims.sort_by_key(|i| std::cmp::Reverse(i.abs_diff(task.index)));
+                            victims.sort_by_key(|i| {
+                                (
+                                    reader.desired.contains(i),
+                                    std::cmp::Reverse(i.abs_diff(task.index)),
+                                )
+                            });
                             for victim in victims {
                                 if used.saturating_add(plan.byte_len()) <= READER_MODEL_BYTES {
                                     break;
@@ -3736,7 +3767,9 @@ impl Controller {
                                 reader.decoded_widths.remove(&victim);
                                 reader.decoded_windows.remove(&victim);
                                 reader.decoded_responses.remove(&victim);
-                                reader.budget_blocked.insert(victim);
+                                if reader.desired.contains(&victim) {
+                                    reader.budget_blocked.insert(victim);
+                                }
                                 if let Some(mut old) = model.row_data(victim) {
                                     old.tiles = ModelRc::default();
                                     old.image = slint::Image::default();

@@ -117,6 +117,19 @@ overlapping windows still share identical rects and their delegates. The seam
 logic in `app.slint` is per tile and unchanged. Only upload sizes and tile
 counts were measured; frame times need a physical device.
 
+## Retention and read-ahead
+
+Pages that leave the one-page-either-side window used to be dropped at once,
+so a short back-and-forth scroll decoded them again. Outside a reverse handoff
+they now stay retained, and a completion that needs the model budget reclaims
+the farthest page outside the read-ahead window first (visible work may reclaim
+any non-visible page, as before). Read-ahead follows the scroll direction
+(`continuity_backwards`): about two viewport heights, one to four pages, with
+one page kept behind. Pages whose width or display recipe is stale are still
+dropped immediately, and `defers_prefetch`, `handoff_budgets` and the 32 MiB
+model budget are unchanged. A scripted live-worker walk (down 3, up 2, down 2
+pages of 512x768) went from 10 decodes with 4 repeats to 8 decodes with none.
+
 ## Reproduce the CPU profile
 
 ```sh

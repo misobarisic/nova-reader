@@ -19,6 +19,38 @@ impl Reader {
         }
     }
 
+    /// Pages to prefetch beyond `from` in the scroll direction: enough to cover
+    /// about two viewport heights, at least one and at most four. Decode work
+    /// beyond the visible rows still waits behind `defers_prefetch`, and what is
+    /// retained is bounded by the model budget, farthest first.
+    pub(super) fn read_ahead_pages(&self, from: usize, backwards: bool) -> usize {
+        const MAX_PAGES: usize = 4;
+        if self.mode != ReadingMode::Webtoon
+            || self.viewport_width <= 0.
+            || self.viewport_height <= 0.
+            || from >= self.pages.len()
+        {
+            return 1;
+        }
+        let wanted = self.viewport_height * 2.;
+        let mut covered = 0.;
+        let mut pages = 0;
+        let mut index = from;
+        while pages < MAX_PAGES && covered < wanted {
+            index = match if backwards {
+                index.checked_sub(1)
+            } else {
+                Some(index + 1).filter(|next| *next < self.pages.len())
+            } {
+                Some(next) => next,
+                None => break,
+            };
+            covered += self.ratios[index] * self.viewport_width;
+            pages += 1;
+        }
+        pages.max(1)
+    }
+
     pub(super) fn window_demand_target(&self) -> Option<usize> {
         let demand = self.window_demand.as_ref()?;
         (0..self.pages.len()).find(|i| self.row_page_id(*i) == demand.identity)
