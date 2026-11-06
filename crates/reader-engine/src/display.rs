@@ -5,6 +5,11 @@ use std::sync::Arc;
 pub const DISPLAY_WINDOW_BYTES: usize = 32 * 1024 * 1024;
 const FULL_DISPLAY_BYTES: u64 = 64 * 1024 * 1024;
 pub const DISPLAY_TILE_ROWS: u32 = 2048;
+/// Upload granularity inside one aligned strip. A 2,048-row strip is about
+/// 9 MiB at 1,150 px wide; mounting it as 512-row textures keeps each mid-scroll
+/// GPU upload to a quarter of that. Must divide `DISPLAY_TILE_ROWS`.
+pub const DISPLAY_UPLOAD_ROWS: u32 = 512;
+const _: () = assert!(DISPLAY_TILE_ROWS.is_multiple_of(DISPLAY_UPLOAD_ROWS));
 const PREFETCH_ROWS: u32 = DISPLAY_TILE_ROWS;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -22,9 +22,10 @@ fn light_tile(width: u32, height: u32) -> slint::Image {
 }
 fn page(position: f32, height: u32) -> PageRow {
     let tiles = (0..height)
-        .step_by(2048)
+        // Production mounts 512-row upload rects inside each 2048-row strip.
+        .step_by(512)
         .map(|start| {
-            let rows = 2048.min(height - start);
+            let rows = 512.min(height - start);
             TileRow {
                 image: light_image(rows),
                 offset: start as f32 / height as f32,
@@ -96,8 +97,11 @@ fn reader_shared_edges_cover_fractional_scroll_at_each_device_scale() {
             settle();
             let width = ui.get_reader_width();
             let viewport = element(&ui, "AppWindow::reader");
-            // Internal 2048-row tile joins and the actual adjacent-page join.
+            // Internal 512-row upload joins, a 2048-row strip join and the
+            // actual adjacent-page join.
             for boundary in [
+                512. / 513. * width,
+                1536. / 513. * width,
                 2048. / 513. * width,
                 4096. / 513. * width,
                 first.ratio * width,

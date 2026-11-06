@@ -4,9 +4,10 @@ mod avif;
 mod display;
 mod jxl;
 pub use display::{
-    DISPLAY_TILE_ROWS, DISPLAY_WINDOW_BYTES, DisplayDecoder, DisplayOptions, DisplayWindow,
-    DisplayWindowPlan, PagePresentation, PageRotation, WindowRenderer, decode_display_image,
-    decode_display_window, filter_pixel, page_presentation, plan_display_window,
+    DISPLAY_TILE_ROWS, DISPLAY_UPLOAD_ROWS, DISPLAY_WINDOW_BYTES, DisplayDecoder, DisplayOptions,
+    DisplayWindow, DisplayWindowPlan, PagePresentation, PageRotation, WindowRenderer,
+    decode_display_image, decode_display_window, filter_pixel, page_presentation,
+    plan_display_window,
 };
 pub use nova_image::is_jpeg_xl;
 pub use nova_image::{DecodeLimits, PageDimensions};

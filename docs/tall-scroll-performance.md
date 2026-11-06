@@ -84,8 +84,8 @@ original; final windows and short pages retain normal next-page prefetch.
 Renderer cache reuse depends on preserving repeated-item
 identity as well as image identity: recreating delegates can re-upload dynamic
 images. Slow-scroll regressions assert unchanged pixel allocations/model identity,
-no reset or overlap row-change events and at most one entering 720×2,048 strip
-per window shift for a 720×25,000 page. These are deterministic work/retention
+no reset or overlap row-change events and at most one entering 2,048-row strip
+(four 512-row upload rects) per window shift for a 720×25,000 page. These are deterministic work/retention
 checks; Android GPU frame times still require physical-device measurements.
 
 ## Strip-shift rendering
@@ -106,6 +106,16 @@ the old and new binaries, five one-strip shifts, 512 px output) went from about
 109 ms per shift to about 5 ms (6 ms for a shift that actually admits a strip;
 some shifts admit none and now cost nothing). Native-width shifts went from
 1.7 ms to 0.5 ms.
+
+## Upload granularity
+
+Strips still align to the 2,048-row grid, but the Slint tile items are 512-row
+sub-rects of each strip (`DISPLAY_UPLOAD_ROWS`), so a mid-scroll GPU upload is a
+quarter of the size: a 720 px wide upload drops from 5.9 MB to 1.5 MB and a
+1,080 px wide one from 8.8 MB to 2.2 MB. Sub-rects sit on one global grid, so
+overlapping windows still share identical rects and their delegates. The seam
+logic in `app.slint` is per tile and unchanged. Only upload sizes and tile
+counts were measured; frame times need a physical device.
 
 ## Reproduce the CPU profile
 

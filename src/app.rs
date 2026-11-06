@@ -4758,9 +4758,11 @@ fn tile_rects(plan: reader_engine::DisplayWindowPlan) -> Vec<TileRect> {
     let mut top = plan.first_row;
     let end = plan.first_row + plan.rows;
     while top < end {
+        // Sub-rects stay on the global upload grid (inside the 2,048-row strip
+        // alignment), so overlapping windows share identical rects.
         let bottom =
-            (top / reader_engine::DISPLAY_TILE_ROWS + 1) * reader_engine::DISPLAY_TILE_ROWS;
-        let height = (bottom.min(end) - top).min(2048);
+            (top / reader_engine::DISPLAY_UPLOAD_ROWS + 1) * reader_engine::DISPLAY_UPLOAD_ROWS;
+        let height = bottom.min(end) - top;
         for left in (0..plan.width).step_by(2048) {
             result.push(TileRect {
                 left,
@@ -8040,7 +8042,9 @@ mod tests {
             let entering = prepared.iter().filter(|tile| tile.pixels.is_some()).count();
             if incremental && previous.is_some() {
                 assert!(
-                    entering <= 1,
+                    entering
+                        <= (reader_engine::DISPLAY_TILE_ROWS / reader_engine::DISPLAY_UPLOAD_ROWS)
+                            as usize,
                     "slow scroll must upload only its entering strip"
                 );
             }
@@ -8125,6 +8129,64 @@ mod tests {
     }
 
     #[test]
+    fn upload_rects_partition_windows_on_a_grid_shared_by_overlapping_windows() {
+        let plan = |first_row, rows| reader_engine::DisplayWindowPlan {
+            width: 1080,
+            full_height: 40_000,
+            first_row,
+            rows,
+        };
+        let upload = reader_engine::DISPLAY_UPLOAD_ROWS;
+        let mut seen = BTreeMap::<u32, TileRect>::new();
+        // Aligned strips, an unaligned tight-budget window and the page tail.
+        for (first, rows) in [
+            (0, 6144),
+            (2048, 6144),
+            (4096, 6144),
+            (1000, 1602),
+            (37_952, 2048),
+            (39_999, 1),
+        ] {
+            let window = plan(first, rows);
+            let rects = tile_rects(window);
+            let mut next = first;
+            for rect in &rects {
+                assert_eq!(rect.top, next, "rects must be contiguous");
+                assert!(rect.height >= 1 && rect.height <= upload);
+                assert_eq!((rect.left, rect.width), (0, 1080));
+                // Only the first/last rect of an unaligned window may be partial.
+                if rect.top % upload == 0 && rect.top + upload <= first + rows {
+                    assert_eq!(rect.height, upload);
+                }
+                assert!(
+                    (rect.top / upload + 1) * upload >= rect.top + rect.height,
+                    "no rect crosses the upload grid"
+                );
+                if (first % reader_engine::DISPLAY_TILE_ROWS == 0)
+                    && (rows % reader_engine::DISPLAY_TILE_ROWS == 0)
+                {
+                    // Aligned windows share byte-identical rects where they overlap.
+                    if let Some(old) = seen.insert(rect.top, *rect) {
+                        assert_eq!(old, *rect);
+                    }
+                }
+                next += rect.height;
+            }
+            assert_eq!(next, first + rows, "rects must cover the window exactly");
+            // The largest single upload shrank from a 2,048-row strip.
+            assert!(
+                rects
+                    .iter()
+                    .all(|rect| rect.width * rect.height * 4 <= 1080 * upload * 4)
+            );
+        }
+        // An aligned one-strip shift enters exactly one strip's worth of rects.
+        let (before, after) = (tile_rects(plan(0, 6144)), tile_rects(plan(2048, 6144)));
+        let entering = after.iter().filter(|rect| !before.contains(rect)).count();
+        assert_eq!(entering as u32, reader_engine::DISPLAY_TILE_ROWS / upload);
+    }
+
+    #[test]
     fn horizontal_tiles_preserve_source_pixels_and_partial_row_coordinates() {
         let image = image::RgbaImage::from_fn(5000, 8, |x, y| {
             image::Rgba([(x % 251) as u8, (x / 251) as u8, y as u8, 255])
@@ -8132,7 +8194,10 @@ mod tests {
         let tiles = display_window_tiles(image.as_raw(), 5000, 8, 5000, 20000);
         assert_eq!(tiles.len(), 3);
         for (index, tile) in tiles.iter().enumerate() {
-            assert!(tile.image.size().width <= 2048 && tile.image.size().height <= 2048);
+            assert!(
+                tile.image.size().width <= 2048
+                    && tile.image.size().height <= reader_engine::DISPLAY_UPLOAD_ROWS
+            );
             assert_eq!(tile.offset, 0.25);
             assert_eq!(tile.bottom, 5008. / 20000.);
             let pixels = tile.image.to_rgba8().unwrap();
@@ -9000,12 +9065,12 @@ mod tests {
         .unwrap();
         assert_eq!((image.width(), image.height()), (128, 12000));
         let tiles = display_tiles(image.as_raw(), image.width(), image.height());
-        assert_eq!(tiles.len(), 6);
-        assert!(
-            tiles
-                .iter()
-                .all(|t| t.image.size().width == 128 && t.image.size().height <= 2048)
+        assert_eq!(
+            tiles.len() as u32,
+            12000_u32.div_ceil(reader_engine::DISPLAY_UPLOAD_ROWS)
         );
+        assert!(tiles.iter().all(|t| t.image.size().width == 128
+            && t.image.size().height <= reader_engine::DISPLAY_UPLOAD_ROWS));
         assert!((tiles.iter().map(|t| t.fraction).sum::<f32>() - 1.).abs() < 0.00001);
         assert!(
             (tiles.last().unwrap().offset + tiles.last().unwrap().fraction - 1.).abs() < 0.00001
