@@ -157,15 +157,30 @@ impl Services {
             })
             .and_then(|p| self.sources.source(&p.id).map_err(error))
     }
+    /// Browse/search row: captures a hint when present but never withdraws one,
+    /// because listings commonly omit fields that the details response carries.
+    pub fn series_listing(&self, source_id: &str, dto: reader_sources::Series) -> Series {
+        let id = SeriesId::new(source_id, &dto.id);
+        if let Err(error) = crate::content_presentation::Settings::record_listing_hint(
+            &id,
+            dto.presentation.as_deref(),
+        ) {
+            eprintln!("Nova Reader: could not save content presentation hint: {error}");
+        }
+        Self::series_domain(id, dto)
+    }
+    /// Full details response: authoritative, so a missing hint withdraws it.
     pub fn series(&self, source_id: &str, dto: reader_sources::Series) -> Series {
         let id = SeriesId::new(source_id, &dto.id);
-        // Capture before discarding source-only metadata. Browse/search and both
-        // manual and scheduled detail refreshes share this conversion boundary.
+        // Capture before discarding source-only metadata.
         if let Err(error) =
             crate::content_presentation::Settings::record_hint(&id, dto.presentation.as_deref())
         {
             eprintln!("Nova Reader: could not save content presentation hint: {error}");
         }
+        Self::series_domain(id, dto)
+    }
+    fn series_domain(id: SeriesId, dto: reader_sources::Series) -> Series {
         Series {
             publication_status: reader_domain::PublicationStatus::from_source(
                 dto.status.as_deref(),

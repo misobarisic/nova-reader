@@ -27,7 +27,9 @@ pub fn domain(kind: &str) -> String {
 }
 /// Domains whose materialization and receipts this adapter owns.
 pub fn handles_projection_domain(name: &str) -> bool {
-    KINDS.iter().any(|kind| domain(kind) == name) || name == crate::sync_settings::domain()
+    KINDS.iter().any(|kind| domain(kind) == name)
+        || name == crate::sync_settings::domain()
+        || name == crate::content_presentation::domain()
 }
 fn key(value: &impl Serialize) -> nova_sync::Result<String> {
     Ok(serde_json::to_string(value)?)
@@ -124,6 +126,7 @@ pub fn initialize(store: &DomainStore) -> nova_sync::Result<()> {
     nova_sync::configure_protocol(nova_sync::ProtocolConfig::reader())?;
     nova_sync::configure_record_policy(READER_POLICY.clone())?;
     nova_sync::local_store()?;
+    crate::content_presentation::install_sync();
     reader_domain::install_persistence_hook(Arc::new(|before, state, kind| {
         persist(before, state, kind)
             .map_err(|e| reader_domain::Error::Invalid(format!("sync persistence: {e:#}")))
@@ -240,10 +243,13 @@ fn persist(
         }
     }
     let mut changed = false;
+    let mut presentation = Vec::new();
     if projection {
         crate::sync_settings::apply_remote(&mut records)?;
+        presentation = crate::content_presentation::apply_remote(&mut records)?;
     } else if kind == UpdateKind::Seed {
         changed |= crate::sync_settings::prepare(&mut records, dev, false, true)?;
+        changed |= crate::content_presentation::seed(&mut records, dev)?;
     }
     for kind_name in KINDS {
         if *kind_name == "read_actions" {
@@ -264,9 +270,13 @@ fn persist(
     *guard = records;
     if projection {
         let digest = guard.digest();
-        let settings_domain = crate::sync_settings::domain();
-        if let Some(basis) = digest.get(&settings_domain) {
-            guard.mark_projected(&settings_domain, basis)?;
+        for owned in [
+            crate::sync_settings::domain(),
+            crate::content_presentation::domain(),
+        ] {
+            if let Some(basis) = digest.get(&owned) {
+                guard.mark_projected(&owned, basis)?;
+            }
         }
         for kind_name in KINDS {
             let name = domain(kind_name);
@@ -276,13 +286,14 @@ fn persist(
         }
     }
     drop(guard);
+    crate::content_presentation::publish_projection(presentation);
     if changed || kind == UpdateKind::ManualProgress {
         nova_sync::request_local_sync();
     }
     Ok(())
 }
 
-fn preserve_fields(old: &str, new: &str) -> nova_sync::Result<String> {
+pub(crate) fn preserve_fields(old: &str, new: &str) -> nova_sync::Result<String> {
     fn merge(old: serde_json::Value, new: serde_json::Value) -> serde_json::Value {
         match (old, new) {
             (serde_json::Value::Object(mut old), serde_json::Value::Object(new)) => {
@@ -431,6 +442,9 @@ impl nova_sync::RecordPolicy for ReaderPolicy {
         }
         if name == crate::sync_addons::domain() {
             return crate::sync_addons::validate_record(record_key, record);
+        }
+        if name == crate::content_presentation::domain() {
+            return crate::content_presentation::validate_record(record_key, record);
         }
         let Some(kind) = KINDS.iter().find(|kind| domain(kind) == name) else {
             return true;

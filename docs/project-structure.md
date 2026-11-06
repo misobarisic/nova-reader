@@ -44,7 +44,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `crates/ui/source-settings.slint` | Addon settings page with slider-owned Flickable gestures, keyboard focus reveal and existing catalogue/custom-field callbacks |
 | `src/source_compression.rs`, `crates/ui/source-compression-settings.slint`, `tests/source_compression.rs` | Host-owned per-addon global/explicit cache and download compression, worker snapshots and addon sync projection; budgets remain device-wide |
 | `src/source_catalogs.rs` | Host-owned per-addon catalogue switches under `reader:disabled-catalogs:<JSON package ID>`; filters Browse while preserving direct/history/offline access |
-| `src/content_presentation.rs`, `tests/content_presentation.rs` | Device-local versioned `reader:content-presentation:<JSON SeriesId>` records; explicit Default/Reader/Gallery choice and last addon hint, captured before domain conversion and retained for offline use |
+| `src/content_presentation.rs`, `tests/content_presentation.rs`, `tests/presentation_sync.rs` | Versioned `reader:content-presentation:<JSON SeriesId>` records, synced per entry through the `reader_presentation` domain; explicit Default/Reader/Gallery choice and last addon hint, captured before domain conversion and retained for offline use |
 | `src/reading_preferences.rs` | Fallible Nova KV persistence for adult-source visibility and chapter order keyed by full source-local series identity |
 | `src/reader_modes.rs`, `docs/reader-modes.md` | Pinned TachiyomiJ2K classification, Default/global inheritance, explicit Automatic/manual/gapped selection, and durable per-series mode overrides |
 | `src/timeline.rs`, `src/source_filters.rs`, `src/source_browser.rs` | Local date groups/provider date parsing, bounded typed filter values and persistent source pins/last-used grouping |
@@ -82,7 +82,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `assets/open_source_*.hbs`, `assets/open_source_project_sources.tsv`, `assets/open_source_vendors.txt` | Nova catalogue templates and Reader-specific source/vendor attribution; full local notices are appended by `build.rs` |
 | `assets/icons/navigation` | Embedded SVG navigation and reader controls, independent of system font glyph coverage |
 | `crates/reader-domain` | Source-local identities, schema-1 state, library/categories, publication/reading status in `src/library_status.rs`, progress/history/bookmarks, backup/restore and serialized atomic persistence hook |
-| `src/sync.rs` | Reader per-identity adapter on Kit `nova-sync`: default `reader` namespace, metadata, library, category memberships, resume, manual reading actions, history and bookmarks; atomic `reader:state`/record/baseline persistence and remote echo guard |
+| `src/sync.rs` | Reader per-identity adapter on Kit `nova-sync`: default `reader` namespace, metadata, library, category memberships, resume, manual reading actions, history and bookmarks, plus the per-entry `reader_presentation` domain owned by `content_presentation.rs`; atomic `reader:state`/record/baseline persistence and remote echo guard |
 | `crates/reader-sources` | Reader v2 registry, profile settings, QuickJS and checked HTTP; exact-origin/name cookie permissions, isolated session generations/cache scopes, verified peer archives and parse-only native validation |
 | `crates/reader-engine` | Dimension probing, bounded PNG/JPEG/WebP decode and shared Kit AVIF delegation, display geometry, resume anchors and decoded cache utility |
 | `crates/reader-engine/src/jxl.rs`, `crates/reader-engine/tests/jpeg_xl.rs` | Thin adapter to Kit JPEG XL probing/decoding; Reader retains synthetic RGB/alpha integration fixtures while Kit owns metadata admission, auxiliary-box skipping, tracked grid budget and native row conversion |
@@ -238,9 +238,25 @@ with separate Default/Reader/Gallery user preference and last-known addon hint.
 The complete source-local series identity scopes each record. Explicit user
 choices win over the hint; Default uses Gallery only for `"gallery"`, otherwise
 Reader. Source browse/search/details capture hints before domain conversion;
-metadata refresh cannot replace the user's choice. These records survive restart
-and support offline entry, but remain outside portable backups and sync. They do
+metadata refresh cannot replace the user's choice. Only a full details response
+may withdraw a hint: listing rows (`Services::series_listing`) merely add one,
+because catalogues often omit the field from listings. The records survive
+restart and support offline entry, and remain outside portable backups. They do
 not change reading-mode settings, IDs or download paths.
+
+The same choice and hint are synced per entry in the `reader_presentation`
+domain (`profile:reader:reader_presentation`), keyed by the JSON `SeriesId`, with
+value `{"schema_version":1,"user":"default|reader|gallery","hint":"gallery"|"reader"|null}`.
+It is a separate domain because `reader_domain::Series` rejects unknown fields,
+so adding `presentation` to the synced series would make 0.1.35 peers refuse it;
+0.1.35 peers store and relay the unknown domain unchanged. `ReaderPolicy` validates
+key and value (known tokens, 64 KiB cap; newer schema versions are retained but not
+applied). Writers commit the KV record and account record in one Kit transaction;
+projection (`content_presentation::apply_remote`, inside the sync persistence hook)
+writes KV, then refreshes the in-memory snapshots. Choices recorded before sync
+existed are seeded once; untouched defaults gain no authority. Projection
+re-renders cards and details through `refresh_synced` but never closes an open
+reader: the next open uses the synced value.
 
 `reader:mode-choice:<serialized SeriesId>` stores a versioned Automatic/manual
 choice independently of library membership. A manual mode overrides chapter
@@ -507,7 +523,7 @@ generate all installable ZIPs; Reader does not depend on a sibling checkout.
 - Shared cache implementation/settings: Kit `crates/cache` and `crates/ui-base/slint/cache-settings-controls.slint`; Reader `src/chapter_cache.rs`, `src/image_storage.rs` and `tests/image_storage.rs`.
 - Library location, pinned controls, search and per-title actions: `src/library_navigation.rs`, `crates/ui/library-page.slint`, `crates/ui/library-search.slint`, `crates/ui/entry-menu.slint`, `tests/library_navigation.rs`, `tests/entry_menu.rs`.
 - Automatic source paging and Retry: `src/app.rs` (`browse`/`complete_browse`), `crates/ui/app.slint`, `tests/source_paging.rs`.
-- Per-entry Reader/Gallery preferences and optional addon hints: `src/content_presentation.rs`, `src/services.rs::Services::series`, `tests/content_presentation.rs`.
+- Per-entry Reader/Gallery preferences and optional addon hints (local KV plus the `reader_presentation` sync domain): `src/content_presentation.rs`, `src/sync.rs`, `src/services.rs::Services::{series,series_listing}`, `tests/content_presentation.rs`, `tests/presentation_sync.rs`.
 - Automatic/manual reader mode and per-series overrides: `src/reader_modes.rs`, `docs/reader-modes.md`, `tests/reader_modes.rs`.
 - Effective-direction chapter/page controls and progress slider: `crates/ui/reader-osd.slint`, `tests/reader_mode_controls.rs`.
 - Paged gallery dragging, zoom/pan and fitted image geometry: `crates/ui/reader-pager.slint`, `crates/ui/app.slint`, `src/reader_controls.rs`, `tests/reader_pager.rs`.

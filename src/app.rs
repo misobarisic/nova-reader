@@ -2583,7 +2583,7 @@ impl Controller {
                     let series = listing
                         .items
                         .into_iter()
-                        .map(|s| app.services.series(&choice.id, s))
+                        .map(|s| app.services.series_listing(&choice.id, s))
                         .collect::<Vec<_>>();
                     Ok((series, listing.has_next_page))
                 })())
