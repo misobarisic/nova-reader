@@ -15,6 +15,9 @@ export component ReaderPagerMotion inherits Rectangle {
     private property <bool> settling;
     private property <int> pending-step;
     private property <bool> wheel-blocked;
+    // The page step is committed on release; this keeps the leftover slide
+    // animation from being snapped to zero by the resulting page change.
+    private property <bool> committed;
     callback step(int);
     width: 0px; height: 0px;
 
@@ -25,7 +28,7 @@ export component ReaderPagerMotion inherits Rectangle {
         return (delta < 0px ? 1 : -1) * (root.mode == 2 ? -1 : 1);
     }
     public function cancel() {
-        settle.stop(); root.settling = false; root.dragging = false;
+        settle.stop(); root.settling = false; root.dragging = false; root.committed = false;
         root.pending-step = 0; root.offset-x = 0px; root.offset-y = 0px;
     }
     public function moved(dx: length, dy: length) {
@@ -47,9 +50,21 @@ export component ReaderPagerMotion inherits Rectangle {
         let direction = root.direction(delta);
         root.pending-step = abs(delta) >= min(96px, extent * 0.18) && abs(delta) > abs(cross) * 1.2 && root.allowed(direction) ? direction : 0;
         root.dragging = false; root.settling = true;
-        let destination = root.pending-step == 0 ? 0px : (delta < 0px ? -extent : extent);
-        if root.mode == 3 { root.offset-y = destination; }
-        else { root.offset-x = destination; }
+        if root.pending-step == 0 {
+            if root.mode == 3 { root.offset-y = 0px; } else { root.offset-x = 0px; }
+            settle.start();
+            return;
+        }
+        // Commit now so leaving the reader inside the settle window cannot lose
+        // the page. Re-express the drag offset against the new page, then slide.
+        let step = root.pending-step;
+        root.pending-step = 0; root.committed = true;
+        let shift = extent * step * (root.mode == 2 ? -1 : 1);
+        root.settling = false;
+        if root.mode == 3 { root.offset-y += shift; } else { root.offset-x += shift; }
+        root.settling = true;
+        root.step(step);
+        if root.mode == 3 { root.offset-y = 0px; } else { root.offset-x = 0px; }
         settle.start();
     }
     public function wheel(dx: length, dy: length) {
@@ -64,7 +79,7 @@ export component ReaderPagerMotion inherits Rectangle {
     }
     changed enabled => { if !root.enabled { root.cancel(); } }
     changed mode => { root.cancel(); }
-    changed page => { root.cancel(); }
+    changed page => { if !root.committed { root.cancel(); } }
     animate offset-x { duration: root.settling && root.animate ? 160ms : 0ms; easing: ease-out; }
     animate offset-y { duration: root.settling && root.animate ? 160ms : 0ms; easing: ease-out; }
     settle := Timer {

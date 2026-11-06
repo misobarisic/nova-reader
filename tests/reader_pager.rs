@@ -193,6 +193,50 @@ fn pagers_follow_drag_and_settle_in_reading_direction_without_taps_or_holds() {
 }
 
 #[test]
+fn leaving_within_the_settle_window_still_commits_the_swipe() {
+    i_slint_backend_testing::init_no_event_loop();
+    for mode in [1, 2, 3] {
+        let ui = scene(390., 844.);
+        let log = Rc::new(RefCell::new(Vec::<String>::new()));
+        ui.on_page_step({
+            let log = log.clone();
+            let weak = ui.as_weak();
+            move |step| {
+                log.borrow_mut().push(format!("step({step})"));
+                let ui = weak.unwrap();
+                ui.set_current_page(ui.get_current_page() + step);
+            }
+        });
+        ui.on_navigate({
+            let log = log.clone();
+            move |section| log.borrow_mut().push(format!("navigate({section})"))
+        });
+        ui.set_reading_mode(mode);
+        ui.set_current_page(1);
+        advance(100);
+        let (x, y) = (195., 422.);
+        let (dx, dy) = if mode == 3 { (0., -180.) } else { (-180., 0.) };
+        input(&ui, true, TouchPhase::Started, x, y);
+        advance(60);
+        input(&ui, true, TouchPhase::Moved, x + dx / 2., y + dy / 2.);
+        advance(20);
+        input(&ui, true, TouchPhase::Moved, x + dx, y + dy);
+        input(&ui, true, TouchPhase::Ended, x + dx, y + dy);
+        advance(60); // inside the 160 ms settle window
+        ui.invoke_go_back();
+        advance(400);
+        let log = log.borrow();
+        let expected = if mode == 2 { -1 } else { 1 };
+        let step = log.iter().position(|e| *e == format!("step({expected})"));
+        let navigate = log.iter().position(|e| e.starts_with("navigate"));
+        assert!(
+            step.is_some() && navigate.is_some() && step < navigate,
+            "mode={mode}: the swipe commits before leaving: {log:?}"
+        );
+    }
+}
+
+#[test]
 #[ignore = "manual native paged preview using an external public-domain image"]
 fn paged_reader_previews() {
     use i_slint_backend_testing::{TestingBackend, TestingBackendOptions};
