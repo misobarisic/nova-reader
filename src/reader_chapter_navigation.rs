@@ -520,7 +520,18 @@ mod tests {
         tempfile::TempDir,
         mpsc::Receiver<ImageTask>,
     ) {
-        i_slint_backend_testing::init_no_event_loop();
+        zoom_fixture_with(i_slint_backend_testing::init_no_event_loop)
+    }
+
+    fn zoom_fixture_with(
+        init: fn(),
+    ) -> (
+        Arc<Controller>,
+        AppWindow,
+        tempfile::TempDir,
+        mpsc::Receiver<ImageTask>,
+    ) {
+        init();
         let directory = tempfile::tempdir().unwrap();
         let ui = AppWindow::new().unwrap();
         ui.set_section(6);
@@ -549,6 +560,14 @@ mod tests {
             move |offset, width, height| {
                 if let (Some(app), Some(ui)) = (owner.upgrade(), weak.upgrade()) {
                     app.position(&ui, offset, width, height);
+                }
+            }
+        });
+        ui.on_reader_press({
+            let owner = Arc::downgrade(&app);
+            move || {
+                if let Some(app) = owner.upgrade() {
+                    app.reader_pressed();
                 }
             }
         });
@@ -1734,6 +1753,49 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn webtoon_momentum_does_not_cancel_a_pending_chapter_jump() {
+        const CHILD: &str = "READER_MOMENTUM_INTENT_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "app::reader_chapter_navigation::tests::webtoon_momentum_does_not_cancel_a_pending_chapter_jump", "--nocapture"])
+                .env(CHILD, "1").output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let (app, ui, _directory, _receiver) = zoom_fixture();
+        mount_zoom_fixture(&app, &ui);
+        {
+            let mut view = app.view();
+            let reader = view.reader.as_mut().unwrap();
+            reader.retained.remove(&2);
+            reader.decoded_windows.remove(&2);
+            reader.decoded_widths.remove(&2);
+        }
+        app.navigate_chapter(&ui, false);
+        assert!(app.view().reader.as_ref().unwrap().chapter_navigation.is_some());
+        // A fling that was already running delivers one more scroll frame.
+        let width = ui.get_reader_width();
+        let current = {
+            let view = app.view();
+            let reader = view.reader.as_ref().unwrap();
+            (reader.page_position(1) + reader.ratios[1] * reader.anchor.offset() as f32) * width
+        };
+        app.position(&ui, current + 40., width, ui.get_reader_viewport_height());
+        assert!(
+            app.view().reader.as_ref().unwrap().chapter_navigation.is_some(),
+            "momentum frames must not cancel the chapter jump"
+        );
+        // A new press is the user taking over again.
+        ui.invoke_reader_press();
+        assert!(app.view().reader.as_ref().unwrap().chapter_navigation.is_none());
     }
 
     #[test]

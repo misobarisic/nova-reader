@@ -612,6 +612,7 @@ export component AppWindow inherits Window {
     callback chapter-step(int);
     out property <length> reader-viewport-height: root.reader-frame-height;
     callback reader-position(float, float, float);
+    callback reader-press;
     callback reader-reflow(float,float);
     callback mode-changed(int);
     callback page-step(int);
@@ -1082,7 +1083,7 @@ export component AppWindow inherits Window {
                                 content-width: max(self.width, root.reading-mode == 0 ? root.reader-width : root.reader-paged-width);
                                 content-height: root.reading-mode == 0 ? max(self.height, root.reader-height) : max(self.height, root.reader-paged-height);
                                 ReaderImageInteraction {
-                                    press-started => { root.cancel-reader-zoom(); }
+                                    press-started => { root.cancel-reader-zoom(); root.reader-press(); }
                                     width: reader.content-width; height: reader.content-height;
                                     enabled: !zoom-gesture.blocking;
                                     wheel-zoom-enabled: true;
@@ -1160,7 +1161,7 @@ export component AppWindow inherits Window {
                                             image-rendering: smooth;
                                         }
                                         ReaderImageInteraction {
-                                            press-started => { root.cancel-reader-zoom(); }
+                                            press-started => { root.cancel-reader-zoom(); root.reader-press(); }
                                             width: 100%; height: 100%;
                                             enabled: !zoom-gesture.blocking;
                                             context-enabled: page.loaded;

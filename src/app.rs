@@ -2853,6 +2853,12 @@ impl Controller {
             self.request_images(ui, index);
         }
     }
+    /// A new press on the artwork means the user took over again.
+    fn reader_pressed(&self) {
+        if let Some(reader) = self.view().reader.as_mut() {
+            reader.chapter_navigation = None;
+        }
+    }
     fn position(self: &Arc<Self>, ui: &AppWindow, offset: f32, width: f32, viewport: f32) {
         self.position_internal(ui, offset, width, viewport, PositionOrigin::User);
     }
@@ -2901,7 +2907,8 @@ impl Controller {
             if (offset - current).abs() > 0.5 {
                 reader.continuity_backwards = offset < current;
                 reader.retain_window_direction(offset > current);
-                reader.chapter_navigation = None;
+                // A pending explicit chapter jump survives scroll frames (a
+                // running fling keeps delivering them); a new press cancels it.
             }
             reader.observe_reverse_scroll(offset, width, |index| {
                 rows.row_data(index)
@@ -6081,6 +6088,7 @@ pub fn run(services: Services) -> Result<()> {
     });
     wire!(on_reader_reflow, |app, ui, width, height| app
         .reflow(&ui, width, height));
+    wire!(on_reader_press, |app, _ui| app.reader_pressed());
     wire!(on_reader_position, |app, ui, offset, width, height| app
         .position(&ui, offset, width, height));
     wire!(on_page_step, |app, ui, step| app.step_page(&ui, step));
