@@ -750,6 +750,119 @@ mod tests {
         assert!(!ui.get_capture_editor_visible());
         // Neither preview nor Cancel enters any platform publication function.
         assert!(!dir.path().join("image-export").exists());
+        context_menu_open_cost(&app, &ui);
+    }
+
+    /// Opening the reader context menu must not render the scene; only a Device
+    /// resolution screencap action does, once. Prints the measured open cost for
+    /// a phone-sized window (software renderer; Android Skia is similar CPU work).
+    fn context_menu_open_cost(app: &Controller, ui: &AppWindow) {
+        ui.set_reader_platform_android(false);
+        ui.show().unwrap();
+        ui.window().set_size(slint::PhysicalSize::new(1080, 2340));
+        ui.set_reading_mode(0);
+        ui.set_zoom(1.);
+        ui.set_reader_osd(false);
+        let mut noise = 0x2545_f491_u32;
+        let pixels = (0..1080 * 2340 * 4)
+            .map(|_| {
+                noise ^= noise << 13;
+                noise ^= noise >> 17;
+                noise ^= noise << 5;
+                (noise >> 8) as u8
+            })
+            .collect::<Vec<_>>();
+        let tile = slint::Image::from_rgba8(slint::SharedPixelBuffer::clone_from_slice(
+            &pixels, 1080, 2340,
+        ));
+        ui.set_pages(ModelRc::new(VecModel::from(vec![
+            PageRow {
+                ratio: 2340. / 1080.,
+                position: 0.,
+                loaded: true,
+                page_id: "page-0".into(),
+                tiles: ModelRc::new(VecModel::from(vec![crate::TileRow {
+                    image: tile,
+                    fraction: 1.,
+                    ..Default::default()
+                }])),
+                ..Default::default()
+            },
+            PageRow {
+                ratio: 3.,
+                position: 2340. / 1080.,
+                loaded: false,
+                page_id: "page-1".into(),
+                ..Default::default()
+            },
+        ])));
+        for _ in 0..8 {
+            i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
+        }
+        let _ = app;
+        let mut open_ms = Vec::new();
+        let first = DEVICE_SNAPSHOTS.load(std::sync::atomic::Ordering::Relaxed);
+        for _ in 0..5 {
+            let started = std::time::Instant::now();
+            ui.invoke_reader_context_opening(0);
+            open_ms.push(started.elapsed().as_secs_f64() * 1000.);
+            ui.invoke_reader_context_closed();
+        }
+        let taken = DEVICE_SNAPSHOTS.load(std::sync::atomic::Ordering::Relaxed) - first;
+        open_ms.sort_by(f64::total_cmp);
+        eprintln!(
+            "context_menu_open_ms median={:.2} all={open_ms:.2?} snapshots={taken}",
+            open_ms[2]
+        );
+        assert_eq!(
+            taken, 0,
+            "opening the menu must not render a device screencap"
+        );
+        // The action that needs pixels renders exactly once, and only while the
+        // scene still matches what was frozen at open.
+        let stamp = ScreencapStamp::of(ui);
+        let rendered = DEVICE_SNAPSHOTS.load(std::sync::atomic::Ordering::Relaxed);
+        let started = std::time::Instant::now();
+        let Ok(FrozenScreencap::Device(capture)) = resolve_deferred_screencap(ui, &stamp) else {
+            panic!("a matching stamp resolves to a device capture");
+        };
+        eprintln!(
+            "deferred_device_capture_ms={:.2} size={}x{}",
+            started.elapsed().as_secs_f64() * 1000.,
+            capture.width,
+            capture.height
+        );
+        assert_eq!(
+            DEVICE_SNAPSHOTS.load(std::sync::atomic::Ordering::Relaxed),
+            rendered + 1
+        );
+        assert_eq!(
+            capture.pixels.len(),
+            capture.width as usize * capture.height as usize * 4
+        );
+        type Move = Box<dyn Fn(&AppWindow)>;
+        let moves: [Move; 3] = [
+            Box::new(|ui| ui.set_zoom(1.5)),
+            Box::new(|ui| ui.set_scroll_y(-40.)),
+            Box::new(|ui| ui.set_current_page(1)),
+        ];
+        for moved in moves {
+            let before = ScreencapStamp::of(ui);
+            moved(ui);
+            assert!(
+                ScreencapStamp::of(ui) != before,
+                "stamp tracks scene geometry"
+            );
+            assert!(resolve_deferred_screencap(ui, &before).is_err());
+            assert_eq!(
+                DEVICE_SNAPSHOTS.load(std::sync::atomic::Ordering::Relaxed),
+                rendered + 1,
+                "a stale scene is rejected without rendering"
+            );
+            ui.set_zoom(1.);
+            ui.set_scroll_y(0.);
+            ui.set_current_page(0);
+        }
     }
 
     fn paged_letterbox_matches_native_frame(

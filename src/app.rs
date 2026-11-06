@@ -4948,6 +4948,10 @@ struct ReaderScreencap {
 }
 enum FrozenScreencap {
     Device(ReaderScreencap),
+    /// Rendering the scene is the expensive part of opening the context menu, so
+    /// a Device capture is taken only when an action needs it. The stamp proves
+    /// the scene still has the geometry that was frozen when the menu opened.
+    Deferred(ScreencapStamp),
     Chapter(Box<ChapterScreencap>),
 }
 #[derive(Clone)]
@@ -5229,7 +5233,49 @@ fn media_capture_viewport(
         })
         .ok_or_else(|| text::tr("No artwork in the selected area."))
 }
+/// Everything that places reader media inside the window. If any of it moves
+/// while the menu is open, a late render would no longer match the frozen
+/// capture viewport, so the action fails instead of exporting the wrong pixels.
+#[derive(Clone, PartialEq)]
+struct ScreencapStamp {
+    size: (u32, u32),
+    scale: f32,
+    scroll: (f32, f32),
+    zoom: f32,
+    page: i32,
+    mode: i32,
+    reader_width: f32,
+    split: (bool, i32),
+}
+impl ScreencapStamp {
+    fn of(ui: &AppWindow) -> Self {
+        let size = ui.window().size();
+        Self {
+            size: (size.width, size.height),
+            scale: ui.window().scale_factor(),
+            scroll: (ui.get_scroll_x(), ui.get_scroll_y()),
+            zoom: ui.get_zoom(),
+            page: ui.get_current_page(),
+            mode: ui.get_reading_mode(),
+            reader_width: ui.get_reader_width(),
+            split: (ui.get_reader_split_page(), ui.get_reader_split_half()),
+        }
+    }
+}
+/// Render the deferred Device capture now, with the menu already hidden and
+/// before busy feedback is shown, as the eager capture used to see the scene.
+fn resolve_deferred_screencap(ui: &AppWindow, stamp: &ScreencapStamp) -> Result<FrozenScreencap> {
+    if ScreencapStamp::of(ui) != *stamp {
+        return Err(text::tr("Reader screencap is unavailable"));
+    }
+    capture_reader(ui).map(FrozenScreencap::Device)
+}
+#[cfg(test)]
+pub(crate) static DEVICE_SNAPSHOTS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 fn capture_reader(ui: &AppWindow) -> Result<ReaderScreencap> {
+    #[cfg(test)]
+    DEVICE_SNAPSHOTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let size = ui.window().size();
     if u64::from(size.width) * u64::from(size.height) > 8_000_000 {
         return Err(text::tr("Reader screencap exceeds the image size limit"));
@@ -5489,7 +5535,7 @@ fn wire_reader_context(app: &Arc<Controller>, ui: &AppWindow) {
                     capture_chapter_request(&app, &ui, index, false)
                         .map(|capture| FrozenScreencap::Chapter(Box::new(capture)))
                 } else {
-                    capture_reader(&ui).map(FrozenScreencap::Device)
+                    Ok(FrozenScreencap::Deferred(ScreencapStamp::of(&ui)))
                 };
                 let naming = export_name_position(&app, &ui, index, true);
                 *screencap.borrow_mut() =
@@ -5544,12 +5590,25 @@ fn wire_reader_context(app: &Arc<Controller>, ui: &AppWindow) {
                 ui.set_reader_context_status(text::tr("Another image action is active").into());
                 return;
             }
+            // The menu is hidden by now and no busy feedback exists yet, so a
+            // deferred Device capture sees the same scene the eager one did.
+            let snapshot = screencap
+                .borrow_mut()
+                .take()
+                .map(|(generation, capture, naming)| {
+                    let capture = match capture {
+                        Ok(FrozenScreencap::Deferred(stamp)) if screen && selection.is_none() => {
+                            resolve_deferred_screencap(&ui, &stamp)
+                        }
+                        other => other,
+                    };
+                    (generation, capture, naming)
+                });
             if selection.is_some() {
                 ui.set_capture_editor_busy(true);
             }
             ui.set_reader_context_busy(true);
             ui.set_reader_context_status(text::tr("Preparing image…").into());
-            let snapshot = screencap.borrow_mut().take();
             let preferences = crate::capture_settings::preferences(&ui);
             let naming = if screen {
                 None
@@ -5638,6 +5697,9 @@ fn wire_reader_context(app: &Arc<Controller>, ui: &AppWindow) {
                         }
                         let capture = match capture? {
                             FrozenScreencap::Device(capture) => capture,
+                            FrozenScreencap::Deferred(_) => {
+                                return Err(text::tr("Reader screencap is unavailable"));
+                            }
                             FrozenScreencap::Chapter(capture) => {
                                 let (rendered, naming) = reader_capture_editor::render_capture(
                                     &capture,
