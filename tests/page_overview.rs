@@ -3,7 +3,7 @@
 use i_slint_backend_testing::{AccessibleRole, ElementHandle, mock_elapsed_time};
 use nova_reader::{Anim, AppWindow, OverviewTile};
 use slint::platform::{Key, PointerEventButton, WindowEvent};
-use slint::{ComponentHandle, LogicalPosition, LogicalSize, ModelRc, VecModel};
+use slint::{ComponentHandle, LogicalPosition, LogicalSize, Model, ModelRc, VecModel};
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
 fn settle() {
@@ -308,10 +308,13 @@ fn collection_groups_use_the_shared_accessible_chapter_selector() {
             .is_none()
     );
     ui.set_overview_collection(true);
-    ui.set_overview_groups(ModelRc::new(VecModel::from(vec![
-        "Chapter 12".into(),
-        "Chapter 13".into(),
-    ])));
+    // More than eight groups keep the dropdown; fewer become chips (see
+    // few_groups_are_chips_and_many_groups_stay_a_dropdown).
+    ui.set_overview_groups(ModelRc::new(VecModel::from(
+        (12..21)
+            .map(|n| format!("Chapter {n}").into())
+            .collect::<Vec<slint::SharedString>>(),
+    )));
     ui.set_overview_group_index(0);
     let picked = Rc::new(RefCell::new(Vec::new()));
     ui.on_overview_group_selected({
@@ -646,7 +649,7 @@ fn collection_grid_is_edge_to_edge_square_and_virtualized_at_each_density() {
                 (second.absolute_position().x
                     - first.absolute_position().x
                     - first.size().width
-                    - 1.)
+                    - 2.)
                     .abs()
                     < 0.02
             );
@@ -654,7 +657,7 @@ fn collection_grid_is_edge_to_edge_square_and_virtualized_at_each_density() {
                 (next_row.absolute_position().y
                     - first.absolute_position().y
                     - first.size().height
-                    - 1.)
+                    - 2.)
                     .abs()
                     < 0.02
             );
@@ -666,7 +669,7 @@ fn collection_grid_is_edge_to_edge_square_and_virtualized_at_each_density() {
                     .contains("Fixture failure")
             );
             let maximum = columns as usize
-                * ((grid.size().height / (first.size().height + 1.)).ceil() as usize + 1);
+                * ((grid.size().height / (first.size().height + 2.)).ceil() as usize + 1);
             let delegates = ElementHandle::find_by_element_type_name(&ui, "PageThumbnail").count();
             assert!(
                 delegates <= maximum && delegates < 110,
@@ -721,7 +724,7 @@ fn collection_real_pinch_and_ctrl_wheel_preserve_focal_image_and_cancel_taps() {
     let before = image();
     let cx = before.absolute_position().x + before.size().width / 2.;
     let cy = before.absolute_position().y + before.size().height * 0.4;
-    let row_fraction = (cy - before.absolute_position().y) / (before.size().height + 1.);
+    let row_fraction = (cy - before.absolute_position().y) / (before.size().height + 2.);
     let touch = |id, x, y, phase| {
         ui.window()
             .dispatch_event(WindowEvent::internal(InternalEvent::Touch {
@@ -746,7 +749,7 @@ fn collection_real_pinch_and_ctrl_wheel_preserve_focal_image_and_cancel_taps() {
     assert_eq!(requests.borrow().last().unwrap().1, "stable-page-97");
     let enlarged = image();
     assert!(
-        (enlarged.absolute_position().y + row_fraction * (enlarged.size().height + 1.) - cy).abs()
+        (enlarged.absolute_position().y + row_fraction * (enlarged.size().height + 2.) - cy).abs()
             < 1.5
     );
     touch(11, cx - 30., cy + 20., TouchPhase::Moved);
@@ -755,7 +758,7 @@ fn collection_real_pinch_and_ctrl_wheel_preserve_focal_image_and_cancel_taps() {
     settle();
     let translated = image();
     assert!(
-        (translated.absolute_position().y + row_fraction * (translated.size().height + 1.)
+        (translated.absolute_position().y + row_fraction * (translated.size().height + 2.)
             - cy
             - 20.)
             .abs()
@@ -775,7 +778,7 @@ fn collection_real_pinch_and_ctrl_wheel_preserve_focal_image_and_cancel_taps() {
     let enlarged = image();
     let wx = enlarged.absolute_position().x + enlarged.size().width / 2.;
     let wy = enlarged.absolute_position().y + enlarged.size().height * 0.6;
-    let wheel_fraction = (wy - enlarged.absolute_position().y) / (enlarged.size().height + 1.);
+    let wheel_fraction = (wy - enlarged.absolute_position().y) / (enlarged.size().height + 2.);
     ui.window().dispatch_event(WindowEvent::KeyPressed {
         text: Key::Control.into(),
     });
@@ -795,7 +798,7 @@ fn collection_real_pinch_and_ctrl_wheel_preserve_focal_image_and_cancel_taps() {
     );
     let smaller = image();
     assert!(
-        (smaller.absolute_position().y + wheel_fraction * (smaller.size().height + 1.) - wy).abs()
+        (smaller.absolute_position().y + wheel_fraction * (smaller.size().height + 2.) - wy).abs()
             < 1.5
     );
     assert_eq!(requests.borrow().last().unwrap().1, "stable-page-97");
@@ -821,6 +824,536 @@ fn collection_real_pinch_and_ctrl_wheel_preserve_focal_image_and_cancel_taps() {
         *selected.borrow(),
         ["stable-page-97"],
         "a fresh tap works after both pinch contacts end"
+    );
+}
+
+/// Collection scene with the production gallery chrome on a 320-image inventory.
+fn gallery(width: f32, height: f32, current: i32) -> AppWindow {
+    let ui = scene(width, height, current);
+    ui.set_overview_collection(true);
+    ui.set_overview_subtitle("".into());
+    // Like opening the overview: the grid shell owns the keyboard.
+    ui.set_overview_focus_request(ui.get_overview_focus_request() + 1);
+    settle();
+    ui
+}
+
+fn by_id(ui: &AppWindow, id: &str) -> ElementHandle {
+    ElementHandle::find_by_element_id(ui, id)
+        .next()
+        .unwrap_or_else(|| panic!("{id} should exist"))
+}
+
+fn button(ui: &AppWindow, label: &str) -> Option<ElementHandle> {
+    ElementHandle::find_by_accessible_label(ui, label)
+        .find(|element| element.accessible_role() == Some(AccessibleRole::Button))
+}
+
+fn header_shown(ui: &AppWindow) -> bool {
+    // A fully hidden header is not instantiated for hit testing at all.
+    ElementHandle::find_by_element_id(ui, "PageOverview::gallery-header")
+        .next()
+        .is_some_and(|header| {
+            header.computed_opacity() > 0.99 && header.absolute_position().y >= -0.5
+        })
+}
+
+fn wheel_grid(ui: &AppWindow, delta: f32) {
+    // Positive wheel delta scrolls toward the start; one step per notch keeps
+    // the movement a continuous run, as a finger or trackpad would.
+    let grid = by_id(ui, "PageOverview::grid");
+    for _ in 0..4 {
+        grid.scroll(0., delta / 4.);
+        settle();
+    }
+    // Wheel scrolling eases toward its target; let that finish.
+    for _ in 0..4 {
+        settle();
+    }
+}
+
+#[test]
+fn gallery_images_start_at_the_top_under_a_floating_header() {
+    i_slint_backend_testing::init_no_event_loop();
+    for (width, height) in [(360., 800.), (1280., 800.)] {
+        let ui = gallery(width, height, 0);
+        let grid = by_id(&ui, "PageOverview::grid");
+        assert!(
+            grid.absolute_position().y.abs() < 0.01 && (grid.size().height - height).abs() < 0.5,
+            "the grid owns the whole window: {:?} {:?}",
+            grid.absolute_position(),
+            grid.size()
+        );
+        let first = ElementHandle::find_by_accessible_label(&ui, "Image 1")
+            .find(|element| element.accessible_role() == Some(AccessibleRole::Button))
+            .unwrap();
+        assert!(first.absolute_position().y.abs() < 0.01);
+        let header = by_id(&ui, "PageOverview::gallery-header");
+        assert!(
+            header.size().height >= 48. && header.size().height < 80.,
+            "one compact row: {}",
+            header.size().height
+        );
+        // Everything lives in that single row over the grid.
+        let row = header.absolute_position().y;
+        for label in ["Back", "Current image", "Overview options"] {
+            let control = button(&ui, label).unwrap_or_else(|| panic!("{label}"));
+            assert!(control.size().height >= 48., "{label} keeps a 48px target");
+            assert!(
+                control.absolute_position().y >= row - 0.5
+                    && control.absolute_position().y + control.size().height
+                        <= row + header.size().height + 0.5,
+                "{label} sits in the header row"
+            );
+            assert!(
+                control.absolute_position().x >= 0.
+                    && control.absolute_position().x + control.size().width <= width + 0.5
+            );
+        }
+        // Density moved into Options; zoom gestures remain the quick path.
+        assert!(button(&ui, "Smaller thumbnails").is_none());
+        assert!(button(&ui, "Larger thumbnails").is_none());
+        assert!(
+            ElementHandle::find_by_accessible_label(&ui, "Image 1")
+                .next()
+                .is_some()
+        );
+    }
+}
+
+#[test]
+fn gallery_header_hides_scrolling_down_and_returns_on_scroll_up_tap_or_keyboard() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = gallery(390., 844., 0);
+    assert!(header_shown(&ui), "visible at the top");
+    wheel_grid(&ui, -600.);
+    assert!(!header_shown(&ui), "scrolling down hides the header");
+    wheel_grid(&ui, 120.);
+    assert!(header_shown(&ui), "scrolling up brings it back");
+    wheel_grid(&ui, -600.);
+    assert!(!header_shown(&ui));
+    // Tapping the top edge is "tapping empty space".
+    ui.window().dispatch_event(WindowEvent::PointerMoved {
+        position: LogicalPosition::new(195., 10.),
+    });
+    settle();
+    assert!(header_shown(&ui), "the top edge reveals it");
+    wheel_grid(&ui, -600.);
+    ui.window().dispatch_event(WindowEvent::PointerMoved {
+        position: LogicalPosition::new(195., 500.),
+    });
+    settle();
+    assert!(!header_shown(&ui));
+    key(&ui, Key::DownArrow);
+    assert!(header_shown(&ui), "keyboard navigation reveals it");
+    // Jumping to the start by Current keeps it up even though the viewport moves.
+    wheel_grid(&ui, -900.);
+    assert!(!header_shown(&ui));
+    assert!(
+        ElementHandle::find_by_accessible_label(&ui, "Current image")
+            .next()
+            .is_none(),
+        "hidden chrome is not a hit target"
+    );
+    wheel_grid(&ui, 120.);
+    assert!(header_shown(&ui));
+    ElementHandle::find_by_accessible_label(&ui, "Current image")
+        .next()
+        .unwrap()
+        .invoke_accessible_default_action();
+    settle();
+    assert!(header_shown(&ui));
+}
+
+#[test]
+fn programmatic_scrolling_never_hides_the_header() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = gallery(390., 844., 0);
+    ui.set_overview_restore_index(200);
+    ui.set_overview_restore_fraction(0.);
+    ui.set_overview_restore_serial(ui.get_overview_restore_serial() + 1);
+    settle();
+    assert!(
+        header_shown(&ui),
+        "restoring a far anchor is not a user scroll"
+    );
+    key(&ui, Key::End);
+    assert!(header_shown(&ui), "keyboard jumps are not a user scroll");
+}
+
+#[test]
+fn thumbnails_fade_in_unless_motion_is_off() {
+    i_slint_backend_testing::init_no_event_loop();
+    let picture =
+        slint::Image::from_rgba8(slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(4, 4));
+    for motion in [true, false] {
+        let ui = gallery(390., 844., -1);
+        ui.global::<Anim>().set_enabled(motion);
+        let model = ui.get_overview_tiles();
+        let image = || by_id(&ui, "PageThumbnail::thumb-image");
+        assert!(
+            image().computed_opacity() < 0.01,
+            "placeholder until the thumbnail arrives"
+        );
+        assert!(
+            ElementHandle::find_by_accessible_label(&ui, "Image 1")
+                .next()
+                .unwrap()
+                .accessible_value()
+                .unwrap()
+                .contains("Loading preview"),
+            "status stays available to assistive tech"
+        );
+        let mut tile = model.row_data(0).unwrap();
+        tile.thumbnail = picture.clone();
+        tile.loading = false;
+        model.set_row_data(0, tile);
+        if motion {
+            mock_elapsed_time(Duration::from_millis(40));
+            let partial = image().computed_opacity();
+            assert!(partial > 0. && partial < 1., "fading in: opacity {partial}");
+            mock_elapsed_time(Duration::from_millis(300));
+        } else {
+            // No elapsed time at all: the image is simply there.
+            assert!(
+                image().computed_opacity() > 0.99,
+                "motion off shows the thumbnail immediately"
+            );
+        }
+        assert!(image().computed_opacity() > 0.99);
+    }
+}
+
+#[test]
+fn failed_previews_show_a_centered_glyph_and_no_status_text() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = gallery(390., 844., 0);
+    for text in [
+        "Waiting for preview",
+        "Loading preview",
+        "Preview unavailable",
+    ] {
+        assert!(
+            !ElementHandle::find_by_accessible_label(&ui, text)
+                .any(|element| { element.accessible_role() == Some(AccessibleRole::Text) }),
+            "{text:?} is not painted in collection tiles"
+        );
+    }
+    let failed = ElementHandle::find_by_accessible_label(&ui, "Image 6")
+        .find(|element| element.accessible_role() == Some(AccessibleRole::Button))
+        .unwrap();
+    assert!(
+        failed
+            .accessible_value()
+            .unwrap()
+            .contains("Fixture failure")
+    );
+}
+
+#[test]
+fn current_and_focused_markers_are_distinct_and_not_a_full_border() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = gallery(390., 844., 1);
+    let rings = |id: &str| ElementHandle::find_by_element_id(&ui, id).count();
+    assert_eq!(rings("PageThumbnail::current-ring"), 1);
+    assert_eq!(
+        rings("PageThumbnail::focus-ring"),
+        0,
+        "no focus without keys"
+    );
+    let current = ElementHandle::find_by_element_id(&ui, "PageThumbnail::current-ring")
+        .next()
+        .unwrap();
+    let tile = ElementHandle::find_by_accessible_label(&ui, "Image 2")
+        .find(|element| element.accessible_role() == Some(AccessibleRole::Button))
+        .unwrap();
+    assert!(
+        current.size().width < tile.size().width && current.size().height < tile.size().height,
+        "the current ring is inset inside the tile"
+    );
+    key(&ui, Key::RightArrow);
+    assert_eq!(rings("PageThumbnail::focus-ring"), 1);
+    let focus = ElementHandle::find_by_element_id(&ui, "PageThumbnail::focus-ring")
+        .next()
+        .unwrap();
+    assert!(
+        (focus.size().width - tile.size().width).abs() < 0.5,
+        "keyboard focus covers the whole tile"
+    );
+}
+
+#[test]
+fn gallery_density_lives_in_the_options_menu() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = gallery(390., 844., 0);
+    ui.set_section(23);
+    ui.set_overview_density(1);
+    let densities = Rc::new(RefCell::new(Vec::new()));
+    ui.on_overview_density_changed({
+        let densities = densities.clone();
+        move |value| densities.borrow_mut().push(value)
+    });
+    let options = button(&ui, "Overview options").unwrap();
+    options.invoke_accessible_default_action();
+    settle();
+    ui.invoke_open_entry_menu("stable-series".into(), "Fixture".into(), true, 20., 20.);
+    settle();
+    button(&ui, "Larger thumbnails")
+        .expect("Options offers larger thumbnails")
+        .invoke_accessible_default_action();
+    settle();
+    assert_eq!(*densities.borrow(), [2]);
+    assert!(!ui.get_entry_menu_visible(), "choosing closes the menu");
+    ui.set_overview_density(2);
+    ui.invoke_open_entry_menu("stable-series".into(), "Fixture".into(), true, 20., 20.);
+    settle();
+    let larger = button(&ui, "Larger thumbnails").unwrap();
+    assert_eq!(
+        larger.accessible_enabled(),
+        Some(false),
+        "already at the largest"
+    );
+    button(&ui, "Smaller thumbnails")
+        .unwrap()
+        .invoke_accessible_default_action();
+    settle();
+    assert_eq!(*densities.borrow(), [2, 1]);
+}
+
+#[test]
+fn few_groups_are_chips_and_many_groups_stay_a_dropdown() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = gallery(390., 844., 0);
+    let picked = Rc::new(RefCell::new(Vec::new()));
+    ui.on_overview_group_selected({
+        let picked = picked.clone();
+        move |index| picked.borrow_mut().push(index)
+    });
+    let groups = |count: usize| {
+        ModelRc::new(VecModel::from(
+            (0..count)
+                .map(|index| format!("Chapter {}", index + 12).into())
+                .collect::<Vec<slint::SharedString>>(),
+        ))
+    };
+    // Up to eight groups: always-visible chips, no dropdown.
+    ui.set_overview_groups(groups(8));
+    ui.set_overview_group_index(1);
+    settle();
+    assert!(
+        ElementHandle::find_by_accessible_label(&ui, "Choose chapter")
+            .all(|element| element.accessible_role() != Some(AccessibleRole::Combobox))
+    );
+    let chip = |n: i32| button(&ui, &format!("Chapter {n}")).unwrap_or_else(|| panic!("chip {n}"));
+    assert_eq!(chip(13).accessible_checked(), Some(true));
+    assert_eq!(chip(12).accessible_checked(), Some(false));
+    assert!(chip(13).size().height >= 48.);
+    chip(15).invoke_accessible_default_action();
+    settle();
+    assert_eq!(*picked.borrow(), [3]);
+    assert_eq!(ui.get_overview_group_index(), 3);
+    assert_eq!(chip(15).accessible_checked(), Some(true));
+    // The selected chip is revealed when it starts outside the row.
+    ui.set_overview_group_index(7);
+    settle();
+    let selected = chip(19);
+    assert!(
+        selected.absolute_position().x >= 0.
+            && selected.absolute_position().x + selected.size().width <= 390.5,
+        "selected chip scrolls into view: {:?}",
+        selected.absolute_position()
+    );
+    // Nine groups: the existing accessible dropdown scales better.
+    ui.set_overview_groups(groups(9));
+    ui.set_overview_group_index(0);
+    picked.borrow_mut().clear();
+    settle();
+    let selector = ElementHandle::find_by_accessible_label(&ui, "Choose chapter")
+        .find(|element| element.accessible_role() == Some(AccessibleRole::Combobox))
+        .expect("more than eight groups use the dropdown");
+    assert!(selector.size().height >= 48.);
+    selector.invoke_accessible_default_action();
+    settle();
+    button(&ui, "Chapter 13")
+        .unwrap()
+        .invoke_accessible_default_action();
+    settle();
+    assert_eq!(*picked.borrow(), [1]);
+}
+
+fn scroller(ui: &AppWindow) -> Option<ElementHandle> {
+    ElementHandle::find_by_accessible_label(ui, "Fast scroller").next()
+}
+
+#[test]
+fn fast_scroller_appears_for_long_collections_and_jumps_to_the_matching_row() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = gallery(390., 844., 0);
+    let ranges = Rc::new(RefCell::new(Vec::new()));
+    ui.on_overview_visible_range({
+        let ranges = ranges.clone();
+        move |first, last, columns| ranges.borrow_mut().push((first, last, columns))
+    });
+    let anchors = Rc::new(RefCell::new(Vec::new()));
+    ui.on_overview_anchor({
+        let anchors = anchors.clone();
+        move |id, _| anchors.borrow_mut().push(id.to_string())
+    });
+    // Idle: nothing to grab, so it never steals taps from edge tiles.
+    assert!(scroller(&ui).is_none_or(|s| s.computed_opacity() < 0.01));
+    wheel_grid(&ui, -80.);
+    let track = scroller(&ui).expect("a long collection offers a fast scroller");
+    assert!(track.computed_opacity() > 0.99, "recent scrolling shows it");
+    let origin = track.absolute_position();
+    let size = track.size();
+    let x = origin.x + size.width / 2.;
+    let down = |y: f32| {
+        ui.window().dispatch_event(WindowEvent::PointerPressed {
+            position: LogicalPosition::new(x, origin.y + y),
+            button: PointerEventButton::Left,
+        });
+        mock_elapsed_time(Duration::from_millis(16));
+    };
+    let drag = |y: f32| {
+        ui.window().dispatch_event(WindowEvent::PointerMoved {
+            position: LogicalPosition::new(x, origin.y + y),
+        });
+        mock_elapsed_time(Duration::from_millis(16));
+    };
+    let up = |y: f32| {
+        ui.window().dispatch_event(WindowEvent::PointerReleased {
+            position: LogicalPosition::new(x, origin.y + y),
+            button: PointerEventButton::Left,
+        });
+        settle();
+    };
+    let columns = 3; // 390px phone at the default density
+    let rows = 320_usize.div_ceil(columns);
+    let (grid_height, row) = (844., (390. - 4.) / 3. + 2.);
+    for fraction in [0.5_f32, 0.9, 0.25, 1.0, 0.0] {
+        down(size.height * 0.1);
+        drag(size.height * 0.1 + 6.);
+        let thumb = 52.;
+        drag(fraction * (size.height - thumb) + thumb / 2.);
+        settle();
+        // While dragging, a bubble names the image under the thumb.
+        let top_row = ((fraction * (rows as f32 * row - grid_height)) / row).floor() as usize;
+        let expected = (top_row * columns + 1).min(320);
+        assert!(
+            ElementHandle::find_by_accessible_label(&ui, &format!("Image {expected} of 320"))
+                .next()
+                .is_some(),
+            "bubble for fraction {fraction}: expected Image {expected} of 320"
+        );
+        up(fraction * (size.height - thumb) + thumb / 2.);
+        // The viewport lands on that row: its first image is visible at the top.
+        let first = ElementHandle::find_by_accessible_label(&ui, &format!("Image {expected}"))
+            .find(|element| element.accessible_role() == Some(AccessibleRole::Button))
+            .unwrap_or_else(|| panic!("row of image {expected} is instantiated"));
+        let grid = by_id(&ui, "PageOverview::grid");
+        let offset = first.absolute_position().y - grid.absolute_position().y;
+        assert!(
+            (-row..=row).contains(&offset),
+            "fraction {fraction}: image {expected} is {offset}px from the top"
+        );
+        let (first_visible, last_visible, _) = *ranges.borrow().last().unwrap();
+        assert!(
+            (first_visible as i32) <= expected as i32
+                && (last_visible as i32) > expected as i32 - 1,
+            "range {first_visible}..{last_visible} includes {expected}"
+        );
+        assert!(
+            ElementHandle::find_by_element_type_name(&ui, "PageThumbnail").count() < 60,
+            "still virtualized after a jump"
+        );
+    }
+    assert!(
+        !anchors.borrow().is_empty(),
+        "restore anchors keep following the jumped-to row"
+    );
+    // A short collection does not need one.
+    let short = gallery(390., 844., 0);
+    short.set_overview_tiles(ModelRc::new(VecModel::from(
+        (0..20)
+            .map(|index| OverviewTile {
+                page_id: format!("stable-page-{index}").into(),
+                page_number: index + 1,
+                ..Default::default()
+            })
+            .collect::<Vec<_>>(),
+    )));
+    settle();
+    wheel_grid(&short, -200.);
+    assert!(scroller(&short).is_none());
+}
+
+#[test]
+fn fast_scroller_follows_ordinary_scrolling_and_survives_density_changes() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = gallery(390., 844., 0);
+    wheel_grid(&ui, -80.);
+    let track = scroller(&ui).unwrap();
+    let early = track.accessible_value().unwrap().to_string();
+    wheel_grid(&ui, -4000.);
+    let later = scroller(&ui)
+        .unwrap()
+        .accessible_value()
+        .unwrap()
+        .to_string();
+    assert!(
+        later.parse::<f32>().unwrap() > early.parse::<f32>().unwrap(),
+        "thumb advances with the content: {early} -> {later}"
+    );
+    ui.set_overview_density(0);
+    settle();
+    assert!(ElementHandle::find_by_element_type_name(&ui, "PageThumbnail").count() < 110);
+}
+
+#[test]
+fn viewer_counter_shows_without_chrome_and_tap_toggles_the_chrome() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = scene(390., 844., 0);
+    ui.set_pages(ModelRc::new(VecModel::from(vec![nova_reader::PageRow {
+        page_id: "fixture".into(),
+        ratio: 1.,
+        loaded: true,
+        ..Default::default()
+    }])));
+    ui.set_reader_collection(true);
+    ui.set_reader_gallery_group_count(1);
+    ui.set_reader_page_count(40);
+    ui.set_reader_local_page(7);
+    ui.set_section(6);
+    settle();
+    assert!(!ui.get_reader_osd(), "chrome is hidden by default");
+    let counter = ElementHandle::find_by_accessible_label(&ui, "Image 7 of 40")
+        .next()
+        .expect("collections always show an N / M counter");
+    assert!(counter.size().width > 0.);
+    ui.set_reader_local_page(8);
+    settle();
+    assert!(
+        ElementHandle::find_by_accessible_label(&ui, "Image 8 of 40")
+            .next()
+            .is_some()
+    );
+    // With chrome visible the OSD owns the position text instead.
+    ui.set_reader_osd(true);
+    settle();
+    assert!(
+        ElementHandle::find_by_accessible_label(&ui, "Image 8 of 40").all(|element| element
+            .accessible_role()
+            != Some(AccessibleRole::Text)
+            || element.size().width > 0.)
+    );
+    // Manga pages keep the counter behind the existing setting.
+    ui.set_reader_osd(false);
+    ui.set_reader_collection(false);
+    settle();
+    assert!(
+        ElementHandle::find_by_accessible_label(&ui, "Image 8 of 40")
+            .next()
+            .is_none()
     );
 }
 
@@ -1133,4 +1666,99 @@ fn render_page_overview_previews() {
             .is_none()
     );
     capture("gallery-viewer-single-390x844.png");
+}
+
+#[test]
+#[ignore = "opt-in native gallery snapshots; set NOVA_GALLERY_SHOT_DIR and NOVA_GALLERY_SHOT_LABEL"]
+fn render_gallery_snapshots() {
+    use i_slint_backend_testing::{TestingBackend, TestingBackendOptions};
+    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+        mock_time: true,
+        threading: false,
+        renderer_name: Some("software".into()),
+    })))
+    .unwrap();
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let pictures = ["portrait", "wide", "tall"].map(|name| {
+        let source =
+            image::open(base.join(format!("examples/addons/neutral-fixture/pages/{name}.png")))
+                .unwrap()
+                .resize_to_fill(320, 320, image::imageops::FilterType::Triangle)
+                .to_rgba8();
+        slint::Image::from_rgba8(slint::SharedPixelBuffer::clone_from_slice(
+            source.as_raw(),
+            source.width(),
+            source.height(),
+        ))
+    });
+    let tiles = (0..320)
+        .map(|index| OverviewTile {
+            page_id: format!("stable-page-{index}").into(),
+            page_number: index + 1,
+            thumbnail: if index < 120 && index != 5 && index != 9 {
+                pictures[index as usize % 3].clone()
+            } else {
+                Default::default()
+            },
+            // Tiles 100.. are still loading, 5 and 9 failed.
+            loading: index >= 100 && index != 9,
+            error: if index == 5 || index == 9 {
+                "Fixture failure".into()
+            } else {
+                "".into()
+            },
+            ..Default::default()
+        })
+        .collect::<Vec<_>>();
+    let label = std::env::var("NOVA_GALLERY_SHOT_LABEL").unwrap_or_else(|_| "after".into());
+    let directory = std::path::PathBuf::from(std::env::var("NOVA_GALLERY_SHOT_DIR").unwrap_or_else(
+        |_| "/tmp/claude-0/-home-user/fd9e969b-e896-516f-a49a-a3f9e3998d90/scratchpad/gallery-shots".into(),
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    for (width, height) in [(360, 800), (1280, 800)] {
+        let ui = AppWindow::new().unwrap();
+        ui.global::<Anim>().set_enabled(false);
+        ui.set_overview_title("Holiday album".into());
+        ui.set_overview_subtitle("".into());
+        ui.set_overview_collection(true);
+        ui.set_overview_tiles(ModelRc::new(VecModel::from(tiles.clone())));
+        ui.set_overview_current_index(3);
+        ui.set_overview_restore_index(0);
+        ui.set_overview_restore_serial(1);
+        ui.set_overview_groups(ModelRc::new(VecModel::from(vec![
+            "Day 1".into(),
+            "Day 2".into(),
+            "Day 3".into(),
+        ])));
+        ui.set_section(23);
+        ui.window()
+            .set_size(slint::PhysicalSize::new(width, height));
+        ui.show().unwrap();
+        settle();
+        let capture = |state: &str| {
+            let shot = ui.window().take_snapshot().unwrap();
+            image::save_buffer(
+                directory.join(format!("{label}-{width}x{height}-{state}.png")),
+                shot.as_bytes(),
+                shot.width(),
+                shot.height(),
+                image::ColorType::Rgba8,
+            )
+            .unwrap();
+        };
+        capture("top");
+        key(&ui, Key::RightArrow);
+        capture("keyboard-focus");
+        let grid = ElementHandle::find_by_element_id(&ui, "PageOverview::grid")
+            .next()
+            .unwrap();
+        for _ in 0..6 {
+            grid.scroll(0., -60.);
+            settle();
+        }
+        capture("scrolling-down");
+        grid.scroll(0., 40.);
+        settle();
+        capture("scrolling-up");
+    }
 }

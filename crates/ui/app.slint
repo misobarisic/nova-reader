@@ -408,6 +408,12 @@ export component AppWindow inherits Window {
             root.confirm-entry-action(key, action);
             return;
         }
+        // Density belongs to the open gallery, not to the title record.
+        if action == "density-smaller" || action == "density-larger" {
+            root.close-entry-menu();
+            root.overview-density-changed(Math.clamp(root.overview-density + (action == "density-larger" ? 1 : -1), 0, 2));
+            return;
+        }
         root.entry-action(root.entry-menu-key,action);
         if action == "categories" { root.entry-menu-editing = true; }
         else if action == "change-status" { root.entry-menu-status-editing = true; }
@@ -419,6 +425,9 @@ export component AppWindow inherits Window {
     // Nova's responsive breakpoint applies equally to Android and desktop.
     out property <bool> mobile-ui: root.width < 700px;
     private property <bool> edge-to-edge-artwork: root.section == 5 || root.section == 6;
+    // The image gallery's photographs start at the top of the screen, under the
+    // status bar; its floating header clears the inset itself.
+    private property <bool> gallery-top-bleed: root.section == 23 && root.overview-collection;
     out property <length> navigation-width: root.mobile-ui || root.section == 5 || root.section == 6 ? 0px : 64px;
     out property <length> bottom-navigation-height: root.mobile-ui && !(root.section == 3 && root.source-catalog-open) && (root.section == 0 || root.section == 1 || root.section == 2 || root.section == 3 || root.section == 4) ? 68px : 0px;
     in-out property <bool> reader-osd: false;
@@ -703,9 +712,9 @@ export component AppWindow inherits Window {
         // resize or shift the reading viewport.
         content-viewport := Rectangle {
             x: root.edge-to-edge-artwork ? 0px : root.safe-area-insets.left;
-            y: root.edge-to-edge-artwork ? 0px : root.safe-area-insets.top;
+            y: root.edge-to-edge-artwork || root.gallery-top-bleed ? 0px : root.safe-area-insets.top;
             width: max(0px, root.width - (root.edge-to-edge-artwork ? 0px : root.safe-area-insets.left + root.safe-area-insets.right));
-            height: max(0px, root.height - (root.edge-to-edge-artwork ? 0px : root.safe-area-insets.top) - (root.section == 6 ? 0px : root.safe-area-insets.bottom));
+            height: max(0px, root.height - (root.edge-to-edge-artwork || root.gallery-top-bleed ? 0px : root.safe-area-insets.top) - (root.section == 6 ? 0px : root.safe-area-insets.bottom));
             VerticalLayout {
                 spacing: 0px;
                 HorizontalLayout {
@@ -1303,6 +1312,7 @@ export component AppWindow inherits Window {
                             density: root.overview-density; restore-index: root.overview-restore-index;
                             restore-fraction: root.overview-restore-fraction; restore-serial: root.overview-restore-serial;
                             groups: root.overview-groups; group-index <=> root.overview-group-index;
+                            safe-top: root.gallery-top-bleed ? root.safe-area-insets.top : 0px;
                             selected(id) => { root.overview-selected(id); }
                             visible-range(first,last,columns) => { root.overview-visible-range(first,last,columns); }
                             anchor(id,fraction) => { root.overview-anchor(id,fraction); }
@@ -1460,6 +1470,7 @@ export component AppWindow inherits Window {
         narrow: root.mobile-ui; editing: root.entry-menu-editing; status-editing: root.entry-menu-status-editing;
         title: root.entry-menu-title; in-library: root.entry-menu-library;
         collection: root.section == 23 && root.overview-collection;
+        density: root.overview-density;
         presentation-choice: root.entry-menu-presentation;
         categories: root.entry-categories;
         anchor-x: root.entry-menu-x; anchor-y: root.entry-menu-y;

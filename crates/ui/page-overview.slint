@@ -1,9 +1,240 @@
 import { ListView, Spinner } from "std-widgets.slint";
-import { Theme, SettingsStyle } from "@NovaUiShared";
+import { Theme, SettingsStyle, Anim } from "@NovaUiShared";
 import { ActionButton, IconAction, BackButton, ReaderSelect } from "controls.slint";
 import { OverviewTile, PageThumbnail } from "page-thumbnail.slint";
 import { ReaderZoomGesture } from "reader-zoom.slint";
 export { OverviewTile } from "page-thumbnail.slint";
+
+// Round 48px touch target with a 40px translucent disc. The disc and white
+// glyph stay legible over any photograph beneath the gallery's top scrim.
+component OverlayButton inherits Rectangle {
+    in property <string> text;
+    in property <image> icon;
+    in property <bool> enabled: true;
+    callback clicked;
+    width: 48px; height: 48px;
+    accessible-role: button; accessible-label: root.text; accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    Rectangle {
+        x: 4px; y: 4px; width: 40px; height: 40px; border-radius: 20px;
+        background: touch.pressed ? #ffffff44 : touch.has-hover && root.enabled ? #ffffff2a : #0000005c;
+        border-width: focus.has-focus && SettingsStyle.keyboard-mode ? 2px : 0px;
+        border-color: Theme.current.focus_ring;
+    }
+    Image {
+        source: root.icon; width: 22px; height: 22px;
+        x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+        colorize: root.enabled ? #ffffff : #ffffff66; image-fit: contain;
+    }
+    focus := FocusScope {
+        enabled: root.enabled; width: 100%; height: 100%;
+        key-pressed(event) => {
+            SettingsStyle.keyboard-mode = true;
+            if event.text == Key.Return || event.text == " " { root.clicked(); return accept; }
+            return reject;
+        }
+    }
+    touch := TouchArea {
+        enabled: root.enabled; mouse-cursor: pointer;
+        clicked => { SettingsStyle.keyboard-mode = false; root.clicked(); }
+    }
+}
+
+// Text pill for the "Current image" action in the overlay header.
+component OverlayPill inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    callback clicked;
+    height: 48px; min-width: 0px; preferred-width: label.preferred-width + 32px;
+    accessible-role: button; accessible-label: root.text; accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    Rectangle {
+        y: 6px; height: 36px; border-radius: 18px;
+        background: touch.pressed ? #ffffff44 : touch.has-hover && root.enabled ? #ffffff2a : #0000005c;
+        border-width: focus.has-focus && SettingsStyle.keyboard-mode ? 2px : 0px;
+        border-color: Theme.current.focus_ring;
+    }
+    label := Text {
+        x: 16px; width: parent.width - 32px; height: 100%;
+        text: root.text; font-size: 13px; overflow: elide;
+        color: root.enabled ? #ffffff : #ffffff66;
+        horizontal-alignment: center; vertical-alignment: center;
+    }
+    focus := FocusScope {
+        enabled: root.enabled; width: 100%; height: 100%;
+        key-pressed(event) => {
+            SettingsStyle.keyboard-mode = true;
+            if event.text == Key.Return || event.text == " " { root.clicked(); return accept; }
+            return reject;
+        }
+    }
+    touch := TouchArea {
+        enabled: root.enabled; mouse-cursor: pointer;
+        clicked => { SettingsStyle.keyboard-mode = false; root.clicked(); }
+    }
+}
+
+// One chip of the overlay's horizontally scrollable group row.
+component GroupChip inherits Rectangle {
+    in property <string> label;
+    in property <bool> selected;
+    callback picked;
+    callback reveal(length, length);
+    height: 48px; min-width: 64px; preferred-width: max(64px, text.preferred-width + 32px);
+    accessible-role: button; accessible-label: root.label;
+    accessible-checkable: true; accessible-checked: root.selected;
+    accessible-action-default => { root.picked(); }
+    changed selected => { if root.selected { root.reveal(root.x, root.width); } }
+    init => { if root.selected { root.reveal(root.x, root.width); } }
+    Rectangle {
+        y: 6px; height: 36px; border-radius: 18px;
+        background: root.selected ? Theme.current.accent : touch.pressed ? #ffffff44 : #0000005c;
+        border-width: focus.has-focus && SettingsStyle.keyboard-mode ? 2px : 1px;
+        border-color: focus.has-focus && SettingsStyle.keyboard-mode ? Theme.current.focus_ring : root.selected ? Theme.current.accent : #ffffff3a;
+    }
+    text := Text {
+        x: 16px; width: parent.width - 32px; height: 100%;
+        text: root.label; font-size: 13px; overflow: elide;
+        color: root.selected ? Theme.current.on_accent : #ffffff;
+        horizontal-alignment: center; vertical-alignment: center;
+    }
+    focus := FocusScope {
+        width: 100%; height: 100%;
+        key-pressed(event) => {
+            SettingsStyle.keyboard-mode = true;
+            if event.text == Key.Return || event.text == " " { root.picked(); return accept; }
+            return reject;
+        }
+    }
+    touch := TouchArea { mouse-cursor: pointer; clicked => { SettingsStyle.keyboard-mode = false; root.picked(); } }
+}
+
+component GroupChips inherits Rectangle {
+    in property <[string]> groups;
+    in property <int> selected;
+    callback picked(int);
+    height: 48px;
+    accessible-role: groupbox; accessible-label: @tr("Choose chapter");
+    function reveal(left: length, width: length) {
+        if left < -rail.content-x { rail.content-x = -left; }
+        else if left + width > -rail.content-x + rail.width {
+            rail.content-x = min(0px, rail.width - left - width);
+        }
+    }
+    rail := Flickable {
+        width: 100%; height: 100%;
+        content-width: row.preferred-width; content-height: self.height;
+        // One horizontal axis only; overshoot must not pull chips off their lane.
+        content-y: 0px;
+        changed content-y => { if self.content-y != 0px { self.content-y = 0px; } }
+        row := HorizontalLayout {
+            spacing: 8px; alignment: start;
+            for group[index] in root.groups: GroupChip {
+                label: group; selected: index == root.selected;
+                picked => { root.picked(index); }
+                reveal(left, width) => { root.reveal(left, width); }
+            }
+        }
+    }
+}
+
+// Spinner, message and the single explicit Retry shared by both headers.
+component InventoryStatus inherits Rectangle {
+    in property <bool> collection;
+    in property <bool> busy;
+    in property <string> status;
+    callback retry();
+    min-height: 48px; vertical-stretch: 0;
+    preferred-height: max(48px, status-row.preferred-height);
+    status-row := HorizontalLayout {
+        spacing: 12px;
+        if root.busy: Spinner {
+            width: 24px; height: 24px;
+            accessible-label: @tr("Loading image inventory");
+        }
+        Text {
+            min-width: 0px; horizontal-stretch: 1; wrap: word-wrap;
+            text: root.status != "" ? root.status : root.collection ? @tr("Loading image inventory…") : @tr("Loading pages…");
+            color: root.collection ? #ffffffcc : Theme.current.text_secondary; font-size: 13px; vertical-alignment: center;
+        }
+        if !root.busy && root.status != "": ActionButton {
+            height: 48px; text: @tr("Retry"); clicked => { root.retry(); }
+        }
+    }
+}
+
+// Collection header: one compact row floating over a black-to-transparent
+// scrim, so the photographs start at the very top of the screen.
+component GalleryHeader inherits Rectangle {
+    in property <string> title;
+    in property <string> count;
+    in property <bool> show-menu;
+    in property <bool> current-enabled;
+    in property <[string]> groups;
+    in-out property <int> group-index;
+    in property <bool> busy;
+    in property <string> status;
+    in property <length> safe-top;
+    in property <length> safe-left;
+    in property <length> safe-right;
+    // Few groups read better as always-visible chips than as a dropdown; past
+    // this many the dropdown (which scales to hundreds of chapters) takes over.
+    in property <int> max-chips: 8;
+    callback back();
+    callback current();
+    callback menu();
+    callback group-selected(int);
+    callback retry();
+    height: stack.preferred-height;
+    Rectangle {
+        y: 0px; width: 100%; height: parent.height + 28px;
+        background: @linear-gradient(180deg, #000000e0 0%, #000000a8 55%, #00000000 100%);
+    }
+    // Header chrome swallows taps so they never open the image underneath.
+    TouchArea { }
+    stack := VerticalLayout {
+        padding-top: root.safe-top + 4px; padding-bottom: 8px;
+        padding-left: root.safe-left + 8px; padding-right: root.safe-right + 8px;
+        spacing: 4px;
+        HorizontalLayout {
+            height: 48px; spacing: 4px;
+            OverlayButton {
+                text: @tr("Back"); icon: @image-url("../../assets/icons/navigation/back.svg");
+                clicked => { root.back(); }
+            }
+            VerticalLayout {
+                min-width: 0px; horizontal-stretch: 1; alignment: center; spacing: 1px;
+                Text { text: root.title; font-size: 17px; font-weight: 700; color: #ffffff; overflow: elide; min-width: 0px; }
+                Text { text: root.count; font-size: 12px; color: #ffffffcc; overflow: elide; min-width: 0px; }
+            }
+            OverlayPill {
+                max-width: 150px; text: @tr("Current image"); enabled: root.current-enabled;
+                clicked => { root.current(); }
+            }
+            if root.show-menu: OverlayButton {
+                text: @tr("Overview options"); icon: @image-url("../../assets/icons/navigation/more.svg");
+                clicked => { root.menu(); }
+            }
+        }
+        if root.groups.length > 1 && root.groups.length <= root.max-chips: GroupChips {
+            groups: root.groups; selected: root.group-index;
+            picked(index) => { root.group-index = index; root.group-selected(index); }
+        }
+        if root.groups.length > root.max-chips: HorizontalLayout {
+            height: 48px; spacing: 12px;
+            ReaderSelect {
+                height: 48px; min-width: 0px; horizontal-stretch: 1;
+                placeholder-text: @tr("Choose chapter"); model: root.groups;
+                current-index <=> root.group-index;
+                selected(value) => { root.group-selected(root.group-index); }
+            }
+        }
+        if root.busy || root.status != "": InventoryStatus {
+            collection: true; busy: root.busy; status: root.status;
+            retry => { root.retry(); }
+        }
+    }
+}
 
 // One regular row grid is shared by chapter pages and title image collections.
 // Slint 1.18's ListView calls update_visible_instances in model/repeater.rs;
@@ -25,11 +256,19 @@ export component PageOverview inherits Rectangle {
     in property <bool> busy;
     in property <string> status;
     in property <[string]> groups;
+    // The collection grid bleeds under the status bar; only its floating
+    // header needs to clear it.
+    in property <length> safe-top;
     in-out property <int> group-index;
     out property <int> columns: root.columns-for-density(root.density);
     out property <length> row-height: root.collection ? root.tile-width + root.tile-gap : root.tile-width * 1.4 + 44px;
     out property <length> viewport-height: grid.visible-height;
-    private property <length> tile-gap: root.collection ? 1px : 12px;
+    // Collection chrome is visible at the top, while loading, and after an
+    // upward scroll, and hides while scrolling down through the photographs.
+    out property <bool> header-shown: !root.collection || !root.header-hidden || root.tiles.length == 0 || root.busy || root.status != "";
+    out property <length> header-height: root.header-measured;
+    out property <bool> scroller-visible: root.scroller-eligible && (root.scroller-recent || root.scroller-dragging || root.scroller-hover);
+    private property <length> tile-gap: root.collection ? 2px : 12px;
     private property <length> tile-width: max(1px, (grid.visible-width - (root.columns - 1) * root.tile-gap) / root.columns);
     private property <int> row-count: Math.ceil(root.tiles.length * 1.0 / root.columns);
     private property <int> tile-count: root.tiles.length;
@@ -41,6 +280,25 @@ export component PageOverview inherits Rectangle {
     private property <int> pinch-start-density;
     private property <float> pinch-row-fraction;
     private property <length> pinch-last-y;
+    private property <bool> header-hidden;
+    private property <length> header-measured;
+    private property <bool> scroller-hover;
+    private property <bool> programmatic;
+    private property <length> last-scroll-y;
+    private property <length> scroll-run;
+    private property <length> total-height: root.row-count * root.row-height;
+    private property <length> scroll-range: max(0px, root.total-height - grid.visible-height);
+    // The fast scroller is for long collections: more than about 3 screens.
+    private property <bool> scroller-eligible: root.collection && root.tiles.length > 0 && root.total-height > grid.visible-height * 3;
+    private property <bool> scroller-recent;
+    private property <bool> scroller-dragging;
+    private property <float> scroller-drag-fraction;
+    private property <length> scroller-top: root.safe-top + 64px;
+    private property <length> scroller-height: max(1px, root.height - root.scroller-top - 16px);
+    private property <length> scroller-thumb: 52px;
+    private property <float> scroller-fraction: root.scroller-dragging ? root.scroller-drag-fraction
+        : root.scroll-range > 0px ? Math.clamp(-grid.content-y / root.scroll-range, 0, 1) : 0;
+    private property <int> scroller-image: min(root.tiles.length, Math.floor(root.scroller-fraction * root.scroll-range / root.row-height) * root.columns + 1);
     callback selected(string);
     callback visible-range(int, int, int);
     callback anchor(string, float);
@@ -105,18 +363,59 @@ export component PageOverview inherits Rectangle {
             }
         } else { root.visible-range(0, 0, root.columns); }
     }
+    // Scroll movement the program caused (reveal, fast scroller, restore) must
+    // not hide the header or flash the scroller; only the user's own scrolling
+    // does. Slint reports property changes lazily, so a short guard window
+    // stands in for "the next change is ours".
+    function mark-programmatic() {
+        root.programmatic = true;
+        // Timer.restart() does nothing on a stopped timer, so start it first.
+        guard.running = true;
+        guard.restart();
+    }
+    function track-scroll() {
+        let y = -grid.content-y;
+        let delta = y - root.last-scroll-y;
+        root.last-scroll-y = y;
+        if !root.collection || root.restoring || root.programmatic { root.scroll-run = 0px; return; }
+        root.scroller-recent = true;
+        scroller-idle.running = true;
+        scroller-idle.restart();
+        if y <= 6px { root.header-hidden = false; root.scroll-run = 0px; return; }
+        // Accumulate one direction at a time so a jittery finger never flickers
+        // the header; hide after a clear downward run, show after a short upward one.
+        if root.scroll-run == 0px || (delta > 0px) == (root.scroll-run > 0px) { root.scroll-run += delta; }
+        else { root.scroll-run = delta; }
+        if root.scroll-run > 32px { root.header-hidden = true; }
+        else if root.scroll-run < -16px { root.header-hidden = false; }
+    }
+    public function reveal-header() { root.header-hidden = false; root.scroll-run = 0px; }
     public function reveal(index: int) {
         if index < 0 || index >= root.tiles.length { return; }
-        if Math.floor(index / root.columns) * root.row-height + grid.content-y < 0px {
-            grid.content-y = -Math.floor(index / root.columns) * root.row-height;
+        // A visible floating header covers the top of the grid.
+        let inset = root.collection && root.header-shown ? root.header-measured : 0px;
+        root.mark-programmatic();
+        if Math.floor(index / root.columns) * root.row-height + grid.content-y < inset {
+            grid.content-y = min(0px, inset - Math.floor(index / root.columns) * root.row-height);
         } else if (Math.floor(index / root.columns) + 1) * root.row-height + grid.content-y > grid.visible-height {
             grid.content-y = min(0px, grid.visible-height - (Math.floor(index / root.columns) + 1) * root.row-height);
         }
+    }
+    // Move the viewport to a fraction (0..1) of the scrollable range, as the
+    // fast scroller does while its thumb is dragged.
+    public function jump-to-fraction(fraction: float) {
+        root.mark-programmatic();
+        grid.content-y = -Math.clamp(fraction, 0, 1) * root.scroll-range;
+    }
+    function scroller-drag(y: length) {
+        root.scroller-drag-fraction = Math.clamp((y - root.scroller-thumb / 2) / max(1px, root.scroller-height - root.scroller-thumb), 0, 1);
+        root.jump-to-fraction(root.scroller-drag-fraction);
     }
     public function focus-shell() { keyboard.focus(); }
     function move-focus(delta: int) {
         root.keyboard-active = true;
         SettingsStyle.keyboard-mode = true;
+        root.header-hidden = false;
         root.focus-index = max(0, min(root.tiles.length - 1, root.focus-index + delta));
         root.reveal(root.focus-index);
     }
@@ -155,9 +454,18 @@ export component PageOverview inherits Rectangle {
                 self.start();
             } else {
                 root.restoring = false;
+                root.last-scroll-y = -grid.content-y;
                 root.publish-viewport();
             }
         }
+    }
+    guard := Timer {
+        interval: 140ms; running: false;
+        triggered => { self.stop(); root.programmatic = false; root.last-scroll-y = -grid.content-y; root.scroll-run = 0px; }
+    }
+    scroller-idle := Timer {
+        interval: 1400ms; running: false;
+        triggered => { self.stop(); root.scroller-recent = false; }
     }
     keyboard := FocusScope {
         width: 100%; height: 100%;
@@ -178,82 +486,72 @@ export component PageOverview inherits Rectangle {
             }
             return reject;
         }
+        // Chapter pages keep their in-flow header; collections float it below.
+        // The slot in either case is where the grid lives.
         VerticalLayout {
             padding: root.collection ? 0px : 18px; spacing: root.collection ? 0px : 14px;
-          VerticalLayout {
-            padding-left: root.collection ? 18px : 0px; padding-right: root.collection ? 18px : 0px;
-            padding-top: root.collection ? 18px : 0px; padding-bottom: root.collection ? 12px : 0px;
-            spacing: 14px; vertical-stretch: 0;
-            HorizontalLayout {
-                spacing: 12px; height: 48px;
-                BackButton { width: 48px; height: 48px; clicked => { root.back(); } }
-                VerticalLayout {
-                    min-width: 0px; spacing: 2px;
-                    Text { text: root.title; font-size: root.width < 700px ? 24px : 28px; font-weight: 700; color: Theme.current.text_bright; overflow: elide; min-width: 0px; }
-                    if root.subtitle != "": Text { text: root.subtitle; font-size: 12px; color: Theme.current.text_secondary; overflow: elide; min-width: 0px; }
-                }
-                if root.show-menu: IconAction {
-                    width: 48px; height: 48px; text: @tr("Overview options");
-                    icon: @image-url("../../assets/icons/navigation/more.svg"); clicked => { root.menu(); }
-                }
-            }
-            HorizontalLayout {
-                height: 48px; spacing: 8px;
-                Text {
-                    text: root.tiles.length == 0 && (root.busy || root.status != "") ? ""
-                        : root.collection ? @tr("{n} image" | "{n} images" % root.tiles.length) : @tr("{n} page" | "{n} pages" % root.tiles.length);
-                    font-size: 13px; color: Theme.current.text_secondary; vertical-alignment: center; min-width: 0px;
-                }
-                ActionButton {
-                    height: 48px; max-width: 180px;
-                    text: root.collection ? @tr("Current image") : @tr("Current page");
-                    enabled: root.current-index >= 0 && root.current-index < root.tiles.length;
-                    clicked => {
-                        root.focus-index = root.current-index;
-                        root.keyboard-active = false;
-                        keyboard.focus(); root.reveal(root.current-index); root.current();
+            if !root.collection: VerticalLayout {
+                spacing: 14px; vertical-stretch: 0;
+                HorizontalLayout {
+                    spacing: 12px; height: 48px;
+                    BackButton { width: 48px; height: 48px; clicked => { root.back(); } }
+                    VerticalLayout {
+                        min-width: 0px; spacing: 2px;
+                        Text { text: root.title; font-size: root.width < 700px ? 24px : 28px; font-weight: 700; color: Theme.current.text_bright; overflow: elide; min-width: 0px; }
+                        if root.subtitle != "": Text { text: root.subtitle; font-size: 12px; color: Theme.current.text_secondary; overflow: elide; min-width: 0px; }
+                    }
+                    if root.show-menu: IconAction {
+                        width: 48px; height: 48px; text: @tr("Overview options");
+                        icon: @image-url("../../assets/icons/navigation/more.svg"); clicked => { root.menu(); }
                     }
                 }
-                IconAction {
-                    width: 48px; height: 48px; text: @tr("Smaller thumbnails"); enabled: root.density > 0;
-                    icon: @image-url("../../assets/icons/navigation/minus.svg"); clicked => { root.density-changed(root.density - 1); }
+                HorizontalLayout {
+                    height: 48px; spacing: 8px;
+                    Text {
+                        text: root.tiles.length == 0 && (root.busy || root.status != "") ? "" : @tr("{n} page" | "{n} pages" % root.tiles.length);
+                        font-size: 13px; color: Theme.current.text_secondary; vertical-alignment: center; min-width: 0px;
+                    }
+                    ActionButton {
+                        height: 48px; max-width: 180px;
+                        text: @tr("Current page");
+                        enabled: root.current-index >= 0 && root.current-index < root.tiles.length;
+                        clicked => {
+                            root.focus-index = root.current-index;
+                            root.keyboard-active = false;
+                            keyboard.focus(); root.reveal(root.current-index); root.current();
+                        }
+                    }
+                    IconAction {
+                        width: 48px; height: 48px; text: @tr("Smaller thumbnails"); enabled: root.density > 0;
+                        icon: @image-url("../../assets/icons/navigation/minus.svg"); clicked => { root.density-changed(root.density - 1); }
+                    }
+                    IconAction {
+                        width: 48px; height: 48px; text: @tr("Larger thumbnails"); enabled: root.density < 2;
+                        icon: @image-url("../../assets/icons/navigation/plus.svg"); clicked => { root.density-changed(root.density + 1); }
+                    }
                 }
-                IconAction {
-                    width: 48px; height: 48px; text: @tr("Larger thumbnails"); enabled: root.density < 2;
-                    icon: @image-url("../../assets/icons/navigation/plus.svg"); clicked => { root.density-changed(root.density + 1); }
+                if root.groups.length > 1: HorizontalLayout {
+                    height: 48px; spacing: 12px;
+                    Text {
+                        text: @tr("Chapter"); font-size: 13px;
+                        color: Theme.current.text_secondary; vertical-alignment: center;
+                    }
+                    ReaderSelect {
+                        height: 48px; min-width: 0px; horizontal-stretch: 1;
+                        placeholder-text: @tr("Choose chapter"); model: root.groups;
+                        current-index <=> root.group-index;
+                        selected(value) => { root.group-selected(root.group-index); }
+                    }
+                }
+                if root.busy || root.status != "": InventoryStatus {
+                    collection: false; busy: root.busy; status: root.status;
+                    retry => { root.retry(); }
                 }
             }
-            if root.groups.length > 1: HorizontalLayout {
-                height: 48px; spacing: 12px;
-                Text {
-                    text: @tr("Chapter"); font-size: 13px;
-                    color: Theme.current.text_secondary; vertical-alignment: center;
-                }
-                ReaderSelect {
-                    height: 48px; min-width: 0px; horizontal-stretch: 1;
-                    placeholder-text: @tr("Choose chapter"); model: root.groups;
-                    current-index <=> root.group-index;
-                    selected(value) => { root.group-selected(root.group-index); }
-                }
-            }
-            if root.busy || root.status != "": HorizontalLayout {
-                min-height: 48px; vertical-stretch: 0; spacing: 12px;
-                if root.busy: Spinner {
-                    width: 24px; height: 24px;
-                    accessible-label: @tr("Loading image inventory");
-                }
-                Text {
-                    min-width: 0px; horizontal-stretch: 1; wrap: word-wrap;
-                    text: root.status != "" ? root.status : root.collection ? @tr("Loading image inventory…") : @tr("Loading pages…");
-                    color: Theme.current.text_secondary; font-size: 13px; vertical-alignment: center;
-                }
-                if !root.busy && root.status != "": ActionButton {
-                    height: 48px; text: @tr("Retry"); clicked => { root.retry(); }
-                }
-            }
-          }
-          pinch-gesture := ReaderZoomGesture {
-            min-height: 0px; vertical-stretch: 1;
+            grid-slot := Rectangle { min-height: 0px; vertical-stretch: 1; }
+        }
+        pinch-gesture := ReaderZoomGesture {
+            x: grid-slot.x; y: grid-slot.y; width: grid-slot.width; height: grid-slot.height;
             zoom: 1; enabled: root.collection;
             began => { root.begin-pinch(self.center.x, self.center.y); }
             transform(factor,from-x,from-y,to-x,to-y) => { root.pinch(factor, to-y * self.height); }
@@ -261,7 +559,7 @@ export component PageOverview inherits Rectangle {
                 width: 100%; height: 100%; enabled: !pinch-gesture.blocking;
                 horizontal-scrollbar-policy: always-off; vertical-scrollbar-policy: always-off;
                 mouse-drag-pan-enabled: true; content-width: self.visible-width;
-                changed content-y => { root.publish-viewport(); }
+                changed content-y => { root.publish-viewport(); root.track-scroll(); }
                 for row in root.row-count: Rectangle {
                     width: grid.visible-width; height: root.row-height;
                     for column in root.columns: cell := Rectangle {
@@ -282,7 +580,91 @@ export component PageOverview inherits Rectangle {
                     }
                 }
             }
-          }
+        }
+        // Tap (or hover) along the top edge brings a scrolled-away header back.
+        if root.collection && !root.header-shown: reveal-edge := TouchArea {
+            x: 0px; y: 0px; width: 100%; height: root.safe-top + 28px;
+            clicked => { root.reveal-header(); }
+            changed has-hover => { if self.has-hover { root.reveal-header(); } }
+        }
+        // Fast scroller: a draggable thumb along the trailing edge, for
+        // collections of more than about three screens.
+        if root.scroller-eligible: scroller := Rectangle {
+            x: root.rtl ? 0px : parent.width - self.width; y: root.scroller-top;
+            width: 40px; height: root.scroller-height;
+            opacity: root.scroller-visible ? 1 : 0;
+            visible: root.scroller-visible || self.opacity > 0.01;
+            animate opacity { duration: Anim.enabled ? 180ms : 0ms; easing: ease-out; }
+            accessible-role: slider;
+            accessible-label: @tr("Fast scroller");
+            accessible-value-minimum: 0; accessible-value-maximum: 1; accessible-value-step: 0.05;
+            accessible-value: root.scroller-fraction;
+            accessible-action-set-value(value) => { if value.is-float() { root.jump-to-fraction(value.to-float()); } }
+            accessible-action-increment => { root.jump-to-fraction(root.scroller-fraction + 0.05); }
+            accessible-action-decrement => { root.jump-to-fraction(root.scroller-fraction - 0.05); }
+            Rectangle {
+                x: root.rtl ? 4px : parent.width - self.width - 4px;
+                y: root.scroller-fraction * (parent.height - root.scroller-thumb);
+                width: root.scroller-dragging ? 10px : 6px; height: root.scroller-thumb;
+                border-radius: self.width / 2;
+                background: root.scroller-dragging ? Theme.current.accent : #ffffffb0;
+                border-width: 1px; border-color: #00000055;
+                animate width { duration: Anim.enabled ? 100ms : 0ms; }
+            }
+            scroller-touch := TouchArea {
+                enabled: root.scroller-visible; mouse-cursor: pointer;
+                changed has-hover => { root.scroller-hover = self.has-hover; }
+                pointer-event(event) => {
+                    if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+                        root.scroller-dragging = true;
+                        root.scroller-drag(self.mouse-y);
+                    } else if event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel {
+                        root.scroller-dragging = false;
+                        scroller-idle.running = true;
+                        scroller-idle.restart();
+                    }
+                }
+                moved => { if root.scroller-dragging { root.scroller-drag(self.mouse-y); } }
+            }
+            if root.scroller-dragging: bubble := Rectangle {
+                x: root.rtl ? 48px : -self.width - 8px;
+                y: Math.clamp(root.scroller-fraction * (parent.height - root.scroller-thumb) + (root.scroller-thumb - self.height) / 2, 0px, parent.height - self.height);
+                width: bubble-text.preferred-width + 28px; height: 40px; border-radius: 20px;
+                background: #000000d8; border-width: 1px; border-color: #ffffff40;
+                bubble-text := Text {
+                    text: @tr("Image {0} of {1}", root.scroller-image, root.tiles.length);
+                    color: #ffffff; font-size: 14px; font-weight: 600;
+                    x: 14px; width: parent.width - 28px; height: 100%;
+                    horizontal-alignment: center; vertical-alignment: center;
+                }
+            }
+        }
+        if root.collection: gallery-header := GalleryHeader {
+            visible: root.header-shown || self.y > -self.height - 28px + 1px;
+            init => { root.header-measured = self.height; }
+            changed height => { root.header-measured = self.height; }
+            x: 0px; width: 100%;
+            y: root.header-shown ? 0px : -self.height - 28px;
+            opacity: root.header-shown ? 1 : 0;
+            animate y { duration: Anim.player_slide; easing: ease-out; }
+            animate opacity { duration: Anim.player_fade; easing: ease-out; }
+            title: root.title;
+            count: root.tiles.length == 0 && (root.busy || root.status != "") ? "" : @tr("{n} image" | "{n} images" % root.tiles.length);
+            show-menu: root.show-menu;
+            current-enabled: root.current-index >= 0 && root.current-index < root.tiles.length;
+            groups: root.groups; group-index <=> root.group-index;
+            busy: root.busy; status: root.status;
+            safe-top: root.safe-top;
+            back => { root.back(); }
+            current => {
+                root.header-hidden = false;
+                root.focus-index = root.current-index;
+                root.keyboard-active = false;
+                keyboard.focus(); root.reveal(root.current-index); root.current();
+            }
+            menu => { root.menu(); }
+            group-selected(index) => { root.group-selected(index); }
+            retry => { root.retry(); }
         }
     }
 }

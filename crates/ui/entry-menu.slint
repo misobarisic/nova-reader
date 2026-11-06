@@ -16,6 +16,8 @@ export component EntryMenu inherits Rectangle {
     in property <bool> status-editing;
     in property <bool> in-library;
     in property <bool> collection;
+    // Thumbnail density of the open gallery (0 smallest .. 2 largest columns).
+    in property <int> density: 1;
     in property <int> presentation-choice;
     in property <string> title;
     in property <[EntryCategoryRow]> categories;
@@ -42,6 +44,8 @@ export component EntryMenu inherits Rectangle {
         { label: @tr("Presentation"), id: "presentation", enabled: true },
     ];
     private property <[EntryAction]> collection-actions: [
+        { label: @tr("Smaller thumbnails"), id: "density-smaller", enabled: root.density > 0 },
+        { label: @tr("Larger thumbnails"), id: "density-larger", enabled: root.density < 2 },
         { label: @tr("Metadata"), id: "details", enabled: true },
         { label: @tr("Download"), id: "download", enabled: true },
         { label: @tr("Change status"), id: "change-status", enabled: root.in-library },
@@ -89,6 +93,8 @@ export component EntryMenu inherits Rectangle {
         safe-bottom: root.safe-bottom; safe-left: root.safe-left; safe-right: root.safe-right;
         max_h: root.height * 0.85;
         items: root.collection ? [
+            { label: @tr("Smaller thumbnails"), enabled: root.density > 0 },
+            { label: @tr("Larger thumbnails"), enabled: root.density < 2 },
             { label: @tr("Metadata"), enabled: true },
             { label: @tr("Download"), enabled: true },
             { label: @tr("Change status"), enabled: root.in-library },
