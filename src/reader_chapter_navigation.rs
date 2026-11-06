@@ -1594,6 +1594,149 @@ mod tests {
     }
 
     #[test]
+    fn webtoon_scrolling_between_continuous_chapters_saves_progress_for_the_owner() {
+        const CHILD: &str = "READER_CONTINUOUS_OWNER_PROGRESS_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "app::reader_chapter_navigation::tests::webtoon_scrolling_between_continuous_chapters_saves_progress_for_the_owner", "--nocapture"])
+                .env(CHILD, "1").output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        i_slint_backend_testing::init_integration_test_with_system_time();
+        let directory = tempfile::tempdir().unwrap();
+        let services = Services::open(&directory.path().join("data")).unwrap();
+        crate::reader_settings::init().unwrap();
+        let ui = AppWindow::new().unwrap();
+        ui.window().set_size(slint::LogicalSize::new(1000., 600.));
+        let (images, _receiver) = mpsc::channel();
+        let app = Arc::new(Controller {
+            progress_checkpoint: crate::progress_checkpoint::ProgressWriter::new(
+                services.domain.clone(),
+            )
+            .unwrap(),
+            artwork: crate::artwork::ArtworkLoader::new(
+                services.clone(),
+                ui.as_weak(),
+                directory.path().join("posters"),
+            ),
+            services,
+            chapter_cache: Arc::new(crate::chapter_cache::ChapterCache::new(
+                directory.path().join("cache"),
+            )),
+            capture_originals: Mutex::default(),
+            thumbnail_service: OnceLock::new(),
+            image_worker_live: AtomicBool::new(false),
+            view: Mutex::default(),
+            generation: AtomicU64::new(17),
+            cancel: Mutex::default(),
+            images,
+            download_serial: Mutex::default(),
+            active_image: Mutex::default(),
+            metadata_refresh: Arc::default(),
+            continuation_work: Default::default(),
+        });
+        // Segments 0, 1, 2 are chapters 10, 11, 12 here; each has three
+        // pages of 4000 px at width 400. Reading starts in the middle chapter.
+        for (start, target_page, target_chapter, label) in [
+            (1, 1, 0, "reverse into the previous chapter"),
+            (1, 7, 2, "forward into the next chapter"),
+        ] {
+            for completed in [false, true] {
+                let mut reader = reader(ReadingMode::Webtoon, true);
+                reader.chapter_navigation = None;
+                reader.preload_epoch = app.generation.load(Ordering::Acquire);
+                reader.chapter = reader.segments[start].chapter.clone();
+                reader.anchor = ResumeAnchor::new(reader.page_id(3), 3, 0.).unwrap();
+                // The chapter being scrolled into was read before (it is what
+                // the reader just came from), unless the flag is cleared.
+                reader.segments[target_chapter].completed = completed;
+                for index in 0..reader.pages.len() {
+                    measure(&mut reader, index, 100, 1000, false);
+                    retain(&mut reader, index, 0, 1000, 1000);
+                }
+                let chapters: Vec<Chapter> = reader
+                    .segments
+                    .iter()
+                    .enumerate()
+                    .map(|(index, segment)| Chapter {
+                        id: segment.chapter.clone(),
+                        title: segment.title.clone(),
+                        label: String::new(),
+                        number: Some(index.to_string()),
+                        volume: None,
+                        source_order: index as i64,
+                        language: None,
+                        scanlator: None,
+                        uploaded_at: None,
+                    })
+                    .collect();
+                seed_fixture_metadata(&app, &chapters);
+                app.services
+                    .domain
+                    .update(|state| {
+                        state.progress.clear();
+                        state.history.clear();
+                        Ok(())
+                    })
+                    .unwrap();
+                let owner = reader.segments[target_chapter].chapter.clone();
+                *app.view() = View {
+                    section: 6,
+                    reader: Some(reader),
+                    chapters,
+                    ..Default::default()
+                };
+                ui.set_section(6);
+                ui.set_reading_mode(mode_index(ReadingMode::Webtoon));
+                app.mount_pages(&ui);
+                let rows = ui.get_pages();
+                for index in 0..rows.row_count() {
+                    let mut row = rows.row_data(index).unwrap();
+                    row.loaded = true;
+                    rows.set_row_data(index, row);
+                }
+                // Scroll half way into the target chapter's page, then leave.
+                let offset = (target_page as f32 + 0.5) * 10. * 400.;
+                app.position(&ui, offset, 400., 600.);
+                app.flush();
+                let stored = app
+                    .services
+                    .domain
+                    .snapshot()
+                    .unwrap()
+                    .progress
+                    .into_iter()
+                    .find(|p| p.chapter == owner);
+                let stored = stored.unwrap_or_else(|| {
+                    let view = app.view();
+                    let r = view.reader.as_ref().unwrap();
+                    panic!(
+                        "{label} completed={completed}: no progress stored for the owner; anchor={:?} chapter={:?} eligible={} pending={:?}",
+                        r.anchor, r.chapter, r.completion_eligible, view.pending
+                    )
+                });
+                if completed {
+                    // Deliberate (84e8063): a chapter already read keeps its flag
+                    // but no resume page, even when re-entered by scrolling up.
+                    assert!(stored.anchor.is_cleared(), "{label}: {:?}", stored.anchor);
+                } else {
+                    assert!(
+                        !stored.anchor.is_cleared() && stored.anchor.page_index == target_page % 3,
+                        "{label}: stored {:?}",
+                        stored.anchor
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn retained_controller_navigation_and_terminal_errors_preserve_the_live_reader() {
         const CHILD: &str = "READER_EXPLICIT_CHAPTER_NAVIGATION_CHILD";
         if std::env::var_os(CHILD).is_none() {
