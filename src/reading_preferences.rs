@@ -10,7 +10,7 @@ const ADULT_KEY: &str = "reader:show-adult";
 const ORDER_PREFIX: &str = "reader:chapter-order:";
 
 fn read_bool(key: &str, default: bool) -> Result<bool, String> {
-    match nova_storage::try_get_str(key).map_err(|error| error.to_string())? {
+    match reader_domain::profile::kv::try_get_str(key).map_err(|error| error.to_string())? {
         Some(raw) => serde_json::from_str(&raw).map_err(|error| error.to_string()),
         None => Ok(default),
     }
@@ -86,17 +86,38 @@ fn change_adult(
     }
 }
 
-/// Initialize after the same storage backend used by Nova has opened.
-pub fn init(ui: &AppWindow) -> Result<(), String> {
-    let adult = match read_bool(ADULT_KEY, false) {
+thread_local! {
+    // Last persisted toggle value, shared by the callback and profile reloads.
+    static SAVED: std::cell::RefCell<Option<Rc<Cell<bool>>>> = const { std::cell::RefCell::new(None) };
+}
+
+fn load_adult(ui: &AppWindow) -> bool {
+    match read_bool(ADULT_KEY, false) {
         Ok(value) => value,
         Err(_) => {
             ui.set_status(text::tr("Could not read source visibility; using defaults.").into());
             false
         }
-    };
+    }
+}
+
+/// Re-read the active profile's source visibility after a profile switch.
+pub fn reload(ui: &AppWindow) {
+    let adult = load_adult(ui);
+    ui.set_show_adult(adult);
+    SAVED.with(|saved| {
+        if let Some(saved) = saved.borrow().as_ref() {
+            saved.set(adult);
+        }
+    });
+}
+
+/// Initialize after the same storage backend used by Nova has opened.
+pub fn init(ui: &AppWindow) -> Result<(), String> {
+    let adult = load_adult(ui);
     ui.set_show_adult(adult);
     let saved = Rc::new(Cell::new(adult));
+    SAVED.with(|cell| *cell.borrow_mut() = Some(saved.clone()));
     let weak = ui.as_weak();
     ui.on_adult_visibility_changed(move |next| {
         if let Some(ui) = weak.upgrade() {

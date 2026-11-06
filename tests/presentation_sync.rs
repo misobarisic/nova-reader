@@ -101,9 +101,11 @@ fn synced_hint_makes_the_entry_open_as_gallery_on_another_device() {
             // Remote arrivals must wake the projection worker.
             assert!(sync::handles_projection_domain(&domain()));
             // The projection is durable, not just a cache entry.
-            let raw =
-                nova_storage::get_str(&format!("reader:content-presentation:{}", key(&series)))
-                    .expect("projected presentation is persisted");
+            let raw = nova_storage::get_str(&reader_domain::profile::key(&format!(
+                "reader:content-presentation:{}",
+                key(&series)
+            )))
+            .expect("projected presentation is persisted");
             assert!(raw.contains("gallery"), "{raw}");
             // A projection never echoes back as a local edit.
             let before = owner().digest();
@@ -298,9 +300,12 @@ fn local_choices_publish_the_documented_record_and_stay_idle_when_unchanged() {
             assert!(record_value(&other).is_none());
             // Local KV and the account record commit together.
             assert!(
-                nova_storage::get_str(&format!("reader:content-presentation:{}", key(&series)))
-                    .unwrap()
-                    .contains("Gallery")
+                nova_storage::get_str(&reader_domain::profile::key(&format!(
+                    "reader:content-presentation:{}",
+                    key(&series)
+                )))
+                .unwrap()
+                .contains("Gallery")
             );
         },
     );

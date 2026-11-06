@@ -107,6 +107,21 @@ impl Services {
             sources: SourceRegistry::open(path.join("addons")).map_err(error)?,
         };
         crate::sync::initialize(&services.domain).map_err(error)?;
+        // The directory, selection and per-profile registry settings are settled
+        // before addon sync captures the selected profile's domain.
+        crate::profiles::install_registry(services.sources.clone());
+        let preferences = crate::profiles::initialize()?;
+        if preferences.active_profile != services.domain.active_profile() {
+            services
+                .domain
+                .set_profile(&preferences.active_profile)
+                .map_err(error)?;
+            services
+                .domain
+                .update_with_kind(reader_domain::UpdateKind::Seed, |_| Ok(()))
+                .map_err(error)?;
+        }
+        crate::profiles::apply_registry_profile();
         crate::sync_addons::initialize(&services)?;
         let _ = CURRENT.set(services.clone());
         Ok(services)

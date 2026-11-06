@@ -221,7 +221,7 @@ impl Controller {
             let owner = Arc::downgrade(self);
             let services = self.services.clone();
             let weak = ui.as_weak();
-            std::thread::spawn(move || {
+            crate::profiles::spawn(move || {
                 let stored = services.downloads.page_inventory(&chapter);
                 let _ = weak.upgrade_in_event_loop(move |ui| {
                     let Some(app) = owner.upgrade() else {

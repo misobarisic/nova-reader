@@ -44,7 +44,7 @@ impl ContinuationWork {
         queue.running = true;
         let shared = self.queue.clone();
         drop(queue);
-        std::thread::spawn(move || {
+        crate::profiles::spawn(move || {
             loop {
                 let work = {
                     let mut queue = shared.lock().unwrap_or_else(|e| e.into_inner());

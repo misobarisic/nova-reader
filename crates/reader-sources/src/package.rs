@@ -7,7 +7,7 @@ use std::{
     io::{Cursor, Read, Write},
     path::Path,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, RwLock,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -118,7 +118,8 @@ struct Inner {
 #[derive(Clone)]
 pub struct SourceRegistry {
     inner: Arc<Mutex<Inner>>,
-    profile: String,
+    /// Shared by every clone, so one switch retargets all holders of the registry.
+    profile: Arc<RwLock<String>>,
 }
 fn invalid(s: impl Into<String>) -> SourceError {
     SourceError::Package(s.into())
@@ -412,14 +413,42 @@ impl SourceRegistry {
                 sessions: BTreeMap::new(),
                 settings: BTreeMap::new(),
             })),
-            profile: "default".into(),
+            profile: Arc::new(RwLock::new("default".into())),
         })
     }
     /// Session state is in memory and isolated by profile and source; archives remain app-wide.
     pub fn with_profile(&self, profile: impl Into<String>) -> Self {
         Self {
             inner: self.inner.clone(),
-            profile: profile.into(),
+            profile: Arc::new(RwLock::new(profile.into())),
+        }
+    }
+    /// Retarget every clone of this registry. Sources already obtained keep the
+    /// settings of the profile they were opened for.
+    pub fn set_profile(&self, profile: impl Into<String>) {
+        *self.profile.write().unwrap_or_else(|e| e.into_inner()) = profile.into();
+    }
+    fn profile(&self) -> String {
+        self.profile
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+    /// Delete the persisted settings of a removed profile. Installed packages
+    /// are app-wide and stay.
+    pub fn remove_profile_settings(&self, profile: &str) -> Result<()> {
+        let inner = self.inner.lock().unwrap();
+        let directory = crate::settings::path(&inner.root, profile, "x")
+            .parent()
+            .map(std::path::Path::to_path_buf);
+        drop(inner);
+        match directory {
+            Some(directory) => match fs::remove_dir_all(directory) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error.into()),
+            },
+            None => Ok(()),
         }
     }
     pub fn install_zip(&self, bytes: &[u8]) -> Result<SourceDescriptor> {
@@ -513,6 +542,7 @@ impl SourceRegistry {
             .transpose()
     }
     fn source_unchecked(&self, id: &str) -> Result<Source> {
+        let profile = self.profile();
         let mut inner = self.inner.lock().unwrap();
         let row = inner
             .state
@@ -530,12 +560,11 @@ impl SourceRegistry {
         }
         let (m, script) = validate(&bytes)?;
         let active = inner.active.get(id).unwrap().clone();
-        let cache_partition =
-            serde_json::to_string(&(inner.root.to_string_lossy(), &self.profile, id))
-                .expect("source profile identity serializes");
+        let cache_partition = serde_json::to_string(&(inner.root.to_string_lossy(), &profile, id))
+            .expect("source profile identity serializes");
         let transport = inner
             .sessions
-            .entry((self.profile.clone(), id.into()))
+            .entry((profile.clone(), id.into()))
             .or_insert_with(|| {
                 Arc::new(NetworkTransport::new_scoped(
                     m.permissions.clone(),
@@ -543,10 +572,10 @@ impl SourceRegistry {
                 ))
             })
             .clone();
-        let key = (self.profile.clone(), id.to_owned());
+        let key = (profile.clone(), id.to_owned());
         if !inner.settings.contains_key(&key) {
             let values = crate::settings::load(
-                &crate::settings::path(&inner.root, &self.profile, id),
+                &crate::settings::path(&inner.root, &profile, id),
                 &m.configuration,
             )?;
             inner
@@ -598,6 +627,7 @@ impl SourceRegistry {
     }
     /// Partial updates retain omitted values. An explicit empty secret clears it.
     pub fn set_settings(&self, id: &str, patch: serde_json::Value) -> Result<()> {
+        let profile = self.profile();
         let source = self.source_unchecked(id)?;
         let inner = self.inner.lock().unwrap();
         if inner
@@ -610,14 +640,14 @@ impl SourceRegistry {
         let mut current = source.settings.lock().unwrap();
         let merged = crate::settings::merge(&current, &patch, &source.manifest.configuration)?;
         crate::settings::persist(
-            &crate::settings::path(&inner.root, &self.profile, id),
+            &crate::settings::path(&inner.root, &profile, id),
             &merged,
             &source.manifest.configuration,
         )?;
         if *current != merged {
             // Freeze running invocations on their old jar; new settings must not
             // inherit cookies set from an earlier settings snapshot.
-            if let Some(session) = inner.sessions.get(&(self.profile.clone(), id.to_owned())) {
+            if let Some(session) = inner.sessions.get(&(profile.clone(), id.to_owned())) {
                 session.reset_session();
             }
             *current = merged;

@@ -378,7 +378,7 @@ fn read<T: serde::de::DeserializeOwned + Default>(
     key: &str,
     validate: impl FnOnce(&T) -> Result<(), String>,
 ) -> Result<T, String> {
-    let Some(raw) = nova_storage::try_get_str(key).map_err(|e| e.to_string())? else {
+    let Some(raw) = reader_domain::profile::kv::try_get_str(key).map_err(|e| e.to_string())? else {
         return Ok(T::default());
     };
     match serde_json::from_str::<Record<T>>(&raw) {

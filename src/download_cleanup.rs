@@ -16,14 +16,14 @@ pub struct Settings {
 }
 impl Settings {
     pub fn load() -> Result<Self, String> {
-        nova_storage::try_get_str(SETTINGS_KEY)
+        reader_domain::profile::kv::try_get_str(SETTINGS_KEY)
             .map_err(|e| e.to_string())?
             .map(|json| serde_json::from_str(&json).map_err(|e| e.to_string()))
             .transpose()
             .map(Option::unwrap_or_default)
     }
     fn save(&self) -> Result<(), String> {
-        nova_storage::try_set_str(
+        reader_domain::profile::kv::try_set_str(
             SETTINGS_KEY,
             &serde_json::to_string(self).map_err(|e| e.to_string())?,
         )

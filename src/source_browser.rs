@@ -33,7 +33,7 @@ struct StoredPreferences {
 
 impl SourceBrowser {
     pub fn load() -> Self {
-        let stored = nova_storage::get_str(STORAGE_KEY);
+        let stored = reader_domain::profile::kv::get_str(STORAGE_KEY);
         Self::from_json(stored.as_deref())
     }
 
@@ -172,7 +172,7 @@ impl SourceBrowser {
 }
 
 fn persist(stored: &str) -> Result<(), String> {
-    nova_storage::try_set_str(STORAGE_KEY, stored).map_err(|error| error.to_string())
+    reader_domain::profile::kv::try_set_str(STORAGE_KEY, stored).map_err(|error| error.to_string())
 }
 
 fn valid_id(id: &str) -> bool {

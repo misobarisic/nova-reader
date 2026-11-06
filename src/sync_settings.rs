@@ -21,7 +21,13 @@ const OVERRIDES: &str = "reader:sync-settings-overrides";
 static PUBLISHER: LazyLock<Mutex<Option<Publisher>>> = LazyLock::new(|| Mutex::new(None));
 
 pub fn domain() -> String {
-    nova_sync::profile_domain("reader", "reader_settings")
+    crate::sync::domain("settings")
+}
+/// Physical KV key for a logical settings document: personal documents live in
+/// the active profile's namespace, device-global ones (captures, image storage)
+/// are shared by every profile.
+fn kv(key: &str) -> String {
+    reader_domain::profile::key(key)
 }
 pub fn install_publisher(publisher: impl Fn() + Send + Sync + 'static) {
     *PUBLISHER.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(publisher));
@@ -37,7 +43,7 @@ where
     let next_value = serde_json::to_value(next).map_err(|e| e.to_string())?;
     if template(key).is_none() {
         let json = serde_json::to_string(next).map_err(|e| e.to_string())?;
-        nova_storage::try_set_str(key, &json).map_err(|e| e.to_string())?;
+        reader_domain::profile::kv::try_set_str(key, &json).map_err(|e| e.to_string())?;
         return Ok(next.clone());
     }
     let publisher = PUBLISHER.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -57,7 +63,7 @@ where
                 for (field, value) in fields(&BTreeMap::from([(key.into(), prior)])) {
                     baseline.entry(field).or_insert(value);
                 }
-                store.queue_extra(BASELINE, Some(serde_json::to_string(&baseline)?));
+                store.queue_extra(&kv(BASELINE), Some(serde_json::to_string(&baseline)?));
             }
             let merged = merge_editor(&mut store, key, &previous, &next_value)?;
             let effective = serde_json::from_value(merged)?;
@@ -77,7 +83,7 @@ where
     } else {
         // Before sync is installed ordinary preference tests and startup still
         // use fallible KV writes. No account records or identity are created.
-        let raw = nova_storage::try_get_str(key).map_err(|e| e.to_string())?;
+        let raw = reader_domain::profile::kv::try_get_str(key).map_err(|e| e.to_string())?;
         let mut current = raw
             .and_then(|raw| {
                 let mut document: Value = serde_json::from_str(&raw).ok()?;
@@ -95,7 +101,8 @@ where
         }
         let effective = serde_json::from_value(current.clone()).map_err(|e| e.to_string())?;
         let document = stored_document(key, &current);
-        nova_storage::try_set_str(key, &document.to_string()).map_err(|e| e.to_string())?;
+        reader_domain::profile::kv::try_set_str(key, &document.to_string())
+            .map_err(|e| e.to_string())?;
         effective
     };
     if let Some(publish) = publisher {
@@ -160,7 +167,7 @@ fn merge_editor(
         return Err(std::io::Error::other("invalid merged Reader preferences").into());
     }
     store.queue_extra(
-        key,
+        &kv(key),
         Some(serde_json::to_string(&stored_document(key, &current))?),
     );
     Ok(current)
@@ -302,7 +309,9 @@ fn validate(storage: &str, value: &Value) -> bool {
 fn documents(store: &nova_sync::Store) -> nova_sync::Result<BTreeMap<String, Value>> {
     let mut documents = templates();
     // Include legacy local decisions and remote identities not opened here yet.
-    for (key, _) in nova_storage::try_scan_prefixes(&[SERIES_PREFIX.into(), MODE_PREFIX.into()])? {
+    for (key, _) in
+        reader_domain::profile::kv::try_scan_prefixes(&[SERIES_PREFIX.into(), MODE_PREFIX.into()])?
+    {
         if let Some(value) = template(&key) {
             documents.insert(key, value);
         }
@@ -315,7 +324,7 @@ fn documents(store: &nova_sync::Store) -> nova_sync::Result<BTreeMap<String, Val
         }
     }
     for (key, template) in &mut documents {
-        if let Some(raw) = store.extra_value(key)? {
+        if let Some(raw) = store.extra_value(&kv(key))? {
             let value = unpack_document(key, serde_json::from_str(&raw)?);
             // Deserialize and reserialize through each module's defaults so
             // preferences introduced after the last local edit participate.
@@ -357,7 +366,7 @@ fn fields(documents: &BTreeMap<String, Value>) -> Fields {
 }
 fn read_map(store: &nova_sync::Store, key: &str) -> nova_sync::Result<Fields> {
     store
-        .extra_value(key)?
+        .extra_value(&kv(key))?
         .map(|v| serde_json::from_str(&v))
         .transpose()
         .map(|v| v.unwrap_or_default())
@@ -430,7 +439,7 @@ fn prepare_documents(
                 .collect(),
         );
         for (storage, value) in &documents {
-            if store.extra_value(storage)?.is_some() {
+            if store.extra_value(&kv(storage))?.is_some() {
                 flatten(storage, "", value, &mut legacy);
             }
         }
@@ -453,7 +462,7 @@ fn prepare_documents(
             changed |= store.set(&domain(), key, Some(serde_json::to_string(value)?), 0, dev);
         }
     }
-    store.queue_extra(BASELINE, Some(serde_json::to_string(&current)?));
+    store.queue_extra(&kv(BASELINE), Some(serde_json::to_string(&current)?));
     Ok(changed)
 }
 fn project(documents: &mut BTreeMap<String, Value>, account: &Fields, overrides: &mut Fields) {
@@ -505,7 +514,7 @@ fn queue_documents(
 ) -> nova_sync::Result<()> {
     for (key, value) in documents {
         let value = stored_document(key, value);
-        store.queue_extra(key, Some(serde_json::to_string(&value)?));
+        store.queue_extra(&kv(key), Some(serde_json::to_string(&value)?));
     }
     Ok(())
 }
@@ -516,8 +525,11 @@ pub fn apply_remote(store: &mut nova_sync::Store) -> nova_sync::Result<()> {
     let mut overrides = read_map(store, OVERRIDES)?;
     project(&mut documents, &shared(store), &mut overrides);
     queue_documents(store, &documents)?;
-    store.queue_extra(BASELINE, Some(serde_json::to_string(&fields(&documents))?));
-    store.queue_extra(OVERRIDES, Some(serde_json::to_string(&overrides)?));
+    store.queue_extra(
+        &kv(BASELINE),
+        Some(serde_json::to_string(&fields(&documents))?),
+    );
+    store.queue_extra(&kv(OVERRIDES), Some(serde_json::to_string(&overrides)?));
     Ok(())
 }
 /// Policy changes never stamp a shared record. Releasing a local override follows
@@ -559,8 +571,11 @@ pub fn set_override(
         );
     }
     queue_documents(store, &documents)?;
-    store.queue_extra(BASELINE, Some(serde_json::to_string(&fields(&documents))?));
-    store.queue_extra(OVERRIDES, Some(serde_json::to_string(&overrides)?));
+    store.queue_extra(
+        &kv(BASELINE),
+        Some(serde_json::to_string(&fields(&documents))?),
+    );
+    store.queue_extra(&kv(OVERRIDES), Some(serde_json::to_string(&overrides)?));
     store.save()
 }
 #[derive(Clone, Debug)]

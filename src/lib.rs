@@ -30,6 +30,7 @@ mod metadata_refresh;
 pub mod page_inventory;
 pub mod page_thumbnails;
 mod paths;
+pub mod profiles;
 mod progress_checkpoint;
 #[cfg(not(target_os = "android"))]
 mod reader_desktop;

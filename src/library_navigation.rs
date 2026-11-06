@@ -57,7 +57,7 @@ impl SelectionRecord {
 }
 impl State {
     pub(super) fn load() -> Self {
-        let raw = nova_storage::try_get_str(KEY).unwrap_or_else(|error| {
+        let raw = reader_domain::profile::kv::try_get_str(KEY).unwrap_or_else(|error| {
             eprintln!("Nova Reader: could not load Library location: {error}");
             None
         });
@@ -181,9 +181,9 @@ impl Writer {
                         .unwrap_or_else(|error| error.into_inner())
                         .take();
                     let result = if let Some(state) = state {
-                        let result = state
-                            .storage_json()
-                            .and_then(|json| nova_storage::try_set_str(KEY, &json).map_err(error));
+                        let result = state.storage_json().and_then(|json| {
+                            reader_domain::profile::kv::try_set_str(KEY, &json).map_err(error)
+                        });
                         if result.is_err() {
                             let mut pending =
                                 work.lock().unwrap_or_else(|error| error.into_inner());

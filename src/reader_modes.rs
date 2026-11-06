@@ -94,7 +94,7 @@ pub fn sync_key(series: &SeriesId) -> String {
     )
 }
 fn write(series: &SeriesId, choice: ModeChoice) -> Result<(), String> {
-    let previous = nova_storage::try_get_str(&sync_key(series))
+    let previous = reader_domain::profile::kv::try_get_str(&sync_key(series))
         .map_err(|e| e.to_string())?
         .and_then(|raw| serde_json::from_str::<Record>(&raw).ok())
         .filter(|record| record.schema_version == 1)
@@ -110,7 +110,9 @@ pub fn save(series: &SeriesId, choice: ModeChoice) -> Result<(), String> {
 /// Explicit Automatic is a record (not deletion), so legacy data cannot revive.
 pub fn load(series: &SeriesId, legacy: Option<ReadingMode>) -> Result<ModeChoice, String> {
     let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(raw) = nova_storage::try_get_str(&sync_key(series)).map_err(|e| e.to_string())? {
+    if let Some(raw) =
+        reader_domain::profile::kv::try_get_str(&sync_key(series)).map_err(|e| e.to_string())?
+    {
         return match serde_json::from_str::<Record>(&raw) {
             Ok(record) if record.schema_version == 1 => Ok(record.choice),
             _ => {

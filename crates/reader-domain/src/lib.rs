@@ -1,6 +1,7 @@
 //! Reader-owned identities and metadata. Backups deliberately have no path,
 //! executable, session, cookie, or credential fields.
 mod library_status;
+pub mod profile;
 pub use library_status::{PublicationStatus, ReadingStatus, library_bucket};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -10,15 +11,21 @@ use std::{
 };
 
 pub const SCHEMA_VERSION: u32 = 1;
+/// Logical key of a profile's state; `profile::key` maps it to the active profile.
 pub const STATE_KEY: &str = "reader:state";
+/// Installed-addon descriptors describe packages, which are device-global, so
+/// they are kept out of each profile's state key.
+pub const SOURCES_KEY: &str = "reader:installed-sources:v1";
 const MAX_BACKUP_BYTES: usize = 32 * 1024 * 1024;
 static STORE_PATH: OnceLock<PathBuf> = OnceLock::new();
 static SERIAL: Mutex<()> = Mutex::new(());
 
 /// Persistence runs under the domain serial lock. Hooks must not call DomainStore.
 /// The hook commits the validated snapshot and its sync records in one batch.
+/// The first argument is the profile whose state is being updated; only the
+/// active profile is ever edited by the user, inactive ones receive projections.
 pub type PersistenceHook =
-    dyn Fn(&ReaderState, &mut ReaderState, UpdateKind) -> Result<()> + Send + Sync;
+    dyn Fn(&str, &ReaderState, &mut ReaderState, UpdateKind) -> Result<()> + Send + Sync;
 static PERSISTENCE: Mutex<Option<Arc<PersistenceHook>>> = Mutex::new(None);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -389,19 +396,62 @@ impl DomainStore {
         }
         nova_storage::init_at(&path);
         let _ = STORE_PATH.set(path.clone());
-        let state = Self::read()?;
-        nova_storage::try_set_str(STATE_KEY, &serde_json::to_string(&state)?)?;
+        // Personal keys become profile-scoped before anything reads them. The
+        // legacy layout moves into the default profile in one transaction.
+        profile::enable(&profile::stored_selection().unwrap_or_default());
+        profile::migrate_legacy()?;
+        let active = profile::active();
+        let state = Self::read(&active)?;
+        Self::write_direct(&active, &state)?;
         Ok(Self { _path: path })
     }
-    fn read() -> Result<ReaderState> {
-        nova_storage::try_get_str(STATE_KEY)?
+    fn read(profile: &str) -> Result<ReaderState> {
+        let mut state = nova_storage::try_get_str(&profile::key_in(profile, STATE_KEY))?
             .map(|s| decode(s.as_bytes()))
-            .transpose()
-            .map(|s| s.unwrap_or_default())
+            .transpose()?
+            .unwrap_or_default();
+        if let Some(raw) = nova_storage::try_get_str(SOURCES_KEY)? {
+            state.sources = serde_json::from_str(&raw)?;
+        }
+        Ok(state)
+    }
+    /// The KV rows that persist `state` for `profile`: its personal state plus the
+    /// device-global addon descriptors. Hooks write these in their own batch.
+    pub fn storage_entries(
+        profile: &str,
+        state: &ReaderState,
+    ) -> Result<Vec<(String, Option<String>)>> {
+        let mut personal = state.clone();
+        let sources = std::mem::take(&mut personal.sources);
+        Ok(vec![
+            (
+                profile::key_in(profile, STATE_KEY),
+                Some(personal.storage_json()?),
+            ),
+            (SOURCES_KEY.into(), Some(serde_json::to_string(&sources)?)),
+        ])
+    }
+    fn write_direct(profile: &str, state: &ReaderState) -> Result<()> {
+        nova_storage::try_write_batch(&Self::storage_entries(profile, state)?)?;
+        Ok(())
     }
     pub fn snapshot(&self) -> Result<ReaderState> {
         let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-        Self::read()
+        Self::read(&profile::active())
+    }
+    /// A profile's state while it is not the active one (sync projection, cleanup).
+    pub fn snapshot_profile(&self, profile: &str) -> Result<ReaderState> {
+        let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        Self::read(profile)
+    }
+    /// Select the profile whose state later reads and updates use. The serial lock
+    /// makes the swap atomic with respect to every in-flight update.
+    pub fn set_profile(&self, id: &str) -> Result<()> {
+        let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        profile::set_active(id)
+    }
+    pub fn active_profile(&self) -> String {
+        profile::active()
     }
     pub fn update(&self, update: impl FnOnce(&mut ReaderState) -> Result<()>) -> Result<()> {
         self.update_with_kind(UpdateKind::Local, update)
@@ -424,18 +474,41 @@ impl DomainStore {
         update: impl FnOnce(&mut ReaderState) -> Result<()>,
     ) -> Result<()> {
         let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-        let before = Self::read()?;
+        Self::update_locked(&profile::active(), kind, update)
+    }
+    /// Update a named profile's state, active or not. Reading checkpoints and
+    /// edits only ever target the active profile; this exists so that remote
+    /// projections can materialize an inactive profile without selecting it.
+    pub fn update_profile_with_kind(
+        &self,
+        profile: &str,
+        kind: UpdateKind,
+        update: impl FnOnce(&mut ReaderState) -> Result<()>,
+    ) -> Result<()> {
+        if !profile::valid_id(profile) {
+            return Err(Error::Invalid("invalid profile id".into()));
+        }
+        let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        Self::update_locked(profile, kind, update)
+    }
+    fn update_locked(
+        profile: &str,
+        kind: UpdateKind,
+        update: impl FnOnce(&mut ReaderState) -> Result<()>,
+    ) -> Result<()> {
+        let before = Self::read(profile)?;
         let mut state = before.clone();
         update(&mut state)?;
-        let json = state.storage_json()?;
         let hook = PERSISTENCE
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         if let Some(hook) = hook {
-            hook(&before, &mut state, kind)?;
+            // Validation and the size bound apply to hook-owned commits too.
+            state.storage_json()?;
+            hook(profile, &before, &mut state, kind)?;
         } else {
-            nova_storage::try_set_str(STATE_KEY, &json)?;
+            Self::write_direct(profile, &state)?;
         }
         Ok(())
     }

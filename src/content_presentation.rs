@@ -54,6 +54,17 @@ struct Record {
     settings: Settings,
 }
 
+/// Cache entries are keyed by the physical key, so a profile's entries can never
+/// answer for another profile even if a stale worker publishes after a switch.
+fn cache_key(series: &SeriesId) -> String {
+    reader_domain::profile::key(&key(series))
+}
+
+/// Forget cached entries (profile switch); the next load reads the new profile's KV.
+pub fn reset() {
+    SNAPSHOTS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+}
+
 fn key(series: &SeriesId) -> String {
     format!(
         "{PREFIX}{}",
@@ -62,7 +73,9 @@ fn key(series: &SeriesId) -> String {
 }
 
 fn read(series: &SeriesId) -> Result<Settings, String> {
-    let Some(raw) = nova_storage::try_get_str(&key(series)).map_err(|e| e.to_string())? else {
+    let Some(raw) =
+        reader_domain::profile::kv::try_get_str(&key(series)).map_err(|e| e.to_string())?
+    else {
         return Ok(Settings::default());
     };
     match serde_json::from_str::<Record>(&raw) {
@@ -85,7 +98,8 @@ fn local_raw(settings: &Settings) -> Result<String, String> {
 fn write(series: &SeriesId, settings: &Settings) -> Result<(), String> {
     let raw = local_raw(settings)?;
     if !SYNC.load(Ordering::Acquire) {
-        return nova_storage::try_set_str(&key(series), &raw).map_err(|e| e.to_string());
+        return reader_domain::profile::kv::try_set_str(&key(series), &raw)
+            .map_err(|e| e.to_string());
     }
     publish(series, settings, raw).map_err(|e| e.to_string())
 }
@@ -207,7 +221,7 @@ fn publish(series: &SeriesId, settings: &Settings, raw: String) -> nova_sync::Re
         }
         changed = records.set(&domain, &identity, Some(value), 0, dev);
     }
-    records.queue_extra(&key(series), Some(raw));
+    records.queue_extra(&cache_key(series), Some(raw));
     records.save()?;
     *guard = records;
     drop(guard);
@@ -225,7 +239,7 @@ fn key_json(series: &SeriesId) -> String {
 pub(crate) fn seed(store: &mut nova_sync::Store, dev: u64) -> nova_sync::Result<bool> {
     let domain = domain();
     let mut changed = false;
-    for (storage, raw) in nova_storage::try_scan_prefix(PREFIX)? {
+    for (storage, raw) in reader_domain::profile::kv::try_scan_prefix(PREFIX)? {
         let Some(identity) = storage.strip_prefix(PREFIX) else {
             continue;
         };
@@ -257,11 +271,9 @@ pub(crate) fn apply_remote(
     store: &mut nova_sync::Store,
 ) -> nova_sync::Result<Vec<(String, Settings)>> {
     let domain = domain();
-    if !store.pending_domains().contains(&domain) {
-        return Ok(Vec::new());
-    }
-    let existing: BTreeMap<String, String> =
-        nova_storage::try_scan_prefix(PREFIX)?.into_iter().collect();
+    let existing: BTreeMap<String, String> = reader_domain::profile::kv::try_scan_prefix(PREFIX)?
+        .into_iter()
+        .collect();
     let mut changed = Vec::new();
     for (identity, raw) in store.records(&domain) {
         let Some(settings) = decode(&raw) else {
@@ -276,11 +288,12 @@ pub(crate) fn apply_remote(
         if current.as_ref() == Some(&settings) {
             continue;
         }
+        let physical = reader_domain::profile::key(&storage);
         store.queue_extra(
-            &storage,
+            &physical,
             Some(local_raw(&settings).map_err(std::io::Error::other)?),
         );
-        changed.push((storage, settings));
+        changed.push((physical, settings));
     }
     Ok(changed)
 }
@@ -301,23 +314,23 @@ impl Settings {
     /// a successfully published write. Hot card projections use memory only.
     pub fn load(series: &SeriesId) -> Result<Self, String> {
         let mut snapshots = SNAPSHOTS.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(settings) = snapshots.get(&key(series)) {
+        if let Some(settings) = snapshots.get(&cache_key(series)) {
             return Ok(settings.clone());
         }
         let settings = read(series)?;
-        snapshots.insert(key(series), settings.clone());
+        snapshots.insert(cache_key(series), settings.clone());
         Ok(settings)
     }
 
     pub fn set_user(series: &SeriesId, user: UserPreference) -> Result<Self, String> {
         let mut snapshots = SNAPSHOTS.lock().unwrap_or_else(|e| e.into_inner());
-        let mut settings = match snapshots.get(&key(series)) {
+        let mut settings = match snapshots.get(&cache_key(series)) {
             Some(settings) => settings.clone(),
             None => read(series)?,
         };
         settings.user = user;
         write(series, &settings)?;
-        snapshots.insert(key(series), settings.clone());
+        snapshots.insert(cache_key(series), settings.clone());
         Ok(settings)
     }
 
@@ -325,7 +338,7 @@ impl Settings {
     /// Only a full details response may withdraw; listings use `record_listing_hint`.
     pub fn record_hint(series: &SeriesId, hint: Option<&str>) -> Result<Self, String> {
         let mut snapshots = SNAPSHOTS.lock().unwrap_or_else(|e| e.into_inner());
-        let mut settings = match snapshots.get(&key(series)) {
+        let mut settings = match snapshots.get(&cache_key(series)) {
             Some(settings) => settings.clone(),
             None => read(series)?,
         };
@@ -335,7 +348,7 @@ impl Settings {
             settings.last_known_addon_hint = hint.map(str::to_owned);
             write(series, &settings)?;
         }
-        snapshots.insert(key(series), settings.clone());
+        snapshots.insert(cache_key(series), settings.clone());
         Ok(settings)
     }
 

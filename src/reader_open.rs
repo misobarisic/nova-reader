@@ -267,7 +267,7 @@ impl Controller {
         ui.invoke_begin_reader_entry();
         let app = self.clone();
         let weak = ui.as_weak();
-        std::thread::spawn(move || {
+        crate::profiles::spawn(move || {
             // Preserve ordered progress before reading resume state. Never wait
             // for disk or a source inside the chapter tap handler.
             let result = app

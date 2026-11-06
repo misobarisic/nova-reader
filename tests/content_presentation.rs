@@ -9,7 +9,9 @@ fn presentation_survives_restart_and_offline_without_changing_explicit_choices()
     if let Ok(phase) = std::env::var(PHASE) {
         let a = SeriesId::new("source-a", "same-local");
         let b = SeriesId::new("source-b", "same-local");
-        nova_storage::init_at(std::path::Path::new(&std::env::var(DIRECTORY).unwrap()));
+        // Opening the domain store enables profile scoping and migrates the legacy layout.
+        reader_domain::DomainStore::open(std::path::Path::new(&std::env::var(DIRECTORY).unwrap()))
+            .unwrap();
         match phase.as_str() {
             "write" => {
                 assert_eq!(
@@ -109,10 +111,12 @@ fn presentation_survives_restart_and_offline_without_changing_explicit_choices()
                     "broken",
                     r#"{"schema_version":999,"settings":{"user":"Gallery","last_known_addon_hint":"gallery"}}"#,
                 ] {
-                    nova_storage::try_set_str(&key, raw).unwrap();
+                    nova_storage::try_set_str(&reader_domain::profile::key(&key), raw).unwrap();
                     assert_eq!(Settings::load(&invalid).unwrap(), Settings::default());
                     assert_eq!(
-                        nova_storage::try_get_str(&key).unwrap().as_deref(),
+                        nova_storage::try_get_str(&reader_domain::profile::key(&key))
+                            .unwrap()
+                            .as_deref(),
                         Some(raw)
                     );
                 }

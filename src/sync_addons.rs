@@ -32,7 +32,7 @@ pub struct Status {
     pub confirmation_required: usize,
 }
 pub fn domain() -> String {
-    nova_sync::profile_domain("reader", "reader_addons")
+    crate::sync::domain("addons")
 }
 fn valid_id(id: &str) -> bool {
     !id.is_empty()
@@ -65,6 +65,20 @@ impl Descriptor {
             && self.settings.as_object().is_some_and(|map| map.len() <= 64)
             && serde_json::to_vec(&self.settings).is_ok_and(|v| v.len() <= 64 * 1024)
     }
+}
+/// Whether a live profile other than the selected one still lists `id`.
+fn listed_by_other_profile(store: &nova_sync::Store, id: &str) -> bool {
+    let selected = reader_domain::profile::active();
+    store.domains().iter().any(|name| {
+        crate::sync::parse_domain(name).is_some_and(|(profile, kind)| {
+            kind == "addons"
+                && profile != selected
+                && !crate::profiles::is_retired(profile)
+                && store
+                    .record(name, id)
+                    .is_some_and(|record| !record.is_deleted())
+        })
+    })
 }
 pub fn validate_record(key: &str, record: &nova_sync::Record) -> bool {
     if !valid_id(key) {
@@ -313,6 +327,10 @@ pub fn reconcile(services: &Services, cancel: Arc<AtomicBool>) -> Result<Status,
                 store
                     .record(&domain(), &s.id)
                     .is_some_and(|r| r.is_deleted())
+                    // Installed packages are shared by every profile on this
+                    // device: one profile's removal must not uninstall an addon
+                    // another live profile still lists.
+                    && !listed_by_other_profile(&store, &s.id)
             })
             .map(|s| s.id)
             .collect::<Vec<_>>();

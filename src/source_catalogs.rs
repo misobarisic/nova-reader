@@ -8,7 +8,7 @@ fn key(package: &str) -> String {
     )
 }
 pub fn disabled(package: &str) -> BTreeSet<String> {
-    nova_storage::try_get_str(&key(package))
+    reader_domain::profile::kv::try_get_str(&key(package))
         .ok()
         .flatten()
         .and_then(|raw| serde_json::from_str(&raw).ok())
@@ -25,5 +25,5 @@ pub fn set_enabled(package: &str, catalogue: &str, enabled: bool) -> Result<(), 
         disabled.insert(catalogue.to_owned());
     }
     let raw = serde_json::to_string(&disabled).map_err(|error| error.to_string())?;
-    nova_storage::try_set_str(&key(package), &raw).map_err(|error| error.to_string())
+    reader_domain::profile::kv::try_set_str(&key(package), &raw).map_err(|error| error.to_string())
 }

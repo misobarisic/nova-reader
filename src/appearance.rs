@@ -136,28 +136,52 @@ fn save(ui: &AppWindow, state: &RefCell<Preferences>, next: Preferences) {
     }
 }
 
+thread_local! {
+    // The UI-thread draft that the callbacks edit; a profile switch replaces its value.
+    static DRAFT: RefCell<Option<Rc<RefCell<Preferences>>>> = const { RefCell::new(None) };
+}
+
+fn load(ui: &AppWindow) -> Result<Preferences, String> {
+    Ok(
+        match reader_domain::profile::kv::try_get_str(KEY).map_err(|e| e.to_string())? {
+            Some(json) => match serde_json::from_str::<Preferences>(&json) {
+                Ok(prefs) => prefs,
+                Err(e) => {
+                    // A cosmetic preference must not prevent opening the reader.
+                    // Keep the raw value until a deliberate successful user edit.
+                    eprintln!("Nova Reader: invalid appearance preferences: {e}");
+                    ui.set_status(
+                        nova_reader_ui::backend_text::tr(
+                            "Could not read appearance preferences; using defaults.",
+                        )
+                        .into(),
+                    );
+                    Preferences::default()
+                }
+            },
+            None => Preferences::default(),
+        },
+    )
+}
+
+/// Re-read the active profile's appearance after a profile switch.
+pub fn reload(ui: &AppWindow) -> Result<(), String> {
+    let prefs = load(ui)?;
+    prefs.apply(ui);
+    DRAFT.with(|draft| {
+        if let Some(state) = draft.borrow().as_ref() {
+            *state.borrow_mut() = prefs;
+        }
+    });
+    Ok(())
+}
+
 /// Call after Services initializes Reader's storage and before showing the UI.
 pub fn init(ui: &AppWindow) -> Result<(), String> {
-    let prefs = match nova_storage::try_get_str(KEY).map_err(|e| e.to_string())? {
-        Some(json) => match serde_json::from_str::<Preferences>(&json) {
-            Ok(prefs) => prefs,
-            Err(e) => {
-                // A cosmetic preference must not prevent opening the reader.
-                // Keep the raw value until a deliberate successful user edit.
-                eprintln!("Nova Reader: invalid appearance preferences: {e}");
-                ui.set_status(
-                    nova_reader_ui::backend_text::tr(
-                        "Could not read appearance preferences; using defaults.",
-                    )
-                    .into(),
-                );
-                Preferences::default()
-            }
-        },
-        None => Preferences::default(),
-    };
+    let prefs = load(ui)?;
     prefs.apply(ui);
     let state = Rc::new(RefCell::new(prefs));
+    DRAFT.with(|draft| *draft.borrow_mut() = Some(state.clone()));
     let weak = ui.as_weak();
     let current = state.clone();
     ui.global::<Appearance>()

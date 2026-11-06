@@ -167,7 +167,7 @@ impl Controller {
         let owner = Arc::downgrade(self);
         let services = self.services.clone();
         let weak = ui.as_weak();
-        std::thread::spawn(move || {
+        crate::profiles::spawn(move || {
             let mut series = request.series;
             if request.resolve_metadata
                 && let Ok(state) = services.domain.snapshot()
@@ -456,7 +456,7 @@ impl Controller {
         let services = self.services.clone();
         let owner = Arc::downgrade(self);
         let weak = ui.as_weak();
-        std::thread::spawn(move || {
+        crate::profiles::spawn(move || {
             let result = services.details(&series, &cancel);
             let _ = weak.upgrade_in_event_loop(move |ui| {
                 let Some(app) = owner.upgrade() else {

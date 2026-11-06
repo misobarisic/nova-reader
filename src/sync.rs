@@ -8,7 +8,6 @@ use std::{
     sync::{Arc, LazyLock},
 };
 
-pub const PROFILE: &str = "reader";
 const KINDS: &[&str] = &[
     "series",
     "chapters",
@@ -22,14 +21,41 @@ const KINDS: &[&str] = &[
 ];
 type Rows = BTreeMap<String, Vec<(String, String, u64)>>;
 
+/// The active profile's domain for `kind`. Domains stay `profile:{id}:reader_{kind}`,
+/// so the first profile (`reader`) keeps the names 0.1.35 peers already use.
 pub fn domain(kind: &str) -> String {
-    nova_sync::profile_domain(PROFILE, &format!("reader_{kind}"))
+    domain_for(&reader_domain::profile::active(), kind)
 }
-/// Domains whose materialization and receipts this adapter owns.
+pub fn domain_for(profile: &str, kind: &str) -> String {
+    nova_sync::profile_domain(profile, &format!("reader_{kind}"))
+}
+/// Split `profile:{id}:reader_{kind}` into the profile and the kind.
+pub fn parse_domain(name: &str) -> Option<(&str, &str)> {
+    let (profile, base) = nova_sync::parse_profile_domain(name)?;
+    reader_domain::profile::valid_id(profile).then_some(())?;
+    Some((profile, base.strip_prefix("reader_")?))
+}
+/// Domains whose materialization and receipts this adapter owns. Record domains
+/// of every live profile are materialized into its state, selected or not; the
+/// selected profile's settings and presentation additionally project into the UI.
+/// Addons keep their own reconciler.
 pub fn handles_projection_domain(name: &str) -> bool {
-    KINDS.iter().any(|kind| domain(kind) == name)
-        || name == crate::sync_settings::domain()
-        || name == crate::content_presentation::domain()
+    // The profile directory refreshes the picker; there is nothing to materialize.
+    if matches!(
+        name,
+        crate::profiles::DOMAIN | crate::profiles::DELETIONS_DOMAIN
+    ) {
+        return true;
+    }
+    let Some((profile, kind)) = parse_domain(name) else {
+        return false;
+    };
+    if crate::profiles::is_retired(profile) {
+        return false;
+    }
+    KINDS.contains(&kind)
+        || (matches!(kind, "settings" | "presentation")
+            && profile == reader_domain::profile::selected())
 }
 fn key(value: &impl Serialize) -> nova_sync::Result<String> {
     Ok(serde_json::to_string(value)?)
@@ -127,8 +153,8 @@ pub fn initialize(store: &DomainStore) -> nova_sync::Result<()> {
     nova_sync::configure_record_policy(READER_POLICY.clone())?;
     nova_sync::local_store()?;
     crate::content_presentation::install_sync();
-    reader_domain::install_persistence_hook(Arc::new(|before, state, kind| {
-        persist(before, state, kind)
+    reader_domain::install_persistence_hook(Arc::new(|profile, before, state, kind| {
+        persist(profile, before, state, kind)
             .map_err(|e| reader_domain::Error::Invalid(format!("sync persistence: {e:#}")))
     }));
     store.update_with_kind(UpdateKind::Seed, |_| Ok(()))?;
@@ -140,14 +166,49 @@ pub fn initialize(store: &DomainStore) -> nova_sync::Result<()> {
 pub fn apply_remote(store: &DomainStore) -> nova_sync::Result<()> {
     nova_sync::flush_persistence()?;
     store.update_with_kind(UpdateKind::Projection, |_| Ok(()))?;
+    // Other live profiles materialize into their own durable state without
+    // touching the selection or the screen.
+    let selected = reader_domain::profile::active();
+    for profile in pending_profiles(&selected)? {
+        store.update_profile_with_kind(&profile, UpdateKind::Projection, |_| Ok(()))?;
+    }
     Ok(())
 }
 
+/// Live profiles other than `selected` that received state records.
+fn pending_profiles(selected: &str) -> nova_sync::Result<Vec<String>> {
+    let owner = nova_sync::local_store()?;
+    let guard = owner.lock().unwrap_or_else(|e| e.into_inner());
+    let mut profiles: Vec<String> = guard
+        .pending_domains()
+        .iter()
+        .filter_map(|name| parse_domain(name))
+        .filter(|(profile, kind)| {
+            *profile != selected
+                && KINDS.contains(kind)
+                && !crate::profiles::is_retired(profile)
+                && guard
+                    .record("profile_deletions", profile)
+                    .is_none_or(|record| record.is_deleted())
+        })
+        .map(|(profile, _)| profile.to_owned())
+        .collect();
+    profiles.sort();
+    profiles.dedup();
+    Ok(profiles)
+}
+
 fn persist(
+    profile: &str,
     before: &ReaderState,
     state: &mut ReaderState,
     kind: UpdateKind,
 ) -> nova_sync::Result<()> {
+    // Under the domain lock the selection cannot change. Settings and entry
+    // presentation belong to the profile on screen; an unselected profile only
+    // materializes its library state.
+    let selected = profile == reader_domain::profile::active();
+    let domain = |kind: &str| domain_for(profile, kind);
     let owner = nova_sync::local_store()?;
     let dev = nova_sync::local_device()?;
     let mut guard = owner.lock().unwrap_or_else(|e| e.into_inner());
@@ -177,7 +238,7 @@ fn persist(
         }
     }
     if projection {
-        project(&records, state)?;
+        project(&records, profile, state)?;
     }
     if kind == UpdateKind::ManualProgress {
         for progress in &state.progress {
@@ -215,7 +276,7 @@ fn persist(
                 );
             }
         }
-        resolve_actions(&records, state)?;
+        resolve_actions(&records, profile, state)?;
         if kind == UpdateKind::Checkpoint {
             // A queued old checkpoint must not undo an explicit history clear.
             // Fresh reading activity after the deletion may create history again.
@@ -244,10 +305,10 @@ fn persist(
     }
     let mut changed = false;
     let mut presentation = Vec::new();
-    if projection {
+    if selected && projection {
         crate::sync_settings::apply_remote(&mut records)?;
         presentation = crate::content_presentation::apply_remote(&mut records)?;
-    } else if kind == UpdateKind::Seed {
+    } else if selected && kind == UpdateKind::Seed {
         changed |= crate::sync_settings::prepare(&mut records, dev, false, true)?;
         changed |= crate::content_presentation::seed(&mut records, dev)?;
     }
@@ -265,17 +326,23 @@ fn persist(
             kind == UpdateKind::Seed,
         )?;
     }
-    records.queue_extra(reader_domain::STATE_KEY, Some(state.storage_json()?));
+    for (key, value) in DomainStore::storage_entries(profile, state)? {
+        records.queue_extra(&key, value);
+    }
     records.save()?;
     *guard = records;
     if projection {
         let digest = guard.digest();
-        for owned in [
-            crate::sync_settings::domain(),
-            crate::content_presentation::domain(),
-        ] {
-            if let Some(basis) = digest.get(&owned) {
-                guard.mark_projected(&owned, basis)?;
+        let mut owned = vec![
+            crate::profiles::DOMAIN.to_owned(),
+            crate::profiles::DELETIONS_DOMAIN.to_owned(),
+        ];
+        if selected {
+            owned.extend([domain("settings"), domain("presentation")]);
+        }
+        for name in owned {
+            if let Some(basis) = digest.get(&name) {
+                guard.mark_projected(&name, basis)?;
             }
         }
         for kind_name in KINDS {
@@ -315,15 +382,23 @@ pub(crate) fn preserve_fields(old: &str, new: &str) -> nova_sync::Result<String>
     ))?)
 }
 
-fn values<T: DeserializeOwned>(store: &nova_sync::Store, kind: &str) -> nova_sync::Result<Vec<T>> {
+fn values<T: DeserializeOwned>(
+    store: &nova_sync::Store,
+    profile: &str,
+    kind: &str,
+) -> nova_sync::Result<Vec<T>> {
     store
-        .records(&domain(kind))
+        .records(&domain_for(profile, kind))
         .into_iter()
         .map(|(_, raw)| decode_value(kind, &raw))
         .collect()
 }
-fn resolve_actions(store: &nova_sync::Store, state: &mut ReaderState) -> nova_sync::Result<()> {
-    for action in values::<ReadAction>(store, "read_actions")? {
+fn resolve_actions(
+    store: &nova_sync::Store,
+    profile: &str,
+    state: &mut ReaderState,
+) -> nova_sync::Result<()> {
+    for action in values::<ReadAction>(store, profile, "read_actions")? {
         if let Some(progress) = state
             .progress
             .iter_mut()
@@ -335,33 +410,37 @@ fn resolve_actions(store: &nova_sync::Store, state: &mut ReaderState) -> nova_sy
     }
     Ok(())
 }
-fn project(store: &nova_sync::Store, state: &mut ReaderState) -> nova_sync::Result<()> {
+fn project(
+    store: &nova_sync::Store,
+    profile: &str,
+    state: &mut ReaderState,
+) -> nova_sync::Result<()> {
     // Metadata remains a cache: removing membership never deletes cached series,
     // and a metadata refresh cannot recreate membership.
-    for value in values::<reader_domain::Series>(store, "series")? {
+    for value in values::<reader_domain::Series>(store, profile, "series")? {
         state.series.retain(|s| s.id != value.id);
         state.series.push(value);
     }
-    for value in values::<reader_domain::Chapter>(store, "chapters")? {
+    for value in values::<reader_domain::Chapter>(store, profile, "chapters")? {
         state.chapters.retain(|s| s.id != value.id);
         state.chapters.push(value);
     }
-    state.categories = values(store, "categories")?;
-    state.library = values(store, "library")?;
+    state.categories = values(store, profile, "categories")?;
+    state.library = values(store, profile, "library")?;
     for entry in &mut state.library {
         entry.categories.clear();
     }
-    for value in values::<Membership>(store, "memberships")? {
+    for value in values::<Membership>(store, profile, "memberships")? {
         if state.categories.iter().any(|c| c.id == value.category)
             && let Some(entry) = state.library.iter_mut().find(|e| e.series == value.series)
         {
             entry.categories.insert(value.category);
         }
     }
-    state.progress = values(store, "resume")?;
-    state.history = values(store, "history")?;
-    state.bookmarks = values(store, "bookmarks")?;
-    resolve_actions(store, state)?;
+    state.progress = values(store, profile, "resume")?;
+    state.history = values(store, profile, "history")?;
+    state.bookmarks = values(store, profile, "bookmarks")?;
+    resolve_actions(store, profile, state)?;
     state.validate()?;
     Ok(())
 }
@@ -431,22 +510,34 @@ static READER_POLICY: LazyLock<Arc<dyn nova_sync::RecordPolicy>> =
 struct ReaderPolicy;
 impl nova_sync::RecordPolicy for ReaderPolicy {
     fn validate(&self, name: &str, record_key: &str, record: &nova_sync::Record) -> bool {
-        if name == crate::sync_settings::domain() {
-            // Retain newer schemas for the account inspector. Settings projection
-            // applies only supported portable fields to this device.
-            return record.is_deleted()
-                || record.value.as_deref().is_some_and(|raw| {
-                    raw.len() <= 1024 * 1024
-                        && serde_json::from_str::<serde_json::Value>(raw).is_ok()
-                });
+        if matches!(
+            name,
+            crate::profiles::DOMAIN | crate::profiles::DELETIONS_DOMAIN
+        ) {
+            return crate::profiles::validate_record(name, record_key, record);
         }
-        if name == crate::sync_addons::domain() {
-            return crate::sync_addons::validate_record(record_key, record);
+        // Every profile's domains validate alike; unknown names stay accepted so
+        // older and newer peers relay each other's records.
+        let Some((_, kind)) = parse_domain(name) else {
+            return true;
+        };
+        match kind {
+            "settings" => {
+                // Retain newer schemas for the account inspector. Settings projection
+                // applies only supported portable fields to this device.
+                return record.is_deleted()
+                    || record.value.as_deref().is_some_and(|raw| {
+                        raw.len() <= 1024 * 1024
+                            && serde_json::from_str::<serde_json::Value>(raw).is_ok()
+                    });
+            }
+            "addons" => return crate::sync_addons::validate_record(record_key, record),
+            "presentation" => {
+                return crate::content_presentation::validate_record(record_key, record);
+            }
+            _ => {}
         }
-        if name == crate::content_presentation::domain() {
-            return crate::content_presentation::validate_record(record_key, record);
-        }
-        let Some(kind) = KINDS.iter().find(|kind| domain(kind) == name) else {
+        let Some(kind) = KINDS.iter().find(|candidate| **candidate == kind) else {
             return true;
         };
         if record.is_deleted() {
@@ -568,12 +659,19 @@ mod tests {
         assert!(handles_projection_domain(&domain("resume")));
         assert!(handles_projection_domain(&crate::sync_settings::domain()));
         assert!(!handles_projection_domain("peers"));
+        assert!(handles_projection_domain("profiles"));
+        assert!(handles_projection_domain("profile_deletions"));
         assert!(!handles_projection_domain(&domain("future")));
         assert!(!handles_projection_domain(&crate::sync_addons::domain()));
-        assert!(!handles_projection_domain(&nova_sync::profile_domain(
-            "another",
-            "reader_resume"
-        )));
+        // Another live profile's library state is materialized in the background,
+        // but its settings and presentation wait until it is selected.
+        let other = |kind: &str| nova_sync::profile_domain("another", &format!("reader_{kind}"));
+        assert!(handles_projection_domain(&other("resume")));
+        assert!(!handles_projection_domain(&other("settings")));
+        assert!(!handles_projection_domain(&other("presentation")));
+        assert!(!handles_projection_domain(&other("addons")));
+        assert!(!handles_projection_domain("profile::reader_resume"));
+        assert!(!handles_projection_domain("profile:a:b:reader_resume"));
     }
     #[test]
     fn legacy_bookmark_key_is_source_scoped_and_note_independent() {

@@ -284,7 +284,7 @@ fn durable_records_preserve_offline_edits_actions_deletions_and_source_identity(
             .is_deleted()
     );
     assert_eq!(
-        nova_storage::get_str(STATE_KEY).unwrap(),
+        nova_storage::get_str(&profile::key(STATE_KEY)).unwrap(),
         serde_json::to_string(&domain.snapshot().unwrap()).unwrap()
     );
     nova_storage::try_set_str(
