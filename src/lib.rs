@@ -81,6 +81,11 @@ fn android_main(app: slint::android::AndroidApp) {
                 nova_sync::set_foreground(false);
                 app::flush_lifecycle();
             }
+            // The process can be killed after Stop/SaveState without Destroy;
+            // persist the reading position and any settling swipe before then.
+            PollEvent::Main(MainEvent::Stop | MainEvent::SaveState { .. }) => {
+                app::flush_lifecycle();
+            }
             _ => {}
         }
     })
