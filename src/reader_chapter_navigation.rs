@@ -1780,7 +1780,14 @@ mod tests {
             reader.decoded_widths.remove(&2);
         }
         app.navigate_chapter(&ui, false);
-        assert!(app.view().reader.as_ref().unwrap().chapter_navigation.is_some());
+        assert!(
+            app.view()
+                .reader
+                .as_ref()
+                .unwrap()
+                .chapter_navigation
+                .is_some()
+        );
         // A fling that was already running delivers one more scroll frame.
         let width = ui.get_reader_width();
         let current = {
@@ -1790,12 +1797,24 @@ mod tests {
         };
         app.position(&ui, current + 40., width, ui.get_reader_viewport_height());
         assert!(
-            app.view().reader.as_ref().unwrap().chapter_navigation.is_some(),
+            app.view()
+                .reader
+                .as_ref()
+                .unwrap()
+                .chapter_navigation
+                .is_some(),
             "momentum frames must not cancel the chapter jump"
         );
         // A new press is the user taking over again.
         ui.invoke_reader_press();
-        assert!(app.view().reader.as_ref().unwrap().chapter_navigation.is_none());
+        assert!(
+            app.view()
+                .reader
+                .as_ref()
+                .unwrap()
+                .chapter_navigation
+                .is_none()
+        );
     }
 
     #[test]
@@ -1896,7 +1915,9 @@ mod tests {
         assert_ne!(after, before, "the contended frame was replayed");
         let stored = app.services.domain.snapshot().unwrap().progress;
         assert!(
-            stored.iter().any(|p| p.anchor.offset_millionths != before.offset_millionths),
+            stored
+                .iter()
+                .any(|p| p.anchor.offset_millionths != before.offset_millionths),
             "the replayed frame is what flush persisted: {stored:?}"
         );
     }
