@@ -1,4 +1,4 @@
-import { Theme, SettingsStyle } from "@NovaUiShared";
+import { Theme, SettingsStyle, Anim } from "@NovaUiShared";
 import { ReaderImageInteraction } from "reader-context-menu.slint";
 
 // Metadata may cover the whole inventory; only admitted, visible entries carry
@@ -21,11 +21,15 @@ export component PageThumbnail inherits Rectangle {
     callback selected(string);
     callback zoom-requested(float, length, length);
     private property <string> label: root.collection ? @tr("Image {}", root.tile.page-number) : @tr("Page {}", root.tile.page-number);
+    // A decoded derivative is present. Collection tiles stay a quiet dark
+    // placeholder until then, so the grid never flashes status text while
+    // thumbnails stream in.
+    private property <bool> ready: root.tile.thumbnail.width > 0;
     accessible-role: button;
     accessible-label: root.label;
     accessible-value: (root.current ? @tr("Current") + ". " : "")
         + (root.tile.error != "" ? @tr("Preview unavailable") + ": " + root.tile.error
-            : root.tile.loading ? @tr("Loading preview") : @tr("Preview ready"))
+            : root.tile.loading ? @tr("Loading preview") : root.ready ? @tr("Preview ready") : @tr("Waiting for preview"))
         + (!root.collection && root.tile.tall-preview ? ". " + @tr("Top section preview; one page") : "");
     accessible-enabled: root.interaction-enabled;
     accessible-checkable: true;
@@ -35,26 +39,43 @@ export component PageThumbnail inherits Rectangle {
     image-frame := Rectangle {
         x: 0px; y: 0px; width: 100%; height: root.collection ? parent.height : parent.height - 32px;
         border-radius: root.collection ? 0px : Theme.card_corner_radius;
-        background: root.collection ? #000000 : Theme.current.home_artwork_placeholder;
+        background: root.collection ? #17181b : Theme.current.home_artwork_placeholder;
         border-width: root.collection ? 0px : root.current || root.focused ? 2px : 1px;
         border-color: root.focused ? Theme.current.focus_ring : root.current ? Theme.current.accent : Theme.current.border_card;
         clip: true;
-        if root.tile.thumbnail.width > 0: Image {
-            x: root.collection ? 0px : 3px; y: root.collection ? 0px : 3px;
-            width: parent.width - (root.collection ? 0px : 6px); height: parent.height - (root.collection ? 0px : 6px);
-            source: root.tile.thumbnail;
-            // Manga pages remain complete (or a labelled bounded top section).
-            // Collections use the worker's centered square derivative.
-            image-fit: root.collection ? cover : contain;
+        // Manga pages remain complete (or a labelled bounded top section).
+        // Collections use the worker's centered square derivative and fade it
+        // in. Anim.enabled is the app-wide motion switch: off means the
+        // thumbnail appears with its first frame. A tile created with its image
+        // already loaded (scrolling back) starts opaque, so only a fresh load
+        // animates.
+        if root.collection: thumb-image := Image {
+            width: parent.width; height: parent.height;
+            source: root.tile.thumbnail; image-fit: cover;
+            horizontal-alignment: center; vertical-alignment: center;
+            opacity: root.ready ? 1 : 0;
+            animate opacity { duration: Anim.enabled ? 150ms : 0ms; easing: ease-out; }
+        }
+        if !root.collection && root.ready: Image {
+            x: 3px; y: 3px; width: parent.width - 6px; height: parent.height - 6px;
+            source: root.tile.thumbnail; image-fit: contain;
             horizontal-alignment: center; vertical-alignment: center;
         }
-        if root.tile.thumbnail.width == 0: Text {
+        if root.collection && !root.ready && root.tile.error != "": Path {
+            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+            width: min(28px, parent.width * 0.4); height: self.width;
+            viewbox-width: 24; viewbox-height: 24;
+            stroke: #8a8d94; stroke-width: 1.6px; fill: transparent;
+            // Framed picture with a diagonal strike: a broken image.
+            commands: "M4 5h16v14H4zM4 16l4.5-4.5 3 3 2-2 6.5 6.5M15 9.5h.01M3 21L21 3";
+        }
+        if !root.collection && !root.ready: Text {
             x: 8px; y: 8px; width: parent.width - 16px; height: parent.height - 16px;
             text: root.tile.error != "" ? @tr("Preview unavailable") : root.tile.loading ? @tr("Loading preview") : @tr("Waiting for preview");
             color: Theme.current.text_secondary; font-size: 12px;
             wrap: word-wrap; horizontal-alignment: center; vertical-alignment: center;
         }
-        if !root.collection && root.tile.tall-preview && root.tile.thumbnail.width > 0: Rectangle {
+        if !root.collection && root.tile.tall-preview && root.ready: Rectangle {
             x: 3px; y: parent.height - 29px; width: parent.width - 6px; height: 26px;
             background: Theme.current.card;
             Text {
@@ -68,9 +89,24 @@ export component PageThumbnail inherits Rectangle {
             width: parent.width - (root.collection ? 0px : 4px); height: parent.height - (root.collection ? 0px : 4px);
             background: Theme.current.selection_wash; border-radius: root.collection ? 0px : max(0px, Theme.card_corner_radius - 2px);
         }
-        if root.collection && (root.current || root.focused): Rectangle {
-            width: 100%; height: 100%; border-width: 2px;
-            border-color: root.focused ? Theme.current.focus_ring : Theme.current.accent;
+        // Current image: a thin inset ring with a dark under-stroke so it
+        // reads over both bright and dark photographs without framing the
+        // whole tile.
+        if root.collection && root.current: current-ring := Rectangle {
+            x: 3px; y: 3px; width: parent.width - 6px; height: parent.height - 6px;
+            border-width: 4px; border-color: #00000066; border-radius: 4px;
+            Rectangle {
+                x: 1px; y: 1px; width: parent.width - 2px; height: parent.height - 2px;
+                border-width: 2px; border-color: Theme.current.accent; border-radius: 3px;
+            }
+        }
+        // Keyboard focus stays a loud full-tile ring.
+        if root.collection && root.focused: focus-ring := Rectangle {
+            width: 100%; height: 100%; border-width: 3px; border-color: Theme.current.focus_ring;
+            Rectangle {
+                x: 3px; y: 3px; width: parent.width - 6px; height: parent.height - 6px;
+                border-width: 1px; border-color: #000000b0;
+            }
         }
     }
     if !root.collection: HorizontalLayout {
