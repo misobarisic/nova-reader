@@ -23,6 +23,7 @@ export component MorePage inherits Rectangle {
     in property <[string]> license-text-chunks;
     in property <[LicenseSource]> license-sources;
     in property <bool> update-checks-enabled: false;
+    in property <bool> update-checking: false;
     in-out property <bool> about-licenses-open;
     in-out property <length> about-scroll-y;
     in-out property <length> about-licenses-scroll-y;
@@ -322,6 +323,7 @@ export component MorePage inherits Rectangle {
             licenses_scroll_y <=> root.about-licenses-scroll-y;
             system_back_request: root.about-back-request;
             update_checks_enabled: root.update-checks-enabled;
+            update_checking: root.update-checking;
             update_status_text: root.status;
             update_check_requested => { root.check-update(); }
             license_source_requested(url) => { root.license-source-requested(url); }

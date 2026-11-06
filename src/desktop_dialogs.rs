@@ -44,6 +44,57 @@ pub(crate) fn pick_zip(ui: &AppWindow, install: impl FnOnce(&AppWindow, Vec<u8>)
     });
 }
 
+/// What a path picker asks the native dialog for.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum PathRequest {
+    ChapterFile,
+    ChapterFolder,
+    BackupOpen,
+    BackupSave,
+}
+
+impl PathRequest {
+    fn dialog(self) -> Option<std::path::PathBuf> {
+        let dialog = rfd::FileDialog::new();
+        match self {
+            Self::ChapterFile => dialog
+                .add_filter("Local chapter", &["cbz", "zip"])
+                .pick_file(),
+            Self::ChapterFolder => dialog.pick_folder(),
+            Self::BackupOpen => dialog.add_filter("Metadata backup", &["json"]).pick_file(),
+            Self::BackupSave => dialog.set_file_name("nova-reader-backup.json").save_file(),
+        }
+    }
+}
+
+/// Run a native path dialog on a worker: the dialog blocks (and on some
+/// desktops pumps its own loop), which must not freeze Slint's event loop.
+/// Cancelling delivers nothing; one dialog at a time.
+pub(crate) fn pick_path(
+    ui: &AppWindow,
+    request: PathRequest,
+    selected: impl FnOnce(&AppWindow, std::path::PathBuf) + Send + 'static,
+) {
+    static ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    use std::sync::atomic::Ordering;
+    if ACTIVE.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let weak = ui.as_weak();
+    std::thread::spawn(move || {
+        let path = request.dialog();
+        let delivered = weak.upgrade_in_event_loop(move |ui| {
+            ACTIVE.store(false, Ordering::Release);
+            if let Some(path) = path {
+                selected(&ui, path);
+            }
+        });
+        if delivered.is_err() {
+            ACTIVE.store(false, Ordering::Release);
+        }
+    });
+}
+
 fn deliver(
     weak: slint::Weak<AppWindow>,
     result: Result<Option<Vec<u8>>, &'static str>,
@@ -72,6 +123,62 @@ mod tests {
         },
         time::Duration,
     };
+
+    #[test]
+    fn path_picker_runs_off_the_event_loop_and_delivers_selection_or_nothing() {
+        const CASE: &str = "READER_PATH_PICKER_TEST_CASE";
+        let Ok(case) = std::env::var(CASE) else {
+            for case in ["selected", "cancelled"] {
+                let fixture = tempfile::tempdir().unwrap();
+                let selected = fixture.path().join("backup.json");
+                let script = fixture.path().join("zenity");
+                std::fs::write(
+                    &script,
+                    "#!/bin/sh\nif [ \"$READER_PATH_PICKER_TEST_CASE\" = cancelled ]; then exit 1; fi\nprintf '%s\\n' \"$READER_PICKER_SELECTED\"\n",
+                )
+                .unwrap();
+                std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+                assert!(
+                    std::process::Command::new(std::env::current_exe().unwrap())
+                        .args([
+                            "--exact",
+                            "desktop_dialogs::tests::path_picker_runs_off_the_event_loop_and_delivers_selection_or_nothing",
+                            "--nocapture",
+                        ])
+                        .env(CASE, case)
+                        .env("PATH", fixture.path())
+                        .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent-reader-test-bus")
+                        .env("READER_PICKER_SELECTED", &selected)
+                        .status()
+                        .unwrap()
+                        .success(),
+                    "path picker case {case} failed"
+                );
+            }
+            return;
+        };
+        i_slint_backend_testing::init_integration_test_with_system_time();
+        let ui = AppWindow::new().unwrap();
+        let delivered = Arc::new(AtomicBool::new(false));
+        let flag = delivered.clone();
+        pick_path(&ui, PathRequest::BackupOpen, move |ui, path| {
+            assert!(path.ends_with("backup.json"));
+            flag.store(true, Ordering::Release);
+            ui.set_status("restored".into());
+        });
+        // The blocking dialog runs on a worker, so the loop is still ours.
+        let marker = Arc::new(AtomicBool::new(false));
+        let ticked = marker.clone();
+        slint::Timer::single_shot(Duration::from_millis(1), move || {
+            ticked.store(true, Ordering::Release)
+        });
+        slint::Timer::single_shot(Duration::from_millis(400), || {
+            slint::quit_event_loop().unwrap()
+        });
+        slint::run_event_loop().unwrap();
+        assert!(marker.load(Ordering::Acquire));
+        assert_eq!(delivered.load(Ordering::Acquire), case == "selected");
+    }
 
     #[test]
     fn native_picker_runs_while_loading_and_delivers_selection_cancel_and_errors() {

@@ -1,0 +1,25 @@
+// Every destructive action (clear history, backup restore, deleting downloads,
+// removing addons or library entries, bulk chapter state) asks first through
+// this one sheet. It builds on Nova's shared action sheet like the save-conflict
+// sheet, so pointer, keyboard, TV navigation, Cancel and outside-tap dismissal
+// behave like Reader's other menus. The host supplies the wording; choice(0)
+// is the confirm row and choice(1) any cancel.
+import { MenuSheet } from "@ReaderMenuSheet";
+
+export component ActionConfirmSheet inherits MenuSheet {
+    in property <string> prompt;
+    in property <string> confirm-label;
+    in property <length> safe-top;
+    callback choice(int);
+    keyboard_navigation: true;
+    sheet_title: root.prompt;
+    accessible-role: groupbox;
+    accessible-label: root.prompt;
+    accessible-enabled: root.open;
+    max_h: max(0px, min(root.height * 0.85, root.height - root.safe-top));
+    items: [
+        { label: root.confirm-label, enabled: true },
+    ];
+    picked(index) => { if root.open { root.choice(index); } }
+    closed => { if root.open { root.choice(1); } }
+}

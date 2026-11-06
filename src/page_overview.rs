@@ -284,10 +284,16 @@ impl Controller {
         )));
         ui.set_overview_title(o.series.title.clone().into());
         ui.set_overview_subtitle(
+            // The tile header already counts pages, so the subtitle names the
+            // chapter being browsed instead of repeating it.
             if o.collection {
                 String::new()
             } else {
-                format!("{} {}", o.inventory.len(), text::tr("pages"))
+                view.chapters
+                    .iter()
+                    .find(|c| c.id == o.chapter)
+                    .map(|c| c.title.clone())
+                    .unwrap_or_default()
             }
             .into(),
         );

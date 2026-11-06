@@ -100,6 +100,9 @@ export component ReaderSettingsForm inherits Rectangle {
     in property <int> rotation: -1;
     in property <string> rotation-label: @tr("Screen orientation");
     in property <string> resolved-mode;
+    // Reading mode in effect (0 is Webtoon). The label above is display text
+    // only; comparing it with translated literals breaks in other languages.
+    in property <int> resolved-mode-index: -1;
     in-out property <int> current-tab: 0;
     callback mode-selected(int);
     callback rotation-selected(int);
@@ -110,7 +113,7 @@ export component ReaderSettingsForm inherits Rectangle {
     private property <string> default-label: ReaderSettings.default-mode == 4 ? @tr("Automatic") : ReaderSettings.default-mode == 1 ? @tr("Left to right") : ReaderSettings.default-mode == 2 ? @tr("Right to left") : ReaderSettings.default-mode == 3 ? @tr("Vertical") : ReaderSettings.default-mode == 0 ? @tr("Webtoon") : @tr("Long strip with gaps");
     private property <int> layout-tab: root.global-settings
         ? ((ReaderSettings.default-mode == 0 || ReaderSettings.default-mode == 5) ? 1 : 0)
-        : ((root.mode == 0 || root.mode == 5 || root.resolved-mode == @tr("Webtoon") || root.resolved-mode == @tr("Long strip with gaps")) ? 1 : 0);
+        : ((root.mode == 0 || root.mode == 5 || root.resolved-mode-index == 0) ? 1 : 0);
     private property <int> focus-request: SettingsStyle.focus-request;
     changed focus-request => {
         if SettingsStyle.keyboard-mode && root.interactive && root.visible {
@@ -302,6 +305,9 @@ export component ReaderSettingsPanel inherits Rectangle {
     in property <int> rotation: -1;
     in property <string> rotation-label: @tr("Screen orientation");
     in property <string> resolved-mode;
+    // Reading mode in effect (0 is Webtoon). The label above is display text
+    // only; comparing it with translated literals breaks in other languages.
+    in property <int> resolved-mode-index: -1;
     in-out property <int> current-tab: 0;
     callback mode-selected(int);
     callback rotation-selected(int);
@@ -353,7 +359,7 @@ export component ReaderSettingsPanel inherits Rectangle {
             }
             form := ReaderSettingsForm {
                 global-settings: root.global-settings; interactive: root.interactive && root.open;
-                mode: root.mode; rotation: root.rotation; rotation-label: root.rotation-label; resolved-mode: root.resolved-mode; current-tab <=> root.current-tab;
+                mode: root.mode; rotation: root.rotation; rotation-label: root.rotation-label; resolved-mode: root.resolved-mode; resolved-mode-index: root.resolved-mode-index; current-tab <=> root.current-tab;
                 mode-selected(i) => { root.mode-selected(i); }
                 rotation-selected(i) => { root.rotation-selected(i); }
             }

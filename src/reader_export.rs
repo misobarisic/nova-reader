@@ -4,6 +4,7 @@
 use crate::capture_settings::{CaptureFormat, CapturePreferences, ConflictPolicy};
 use crate::image_storage::ImageStorageFormat;
 use image::ImageEncoder;
+use nova_reader_ui::backend_text as text;
 use std::sync::Arc;
 
 pub struct ExportImage {
@@ -18,7 +19,7 @@ impl ExportImage {
     /// Preserve the original encoded page rather than saving its display tiles.
     pub fn original(bytes: Vec<u8>, name: &str) -> Result<Self, String> {
         reader_engine::inspect_image(&bytes, reader_engine::current_limits())
-            .map_err(|error| format!("Cannot export page image: {error}"))?;
+            .map_err(|error| format!("{}: {error}", text::tr("Cannot export page image")))?;
         let (mime, extension) = if reader_engine::is_jpeg_xl(&bytes) {
             ("image/jxl", "jxl")
         } else {
@@ -27,7 +28,7 @@ impl ExportImage {
                 image::ImageFormat::Jpeg => ("image/jpeg", "jpg"),
                 image::ImageFormat::WebP => ("image/webp", "webp"),
                 image::ImageFormat::Avif => ("image/avif", "avif"),
-                _ => return Err("Unsupported page image format".into()),
+                _ => return Err(text::tr("Unsupported page image format")),
             }
         };
         let stem = std::path::Path::new(name)
@@ -80,9 +81,8 @@ impl ExportImage {
                 mime: "image/png".into(),
                 name: "screencap.png".into(),
                 clipboard_rgba: Some(
-                    image::RgbaImage::from_raw(width, height, pixels).ok_or_else(|| {
-                        "Screenshot pixels do not match its dimensions".to_string()
-                    })?,
+                    image::RgbaImage::from_raw(width, height, pixels)
+                        .ok_or_else(|| text::tr("Screenshot pixels do not match its dimensions"))?,
                 ),
             });
         }
@@ -115,7 +115,12 @@ impl ExportImage {
             )?;
             if preferences.format == CaptureFormat::Avif {
                 reader_engine::inspect_image(&bytes, reader_engine::current_limits()).map_err(
-                    |error| format!("AVIF screenshot exceeds decode admission: {error}"),
+                    |error| {
+                        format!(
+                            "{}: {error}",
+                            text::tr("AVIF screenshot exceeds decode admission")
+                        )
+                    },
                 )?;
             }
             if matches!(
@@ -124,7 +129,12 @@ impl ExportImage {
             ) {
                 // Clipboard decoding and later Reader imports use the same bounds.
                 reader_engine::decode_image(&bytes, reader_engine::current_limits()).map_err(
-                    |error| format!("JPEG XL screencap exceeds decode admission: {error}"),
+                    |error| {
+                        format!(
+                            "{}: {error}",
+                            text::tr("JPEG XL screencap exceeds decode admission")
+                        )
+                    },
                 )?;
             }
             let (mime, extension) = match preferences.format {
@@ -150,9 +160,9 @@ fn validate_screencap(width: u32, height: u32, bytes: usize) -> Result<(), Strin
         .checked_mul(u64::from(height))
         .and_then(|pixels| pixels.checked_mul(4))
         .filter(|bytes| *bytes > 0 && *bytes <= 8_000_000 * 4 && width <= 16384 && height <= 65536)
-        .ok_or_else(|| "Screenshot dimensions exceed supported limits".to_string())?;
+        .ok_or_else(|| text::tr("Screenshot dimensions exceed supported limits"))?;
     if expected != bytes as u64 {
-        return Err("Screenshot pixels do not match its dimensions".into());
+        return Err(text::tr("Screenshot pixels do not match its dimensions"));
     }
     Ok(())
 }
@@ -170,7 +180,7 @@ fn clipboard_pixels(image: &mut ExportImage) -> Result<image::RgbaImage, String>
             ..reader_engine::current_limits()
         },
     )
-    .map_err(|error| format!("Cannot decode clipboard image: {error}"))
+    .map_err(|error| format!("{}: {error}", text::tr("Cannot decode clipboard image")))
 }
 
 /// Reencode only newly fetched storage bytes. Source dimensions are preserved;
@@ -232,12 +242,18 @@ fn reencode_image_with_lossless(
     limits: reader_engine::DecodeLimits,
     lossless: bool,
 ) -> Result<Vec<u8>, String> {
-    let image = reader_engine::decode_image(bytes, limits)
-        .map_err(|error| format!("Cannot decode image for compression: {error}"))?;
+    let image = reader_engine::decode_image(bytes, limits).map_err(|error| {
+        format!(
+            "{}: {error}",
+            text::tr("Cannot decode image for compression")
+        )
+    })?;
     // Keep transparent artwork readable: callers retain the original when
     // JPEG cannot represent it. Screenshot exports use Nova's separate rules.
     if format == ImageStorageFormat::Jpeg && image.pixels().any(|pixel| pixel[3] != 255) {
-        return Err("JPEG compression cannot preserve image transparency".into());
+        return Err(text::tr(
+            "JPEG compression cannot preserve image transparency",
+        ));
     }
     let encoded = match format {
         ImageStorageFormat::JxlLossless | ImageStorageFormat::JxlLossy => nova_image::encode_jxl(
@@ -262,10 +278,12 @@ fn reencode_image_with_lossless(
         )?,
         ImageStorageFormat::Webp if lossless => {
             if image.width() > 16383 || image.height() > 16383 {
-                return Err("WebP supports image dimensions up to 16383 pixels".into());
+                return Err(text::tr(
+                    "WebP supports image dimensions up to 16383 pixels",
+                ));
             }
             let mut config =
-                webp::WebPConfig::new().map_err(|_| "Cannot configure WebP encoder")?;
+                webp::WebPConfig::new().map_err(|_| text::tr("Cannot configure WebP encoder"))?;
             config.lossless = 1;
             config.alpha_compression = 0;
             // Keep RGB beneath transparent pixels; the basic encoder permits
@@ -274,7 +292,7 @@ fn reencode_image_with_lossless(
             config.quality = 75.;
             webp::Encoder::from_rgba(image.as_raw(), image.width(), image.height())
                 .encode_advanced(&config)
-                .map_err(|error| format!("Cannot encode image: {error:?}"))?
+                .map_err(|error| format!("{}: {error:?}", text::tr("Cannot encode image")))?
                 .to_vec()
         }
         ImageStorageFormat::Webp => encode_rgba(
@@ -295,18 +313,26 @@ fn reencode_image_with_lossless(
         )?,
     };
     if encoded.len() > limits.max_encoded_bytes {
-        return Err("Compressed image exceeds encoded byte limit".into());
+        return Err(text::tr("Compressed image exceeds encoded byte limit"));
     }
     drop(image);
     if matches!(
         format,
         ImageStorageFormat::JxlLossless | ImageStorageFormat::JxlLossy
     ) {
-        nova_image::decode_jxl(&encoded, limits)
-            .map_err(|error| format!("Compressed image exceeds decode admission: {error}"))?;
+        nova_image::decode_jxl(&encoded, limits).map_err(|error| {
+            format!(
+                "{}: {error}",
+                text::tr("Compressed image exceeds decode admission")
+            )
+        })?;
     } else {
-        reader_engine::inspect_image(&encoded, limits)
-            .map_err(|error| format!("Compressed image exceeds decode admission: {error}"))?;
+        reader_engine::inspect_image(&encoded, limits).map_err(|error| {
+            format!(
+                "{}: {error}",
+                text::tr("Compressed image exceeds decode admission")
+            )
+        })?;
     }
     Ok(encoded)
 }
@@ -325,7 +351,7 @@ fn encode_rgba(
         CaptureFormat::Png => {
             image::codecs::png::PngEncoder::new(&mut bytes)
                 .write_image(pixels, width, height, image::ExtendedColorType::Rgba8)
-                .map_err(|error| format!("Cannot encode image: {error}"))?;
+                .map_err(|error| format!("{}: {error}", text::tr("Cannot encode image")))?;
         }
         CaptureFormat::Jpeg => {
             // Match Nova: JPEG stores the source RGB channels and has no alpha.
@@ -337,15 +363,17 @@ fn encode_rgba(
                 .collect::<Vec<_>>();
             image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, quality)
                 .encode(&rgb, width, height, image::ExtendedColorType::Rgb8)
-                .map_err(|error| format!("Cannot encode image: {error}"))?;
+                .map_err(|error| format!("{}: {error}", text::tr("Cannot encode image")))?;
         }
         CaptureFormat::WebpLossless | CaptureFormat::WebpLossy => {
             if width > 16383 || height > 16383 {
-                return Err("WebP supports image dimensions up to 16383 pixels".into());
+                return Err(text::tr(
+                    "WebP supports image dimensions up to 16383 pixels",
+                ));
             }
             bytes = webp::Encoder::from_rgba(pixels, width, height)
                 .encode_simple(format == CaptureFormat::WebpLossless, f32::from(quality))
-                .map_err(|error| format!("Cannot encode image: {error:?}"))?
+                .map_err(|error| format!("{}: {error:?}", text::tr("Cannot encode image")))?
                 .to_vec();
         }
         CaptureFormat::JxlLossless | CaptureFormat::JxlLossy => {
@@ -355,11 +383,11 @@ fn encode_rgba(
                 nova_image::JxlEncoding::Lossy { quality }
             };
             bytes = nova_image::encode_jxl(width, height, pixels, encoding, limits)
-                .map_err(|error| format!("Cannot encode JPEG XL image: {error}"))?;
+                .map_err(|error| format!("{}: {error}", text::tr("Cannot encode JPEG XL image")))?;
         }
         CaptureFormat::Avif => {
             bytes = nova_image::encode_avif(width, height, pixels, quality, limits)
-                .map_err(|error| format!("Cannot encode AVIF image: {error}"))?;
+                .map_err(|error| format!("{}: {error}", text::tr("Cannot encode AVIF image")))?;
         }
     }
     Ok(bytes)
@@ -406,21 +434,21 @@ pub fn deliver_with_context(
     callback: impl FnOnce(Result<(), String>) + Send + 'static,
 ) {
     if !(context.current)() {
-        callback(Err("Image action cancelled".into()));
+        callback(Err(text::tr("Image action cancelled")));
         return;
     }
     if !matches!(
         image.mime.as_str(),
         "image/png" | "image/jpeg" | "image/webp" | "image/avif" | "image/jxl"
     ) {
-        callback(Err("Unsupported image export format".into()));
+        callback(Err(text::tr("Unsupported image export format")));
         return;
     }
     #[cfg(not(target_os = "android"))]
     if !clipboard && image.clipboard_rgba.is_some() {
-        callback(Err(
-            "Clipboard pixels cannot be saved without encoding".into()
-        ));
+        callback(Err(text::tr(
+            "Clipboard pixels cannot be saved without encoding",
+        )));
         return;
     }
     platform::deliver(image, clipboard, context, Box::new(callback));
@@ -481,40 +509,47 @@ fn publish_file(
             .and_then(|s| s.to_str())
             != Some(filename)
     {
-        return Err("Invalid image filename".into());
+        return Err(text::tr("Invalid image filename"));
     }
     let destination = directory.join(filename);
     if !(context.current)() {
-        return Err("Image action cancelled".into());
+        return Err(text::tr("Image action cancelled"));
     }
-    std::fs::create_dir_all(&directory).map_err(|e| format!("Cannot create image folder: {e}"))?;
+    std::fs::create_dir_all(&directory)
+        .map_err(|e| format!("{}: {e}", text::tr("Cannot create image folder")))?;
     let mut staged = tempfile::Builder::new()
         .prefix(".nova-reader-image-")
         .tempfile_in(&directory)
-        .map_err(|e| format!("Cannot stage saved image: {e}"))?;
+        .map_err(|e| format!("{}: {e}", text::tr("Cannot stage saved image")))?;
     staged
         .write_all(&image.bytes)
         .and_then(|_| staged.flush())
         .and_then(|_| staged.as_file().sync_all())
-        .map_err(|e| format!("Cannot write saved image: {e}"))?;
+        .map_err(|e| format!("{}: {e}", text::tr("Cannot write saved image")))?;
     let mut path = destination.clone();
     let mut number = 0u32;
     loop {
         if !(context.current)() {
-            return Err("Image action cancelled".into());
+            return Err(text::tr("Image action cancelled"));
         }
         match staged.persist_noclobber(&path) {
             Ok(_) => return Ok(path),
             Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
                 staged = error.file
             }
-            Err(error) => return Err(format!("Cannot publish saved image: {}", error.error)),
+            Err(error) => {
+                return Err(format!(
+                    "{}: {}",
+                    text::tr("Cannot publish saved image"),
+                    error.error
+                ));
+            }
         }
         if number == 0 {
             let choice = match context.policy {
                 ConflictPolicy::Overwrite => ConflictChoice::Overwrite,
                 ConflictPolicy::DoNothing => {
-                    return Err("Image already exists; nothing saved.".into());
+                    return Err(text::tr("Image already exists; nothing saved."));
                 }
                 ConflictPolicy::Ask => {
                     let (send, receive) = std::sync::mpsc::sync_channel(1);
@@ -542,16 +577,18 @@ fn publish_file(
                 }
             };
             match choice {
-                ConflictChoice::Cancel => return Err("Image action cancelled".into()),
+                ConflictChoice::Cancel => return Err(text::tr("Image action cancelled")),
                 ConflictChoice::Overwrite => {
                     if !(context.current)() {
-                        return Err("Image action cancelled".into());
+                        return Err(text::tr("Image action cancelled"));
                     }
                     // tempfile persist replaces atomically, including on Windows.
                     return staged
                         .persist(&destination)
                         .map(|_| destination)
-                        .map_err(|e| format!("Cannot replace saved image: {}", e.error));
+                        .map_err(|e| {
+                            format!("{}: {}", text::tr("Cannot replace saved image"), e.error)
+                        });
                 }
                 ConflictChoice::AddNumber => {}
             }
@@ -559,7 +596,7 @@ fn publish_file(
         number = number
             .checked_add(1)
             .filter(|n| *n <= 10000)
-            .ok_or("Cannot allocate an image filename")?;
+            .ok_or_else(|| text::tr("Cannot allocate an image filename"))?;
         path = directory.join(crate::export_names::numbered(filename, number));
     }
 }
@@ -573,6 +610,7 @@ pub fn shutdown() {
 #[cfg(not(target_os = "android"))]
 mod platform {
     use super::{Callback, ExportImage, SaveContext};
+    use nova_reader_ui::backend_text as text;
     use std::sync::{
         Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
@@ -604,7 +642,7 @@ mod platform {
         callback: Callback,
     ) {
         if BUSY.swap(true, Ordering::AcqRel) {
-            complete(callback, Err("Another image export is active".into()));
+            complete(callback, Err(text::tr("Another image export is active")));
             return;
         }
         let callback: Callback = Box::new(move |result| {
@@ -632,7 +670,7 @@ mod platform {
                                 save(&job.image, &job.context)
                             }
                         }))
-                        .unwrap_or_else(|_| Err("Image export worker failed".into()));
+                        .unwrap_or_else(|_| Err(text::tr("Image export worker failed")));
                         drop(job.image);
                         complete(job.callback, result);
                     }
@@ -642,7 +680,13 @@ mod platform {
                 Ok(thread) => thread,
                 Err(error) => {
                     drop(worker);
-                    complete(callback, Err(format!("Cannot start image export: {error}")));
+                    complete(
+                        callback,
+                        Err(format!(
+                            "{}: {error}",
+                            text::tr("Cannot start image export")
+                        )),
+                    );
                     return;
                 }
             };
@@ -661,16 +705,18 @@ mod platform {
         drop(worker);
         if let Err(error) = result {
             let (job, message) = match error {
-                mpsc::TrySendError::Full(job) => (job, "Another image export is active"),
-                mpsc::TrySendError::Disconnected(job) => (job, "Image export worker stopped"),
+                mpsc::TrySendError::Full(job) => (job, text::tr("Another image export is active")),
+                mpsc::TrySendError::Disconnected(job) => {
+                    (job, text::tr("Image export worker stopped"))
+                }
             };
-            complete(job.callback, Err(message.into()));
+            complete(job.callback, Err(message));
         }
     }
 
     fn save(image: &ExportImage, context: &SaveContext) -> Result<(), String> {
         let directories = directories::UserDirs::new()
-            .ok_or_else(|| "Pictures directory is unavailable".to_string())?;
+            .ok_or_else(|| text::tr("Pictures directory is unavailable"))?;
         let pictures = directories
             .picture_dir()
             .map(std::path::Path::to_path_buf)
@@ -684,17 +730,16 @@ mod platform {
         clipboard: &mut Option<arboard::Clipboard>,
     ) -> Result<(), String> {
         if !(context.current)() {
-            return Err("Image action cancelled".into());
+            return Err(text::tr("Image action cancelled"));
         }
         let rgba = super::clipboard_pixels(image)?;
         if clipboard.is_none() {
-            *clipboard = Some(
-                arboard::Clipboard::new()
-                    .map_err(|error| format!("Cannot access image clipboard: {error}"))?,
-            );
+            *clipboard = Some(arboard::Clipboard::new().map_err(|error| {
+                format!("{}: {error}", text::tr("Cannot access image clipboard"))
+            })?);
         }
         if !(context.current)() {
-            return Err("Image action cancelled".into());
+            return Err(text::tr("Image action cancelled"));
         }
         clipboard
             .as_mut()
@@ -704,7 +749,7 @@ mod platform {
                 height: rgba.height() as usize,
                 bytes: std::borrow::Cow::Owned(rgba.into_raw()),
             })
-            .map_err(|error| format!("Cannot copy image: {error}"))
+            .map_err(|error| format!("{}: {error}", text::tr("Cannot copy image")))
     }
 
     pub(super) fn shutdown() {
@@ -736,6 +781,7 @@ mod platform {
 #[cfg(target_os = "android")]
 mod platform {
     use super::{Callback, ConflictPolicy, ExportImage, SaveContext};
+    use nova_reader_ui::backend_text as text;
     use std::sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -762,7 +808,7 @@ mod platform {
         callback: Callback,
     ) {
         if BUSY.swap(true, Ordering::AcqRel) {
-            callback(Err("Another image export is active".into()));
+            callback(Err(text::tr("Another image export is active")));
             return;
         }
         let completion = Arc::new(Mutex::new(Some(callback)));
@@ -773,7 +819,7 @@ mod platform {
         let thread = std::thread::Builder::new()
             .name("reader-image-export".into())
             .spawn(move || {
-                if !(context.current)() {finish(completion,Err("Image action cancelled".into()));return;}
+                if !(context.current)() {finish(completion,Err(text::tr("Image action cancelled")));return;}
                 let name = context.filename.clone();
                 let staged = (|| {
                     let root = crate::android_documents::cache_dir()?.join("image-export");
@@ -789,7 +835,7 @@ mod platform {
                             .is_some_and(|extension| extension == "image")
                         {
                             std::fs::remove_file(entry.path())
-                                .map_err(|error| format!("Cannot clean staged image: {error}"))?;
+                                .map_err(|error| format!("{}: {error}", text::tr("Cannot clean staged image")))?;
                         }
                     }
                     let timestamp = std::time::SystemTime::now()
@@ -803,7 +849,7 @@ mod platform {
                     ));
                     std::fs::write(&path, image.bytes).map_err(|error| {
                         let _ = std::fs::remove_file(&path);
-                        format!("Cannot stage image: {error}")
+                        format!("{}: {error}", text::tr("Cannot stage image"))
                     })?;
                     Ok::<_, String>(path)
                 })();
@@ -815,7 +861,7 @@ mod platform {
                     }
                 };
                 let cleanup = path.clone();
-                if !(context.current)() {let _=std::fs::remove_file(&cleanup);finish(completion,Err("Image action cancelled".into()));return;}
+                if !(context.current)() {let _=std::fs::remove_file(&cleanup);finish(completion,Err(text::tr("Image action cancelled")));return;}
                 let finished = move |result| {
                     let _ = std::fs::remove_file(cleanup);
                     finish(completion, result);
@@ -854,7 +900,10 @@ mod platform {
         if let Err(error) = thread {
             finish(
                 on_spawn_error,
-                Err(format!("Cannot start image export: {error}")),
+                Err(format!(
+                    "{}: {error}",
+                    text::tr("Cannot start image export")
+                )),
             );
         }
     }

@@ -33,6 +33,7 @@ export component AboutPage inherits Rectangle {
     in property <[LicenseSource]> license_sources;
     in property <string> app_version: "";
     in property <bool> update_checks_enabled: false;
+    in property <bool> update_checking: false;
     in property <string> update_status_text: "";
     callback update_check_requested();
     private property <int> about_action: 0;
@@ -175,7 +176,7 @@ export component AboutPage inherits Rectangle {
                     root.back();
                 } else if (!root.licenses_open) {
                     if root.about_action == 0 { root.open_licenses(); }
-                    else if root.about_action == 1 && root.update_checks_enabled { root.update_check_requested(); }
+                    else if root.about_action == 1 && root.update_checks_enabled && !root.update_checking { root.update_check_requested(); }
                 }
                 else if (root.kb_zone != 2 && root.source_index < root.license_sources.length) {
                     root.license_source_requested(root.license_sources[root.source_index].url);
@@ -361,8 +362,8 @@ export component AboutPage inherits Rectangle {
                             wrap: word-wrap;
                         }
                         if root.update_checks_enabled: PillButton {
-                            label: @tr("Check for updates");
-                            enabled: root.active && !root.licenses_open;
+                            label: root.update_checking ? @tr("Checking…") : @tr("Check for updates");
+                            enabled: root.active && !root.licenses_open && !root.update_checking;
                             focused: root.kb_zone == 1 && root.about_action == 1 && root.kb_active;
                             wrap_label: true;
                             clicked => { root.about_action = 1; root.update_check_requested(); }

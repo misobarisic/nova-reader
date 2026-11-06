@@ -139,7 +139,9 @@ pub(crate) fn scan_invite(callback: impl FnOnce(Result<String, String>) + Send +
         let mut pending = SCAN.lock().unwrap_or_else(|e| e.into_inner());
         if pending.is_some() {
             drop(pending);
-            callback(Err("A QR scan is already active".into()));
+            callback(Err(nova_reader_ui::backend_text::tr(
+                "A QR scan is already active",
+            )));
             return;
         }
         *pending = Some(Box::new(callback));
@@ -274,6 +276,7 @@ pub extern "system" fn Java_dev_misob_nova_reader_QrScanActivity_nativeCancelled
     _env: jni::JNIEnv,
     _this: JObject,
 ) {
+    // Matched by `backend_text::is_user_cancel`; keep the wording in sync.
     finish_scan(Err("QR scan cancelled".into()));
 }
 #[unsafe(no_mangle)]

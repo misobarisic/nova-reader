@@ -2,11 +2,11 @@ THIRD-PARTY VENDOR INVENTORY
 
 NOVA READER APPLICATION AND SHARED CRATES
 Nova Reader and its reader-domain, reader-sources, reader-engine,
-reader-downloads, reader-catalogue and UI crates are GPL-3.0-or-later.
+reader-downloads, reader-catalogue, reader-capture and UI crates are GPL-3.0-or-later.
 Application/build/UI foundations derive from Nova revision
 b69a1e5765ecc65ac3b00acdfe2f16e2f46a5dda. nova-storage, nova-ui-base,
-nova-cache and nova-image are
-consumed from nova-kit revision f2b7ebe26329afa752e8eb447e0e00ba025cc72e.
+nova-cache, nova-image and nova-sync are
+consumed from nova-kit revision 1c30a81a576d5d2e0e79778c95d50a4d044b2aaa.
 The generated Cargo catalog lists runtime crates for the actual target and
 features; the complete project license and third-party notices follow.
 

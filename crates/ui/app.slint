@@ -31,6 +31,7 @@ import { ReaderOsd } from "reader-osd.slint";
 import { ReaderSettings, ReaderSettingsPanel } from "reader-settings.slint";
 export { ReaderSettings } from "reader-settings.slint";
 import { SaveConflictSheet } from "save-conflict-sheet.slint";
+import { ActionConfirmSheet } from "action-confirm-sheet.slint";
 import { LibraryFilterChip } from "@NovaUiBase/filter-chip.slint";
 import { LibraryPage } from "library-page.slint";
 import { EntryMenu, EntryCategoryRow } from "entry-menu.slint";
@@ -109,6 +110,53 @@ export component AppWindow inherits Window {
     in-out property <bool> export-conflict-open: false;
     in-out property <string> export-conflict-name;
     callback export-conflict-choice(int);
+    in-out property <bool> restore-confirm-open: false;
+    in property <bool> update-checking: false;
+    function resolve-restore-confirm(choice: int) {
+        if !root.restore-confirm-open { return; }
+        root.restore-confirm-open = false;
+        if choice == 0 { root.backup(true); }
+    }
+    in-out property <bool> download-confirm-open: false;
+    in-out property <string> download-confirm-message;
+    callback download-confirm-choice(int);
+    function resolve-download-confirm(choice: int) {
+        if !root.download-confirm-open { return; }
+        root.download-confirm-open = false;
+        root.download-confirm-choice(choice);
+    }
+    // One sheet confirms every destructive action that has no undo. The pending
+    // call is captured when the sheet opens, so list reorders cannot retarget it.
+    private property <bool> action-confirm-open: false;
+    private property <string> action-confirm-prompt;
+    private property <string> action-confirm-label;
+    private property <string> action-confirm-kind;
+    private property <string> action-confirm-a;
+    private property <string> action-confirm-b;
+    private property <int> action-confirm-index;
+    function ask-confirm(kind: string, a: string, b: string, index: int, prompt: string, label: string) {
+        root.action-confirm-kind = kind; root.action-confirm-a = a; root.action-confirm-b = b;
+        root.action-confirm-index = index; root.action-confirm-prompt = prompt;
+        root.action-confirm-label = label; root.action-confirm-open = true;
+    }
+    function resolve-action-confirm(choice: int) {
+        if !root.action-confirm-open { return; }
+        root.action-confirm-open = false;
+        if choice == 0 {
+            if root.action-confirm-kind == "extension" { root.extension-action(root.action-confirm-a, root.action-confirm-b); }
+            else if root.action-confirm-kind == "source" { root.source-action(root.action-confirm-a); }
+            else if root.action-confirm-kind == "library" { root.toggle-library(); }
+            else if root.action-confirm-kind == "entry" { root.entry-action(root.action-confirm-a, root.action-confirm-b); }
+            else if root.action-confirm-kind == "chapter" { root.item-action(root.action-confirm-index, root.action-confirm-a); }
+        }
+        keyboard.focus();
+    }
+    function confirm-entry-action(key: string, action: string) {
+        if action == "remove" { root.ask-confirm("entry", key, action, 0, @tr("Remove this title from your library?"), @tr("Remove from library")); }
+        else if action == "mark-all-read" { root.ask-confirm("entry", key, action, 0, @tr("Mark every chapter of this title as read?"), @tr("Mark all read")); }
+        else if action == "mark-all-unread" { root.ask-confirm("entry", key, action, 0, @tr("Mark every chapter of this title as unread?"), @tr("Mark all unread")); }
+        else { root.ask-confirm("entry", key, action, 0, @tr("Clear every saved reading position for this title?"), @tr("Clear all chapter positions")); }
+    }
     function resolve-export-conflict(choice: int) {
         if !root.export-conflict-open { return; }
         root.export-conflict-open = false;
@@ -202,6 +250,9 @@ export component AppWindow inherits Window {
     callback source-filter-selected(string,int);
     callback source-filters-applied;
     in property <string> series-title;
+    // Counts for the chapter filter empty state; Rust refreshes them with the rows.
+    in property <int> detail-unread-count;
+    in property <int> detail-downloaded-count;
     in property <string> detail-series-key;
     in-out property <bool> detail-gallery-single;
     in-out property <length> detail-scroll-y: 0px;
@@ -232,6 +283,7 @@ export component AppWindow inherits Window {
     // Actual renderer modes stay 0–3; index 4 is a persisted Automatic choice.
     in-out property <int> reader-mode-choice: 6;
     in-out property <int> reader-rotation-choice: -1;
+    private property <bool> clear-history-confirm-open: false;
     in-out property <string> reader-mode-label: @tr("Webtoon");
     in-out property <string> reader-chapter-title;
     in-out property <bool> reader-bookmarked: false;
@@ -318,7 +370,6 @@ export component AppWindow inherits Window {
     public function flash-reader-page() { if ReaderSettings.page-flash { root.reader-flash-active = true; reader-flash-timer.restart(); } }
     reader-flash-timer := Timer { interval: 100ms; triggered => { root.reader-flash-active = false; } }
     in-out property <float> zoom: 1;
-    in property <string> position-label;
     in property <bool> can-previous;
     in property <bool> can-next;
     in-out property <string> path-text;
@@ -348,6 +399,12 @@ export component AppWindow inherits Window {
     function entry-menu-picked(action: string) {
         // Dispatch before the conditional overlay is destroyed, including
         // accessibility actions. Category toggles retain this captured ID.
+        if action == "remove" || action == "mark-all-read" || action == "mark-all-unread" || action == "clear-all-positions" {
+            let key = root.entry-menu-key;
+            root.close-entry-menu();
+            root.confirm-entry-action(key, action);
+            return;
+        }
         root.entry-action(root.entry-menu-key,action);
         if action == "categories" { root.entry-menu-editing = true; }
         else if action == "change-status" { root.entry-menu-status-editing = true; }
@@ -562,6 +619,9 @@ export component AppWindow inherits Window {
     callback flush-progress;
 
     public function go-back() {
+        if root.action-confirm-open { root.resolve-action-confirm(1); return; }
+        if root.restore-confirm-open { root.resolve-restore-confirm(1); return; }
+        if root.download-confirm-open { root.resolve-download-confirm(1); return; }
         if root.export-conflict-open { root.resolve-export-conflict(2); return; }
         if root.capture-editor-visible {
             root.capture-editor-action(root.capture-editor-preview-mode ? "adjust" : "cancel"); return;
@@ -604,6 +664,9 @@ export component AppWindow inherits Window {
         }
         ReaderSettingsSync.open = false;
         if root.export-conflict-open { root.resolve-export-conflict(2); }
+        if root.action-confirm-open { root.resolve-action-confirm(1); }
+        if root.restore-confirm-open { root.resolve-restore-confirm(1); }
+        if root.download-confirm-open { root.resolve-download-confirm(1); }
         if root.entry-menu-visible { root.close-entry-menu(); }
         root.detail-restore-pending = root.section == 5;
         if root.reader-context-visible { root.close-reader-context(); }
@@ -758,7 +821,7 @@ export component AppWindow inherits Window {
                                     if root.browse-tab == 1: VerticalLayout {
                                         spacing: 12px;
                                         ActionButton { text: @tr("Install addon"); enabled: !root.addon-zip-import-busy; clicked => { root.install-addon(); } }
-                                        ExtensionList { items: root.extensions; action(id,action) => { root.extension-action(id,action); } }
+                                        ExtensionList { items: root.extensions; action(id,action) => { if action == "remove" { root.ask-confirm("extension", id, action, 0, @tr("Remove this addon? Its sources will no longer be available."), @tr("Remove addon")); } else { root.extension-action(id,action); } } }
                                     }
                                 }
                                 if root.section == 3 && root.source-catalog-open: VerticalLayout {
@@ -801,16 +864,22 @@ export component AppWindow inherits Window {
                                     if root.source-options-open: HorizontalLayout {
                                         spacing: 8px;
                                         ActionButton { text: @tr("Enable / disable"); clicked => { root.source-action("toggle"); } }
-                                        ActionButton { text: @tr("Remove"); clicked => { root.source-action("remove"); } }
+                                        ActionButton { text: @tr("Remove"); clicked => { root.ask-confirm("source", "remove", "", 0, @tr("Remove this addon? Its sources will no longer be available."), @tr("Remove addon")); } }
                                         ActionButton { text: @tr("Settings"); clicked => { root.source-action("settings"); } }
                                     }
                                 }
-                                if root.section == 1: ActionButton { text: @tr("Refresh library"); clicked => { root.browse("refresh"); } }
+                                if root.section == 1: HorizontalLayout {
+                                    spacing: 12px;
+                                    // The shared busy row is hidden on Updates, so progress shows here.
+                                    ActionButton { text: @tr("Refresh library"); enabled: !root.busy; clicked => { root.browse("refresh"); } }
+                                    if root.busy: Spinner { width: 24px; height: 24px; }
+                                    if root.busy: Text { min-width: 0px; text: @tr("Refreshing library…"); color: Theme.current.text_secondary; vertical-alignment: center; }
+                                }
                                 if root.section == 2: HorizontalLayout {
                                     spacing: 8px;
                                     history-query := LineEdit { placeholder-text: @tr("Search history…"); accepted => { root.search(self.text); } }
                                     ActionButton { width: 80px; text: @tr("Search"); clicked => { root.search(history-query.text); } }
-                                    IconAction { width: 44px; text: @tr("Clear history"); icon: @image-url("../../assets/icons/navigation/delete.svg"); clicked => { root.item-action(-1,"clear-history"); } }
+                                    IconAction { width: 44px; text: @tr("Clear history"); icon: @image-url("../../assets/icons/navigation/delete.svg"); clicked => { root.clear-history-confirm-open = true; } }
                                 }
                                 if root.section == 1 || root.section == 2: TimelineList {
                                     items: root.items; history: root.section == 2;
@@ -828,7 +897,7 @@ export component AppWindow inherits Window {
                                     poster: root.series-poster; in-library: root.in-library; can-resume: root.items.length > 0;
                                     narrow: root.mobile-ui; scroll-y: page-scroll.content-y;
                                     expanded <=> root.detail-synopsis-expanded;
-                                    resume => { root.detail-scroll-y = page-scroll.content-y; root.chapter-step(0); } toggle-library => { root.toggle-library(); }
+                                    resume => { root.detail-scroll-y = page-scroll.content-y; root.chapter-step(0); } toggle-library => { if root.in-library { root.ask-confirm("library", "", "", 0, @tr("Remove this title from your library?"), @tr("Remove from library")); } else { root.toggle-library(); } }
                                     request-artwork => { root.request-artwork(-1,-1); }
                                 }
                                 if root.section == 3 && root.source-catalog-open && root.items.length > 0: SeriesGrid {
@@ -861,10 +930,27 @@ export component AppWindow inherits Window {
                                         LibraryFilterChip { label: @tr("Unread"); selected: root.chapter-filter == 1; keyboard-focusable: true; picked => {root.chapter-filter=1;} accessible-action-default => {root.chapter-filter=1;} }
                                         LibraryFilterChip { label: @tr("Downloaded"); selected: root.chapter-filter == 2; keyboard-focusable: true; picked => {root.chapter-filter=2;} accessible-action-default => {root.chapter-filter=2;} }
                                     }
-                                    for chapter[i] in root.items: ChapterRow {
-                                        visible: root.chapter-filter == 0 || (root.chapter-filter == 1 && !chapter.read) || (root.chapter-filter == 2 && chapter.downloaded);
-                                        height: self.visible ? 80px : 0px;
-                                        chapter: chapter; picked => { root.detail-scroll-y = page-scroll.content-y; root.open-item(i); } action(action) => { root.item-action(i,action); }
+                                    if root.items.length > 0 && ((root.chapter-filter == 1 && root.detail-unread-count == 0) || (root.chapter-filter == 2 && root.detail-downloaded-count == 0)): Text {
+                                        min-width: 0px;
+                                        text: root.chapter-filter == 1 ? @tr("No unread chapters") : @tr("No downloaded chapters");
+                                        color: Theme.current.text_secondary; wrap: word-wrap;
+                                    }
+                                    // A filtered-out row collapses to height 0 inside a layout without
+                                    // spacing (its 4px gap is part of the row), so no gaps remain.
+                                    VerticalLayout {
+                                        spacing: 0px;
+                                        for chapter[i] in root.items: Rectangle {
+                                            private property <bool> shown: root.chapter-filter == 0 || (root.chapter-filter == 1 && !chapter.read) || (root.chapter-filter == 2 && chapter.downloaded);
+                                            height: self.shown ? 84px : 0px; clip: true;
+                                            ChapterRow {
+                                                y: 0px; width: parent.width; height: 80px; visible: parent.shown;
+                                                chapter: chapter; picked => { root.detail-scroll-y = page-scroll.content-y; root.open-item(i); }
+                                                action(action) => {
+                                                    if action == "delete-download" { root.ask-confirm("chapter", action, "", i, @tr("Delete this downloaded chapter from this device?"), @tr("Delete download")); }
+                                                    else { root.item-action(i,action); }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                                 if root.section != 4 && root.section != 8: VerticalLayout {
@@ -1142,7 +1228,7 @@ export component AppWindow inherits Window {
                                 zoom-percent: round(root.zoom * 100); fit-width: root.zoom == 1;
                                 fullscreen: root.reader-window-fullscreen; bookmarked: root.reader-bookmarked;
                                 previous-chapter-enabled: root.can-previous; next-chapter-enabled: root.can-next;
-                                previous-page-enabled: root.current-page > 0 || root.scroll-y < 0px;
+                                previous-page-enabled: root.current-page > 0 || root.scroll-y < 0px || (root.reader-split-page && root.reader-split-half > 0);
                                 next-page-enabled: root.current-page + 1 < root.pages.length || root.reading-mode == 0 || (root.reader-split-page && root.reader-split-half == 0);
                                 safe-top: root.safe-area-insets.top; safe-bottom: root.safe-area-insets.bottom;
                                 safe-left: root.safe-area-insets.left; safe-right: root.safe-area-insets.right;
@@ -1174,7 +1260,7 @@ export component AppWindow inherits Window {
                                 safe-top: root.safe-area-insets.top; safe-bottom: root.safe-area-insets.bottom;
                                 safe-left: root.safe-area-insets.left; safe-right: root.safe-area-insets.right;
                                 mode: root.reader-mode-choice; rotation: root.reader-rotation-choice;
-                                rotation-label: @tr("Orientation"); resolved-mode: root.reader-mode-label;
+                                rotation-label: @tr("Orientation"); resolved-mode: root.reader-mode-label; resolved-mode-index: root.reading-mode;
                                 current-tab <=> root.reader-settings-tab;
                                 mode-selected(value) => { root.mode-changed(value); }
                                 rotation-selected(value) => { root.reader-rotation-changed(value); }
@@ -1236,6 +1322,7 @@ export component AppWindow inherits Window {
                             about-licenses-scroll-y <=> root.about-licenses-scroll-y;
                             about-back-request: root.about-back-request;
                             update-checks-enabled: root.about-update-checks-enabled;
+                            update-checking: root.update-checking;
                             license-source-requested(url) => { root.license-source-requested(url); }
                             category-text <=> root.category-text;
                             image-cache-info: root.image-cache-info;
@@ -1246,7 +1333,7 @@ export component AppWindow inherits Window {
                             navigate(section) => { root.navigate(section); }
                             install-addon => { root.install-addon(); }
                             local-import(folder) => { root.local-import(folder); }
-                            backup(restore) => { root.backup(restore); }
+                            backup(restore) => { if restore { root.restore-confirm-open = true; } else { root.backup(false); } }
                             add-category(name) => { root.add-category(name); }
                             check-update => { root.check-update(); }
                         }
@@ -1259,6 +1346,18 @@ export component AppWindow inherits Window {
             }
         }
         key-pressed(event) => {
+            if root.action-confirm-open {
+                if event.text == Key.Escape || event.text == Key.Back || event.text == Key.Backspace { root.resolve-action-confirm(1); }
+                return accept;
+            }
+            if root.restore-confirm-open {
+                if event.text == Key.Escape || event.text == Key.Back || event.text == Key.Backspace { root.resolve-restore-confirm(1); }
+                return accept;
+            }
+            if root.download-confirm-open {
+                if event.text == Key.Escape || event.text == Key.Back || event.text == Key.Backspace { root.resolve-download-confirm(1); }
+                return accept;
+            }
             if root.export-conflict-open {
                 if event.text == Key.Escape || event.text == Key.Back || event.text == Key.Backspace { root.resolve-export-conflict(2); }
                 return accept;
@@ -1373,6 +1472,18 @@ export component AppWindow inherits Window {
         safe-left: root.safe-area-insets.left; safe-right: root.safe-area-insets.right;
         closed => { more-page.focus_shell(); }
     }
+    ActionConfirmSheet {
+        width: root.width; height: root.height;
+        open: root.clear-history-confirm-open;
+        prompt: @tr("Clear all history?");
+        confirm-label: @tr("Clear history");
+        safe-top: root.safe-area-insets.top; safe-bottom: root.safe-area-insets.bottom;
+        safe-left: root.safe-area-insets.left; safe-right: root.safe-area-insets.right;
+        choice(index) => {
+            root.clear-history-confirm-open = false;
+            if index == 0 { root.item-action(-1, "clear-history"); }
+        }
+    }
     SaveConflictSheet {
         width: root.width; height: root.height;
         open: root.export-conflict-open;
@@ -1380,6 +1491,32 @@ export component AppWindow inherits Window {
         safe-top: root.safe-area-insets.top; safe-bottom: root.safe-area-insets.bottom;
         safe-left: root.safe-area-insets.left; safe-right: root.safe-area-insets.right;
         choice(index) => { root.resolve-export-conflict(index); }
+    }
+    ActionConfirmSheet {
+        width: root.width; height: root.height;
+        open: root.action-confirm-open;
+        prompt: root.action-confirm-prompt; confirm-label: root.action-confirm-label;
+        safe-top: root.safe-area-insets.top; safe-bottom: root.safe-area-insets.bottom;
+        safe-left: root.safe-area-insets.left; safe-right: root.safe-area-insets.right;
+        choice(index) => { root.resolve-action-confirm(index); }
+    }
+    ActionConfirmSheet {
+        width: root.width; height: root.height;
+        open: root.restore-confirm-open;
+        prompt: @tr("Restore backup? This replaces your library, categories and reading progress.");
+        confirm-label: @tr("Restore");
+        safe-top: root.safe-area-insets.top; safe-bottom: root.safe-area-insets.bottom;
+        safe-left: root.safe-area-insets.left; safe-right: root.safe-area-insets.right;
+        choice(index) => { root.resolve-restore-confirm(index); }
+    }
+    ActionConfirmSheet {
+        width: root.width; height: root.height;
+        open: root.download-confirm-open;
+        prompt: @tr("Delete downloads? {}", root.download-confirm-message);
+        confirm-label: @tr("Delete");
+        safe-top: root.safe-area-insets.top; safe-bottom: root.safe-area-insets.bottom;
+        safe-left: root.safe-area-insets.left; safe-right: root.safe-area-insets.right;
+        choice(index) => { root.resolve-download-confirm(index); }
     }
     forward-focus: keyboard;
 }

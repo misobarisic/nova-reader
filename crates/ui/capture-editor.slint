@@ -233,7 +233,20 @@ export component CaptureEditor inherits Rectangle {
             ended => { root.dragging = false; root.scroll-direction = 0; }
           }
         }
-        if root.busy || !root.has-image: Rectangle {
+        // A failed first render leaves no image; show the failure instead of an
+        // endless spinner. The footer carries the same text for later failures.
+        if !root.busy && !root.has-image && root.error != "": Rectangle {
+            x: (parent.width - min(320px, parent.width - 32px)) / 2; y: (parent.height - 72px) / 2;
+            width: min(320px, max(1px, parent.width - 32px)); height: 72px;
+            background: Theme.current.popup; border-radius: Theme.card_corner_radius;
+            Text {
+                x: 12px; width: parent.width - 24px; height: parent.height;
+                text: root.error; wrap: word-wrap; color: Theme.current.text_bright;
+                vertical-alignment: center; horizontal-alignment: center;
+                accessible-role: text; accessible-label: root.error;
+            }
+        }
+        if root.busy || (!root.has-image && root.error == ""): Rectangle {
             x: (parent.width - 180px) / 2; y: (parent.height - 56px) / 2;
             width: 180px; height: 56px; background: Theme.current.popup; border-radius: Theme.card_corner_radius;
             HorizontalLayout {

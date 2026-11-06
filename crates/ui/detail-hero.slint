@@ -85,7 +85,8 @@ export component DetailHero inherits Rectangle {
             VerticalLayout {
                 width: root.text-width; horizontal-stretch: 0;
                 spacing: root.narrow ? 14px : 18px; alignment: start;
-                TitleArtwork { title: root.title; reserve-logo-space: true; width: 100%; logo-height: root.narrow ? 88px : 136px; font-size: root.narrow ? 34px : root.width >= 1200px ? 64px : 44px; max-lines: 3; }
+                // No logo source exists yet, so reserving its height only leaves a gap.
+                TitleArtwork { title: root.title; reserve-logo-space: false; width: 100%; logo-height: root.narrow ? 88px : 136px; font-size: root.narrow ? 34px : root.width >= 1200px ? 64px : 44px; max-lines: 3; }
                 Text { text: root.metadata; color: Theme.current.text_hero_metadata; font-size: root.narrow ? 16px : 21px; min-width: 0px; wrap: word-wrap; }
                 GridLayout {
                     spacing: 8px;
@@ -140,5 +141,9 @@ export component DetailHero inherits Rectangle {
             if !root.narrow: Rectangle { horizontal-stretch: 1; }
         }
     }
-    Timer { interval: 150ms; running: root.visible && root.poster.width == 0; triggered => { root.request-artwork(); } }
+    // Retry a cold poster load for a few seconds, then stop polling.
+    private property <int> retry-ticks: 0;
+    changed poster => { root.retry-ticks = 0; }
+    changed visible => { root.retry-ticks = 0; }
+    Timer { interval: 150ms; running: root.visible && root.poster.width == 0 && root.retry-ticks < 40; triggered => { root.retry-ticks += 1; root.request-artwork(); } }
 }

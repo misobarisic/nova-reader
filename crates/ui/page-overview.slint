@@ -201,7 +201,7 @@ export component PageOverview inherits Rectangle {
                 height: 48px; spacing: 8px;
                 Text {
                     text: root.tiles.length == 0 && (root.busy || root.status != "") ? ""
-                        : root.collection ? @tr("{} images", root.tiles.length) : @tr("{} pages", root.tiles.length);
+                        : root.collection ? @tr("{n} image" | "{n} images" % root.tiles.length) : @tr("{n} page" | "{n} pages" % root.tiles.length);
                     font-size: 13px; color: Theme.current.text_secondary; vertical-alignment: center; min-width: 0px;
                 }
                 ActionButton {

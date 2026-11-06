@@ -35,6 +35,7 @@ fn generate_license_catalog() {
         "crates/reader-engine/Cargo.toml",
         "crates/reader-engine/AVIF-NOTICE.txt",
         "crates/reader-downloads/Cargo.toml",
+        "crates/reader-capture/Cargo.toml",
         "crates/reader-catalogue/Cargo.toml",
         "assets/licenses/avif-decoder-BSD-2-Clause.txt",
     ] {

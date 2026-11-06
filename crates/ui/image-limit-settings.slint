@@ -81,7 +81,8 @@ export component ImageLimitSettingsPage inherits VerticalLayout {
     }
     if ImageLimitSettings.message != "": Text {
         text: ImageLimitSettings.message;
-        color: Theme.current.text_bright; wrap: word-wrap; min-width: 0px;
+        color: ImageLimitSettings.error ? Theme.current.accent_soft : Theme.current.text_bright;
+        font-weight: ImageLimitSettings.error ? 700 : 400; wrap: word-wrap; min-width: 0px;
         accessible-role: text; accessible-label: ImageLimitSettings.message;
     }
     HorizontalLayout {

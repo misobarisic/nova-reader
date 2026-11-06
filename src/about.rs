@@ -13,8 +13,9 @@ pub(crate) const OPEN_SOURCE_LICENSE_CATALOG_ZSTD: &[u8] =
 include!(concat!(env!("OUT_DIR"), "/nova_license_catalog_size.rs"));
 
 pub(crate) fn open_source_license_sources() -> Vec<LicenseSource> {
-    const WORKSPACE_CRATES: [&str; 7] = [
+    const WORKSPACE_CRATES: [&str; 8] = [
         "nova-reader",
+        "reader-capture",
         "reader-domain",
         "reader-sources",
         "reader-engine",
@@ -218,6 +219,7 @@ mod tests {
             assert!(
                 ![
                     "nova-reader",
+                    "reader-capture",
                     "reader-domain",
                     "reader-sources",
                     "reader-engine",
@@ -235,6 +237,22 @@ mod tests {
                 .iter()
                 .any(|source| source.label.starts_with("nova-storage "))
         );
+        assert!(
+            !sources
+                .iter()
+                .any(|source| source.label.starts_with("reader-capture ")),
+            "workspace crates are first-party, not third-party credits"
+        );
+        // Provenance rows must name the revision Cargo actually pins.
+        let pin = include_str!("../Cargo.toml")
+            .split("nova-kit\", rev = \"")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .unwrap();
+        let project = include_str!("../assets/open_source_project_sources.tsv");
+        assert!(project.contains(pin), "kit revision {pin} must be credited");
+        assert!(!project.contains("f2b7ebe"), "stale kit revision");
+        assert!(project.contains("Nova shared sync ("));
         for row in include_str!("../assets/open_source_project_sources.tsv").lines() {
             let fields = row.splitn(3, '\t').collect::<Vec<_>>();
             assert_eq!(fields.len(), 3, "project provenance must use TSV fields");

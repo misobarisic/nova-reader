@@ -578,7 +578,14 @@ impl DownloadStore {
     /// Move a queued chapter before another queued chapter, or to the tail when
     /// `before` is `None`. Active workers and nonqueued jobs cannot be moved or
     /// used as targets. Only queued, inactive manifests receive new orders.
+    /// Drop onto a row: moving down lands after it, moving up lands before it.
+    pub fn move_onto(&self, chapter: &ChapterId, onto: &ChapterId) -> Result<()> {
+        self.reorder(chapter, Some(onto), true)
+    }
     pub fn move_before(&self, chapter: &ChapterId, before: Option<&ChapterId>) -> Result<()> {
+        self.reorder(chapter, before, false)
+    }
+    fn reorder(&self, chapter: &ChapterId, before: Option<&ChapterId>, onto: bool) -> Result<()> {
         let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         let mut jobs = metadata_jobs(&inner.root)?
             .into_iter()
@@ -591,13 +598,16 @@ impl DownloadStore {
             .iter()
             .position(|job| &job.chapter == chapter)
             .ok_or_else(|| Error::Invalid("chapter is not an inactive queued job".into()))?;
-        let target = match before {
+        let mut target = match before {
             Some(before) => jobs
                 .iter()
                 .position(|job| &job.chapter == before)
                 .ok_or_else(|| Error::Invalid("target is not an inactive queued job".into()))?,
             None => jobs.len(),
         };
+        if onto && target > position {
+            target += 1;
+        }
         if position == target || position + 1 == target {
             return Ok(());
         }
@@ -699,6 +709,20 @@ impl DownloadStore {
     }
     pub fn resume(&self, chapter: &ChapterId) -> Result<()> {
         self.status(chapter, JobStatus::Queued)
+    }
+    /// Re-queue only a job that is still Failed, checked under the store lock.
+    /// A retry worker sleeps between attempts; a Cancel or Pause the reader
+    /// issued meanwhile must not be overwritten. Returns whether it re-queued.
+    pub fn resume_if_failed(&self, chapter: &ChapterId) -> Result<bool> {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut job = checked_job(&inner.root, chapter)?;
+        if job.status != JobStatus::Failed {
+            return Ok(false);
+        }
+        job.status = JobStatus::Queued;
+        job.error = None;
+        save(&inner.root, &job)?;
+        Ok(true)
     }
     pub fn retry(&self, chapter: &ChapterId) -> Result<()> {
         self.resume(chapter)
@@ -1477,6 +1501,54 @@ mod tests {
         )
         .unwrap();
         assert!(store.snapshot().is_err());
+    }
+    #[test]
+    fn retry_backoff_wakeup_does_not_undo_cancel() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DownloadStore::open(directory.path(), 1_000_000).unwrap();
+        let chapter = chapter();
+        store.enqueue(chapter.clone(), pages()).unwrap();
+        assert!(store.run(&chapter, |_| Err("503".into())).is_err());
+        assert_eq!(store.job(&chapter).unwrap().status, JobStatus::Failed);
+        // The user cancels while the worker sleeps through its backoff.
+        store.cancel(&chapter).unwrap();
+        store.resume_if_failed(&chapter).unwrap();
+        assert_eq!(store.job(&chapter).unwrap().status, JobStatus::Cancelled);
+    }
+    #[test]
+    fn resume_if_failed_requeues_failed_jobs() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DownloadStore::open(directory.path(), 1_000_000).unwrap();
+        let chapter = chapter();
+        store.enqueue(chapter.clone(), pages()).unwrap();
+        assert!(store.run(&chapter, |_| Err("503".into())).is_err());
+        assert!(store.resume_if_failed(&chapter).unwrap());
+        assert_eq!(store.job(&chapter).unwrap().status, JobStatus::Queued);
+    }
+    #[test]
+    fn reorder_onto_next_row_moves_down_past_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DownloadStore::open(directory.path(), 1_000_000).unwrap();
+        let a = chapter();
+        let b = ChapterId::new(a.series.clone(), "b");
+        let c = ChapterId::new(a.series.clone(), "c");
+        for id in [&a, &b, &c] {
+            store.enqueue(id.clone(), pages()).unwrap();
+        }
+        let order = |s: &DownloadStore| {
+            s.snapshot()
+                .unwrap()
+                .into_iter()
+                .map(|j| j.chapter)
+                .collect::<Vec<_>>()
+        };
+        store.move_onto(&a, &b).unwrap();
+        assert_eq!(order(&store), vec![b.clone(), a.clone(), c.clone()]);
+        // Moving up onto a row still lands before it.
+        store.move_onto(&c, &b).unwrap();
+        assert_eq!(order(&store), vec![c.clone(), b.clone(), a.clone()]);
+        store.move_onto(&c, &a).unwrap();
+        assert_eq!(order(&store), vec![b, a, c]);
     }
     #[test]
     fn queue_reorder_survives_reopen_and_legacy_orders() {

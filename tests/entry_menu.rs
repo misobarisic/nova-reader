@@ -73,8 +73,10 @@ fn per_title_menu_gestures_and_category_editor_keep_the_full_identity() {
         let weak = ui.as_weak();
         move |key, action| {
             let ui = weak.unwrap();
+            // Destructive actions dispatch after their confirmation sheet, when
+            // the menu has already closed.
             assert!(
-                ui.get_entry_menu_visible(),
+                ui.get_entry_menu_visible() || action == "remove",
                 "dispatch before conditional dismissal"
             );
             actions
@@ -151,9 +153,21 @@ fn per_title_menu_gestures_and_category_editor_keep_the_full_identity() {
         settle();
         assert!(ui.get_entry_menu_visible());
         assert_eq!(opens.get(), 0);
+        let before = actions.borrow().len();
         button(&ui, "Remove from library").invoke_accessible_default_action();
         settle();
         assert!(!ui.get_entry_menu_visible());
+        // Removal asks first: nothing is dispatched until the sheet is confirmed.
+        assert_eq!(actions.borrow().len(), before);
+        button(&ui, "Cancel").invoke_accessible_default_action();
+        settle();
+        assert_eq!(actions.borrow().len(), before, "Cancel keeps the title");
+        button(&ui, "Book 1").mock_single_click(PointerEventButton::Right);
+        settle();
+        button(&ui, "Remove from library").invoke_accessible_default_action();
+        settle();
+        button(&ui, "Remove from library").invoke_accessible_default_action();
+        settle();
         assert_eq!(
             actions.borrow().last().unwrap(),
             &(keys[1].clone(), "remove".into())
@@ -326,6 +340,19 @@ fn phone_sheet_rows_stay_index_aligned_with_the_desktop_actions() {
         settle();
         button(&ui, label).invoke_accessible_default_action();
         settle();
+        if matches!(
+            expected,
+            "mark-all-read" | "mark-all-unread" | "clear-all-positions" | "remove"
+        ) {
+            // Destructive rows confirm through a sheet that repeats the label.
+            assert_ne!(
+                actions.borrow().last().map(String::as_str),
+                Some(expected),
+                "phone row {label} must ask first"
+            );
+            button(&ui, label).invoke_accessible_default_action();
+            settle();
+        }
         assert_eq!(
             actions.borrow().last().map(String::as_str),
             Some(expected),
@@ -375,6 +402,9 @@ fn detail_series_and_chapter_menus_dispatch_separate_progress_actions() {
         ] {
             button(&ui, "Title options").invoke_accessible_default_action();
             settle();
+            button(&ui, label).invoke_accessible_default_action();
+            settle();
+            // The confirmation sheet repeats the action label.
             button(&ui, label).invoke_accessible_default_action();
             settle();
             assert_eq!(

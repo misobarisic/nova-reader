@@ -634,7 +634,8 @@ fn setting_value(key: &str, value: &Value) -> String {
     {
         return nova_reader_ui::backend_text::tr(
             [
-                "Long strip",
+                // Matches the reader settings screen's label for mode 0.
+                "Webtoon",
                 "Left to right",
                 "Right to left",
                 "Vertical",
@@ -644,7 +645,44 @@ fn setting_value(key: &str, value: &Value) -> String {
             ][mode.selection() as usize],
         );
     }
+    // Pixel-valued presets are shown by the names the settings screens use.
+    let presets: &[(u64, &str)] = match key {
+        "reader:appearance/card_radius" => &[
+            (0, "Square"),
+            (4, "Subtle"),
+            (10, "Soft"),
+            (16, "Rounded"),
+            (24, "Extra rounded"),
+        ],
+        "reader:appearance/button_radius" => &[
+            (0, "Square"),
+            (4, "Subtle"),
+            (8, "Soft"),
+            (12, "Rounded"),
+            (24, "Extra rounded"),
+        ],
+        "reader:appearance/card_spacing" => &[
+            (0, "None"),
+            (4, "Compact"),
+            (8, "Default"),
+            (12, "Roomy"),
+            (16, "Wide"),
+        ],
+        _ => &[],
+    };
+    if let Some((_, label)) = value
+        .as_u64()
+        .and_then(|v| presets.iter().find(|(pixels, _)| *pixels == v))
+    {
+        return nova_reader_ui::backend_text::tr(label);
+    }
+    if key == "reader:appearance/library_list_view"
+        && let Some(list) = value.as_bool()
+    {
+        return nova_reader_ui::backend_text::tr(if list { "List" } else { "Grid" });
+    }
     let choices: &[&str] = match key {
+        "reader:appearance/library_sort" => &["Recently added", "Title", "Unread chapters"],
         "reader:appearance/accent_color" => &[
             "Purple", "Orange", "Blue", "Teal", "Rose", "Cyan", "Amber", "Lime",
         ],
@@ -767,7 +805,7 @@ pub fn refresh_metadata(ui: &crate::AppWindow) -> Result<(), String> {
     }
     let settings = ui.global::<crate::ReaderSettingsSync>();
     settings.set_enabled(sync.enabled);
-    settings.set_rows(std::rc::Rc::new(slint::VecModel::from(rows)).into());
+    settings.set_rows(crate::sync_ui::reuse_model(settings.get_rows(), rows));
     Ok(())
 }
 pub fn init(ui: &crate::AppWindow) -> Result<(), String> {
@@ -790,7 +828,7 @@ pub fn init(ui: &crate::AppWindow) -> Result<(), String> {
             if let Some(ui) = weak.upgrade()
                 && let Err(error) = refresh_metadata(&ui)
             {
-                ui.set_status(error.into());
+                ui.set_status(nova_reader_ui::backend_text::error(&error).into());
             }
         });
     let weak = ui.as_weak();
@@ -812,7 +850,7 @@ pub fn init(ui: &crate::AppWindow) -> Result<(), String> {
                 refresh_metadata(&ui)
             })();
             if let Err(error) = result {
-                ui.set_status(error.into());
+                ui.set_status(nova_reader_ui::backend_text::error(&error).into());
             }
         });
     refresh_metadata(ui)
@@ -821,6 +859,29 @@ pub fn init(ui: &crate::AppWindow) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn scope_modal_labels_match_settings_screens() {
+        let label =
+            |key: &str, value: Value| setting_value(&format!("reader:appearance/{key}"), &value);
+        assert_eq!(label("card_radius", 10.into()), "Soft");
+        assert_eq!(label("card_radius", 24.into()), "Extra rounded");
+        assert_eq!(label("button_radius", 8.into()), "Soft");
+        assert_eq!(label("card_spacing", 8.into()), "Default");
+        assert_eq!(label("card_spacing", 0.into()), "None");
+        assert_eq!(label("library_list_view", true.into()), "List");
+        assert_eq!(label("library_list_view", false.into()), "Grid");
+        assert_eq!(label("library_sort", 1.into()), "Title");
+        assert_eq!(
+            setting_value(
+                "reader:reader-settings/default_mode",
+                &serde_json::to_value(crate::reader_modes::ModeChoice::Manual(
+                    reader_domain::ReadingMode::Webtoon
+                ))
+                .unwrap()
+            ),
+            "Webtoon"
+        );
+    }
     #[test]
     fn portable_schema_rejects_paths_quotas_device_policy_and_invalid_values() {
         for key in [

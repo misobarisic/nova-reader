@@ -63,7 +63,7 @@ export component SourceSettingsPage inherits Flickable {
             }
             if setting.kind != "bool": Text { min-width: 0px; text: setting.name; color: Theme.current.text_bright; wrap: word-wrap; }
             if setting.kind == "bool": CheckBox { text: setting.name; checked: setting.checked; toggled => { root.setting-changed(setting.key, self.checked ? "true" : "false"); } }
-            if setting.kind == "text" || setting.kind == "secret": LineEdit { accessible-label: setting.name; min-width: 0px; text: setting.value; input-type: setting.kind == "secret" ? InputType.password : InputType.text; placeholder-text: setting.kind == "secret" ? @tr("Enter a new secret to replace it") : ""; accepted => { root.setting-changed(setting.key, self.text); } }
+            if setting.kind == "text" || setting.kind == "secret": LineEdit { accessible-label: setting.name; min-width: 0px; text: setting.value; input-type: setting.kind == "secret" ? InputType.password : InputType.text; placeholder-text: setting.kind == "secret" ? (setting.checked ? @tr("Saved. Enter a new secret to replace it") : @tr("Not set")) : ""; accepted => { root.setting-changed(setting.key, self.text); } }
             if setting.kind == "select": ComboBox { placeholder-text: setting.name; min-width: 0px; model: setting.options; current-index: setting.selected; selected(value) => { root.setting-changed(setting.key, value); } }
         }
         if root.settings.length > 0: Text { min-width: 0px; text: @tr("Text fields save when you press Enter. Secrets are stored only on this device and are excluded from sync and backups."); color: Theme.current.text_secondary; wrap: word-wrap; }

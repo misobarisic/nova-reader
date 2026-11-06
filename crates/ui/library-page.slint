@@ -50,6 +50,7 @@ export component LibraryPage inherits Rectangle {
     private property <length> header-shift: max(-library-hero.height - 14px, min(0px, root.scroll-y));
     private property <length> header-cover: library-header.height + root.header-shift;
     private property <length> grid-top: library-header.height + 8px;
+    private property <bool> filtered: root.query != "" || root.category-index != 0;
     private property <bool> restoring: true;
     private property <int> restore-pass: 0;
     private property <int> pending-index: -1;
@@ -173,8 +174,9 @@ export component LibraryPage inherits Rectangle {
                             height: 56px;
                             Image { source: @image-url("../../assets/icons/navigation/library.svg"); width: 48px; height: 48px; x: (parent.width - self.width) / 2; y: 4px; image-fit: contain; colorize: Theme.current.text_muted; }
                         }
-                        Text { min-width: 0px; text: @tr("Your next story starts here"); color: Theme.current.text_bright; font-size: 19px; wrap: word-wrap; horizontal-alignment: center; }
-                        Text { min-width: 0px; text: @tr("Install a source in Browse, or import a local chapter in More."); color: Theme.current.text_secondary; wrap: word-wrap; horizontal-alignment: center; }
+                        // A search or category with no matches is not an empty library.
+                        Text { min-width: 0px; text: root.filtered ? @tr("No titles match") : @tr("Your next story starts here"); color: Theme.current.text_bright; font-size: 19px; wrap: word-wrap; horizontal-alignment: center; }
+                        Text { min-width: 0px; text: root.filtered ? @tr("Try a different search or category.") : @tr("Install a source in Browse, or import a local chapter in More."); color: Theme.current.text_secondary; wrap: word-wrap; horizontal-alignment: center; }
                     }
                 }
             }

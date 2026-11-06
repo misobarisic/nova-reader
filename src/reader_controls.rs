@@ -210,6 +210,16 @@ fn immersive_reading(reading: bool, fullscreen: bool) -> bool {
     reading && fullscreen
 }
 
+/// What the OSD Fullscreen button shows. Android has no window fullscreen
+/// state to query, so the immersive system-bar state is the only truth there.
+fn osd_fullscreen(android: bool, immersive: bool, window_fullscreen: bool) -> bool {
+    if android {
+        immersive
+    } else {
+        window_fullscreen
+    }
+}
+
 pub(super) fn platform(ui: &AppWindow) {
     let prefs = reader_settings::snapshot();
     let reading = ui.get_section() == 6;
@@ -229,7 +239,6 @@ pub(super) fn platform(ui: &AppWindow) {
     }
     #[cfg(not(target_os = "android"))]
     {
-        let _ = immersive;
         crate::reader_desktop::keep_awake(reading && prefs.keep_awake);
         PRE_READER_FULLSCREEN.with(|previous| {
             if reading {
@@ -241,8 +250,12 @@ pub(super) fn platform(ui: &AppWindow) {
                 ui.window().set_fullscreen(fullscreen);
             }
         });
-        ui.set_reader_window_fullscreen(ui.window().is_fullscreen());
     }
+    ui.set_reader_window_fullscreen(osd_fullscreen(
+        cfg!(target_os = "android"),
+        immersive,
+        ui.window().is_fullscreen(),
+    ));
 }
 
 pub(super) fn wire(app: &Arc<Controller>, ui: &AppWindow) {
@@ -618,6 +631,7 @@ impl Controller {
             let c = p.background_color;
             ui.set_reader_background(slint::Color::from_argb_u8(c[3], c[0], c[1], c[2]));
         }
+        let fallback_chapter = text::tr("Chapter");
         let title = reader
             .chapter_segment(index)
             .map(|s| s.title.as_str())
@@ -627,7 +641,7 @@ impl Controller {
                     .find(|c| c.id == reader.chapter)
                     .map(|c| c.title.as_str())
             })
-            .unwrap_or("Chapter");
+            .unwrap_or(fallback_chapter.as_str());
         if ui.get_reader_chapter_title().as_str() != title {
             if !ui.get_reader_chapter_title().is_empty() {
                 ui.invoke_show_reader_transition(ui.get_reader_chapter_title(), title.into());
@@ -797,13 +811,14 @@ impl Controller {
             "zoom-in" => self.reader_zoom(ui, ui.get_zoom() + 0.25, 0.5, 0.5),
             "zoom-out" => self.reader_zoom(ui, ui.get_zoom() - 0.25, 0.5, 0.5),
             "fullscreen" => {
-                if reader_settings::update(
+                match reader_settings::update(
                     "fullscreen",
                     i32::from(!reader_settings::snapshot().fullscreen),
-                )
-                .is_ok()
-                {
-                    self.apply_reader_preferences(ui);
+                ) {
+                    Ok(_) => self.apply_reader_preferences(ui),
+                    Err(error) => ui.set_status(
+                        format!("{}: {error}", text::tr("Could not change fullscreen")).into(),
+                    ),
                 }
             }
             "bookmark" => {
@@ -874,6 +889,13 @@ mod tests {
         for _ in 0..ms / 10 {
             mock_elapsed_time(Duration::from_millis(10));
         }
+    }
+    #[test]
+    fn osd_fullscreen_reads_immersive_state_on_android() {
+        assert!(osd_fullscreen(true, true, false));
+        assert!(!osd_fullscreen(true, false, true));
+        assert!(osd_fullscreen(false, false, true));
+        assert!(!osd_fullscreen(false, true, false));
     }
     #[test]
     fn android_immersive_bars_follow_reading_not_controls_visibility() {

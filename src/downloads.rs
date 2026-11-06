@@ -16,7 +16,8 @@ pub(super) struct DownloadView {
     pub eligible: Vec<ChapterId>,
     initialized: bool,
     samples: BTreeMap<ChapterId, (u64, Instant, String)>,
-    artwork_seen: BTreeMap<SeriesId, Instant>,
+    /// Delete awaiting the reader's confirmation: (row key, action).
+    pub confirm: Option<(String, String)>,
     pub busy: bool,
 }
 fn key<T: serde::Serialize>(id: &T) -> String {
@@ -34,11 +35,11 @@ pub(super) fn state(status: &JobStatus) -> i32 {
 }
 fn size(bytes: u64) -> String {
     if bytes >= 1 << 30 {
-        format!("{:.1} GB", bytes as f64 / (1u64 << 30) as f64)
+        format!("{:.1} GiB", bytes as f64 / (1u64 << 30) as f64)
     } else if bytes >= 1 << 20 {
-        format!("{:.1} MB", bytes as f64 / (1u64 << 20) as f64)
+        format!("{:.1} MiB", bytes as f64 / (1u64 << 20) as f64)
     } else if bytes >= 1 << 10 {
-        format!("{} KB", bytes / 1024)
+        format!("{} KiB", bytes / 1024)
     } else {
         format!("{bytes} B")
     }
@@ -63,6 +64,40 @@ fn model(ui: &AppWindow, rows: Vec<DownloadEntry>, queue: bool) {
             ui.set_downloaded_rows(rows);
         }
     }
+}
+impl DownloadView {
+    /// Keep only selections still listed under the current search/filter.
+    pub fn trim_selection(selected: &mut BTreeSet<ChapterId>, eligible: &[ChapterId]) {
+        selected.retain(|id| eligible.contains(id));
+    }
+    /// Cancelling a row whose metadata preparation failed has no job to
+    /// cancel; dropping its bookkeeping is what dismisses it.
+    pub fn dismiss_prepare_failure(&mut self, id: &ChapterId) -> bool {
+        let failed = self.prepare_errors.remove(id).is_some();
+        if failed {
+            self.pending.remove(id);
+        }
+        failed
+    }
+    /// Resume on a row still being prepared clears its queued pause so the
+    /// worker leaves it queued instead of pausing it after preparation.
+    pub fn resume_pending(&mut self, id: &ChapterId) -> bool {
+        match self.pending.get_mut(id) {
+            Some(desired) => {
+                *desired = None;
+                true
+            }
+            None => false,
+        }
+    }
+}
+/// "Resume all" revives paused and failed jobs; a cancelled job was dismissed
+/// on purpose and stays cancelled until the reader retries it individually.
+fn resume_all_targets(jobs: &[ChapterDownload]) -> Vec<ChapterId> {
+    jobs.iter()
+        .filter(|j| matches!(j.status, JobStatus::Paused | JobStatus::Failed))
+        .map(|j| j.chapter.clone())
+        .collect()
 }
 impl Controller {
     pub(super) fn patch_chapter_downloads(&self, ui: &AppWindow) {
@@ -108,6 +143,7 @@ impl Controller {
                 model.set_row_data(index, row);
             }
         }
+        super::publish_chapter_filter_counts(ui);
     }
     pub(super) fn publish_downloads(&self, ui: &AppWindow) {
         let mut view = self.view();
@@ -224,7 +260,7 @@ impl Controller {
                 series_key: key(id).into(),
                 series_title: title.clone().into(),
                 source: source.clone().into(),
-                meta: format!("{} {}", jobs.len(), text::tr("chapters")).into(),
+                meta: text::chapters_label(jobs.len()).into(),
                 size_label: size(total).into(),
                 artwork_key: art.clone().into(),
                 poster: poster.clone(),
@@ -262,7 +298,7 @@ impl Controller {
                         .into(),
                     series_title: title.clone().into(),
                     source: source.clone().into(),
-                    meta: format!("{} {}", job.pages.len(), text::tr("pages")).into(),
+                    meta: text::pages_label(job.pages.len()).into(),
                     read_meta: read_meta.into(),
                     size_label: size(job.downloaded_bytes()).into(),
                     selected: downloads.selected.contains(&job.chapter),
@@ -270,6 +306,8 @@ impl Controller {
                 });
             }
         }
+        // Count, size and bulk delete must describe only what the reader can see.
+        DownloadView::trim_selection(&mut downloads.selected, &downloads.eligible);
         let mut queued: Vec<_> = downloads
             .jobs
             .iter()
@@ -288,6 +326,19 @@ impl Controller {
                     status: desired.clone().unwrap_or(JobStatus::Queued),
                     error: None,
                 });
+            }
+        }
+        // An explicit resume waits behind the serial worker; show it as queued
+        // rather than the stale Paused/Failed/Cancelled manifest status.
+        for job in &mut queued {
+            if matches!(downloads.pending.get(&job.chapter), Some(None))
+                && matches!(
+                    job.status,
+                    JobStatus::Paused | JobStatus::Failed | JobStatus::Cancelled
+                )
+            {
+                job.status = JobStatus::Queued;
+                job.error = None;
             }
         }
         for (id, failure) in &downloads.prepare_errors {
@@ -371,7 +422,13 @@ impl Controller {
                 done_pages: job.completed_pages() as i32,
                 total_pages: job.pages.len() as i32,
                 rate_label: rate.2.clone().into(),
-                error: job.error.clone().unwrap_or_default().into(),
+                error: job
+                    .error
+                    .as_deref()
+                    .map(text::download_error)
+                    .unwrap_or_default()
+                    .into(),
+                size_label: size(job.downloaded_bytes()).into(),
                 poster: series
                     .get(id)
                     .and_then(|s| self.artwork.cached_image(s))
@@ -396,10 +453,9 @@ impl Controller {
         ui.set_download_queue_count(queue.len() as i32);
         ui.set_download_summary(
             format!(
-                "{titles} {} · {} {} · {}",
-                text::tr("titles"),
-                completed.len(),
-                text::tr("chapters"),
+                "{} · {} · {}",
+                text::titles_label(titles),
+                text::chapters_label(completed.len()),
                 size(saved_bytes)
             )
             .into(),
@@ -424,15 +480,12 @@ impl Controller {
         let Ok(id) = serde_json::from_str::<SeriesId>(key) else {
             return;
         };
-        let Ok(mut view) = self.view.try_lock() else {
+        let Ok(view) = self.view.try_lock() else {
             return;
         };
         if view.section != 7 {
             return;
         }
-        view.downloads
-            .artwork_seen
-            .insert(id.clone(), Instant::now());
         let series = view
             .downloads
             .catalogue
@@ -444,7 +497,52 @@ impl Controller {
             self.artwork.request(&series);
         }
     }
+    /// Destructive removals ask first, stating the count and size.
+    fn confirm_download_delete(&self, ui: &AppWindow, key: &str, action: &str) {
+        let mut view = self.view();
+        if view.downloads.busy {
+            return;
+        }
+        let ids: Vec<ChapterId> = if action == "delete-selected" {
+            view.downloads
+                .selected
+                .iter()
+                .filter(|id| view.downloads.eligible.contains(id))
+                .cloned()
+                .collect()
+        } else {
+            serde_json::from_str::<ChapterId>(key).into_iter().collect()
+        };
+        if ids.is_empty() {
+            return;
+        }
+        let bytes: u64 = view
+            .downloads
+            .jobs
+            .iter()
+            .filter(|j| ids.contains(&j.chapter))
+            .map(|j| j.downloaded_bytes())
+            .sum();
+        view.downloads.confirm = Some((key.to_owned(), action.to_owned()));
+        drop(view);
+        ui.set_download_confirm_message(
+            text::download_delete_prompt(ids.len(), &size(bytes)).into(),
+        );
+        ui.set_download_confirm_open(true);
+    }
+    pub(super) fn resolve_download_delete(self: &Arc<Self>, ui: &AppWindow, confirmed: bool) {
+        ui.set_download_confirm_open(false);
+        let pending = self.view().downloads.confirm.take();
+        if let (true, Some((key, action))) = (confirmed, pending) {
+            self.downloads_action(ui, &key, &format!("confirmed-{action}"));
+        }
+    }
     pub(super) fn downloads_action(self: &Arc<Self>, ui: &AppWindow, key: &str, action: &str) {
+        if matches!(action, "delete" | "delete-selected") {
+            self.confirm_download_delete(ui, key, action);
+            return;
+        }
+        let action = action.strip_prefix("confirmed-").unwrap_or(action);
         match action {
             "toggle-series" => {
                 if let Ok(id) = serde_json::from_str::<SeriesId>(key) {
@@ -490,29 +588,35 @@ impl Controller {
         }
         if matches!(action, "resume" | "retry") {
             if let Some(id) = chapter {
-                self.download(ui, id);
+                // A row already being prepared cannot start a second worker.
+                if self.view().downloads.resume_pending(&id) {
+                    self.publish_downloads(ui);
+                } else {
+                    self.download(ui, id);
+                }
             }
             return;
         }
         let mut ids = if action == "delete-selected" {
-            self.view().downloads.selected.iter().cloned().collect()
-        } else if matches!(action, "pause-all" | "resume-all") {
             let v = self.view();
             v.downloads
-                .jobs
+                .selected
                 .iter()
-                .filter(|j| {
-                    if action == "pause-all" {
-                        matches!(j.status, JobStatus::Queued | JobStatus::Running)
-                    } else {
-                        matches!(
-                            j.status,
-                            JobStatus::Paused | JobStatus::Failed | JobStatus::Cancelled
-                        )
-                    }
-                })
-                .map(|j| j.chapter.clone())
+                .filter(|id| v.downloads.eligible.contains(id))
+                .cloned()
                 .collect()
+        } else if matches!(action, "pause-all" | "resume-all") {
+            let v = self.view();
+            if action == "pause-all" {
+                v.downloads
+                    .jobs
+                    .iter()
+                    .filter(|j| matches!(j.status, JobStatus::Queued | JobStatus::Running))
+                    .map(|j| j.chapter.clone())
+                    .collect()
+            } else {
+                resume_all_targets(&v.downloads.jobs)
+            }
         } else {
             chapter.into_iter().collect::<Vec<_>>()
         };
@@ -547,6 +651,11 @@ impl Controller {
                 } else if action == "cancel" {
                     *value = Some(JobStatus::Cancelled);
                 }
+            }
+            if action == "cancel"
+                && let Ok(id) = serde_json::from_str::<ChapterId>(key)
+            {
+                v.downloads.dismiss_prepare_failure(&id);
             }
             v.downloads.busy = true;
         }
@@ -640,7 +749,12 @@ impl Controller {
         let app = self.clone();
         let weak = ui.as_weak();
         std::thread::spawn(move || {
-            let result = app.services.downloads.move_before(&id, before.as_ref());
+            // Dropping onto a row means "take its place", so moving down lands
+            // after it; the empty target is the end-of-queue drop zone.
+            let result = match before.as_ref() {
+                Some(onto) => app.services.downloads.move_onto(&id, onto),
+                None => app.services.downloads.move_before(&id, None),
+            };
             let _ = weak.upgrade_in_event_loop(move |ui| {
                 if let Err(e) = result {
                     ui.set_status(error(e).into());
@@ -683,6 +797,13 @@ pub(super) fn wire(app: &Arc<Controller>, ui: &AppWindow) {
         }
     });
     let owner = app.clone();
+    let weak = ui.as_weak();
+    ui.on_download_confirm_choice(move |choice| {
+        if let Some(ui) = weak.upgrade() {
+            owner.resolve_download_delete(&ui, choice == 0);
+        }
+    });
+    let owner = app.clone();
     ui.on_download_artwork(move |key| owner.download_artwork(&key));
 }
 
@@ -691,6 +812,71 @@ mod tests {
     use super::*;
     use image::ImageEncoder;
     use reader_downloads::PageResource;
+
+    fn chapter_id(n: &str) -> ChapterId {
+        ChapterId::new(SeriesId::new("fixture.en", "lantern"), n)
+    }
+    fn job(n: &str, status: JobStatus) -> ChapterDownload {
+        ChapterDownload {
+            schema_version: 1,
+            queue_order: 0,
+            chapter: chapter_id(n),
+            pages: vec![],
+            status,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn cancelling_a_prepare_failed_row_dismisses_it() {
+        let mut view = DownloadView::default();
+        let id = chapter_id("1");
+        view.prepare_errors.insert(id.clone(), "offline".into());
+        view.pending.insert(id.clone(), Some(JobStatus::Cancelled));
+        assert!(view.dismiss_prepare_failure(&id));
+        assert!(view.prepare_errors.is_empty() && view.pending.is_empty());
+        assert!(!view.dismiss_prepare_failure(&id));
+    }
+
+    #[test]
+    fn resume_clears_a_pause_requested_while_preparing() {
+        let mut view = DownloadView::default();
+        let id = chapter_id("1");
+        view.pending.insert(id.clone(), Some(JobStatus::Paused));
+        assert!(view.resume_pending(&id));
+        assert_eq!(view.pending[&id], None);
+        assert!(!view.resume_pending(&chapter_id("2")));
+    }
+
+    #[test]
+    fn bulk_delete_selection_is_trimmed_to_the_visible_rows() {
+        let mut view = DownloadView::default();
+        view.selected = BTreeSet::from([chapter_id("1"), chapter_id("2")]);
+        view.eligible = vec![chapter_id("2"), chapter_id("3")];
+        DownloadView::trim_selection(&mut view.selected, &view.eligible);
+        assert_eq!(view.selected, BTreeSet::from([chapter_id("2")]));
+    }
+
+    #[test]
+    fn resume_all_skips_cancelled_jobs() {
+        let jobs = vec![
+            job("paused", JobStatus::Paused),
+            job("cancelled", JobStatus::Cancelled),
+            job("failed", JobStatus::Failed),
+            job("queued", JobStatus::Queued),
+        ];
+        assert_eq!(
+            resume_all_targets(&jobs),
+            vec![chapter_id("paused"), chapter_id("failed")]
+        );
+    }
+
+    #[test]
+    fn sizes_use_binary_unit_labels() {
+        assert_eq!(size(2048), "2 KiB");
+        assert_eq!(size(3 << 20), "3.0 MiB");
+        assert_eq!(size(5 << 30), "5.0 GiB");
+    }
 
     #[test]
     fn download_models_keep_partial_jobs_separate_and_actions_use_stable_ids() {
@@ -811,6 +997,14 @@ mod tests {
             ui.get_downloaded_rows().row_count(),
             3,
             "one group and two complete chapters"
+        );
+        // One-page chapters and a single title must not read "1 pages".
+        let listed = ui.get_downloaded_rows();
+        assert_eq!(listed.row_data(0).unwrap().meta, "2 chapters");
+        assert_eq!(listed.row_data(1).unwrap().meta, "1 page");
+        assert!(
+            ui.get_download_summary()
+                .starts_with("1 title · 2 chapters")
         );
         let existing = ui.get_downloaded_rows();
         app.publish_downloads(&ui);

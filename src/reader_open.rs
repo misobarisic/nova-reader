@@ -4,7 +4,7 @@ use super::*;
 /// Ascending natural reading order: numeric chapter numbers first, then the
 /// source-provided order for unnumbered or equal chapters. Never trust
 /// source_order alone, because several sites list newest first.
-fn reading_order(a: &Chapter, b: &Chapter) -> std::cmp::Ordering {
+pub(super) fn reading_order(a: &Chapter, b: &Chapter) -> std::cmp::Ordering {
     let number = |chapter: &Chapter| {
         chapter
             .number
@@ -250,6 +250,9 @@ impl Controller {
         }
         ui.set_reader_osd(false);
         ui.set_reader_continuation_error("".into());
+        // A title left from the previous chapter or series would make the first
+        // publish look like a chapter change and flash a transition banner.
+        ui.set_reader_chapter_title("".into());
         ui.set_reader_open_error("".into());
         ui.set_status("".into());
         ui.set_busy(true);
@@ -290,7 +293,7 @@ impl Controller {
                                 .series
                                 .as_ref()
                                 .map(|s| s.title.as_str())
-                                .unwrap_or("Series")
+                                .unwrap_or(text::tr("Series").as_str())
                                 .into(),
                         );
                         {
@@ -453,6 +456,7 @@ mod tests {
             }])));
             let release = Arc::new(AtomicBool::new(false));
             let gate = release.clone();
+            ui.set_reader_chapter_title("Old".into());
             ui.set_zoom(4.);
             ui.set_scroll_x(-120.);
             ui.set_scroll_y(-200.);
@@ -474,6 +478,11 @@ mod tests {
             );
             assert!(ui.get_busy());
             assert!(ui.get_reader_opening());
+            assert_eq!(
+                ui.get_reader_chapter_title(),
+                "",
+                "a stale title must not make the new chapter flash a transition banner"
+            );
             assert_eq!(ui.get_zoom(), 1., "every opening starts at fit zoom");
             assert_eq!(ui.get_scroll_x(), 0.);
             assert_eq!(ui.get_scroll_y(), 0.);

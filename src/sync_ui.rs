@@ -27,6 +27,9 @@ pub(crate) struct SyncController {
     addon_cancel: std::sync::Mutex<Arc<AtomicBool>>,
     addon_status: std::sync::Mutex<crate::sync_addons::Status>,
     addon_check: AtomicU64,
+    /// Id of the invite whose ticket/QR are on screen, so unrelated cancels
+    /// and refreshes cannot clear it and an expired one cannot linger.
+    shown_invite: std::sync::Mutex<Option<String>>,
 }
 
 impl SyncController {
@@ -49,6 +52,7 @@ impl SyncController {
             addon_cancel: std::sync::Mutex::new(Arc::new(AtomicBool::new(false))),
             addon_status: std::sync::Mutex::default(),
             addon_check: AtomicU64::new(0),
+            shown_invite: std::sync::Mutex::default(),
         });
         let settings = ui.global::<ReaderSyncSettings>();
         settings.set_sync_background_available(cfg!(target_os = "android"));
@@ -95,7 +99,16 @@ impl SyncController {
             this.change_settings(&window, |s| s.enabled = enabled, true);
         });
         action!(on_sync_device_name_edited, |this, window, name| {
-            this.change_settings(&window, |s| s.device_name = name.trim().into(), false);
+            // Keep the raw text while typing (a trailing space starts the next
+            // word); trim only for the stored value.
+            window
+                .global::<ReaderSyncSettings>()
+                .set_sync_device_name(name.clone());
+            let trimmed = name.trim();
+            // Spaces alone must not rewrite storage or wake sync.
+            if trimmed != nova_sync::read_settings().device_name {
+                this.change_settings(&window, |s| s.device_name = trimmed.into(), false);
+            }
         });
         action!(on_sync_pair_confirm_changed, |this, window, value| {
             this.change_settings(&window, |s| s.require_confirmation = value, false);
@@ -145,8 +158,18 @@ impl SyncController {
             .copy(&window, &ticket));
         action!(on_sync_create_invite, |this, window| {
             if let Some(engine) = nova_sync::engine() {
+                let before = engine
+                    .invites()
+                    .into_iter()
+                    .map(|i| i.id)
+                    .collect::<Vec<_>>();
                 match engine.create_invite() {
                     Ok(ticket) => {
+                        *this.shown_invite.lock().unwrap_or_else(|e| e.into_inner()) = engine
+                            .invites()
+                            .into_iter()
+                            .map(|i| i.id)
+                            .find(|id| !before.contains(id));
                         let global = window.global::<ReaderSyncSettings>();
                         global.set_sync_invite_qr(invite_qr(&ticket).unwrap_or_default());
                         global.set_sync_invite_ticket(ticket.into());
@@ -165,9 +188,14 @@ impl SyncController {
             if let Some(engine) = nova_sync::engine() {
                 engine.cancel_invite(&id);
             }
-            let global = window.global::<ReaderSyncSettings>();
-            global.set_sync_invite_ticket("".into());
-            global.set_sync_invite_qr(slint::Image::default());
+            let shown = this
+                .shown_invite
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            if shown.as_deref() == Some(id.as_str()) {
+                this.clear_invite(&window);
+            }
             this.refresh_status(&window);
         });
         action!(on_sync_join_invite, |this, window, ticket| this
@@ -181,6 +209,8 @@ impl SyncController {
                         let next = controller.clone();
                         let _ = controller.ui.upgrade_in_event_loop(move |ui| match result {
                             Ok(ticket) => next.join(&ui, &ticket),
+                            // Backing out of the camera is a choice, not a failure.
+                            Err(error) if text::is_user_cancel(&error) => {}
                             Err(error) => next.notice(&ui, "Could not scan invite", &error),
                         });
                     }
@@ -210,6 +240,13 @@ impl SyncController {
             controller.start(false);
         }
         Ok(controller)
+    }
+
+    fn clear_invite(&self, ui: &AppWindow) {
+        *self.shown_invite.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        let global = ui.global::<ReaderSyncSettings>();
+        global.set_sync_invite_ticket("".into());
+        global.set_sync_invite_qr(slint::Image::default());
     }
 
     fn notice(&self, ui: &AppWindow, message: &str, detail: &str) {
@@ -336,8 +373,7 @@ impl SyncController {
         if let Some(ui) = self.ui.upgrade() {
             let global = ui.global::<ReaderSyncSettings>();
             global.set_sync_pair_prompt_visible(false);
-            global.set_sync_invite_ticket("".into());
-            global.set_sync_invite_qr(slint::Image::default());
+            self.clear_invite(&ui);
         }
         let weak = Arc::downgrade(self);
         std::thread::spawn(move || {
@@ -488,8 +524,7 @@ impl SyncController {
             nova_sync::PairEvent::Paired { name } => {
                 global.set_sync_pair_prompt_visible(false);
                 global.set_sync_join_input("".into());
-                global.set_sync_invite_ticket("".into());
-                global.set_sync_invite_qr(slint::Image::default());
+                self.clear_invite(ui);
                 self.notice(ui, "Paired with", &name);
                 if let Some(engine) = nova_sync::engine() {
                     engine.sync_now();
@@ -516,7 +551,11 @@ impl SyncController {
         let settings = nova_sync::read_settings();
         let global = ui.global::<ReaderSyncSettings>();
         global.set_sync_enabled(settings.enabled);
-        global.set_sync_device_name(settings.device_name.clone().into());
+        // The field holds raw text while editing; overwriting it with the
+        // stored (trimmed) value would eat a trailing space on every refresh.
+        if global.get_sync_device_name().trim() != settings.device_name {
+            global.set_sync_device_name(settings.device_name.clone().into());
+        }
         global.set_sync_pair_confirm(settings.require_confirmation);
         global.set_sync_local_discovery(settings.enable_local_discovery);
         global.set_sync_interval_index(interval_index(settings.interval_secs));
@@ -546,14 +585,25 @@ impl SyncController {
                 })
                 .collect::<Vec<_>>();
             global.set_sync_identity(engine.identity().into());
-            global.set_sync_peers(ModelRc::new(VecModel::from(peers)));
-            global.set_sync_invites(ModelRc::new(VecModel::from(
-                engine
-                    .invites()
+            global.set_sync_peers(reuse_model(global.get_sync_peers(), peers));
+            let invites = engine.invites();
+            let shown = self
+                .shown_invite
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            // Expired or cancelled elsewhere: the ticket would no longer pair.
+            if shown.is_some_and(|id| !invites.iter().any(|i| i.id == id)) {
+                self.clear_invite(ui);
+                global.set_sync_link_notice("".into());
+            }
+            global.set_sync_invites(reuse_model(
+                global.get_sync_invites(),
+                invites
                     .into_iter()
                     .map(|i| SyncInvite { id: i.id.into() })
-                    .collect::<Vec<_>>(),
-            )));
+                    .collect(),
+            ));
             let mut rendered = status_text(&status);
             let addons = self.addon_status.lock().unwrap_or_else(|e| e.into_inner());
             if self.addon_busy.load(Ordering::Acquire) || addons.pending > 0 {
@@ -583,8 +633,8 @@ impl SyncController {
             }
         } else {
             global.set_sync_identity("".into());
-            global.set_sync_peers(ModelRc::default());
-            global.set_sync_invites(ModelRc::default());
+            global.set_sync_peers(reuse_model(global.get_sync_peers(), Vec::new()));
+            global.set_sync_invites(reuse_model(global.get_sync_invites(), Vec::new()));
             global.set_sync_status(if self.starting.load(Ordering::Acquire) {
                 text::tr("Starting sync…").into()
             } else {
@@ -631,44 +681,13 @@ impl SyncController {
             })
             .collect::<Vec<_>>();
         let global = ui.global::<ReaderSyncSettings>();
-        global.set_sync_inspector_rows(ModelRc::new(VecModel::from(rows)));
+        global.set_sync_inspector_rows(reuse_model(global.get_sync_inspector_rows(), rows));
         let query = global.get_sync_inspector_query().to_lowercase();
-        let chapters = store
-            .records(&crate::sync::domain("resume"))
-            .into_iter()
-            .filter(|(key, value)| {
-                key.to_lowercase().contains(&query) || value.to_lowercase().contains(&query)
-            })
-            .take(80)
-            .filter_map(|(key, raw)| {
-                let progress: reader_domain::ReadingProgress = serde_json::from_str(&raw).ok()?;
-                Some(SyncInspectorRow {
-                    title: format!(
-                        "{} · {}",
-                        progress.chapter.series.source_id, progress.chapter.local_id
-                    )
-                    .into(),
-                    detail: format!(
-                        "{} {} · {} {:.0}%",
-                        text::tr("Page"),
-                        progress.anchor.page_index + 1,
-                        text::tr("offset"),
-                        progress.anchor.offset() * 100.
-                    )
-                    .into(),
-                    status: format!(
-                        "{} · {key}",
-                        text::tr(if progress.completed {
-                            "Read"
-                        } else {
-                            "Reading"
-                        })
-                    )
-                    .into(),
-                })
-            })
-            .collect::<Vec<_>>();
-        global.set_sync_inspector_episodes(ModelRc::new(VecModel::from(chapters)));
+        let chapters = inspector_chapters(store.records(&crate::sync::domain("resume")), &query);
+        global.set_sync_inspector_episodes(reuse_model(
+            global.get_sync_inspector_episodes(),
+            chapters,
+        ));
     }
 
     fn copy(self: &Arc<Self>, _ui: &AppWindow, value: &str) {
@@ -687,6 +706,77 @@ impl SyncController {
             }
         });
     }
+}
+
+/// Update `current` in place when it is already a `VecModel`, so a periodic
+/// refresh with unchanged data keeps row delegates (and their focus) alive.
+pub(crate) fn reuse_model<T: Clone + PartialEq + 'static>(
+    current: ModelRc<T>,
+    rows: Vec<T>,
+) -> ModelRc<T> {
+    use slint::Model;
+    let Some(model) = current.as_any().downcast_ref::<VecModel<T>>() else {
+        return ModelRc::new(VecModel::from(rows));
+    };
+    let shared = model.row_count().min(rows.len());
+    let mut rows = rows.into_iter();
+    for row in 0..shared {
+        let next = rows.next().unwrap();
+        if model.row_data(row).as_ref() != Some(&next) {
+            model.set_row_data(row, next);
+        }
+    }
+    while model.row_count() > shared {
+        model.remove(model.row_count() - 1);
+    }
+    for row in rows {
+        model.push(row);
+    }
+    current
+}
+
+/// Newest reading positions first. Records are parsed before the limit so a
+/// large key cannot hide a recent read behind 80 older ones.
+fn inspector_chapters(records: Vec<(String, String)>, query: &str) -> Vec<SyncInspectorRow> {
+    let mut parsed = records
+        .into_iter()
+        .filter(|(key, value)| {
+            key.to_lowercase().contains(query) || value.to_lowercase().contains(query)
+        })
+        .filter_map(|(key, raw)| {
+            let progress: reader_domain::ReadingProgress = serde_json::from_str(&raw).ok()?;
+            Some((key, progress))
+        })
+        .collect::<Vec<_>>();
+    parsed.sort_by(|a, b| b.1.last_read_at.cmp(&a.1.last_read_at).then(a.0.cmp(&b.0)));
+    parsed
+        .into_iter()
+        .take(80)
+        .map(|(key, progress)| SyncInspectorRow {
+            title: format!(
+                "{} · {}",
+                progress.chapter.series.source_id, progress.chapter.local_id
+            )
+            .into(),
+            detail: format!(
+                "{} {} · {} {:.0}%",
+                text::tr("Page"),
+                progress.anchor.page_index + 1,
+                text::tr("offset"),
+                progress.anchor.offset() * 100.
+            )
+            .into(),
+            status: format!(
+                "{} · {key}",
+                text::tr(if progress.completed {
+                    "Read"
+                } else {
+                    "Reading"
+                })
+            )
+            .into(),
+        })
+        .collect()
 }
 
 fn valid_start(weak: &Weak<SyncController>, generation: u64) -> bool {
@@ -710,13 +800,17 @@ fn interval_index(secs: u64) -> i32 {
 }
 fn ago(stamp: u64) -> String {
     let seconds = crate::services::now().max(0) as u64;
-    let elapsed = seconds.saturating_sub(stamp);
+    ago_elapsed(seconds.saturating_sub(stamp))
+}
+fn ago_elapsed(elapsed: u64) -> String {
     if elapsed < 60 {
         text::tr("Just now")
     } else if elapsed < 3600 {
-        format!("{} {}", elapsed / 60, text::tr("minutes ago"))
+        text::minutes_ago(elapsed / 60)
+    } else if elapsed < 86_400 {
+        text::hours_ago(elapsed / 3600)
     } else {
-        format!("{} {}", elapsed / 3600, text::tr("hours ago"))
+        text::days_ago(elapsed / 86_400)
     }
 }
 fn status_text(status: &nova_sync::SyncStatus) -> String {
@@ -871,6 +965,116 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+    /// Storage allows one data dir per process, so UI-state tests run in a child.
+    fn in_child(test: &str, body: fn(&AppWindow, &Arc<SyncController>)) {
+        const MODE: &str = "READER_SYNC_UI_STATE_CHILD";
+        if let Ok(path) = std::env::var(MODE) {
+            i_slint_backend_testing::init_no_event_loop();
+            let services = Services::open(std::path::Path::new(&path)).unwrap();
+            let ui = AppWindow::new().unwrap();
+            let controller = SyncController::initialize(services, &ui, |_| {}).unwrap();
+            body(&ui, &controller);
+            controller.shutdown();
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &format!("sync_ui::tests::{test}"), "--nocapture"])
+            .env(MODE, dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    #[test]
+    fn device_name_keeps_trailing_space_while_typing() {
+        in_child(
+            "device_name_keeps_trailing_space_while_typing",
+            |ui, controller| {
+                let global = ui.global::<ReaderSyncSettings>();
+                global.invoke_sync_device_name_edited("Living ".into());
+                assert_eq!(global.get_sync_device_name(), "Living ");
+                assert_eq!(nova_sync::read_settings().device_name, "Living");
+                controller.refresh_status(ui);
+                assert_eq!(global.get_sync_device_name(), "Living ");
+            },
+        );
+    }
+    #[test]
+    fn unrelated_cancel_keeps_displayed_invite() {
+        in_child(
+            "unrelated_cancel_keeps_displayed_invite",
+            |ui, controller| {
+                let global = ui.global::<ReaderSyncSettings>();
+                *controller.shown_invite.lock().unwrap() = Some("mine".into());
+                global.set_sync_invite_ticket("NR1-ticket".into());
+                global.invoke_sync_cancel_invite("other".into());
+                assert_eq!(global.get_sync_invite_ticket(), "NR1-ticket");
+                global.invoke_sync_cancel_invite("mine".into());
+                assert_eq!(global.get_sync_invite_ticket(), "");
+            },
+        );
+    }
+    #[test]
+    fn elapsed_labels_are_plural_aware() {
+        assert_eq!(ago_elapsed(30), "Just now");
+        assert_eq!(ago_elapsed(60), "1 minute ago");
+        assert_eq!(ago_elapsed(3600), "1 hour ago");
+        assert_eq!(ago_elapsed(7200), "2 hours ago");
+        assert_eq!(ago_elapsed(86_400 * 3), "3 days ago");
+    }
+    #[test]
+    fn refresh_with_same_data_keeps_models() {
+        use slint::Model;
+        let first = reuse_model(
+            ModelRc::default(),
+            vec![SyncInvite { id: "a".into() }, SyncInvite { id: "b".into() }],
+        );
+        let same = reuse_model(
+            first.clone(),
+            vec![SyncInvite { id: "a".into() }, SyncInvite { id: "b".into() }],
+        );
+        assert!(std::ptr::eq(
+            first
+                .as_any()
+                .downcast_ref::<VecModel<SyncInvite>>()
+                .unwrap(),
+            same.as_any()
+                .downcast_ref::<VecModel<SyncInvite>>()
+                .unwrap()
+        ));
+        let shrunk = reuse_model(same, vec![SyncInvite { id: "b".into() }]);
+        assert_eq!(shrunk.row_count(), 1);
+        assert_eq!(shrunk.row_data(0).unwrap().id, "b");
+        assert_eq!(first.row_count(), 1, "updates happen in place");
+    }
+    #[test]
+    fn inspector_lists_newest_record_beyond_first_eighty_keys() {
+        let record = |at: i64| {
+            serde_json::to_string(&reader_domain::ReadingProgress {
+                chapter: reader_domain::ChapterId::new(
+                    reader_domain::SeriesId::new("src", "s"),
+                    format!("c{at}"),
+                ),
+                anchor: reader_domain::ResumeAnchor::default(),
+                mode: reader_domain::ReadingMode::Webtoon,
+                last_read_at: at,
+                completed: false,
+            })
+            .unwrap()
+        };
+        let mut records = (0..80)
+            .map(|i| (format!("a{i:03}"), record(i)))
+            .collect::<Vec<_>>();
+        records.push(("z999".into(), record(10_000)));
+        let rows = inspector_chapters(records, "");
+        assert_eq!(rows.len(), 80);
+        assert!(rows[0].title.contains("c10000"), "{:?}", rows[0].title);
     }
     #[test]
     fn interval_presets_and_status_keep_real_engine_state() {

@@ -342,10 +342,20 @@ fn chapter_download_delete_actions_follow_saved_remote_jobs() {
                 .invoke_accessible_default_action();
         }
         settle();
+        let asked_before = actions.borrow().len();
         ElementHandle::find_by_accessible_label(&ui, "Delete download")
             .find(|element| element.type_name().as_deref() == Some("PillButton"))
             .unwrap()
             .invoke_accessible_default_action();
+        settle();
+        // Deleting a download asks first; only the sheet's confirm dispatches.
+        assert_eq!(
+            actions.borrow().len(),
+            asked_before,
+            "delete must not dispatch before confirmation"
+        );
+        button(&ui, "Delete download").invoke_accessible_default_action();
+        settle();
         assert_eq!(
             actions.borrow().last().unwrap(),
             &(1, "delete-download".into())
@@ -363,6 +373,9 @@ fn chapter_download_delete_actions_follow_saved_remote_jobs() {
             .find(|element| element.type_name().as_deref() == Some("PillButton"))
             .unwrap()
             .invoke_accessible_default_action();
+        settle();
+        assert_eq!(actions.borrow().len(), before, "confirmation comes first");
+        button(&ui, "Delete download").invoke_accessible_default_action();
         settle();
         assert_eq!(actions.borrow().len(), before + 1);
         assert_eq!(

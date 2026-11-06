@@ -132,16 +132,19 @@ export component SeriesGrid inherits Rectangle {
     }
     // Memory hits publish synchronously before paint. A coalesced retry handles
     // a callback received while Rust is still replacing the current model.
-    changed first-row => { root.request-visible(); artwork-admit.restart(); }
-    changed last-row => { root.request-visible(); artwork-admit.restart(); }
-    changed columns => { root.request-visible(); artwork-admit.restart(); }
-    changed items => { root.request-visible(); artwork-admit.restart(); }
-    changed visible => { root.request-visible(); artwork-admit.restart(); }
+    changed first-row => { root.retry-ticks = 0; root.request-visible(); artwork-admit.restart(); }
+    changed last-row => { root.retry-ticks = 0; root.request-visible(); artwork-admit.restart(); }
+    changed columns => { root.retry-ticks = 0; root.request-visible(); artwork-admit.restart(); }
+    changed items => { root.retry-ticks = 0; root.request-visible(); artwork-admit.restart(); }
+    changed visible => { root.retry-ticks = 0; root.request-visible(); artwork-admit.restart(); }
     artwork-admit := Timer { interval: 1ms; running: false; triggered => {
         self.stop();
         root.request-visible();
     } }
-    Timer { interval: 150ms; running: root.visible && root.items.length > 0; triggered => { root.request-artwork(root.first-row * root.columns, min(root.items.length, (root.last-row + 1) * root.columns)); } }
+    // Cold artwork loads are retried briefly. Any change of window or model
+    // re-arms the budget, so an idle grid with unloadable art stops polling.
+    private property <int> retry-ticks: 0;
+    Timer { interval: 150ms; running: root.visible && root.items.length > 0 && root.retry-ticks < 40; triggered => { root.retry-ticks += 1; root.request-artwork(root.first-row * root.columns, min(root.items.length, (root.last-row + 1) * root.columns)); } }
     for item[i] in root.items: Rectangle {
         x: Math.mod(i, root.columns) * (root.item-width + Theme.card_spacing);
         y: Math.floor(i / root.columns) * root.stride + 4px;
