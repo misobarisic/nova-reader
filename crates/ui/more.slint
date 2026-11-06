@@ -13,6 +13,7 @@ import { ThemeSettings, MotionSettings } from "theme-settings.slint";
 import { PageHeader } from "page-header.slint";
 import { ReaderSyncSettingsPage } from "sync-settings.slint";
 import { AboutPage } from "about.slint";
+import { ProfilesPage, ProfilesBridge } from "profiles.slint";
 import { LicenseSource } from "about-models.slint";
 import { MenuLink, ActionButton, ReaderField } from "controls.slint";
 
@@ -29,6 +30,7 @@ export component MorePage inherits Rectangle {
     in-out property <length> about-licenses-scroll-y;
     in property <int> about-back-request;
     callback license-source-requested(string);
+    callback profile-delete-requested(string, string);
     in property <string> status;
     in property <string> image-cache-info;
     in property <string> image-cache-status;
@@ -52,7 +54,7 @@ export component MorePage inherits Rectangle {
         else { child-scope.focus(); }
     }
     changed narrow => { root.choice = max(root.narrow ? 1 : 2, root.choice); }
-    private property <bool> local-open: root.section >= 9 && root.section <= 22;
+    private property <bool> local-open: (root.section >= 9 && root.section <= 22) || root.section == 24;
     private property <bool> detail-open: root.section == 11 || root.section == 12 || root.section == 14 || root.section == 15 || root.section == 16 || root.section == 17 || root.section == 18 || root.section == 19 || root.section == 20 || root.section == 21 || root.section == 22;
     private property <int> child-section: 9;
     private property <int> detail-section: 11;
@@ -102,7 +104,7 @@ export component MorePage inherits Rectangle {
     private property <bool> detail-active: root.local-open && root.detail-open;
     changed section => {
         SliderGesture.active = false; SliderGesture.hovered = false;
-        if root.section == 9 || root.section == 10 || root.section == 13 {
+        if root.section == 9 || root.section == 10 || root.section == 13 || root.section == 24 {
             if root.child-section != root.section { child-scroll.content-y = 0px; root.child-scroll-y = 0px; }
             root.child-section = root.section;
         }
@@ -177,12 +179,12 @@ export component MorePage inherits Rectangle {
             key-pressed(e) => {
                 if e.text == Key.UpArrow || e.text == Key.DownArrow {
                     SettingsStyle.keyboard-mode = true;
-                    root.choice = clamp(root.choice + (e.text == Key.UpArrow ? -1 : 1), root.narrow ? 1 : 2, 4);
+                    root.choice = clamp(root.choice + (e.text == Key.UpArrow ? -1 : 1), root.narrow ? 1 : 2, 5);
                     self.focus();
                     return accept;
                 }
                 if e.text == Key.Return || e.text == " " {
-                    if !e.repeat { root.navigate(root.choice == 1 ? 7 : root.choice == 2 ? 9 : root.choice == 3 ? 10 : 13); }
+                    if !e.repeat { root.navigate(root.choice == 1 ? 7 : root.choice == 2 ? 9 : root.choice == 3 ? 24 : root.choice == 4 ? 10 : 13); }
                     return accept;
                 }
                 return reject;
@@ -209,13 +211,19 @@ export component MorePage inherits Rectangle {
                     } }
                     SettingsCard { MenuLink {
                         focused: SettingsStyle.keyboard-mode && root.choice == 3;
-                        interactive: root.landing-active; title: @tr("Settings"); subtitle: @tr("Make Nova Reader yours");
-                        destination-id: "more:settings"; icon-kind: 10; picked => { root.choice = 3; root.navigate(10); }
+                        interactive: root.landing-active; title: @tr("Profiles");
+                        subtitle: ProfilesBridge.active-name != "" ? ProfilesBridge.active-name : @tr("Separate libraries, history and settings");
+                        destination-id: "more:profiles"; icon-kind: 11; picked => { root.choice = 3; root.navigate(24); }
                     } }
                     SettingsCard { MenuLink {
                         focused: SettingsStyle.keyboard-mode && root.choice == 4;
+                        interactive: root.landing-active; title: @tr("Settings"); subtitle: @tr("Make Nova Reader yours");
+                        destination-id: "more:settings"; icon-kind: 10; picked => { root.choice = 4; root.navigate(10); }
+                    } }
+                    SettingsCard { MenuLink {
+                        focused: SettingsStyle.keyboard-mode && root.choice == 5;
                         interactive: root.landing-active; title: @tr("About"); subtitle: @tr("Information about Nova Reader");
-                        destination-id: "more:about"; icon-kind: 15; picked => { root.choice = 4; root.navigate(13); }
+                        destination-id: "more:about"; icon-kind: 15; picked => { root.choice = 5; root.navigate(13); }
                     } }
                 }
             }
@@ -238,8 +246,9 @@ export component MorePage inherits Rectangle {
                 VerticalLayout {
                     padding: 18px; spacing: 12px; alignment: start;
                     PageHeader {
-                        title: root.child-section == 9 ? @tr("Local chapters") : root.child-section == 10 ? @tr("Settings") : @tr("About");
-                        narrow: root.narrow; show-back: true; back => { if root.child-active { root.navigate(4); } }
+                        title: root.child-section == 9 ? @tr("Local chapters") : root.child-section == 24 ? @tr("Profiles") : root.child-section == 10 ? @tr("Settings") : @tr("About");
+                        narrow: root.narrow; show-back: !ProfilesBridge.require-selection || root.child-section != 24;
+                        back => { if root.child-active && !(ProfilesBridge.require-selection && root.child-section == 24) { root.navigate(4); } }
                     }
                     if root.status != "": Text { min-width: 0px; text: root.status; color: Theme.current.text_settings; wrap: word-wrap; }
                     if root.child-section == 9: VerticalLayout {
@@ -252,6 +261,10 @@ export component MorePage inherits Rectangle {
                             interactive: root.child-active; title: @tr("Import an image folder"); subtitle: @tr("Choose a folder of chapter pages"); icon-kind: 2;
                             picked => { root.local-import(true); }
                         } }
+                    }
+                    if root.child-section == 24: ProfilesPage {
+                        interactive: root.child-active;
+                        delete-requested(id, name) => { root.profile-delete-requested(id, name); }
                     }
                     if root.child-section == 10: VerticalLayout {
                         spacing: 12px; alignment: start;

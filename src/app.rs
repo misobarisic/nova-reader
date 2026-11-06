@@ -31,6 +31,8 @@ static LIFECYCLE: OnceLock<Weak<Controller>> = OnceLock::new();
 mod gallery_presentation;
 #[path = "page_overview.rs"]
 mod page_overview;
+#[path = "profile_actions.rs"]
+mod profile_actions;
 #[path = "reader_capture_editor.rs"]
 mod reader_capture_editor;
 #[path = "reader_capture_sources.rs"]
@@ -1465,6 +1467,7 @@ struct Controller {
 }
 impl Controller {
     fn refresh_synced(self: &Arc<Self>, ui: &AppWindow) {
+        self.reconcile_profiles(ui);
         let settings_package = { self.view().settings_package.clone() };
         if ui.get_section() == 8
             && let Some(package) = settings_package
@@ -1480,7 +1483,7 @@ impl Controller {
         let adult = ui.get_show_adult();
         let app = self.clone();
         let weak = ui.as_weak();
-        std::thread::spawn(move || {
+        crate::profiles::spawn(move || {
             let sources = app.browse_sources(adult);
             let _ = weak.upgrade_in_event_loop(move |ui| {
                 if app.generation.load(Ordering::Acquire) == generation
@@ -1561,7 +1564,7 @@ impl Controller {
         settings.set_chapter_cache_status("".into());
         let cache = self.chapter_cache.clone();
         let weak = ui.as_weak();
-        std::thread::spawn(move || {
+        crate::profiles::spawn(move || {
             let removed = clear.then(|| cache.clear());
             let (bytes, files) = cache.usage();
             let failed = cache.clone();
@@ -1638,7 +1641,7 @@ impl Controller {
         ui.set_status("".into());
         let app = self.clone();
         let weak = ui.as_weak();
-        std::thread::spawn(move || {
+        crate::profiles::spawn(move || {
             let result = work(&app, &cancel);
             let _ = weak.upgrade_in_event_loop(move |ui| {
                 if app.generation.load(Ordering::Acquire) != generation {
@@ -1937,7 +1940,7 @@ impl Controller {
                 ),
                 _ => (std::cmp::Reverse(0), std::cmp::Reverse(0)),
             });
-            let label = nova_storage::get_str("reader:last-update")
+            let label = reader_domain::profile::kv::get_str("reader:last-update")
                 .and_then(|s| s.parse::<i64>().ok())
                 .map(|t| {
                     let stamp = crate::timeline::TimelineClock::now().history(t);
@@ -2380,6 +2383,15 @@ impl Controller {
         }
     }
     fn navigate(self: &Arc<Self>, ui: &AppWindow, section: i32) {
+        // The startup picker cannot be left without choosing a profile.
+        if section != 24 && self.profile_selection_required(ui) {
+            return;
+        }
+        if section == 24 {
+            self.publish_profiles(ui);
+        } else {
+            ui.global::<crate::ProfilesBridge>().set_error("".into());
+        }
         ui.invoke_remember_library_position();
         if section == 23 && self.gallery_return(ui) {
             return;
@@ -3053,7 +3065,7 @@ impl Controller {
     ) {
         let app = Arc::downgrade(self);
         let weak = ui.as_weak();
-        std::thread::spawn(move || {
+        crate::profiles::spawn(move || {
             std::thread::sleep(due.saturating_duration_since(std::time::Instant::now()));
             let _ = weak.upgrade_in_event_loop(move |ui| {
                 if let Some(app) = app.upgrade() {
@@ -3994,7 +4006,7 @@ impl Controller {
         let app = self.clone();
         let weak = ui.as_weak();
         let lease = crate::download_background::begin(&self.services.downloads);
-        std::thread::spawn(move || {
+        crate::profiles::spawn(move || {
             let _lease = lease;
             // One worker per explicit batch; metadata and transfers remain
             // bounded even when Resume all contains hundreds of chapters.
@@ -4182,7 +4194,7 @@ impl Controller {
                     .map_err(error)?;
                 if !newly_read.is_empty() {
                     let services = self.services.clone();
-                    std::thread::spawn(move || {
+                    crate::profiles::spawn(move || {
                         crate::download_cleanup::after_read(
                             &services.domain,
                             &services.downloads,
@@ -4385,7 +4397,7 @@ impl Controller {
                     .map_err(error);
                 if result.is_ok() && newly_read {
                     let services = self.services.clone();
-                    std::thread::spawn(move || {
+                    crate::profiles::spawn(move || {
                         crate::download_cleanup::after_read(
                             &services.domain,
                             &services.downloads,
@@ -4418,7 +4430,7 @@ impl Controller {
         };
         let app = self.clone();
         let weak = ui.as_weak();
-        std::thread::spawn(move || {
+        crate::profiles::spawn(move || {
             let states = app
                 .services
                 .downloads
@@ -5533,7 +5545,7 @@ fn wire_reader_context(app: &Arc<Controller>, ui: &AppWindow) {
                     });
                 }
             };
-            std::thread::spawn(move || {
+            crate::profiles::spawn(move || {
                 let mut final_naming = naming;
                 let image = (|| {
                     cancel.check().map_err(error)?;
@@ -5778,6 +5790,7 @@ pub fn run(services: Services) -> Result<()> {
         });
     }));
     wire_reader_context(&app, &ui);
+    profile_actions::wire(&app, &ui);
     reader_controls::wire(&app, &ui);
     reader_open::wire(&app, &ui);
     let _overview_timer = page_overview::wire(&app, &ui);
@@ -5919,7 +5932,7 @@ pub fn run(services: Services) -> Result<()> {
             // leaving an empty result with no retry.
             let app = app.clone();
             let weak = ui.as_weak();
-            std::thread::spawn(move || {
+            crate::profiles::spawn(move || {
                 let result = (|| {
                     let source = app.services.source(&choice.id)?;
                     let response = source
@@ -6015,7 +6028,7 @@ pub fn run(services: Services) -> Result<()> {
                     Ok(failed)
                 },
                 |app, ui, failed| {
-                    nova_storage::set_str("reader:last-update", &now().to_string());
+                    reader_domain::profile::kv::set_str("reader:last-update", &now().to_string());
                     app.render(ui);
                     if failed > 0 {
                         ui.set_status(text::library_refresh_failed(failed).into());
@@ -6384,7 +6397,7 @@ pub fn run(services: Services) -> Result<()> {
         ui.set_update_checking(true);
         ui.set_status("".into());
         let weak = ui.as_weak();
-        std::thread::spawn(move || {
+        crate::profiles::spawn(move || {
             let message = match crate::updates::check() {
                 Ok(message) | Err(message) => message,
             };
@@ -6444,11 +6457,14 @@ pub fn run(services: Services) -> Result<()> {
     });
     app.render(&ui);
     app.refresh_download_states(&ui);
+    if app.profile_selection_required(&ui) {
+        app.navigate(&ui, 24);
+    }
     // Recovery verifies persisted payloads; keep that potentially large scan
     // off the event loop as well as the lightweight list-status refresh.
     let startup = app.clone();
     let startup_ui = ui.as_weak();
-    std::thread::spawn(move || {
+    crate::profiles::spawn(move || {
         let queued = startup.services.downloads.jobs().map(|jobs| {
             jobs.into_iter()
                 .filter(|job| job.status == reader_downloads::JobStatus::Queued)

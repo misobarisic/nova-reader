@@ -460,6 +460,12 @@ pub(crate) struct Scheduler {
     cancel: Mutex<CancelToken>,
 }
 impl Scheduler {
+    /// A profile switch starts from a clean slate: no queued batch spacing, no
+    /// running pass for the previous profile's library.
+    pub(crate) fn reset(&self) {
+        self.pause();
+        *self.next_batch.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
     pub(crate) fn pause(&self) {
         self.allowed.store(false, Ordering::Release);
         self.cancel
@@ -487,7 +493,7 @@ impl Scheduler {
         let cancel = CancelToken::default();
         *self.cancel.lock().unwrap_or_else(|e| e.into_inner()) = cancel.clone();
         let scheduler = self.clone();
-        std::thread::spawn(move || {
+        crate::profiles::spawn(move || {
             let changed = scheduler.run(&services, &cancel);
             scheduler.busy.store(false, Ordering::Release);
             if changed {
@@ -568,7 +574,8 @@ impl Scheduler {
             }
         }
         if changed {
-            let _ = nova_storage::try_set_str("reader:last-update", &now().to_string());
+            let _ =
+                reader_domain::profile::kv::try_set_str("reader:last-update", &now().to_string());
         }
         changed
     }

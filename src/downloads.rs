@@ -160,10 +160,16 @@ impl Controller {
         let query = ui.get_download_query().to_lowercase();
         let unread = ui.get_download_unread_only();
         let sort = ui.get_download_sort();
+        // Chapter files are shared by every profile on this device, but each
+        // profile lists only the downloads of series it knows.
         let completed: Vec<_> = downloads
             .jobs
             .iter()
-            .filter(|j| j.status == JobStatus::Complete && j.chapter.series.source_id != "local")
+            .filter(|j| {
+                j.status == JobStatus::Complete
+                    && j.chapter.series.source_id != "local"
+                    && series.contains_key(&j.chapter.series)
+            })
             .collect();
         let saved_bytes: u64 = completed.iter().map(|j| j.downloaded_bytes()).sum();
         let titles = completed
@@ -311,7 +317,11 @@ impl Controller {
         let mut queued: Vec<_> = downloads
             .jobs
             .iter()
-            .filter(|j| j.status != JobStatus::Complete && j.chapter.series.source_id != "local")
+            .filter(|j| {
+                j.status != JobStatus::Complete
+                    && j.chapter.series.source_id != "local"
+                    && series.contains_key(&j.chapter.series)
+            })
             .cloned()
             .collect();
         for (id, desired) in &downloads.pending {
@@ -663,7 +673,7 @@ impl Controller {
         let app = self.clone();
         let weak = ui.as_weak();
         let action = action.to_owned();
-        std::thread::spawn(move || {
+        crate::profiles::spawn(move || {
             let result = (|| -> Result<()> {
                 for id in ids {
                     if id.series.source_id == "local" {
@@ -748,7 +758,7 @@ impl Controller {
         };
         let app = self.clone();
         let weak = ui.as_weak();
-        std::thread::spawn(move || {
+        crate::profiles::spawn(move || {
             // Dropping onto a row means "take its place", so moving down lands
             // after it; the empty target is the end-of-queue drop zone.
             let result = match before.as_ref() {

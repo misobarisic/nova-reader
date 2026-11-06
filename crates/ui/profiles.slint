@@ -1,0 +1,197 @@
+// Profiles: personal libraries, history and settings on one device. Reader's
+// version of Nova's picker, built from Reader's MenuLink/SettingsCard styles.
+// The selection belongs to this device; profile contents belong to sync.
+import { Theme, Anim, SettingsStyle } from "@NovaUiShared";
+import { SettingsCard, ToggleSwitch, SectionHeader } from "@NovaUiBase/settings-controls.slint";
+import { ActionButton, ReaderField } from "controls.slint";
+
+export struct ProfileRow {
+    id: string,
+    name: string,
+    active: bool,
+    initial: string,
+    avatar-background: color,
+    avatar-foreground: color,
+}
+
+export global ProfilesBridge {
+    in-out property <[ProfileRow]> profiles;
+    // Name of the selected profile, shown on the More landing.
+    in-out property <string> active-name;
+    in-out property <string> error;
+    in-out property <bool> busy: false;
+    in-out property <bool> remember-last: true;
+    // Startup picker: navigation stays blocked until a profile is chosen.
+    in-out property <bool> require-selection: false;
+    callback create-profile(string);
+    callback rename-profile(string, string);
+    callback select-profile(string);
+    callback delete-profile(string);
+    callback remember-last-changed(bool);
+}
+
+component ProfileAvatar inherits Rectangle {
+    in property <ProfileRow> profile;
+    width: 48px; height: 48px; border-radius: 24px;
+    background: root.profile.avatar-background;
+    Text {
+        width: 100%; height: 100%;
+        text: root.profile.initial; color: root.profile.avatar-foreground;
+        font-size: 24px; font-weight: 600;
+        horizontal-alignment: center; vertical-alignment: center;
+    }
+}
+
+// One accessible target per identity: tapping it selects the profile.
+component ProfileChoiceRow inherits Rectangle {
+    in property <ProfileRow> profile;
+    in property <bool> interactive: true;
+    callback picked();
+    accessible-role: button;
+    accessible-label: root.profile.active ? @tr("Current profile: {}", root.profile.name) : @tr("Use profile: {}", root.profile.name);
+    accessible-enabled: root.interactive;
+    accessible-action-default => { if root.interactive { root.picked(); } }
+    height: Math.max(72px, 24px + row-measure.preferred-height);
+    vertical-stretch: 0;
+    border-radius: 8px;
+    border-width: root.focus-visible ? 2px : (root.profile.active ? 1px : 0px);
+    border-color: root.focus-visible ? Theme.current.focus_ring : Theme.current.accent;
+    background: touch.pressed && root.interactive ? Theme.current.settings_control : Theme.current.card;
+    opacity: root.interactive ? 1 : 0.45;
+    private property <bool> focus-visible: root.interactive && SettingsStyle.keyboard-mode && row-focus.has-focus;
+    changed focus-visible => {
+        if root.focus-visible { SettingsStyle.reveal_control(root.absolute-position.y, root.height, true); }
+    }
+    Rectangle {
+        height: 0px; clip: true;
+        row-measure := VerticalLayout {
+            width: Math.max(1px, root.width - 160px); spacing: 2px;
+            Text { text: root.profile.name; font-size: 18px; font-weight: 600; wrap: word-wrap; min-width: 0px; }
+            if root.profile.active: Text { text: @tr("Current profile"); font-size: 14px; }
+        }
+    }
+    HorizontalLayout {
+        padding: 12px; padding-left: 16px; padding-right: 16px; spacing: 16px;
+        alignment: start;
+        ProfileAvatar { profile: root.profile; y: (parent.height - self.height) / 2; }
+        VerticalLayout {
+            horizontal-stretch: 1; min-width: 0px; spacing: 2px; alignment: center;
+            Text { text: root.profile.name; color: Theme.current.text_bright; font-size: 18px; font-weight: 600; wrap: word-wrap; min-width: 0px; }
+            if root.profile.active: Text { text: @tr("Current profile"); color: Theme.current.text_secondary; font-size: 14px; }
+        }
+    }
+    forward-focus: row-focus;
+    row-focus := FocusScope {
+        enabled: root.interactive;
+        key-pressed(e) => {
+            if e.text == Key.Return || e.text == " " {
+                SettingsStyle.keyboard-mode = true;
+                if !e.repeat { root.picked(); }
+                return accept;
+            }
+            return reject;
+        }
+    }
+    touch := TouchArea {
+        enabled: root.interactive; width: 100%; height: 100%;
+        mouse-cursor: pointer;
+        clicked => { SettingsStyle.keyboard-mode = false; row-focus.focus(); root.picked(); }
+    }
+}
+
+export component ProfilesPage inherits VerticalLayout {
+    in property <bool> interactive: true;
+    // Deletion is confirmed by the host's shared destructive-action sheet.
+    callback delete-requested(string, string);
+    // 0 list, 1 create, 2 rename.
+    private property <int> editor: 0;
+    private property <string> editing-id;
+    private property <string> draft;
+    private property <bool> required: ProfilesBridge.require-selection;
+    private property <bool> idle: root.interactive && !ProfilesBridge.busy;
+    spacing: 12px; alignment: start;
+
+    public function reset() { root.editor = 0; root.draft = ""; }
+    function begin(kind: int, id: string, name: string) {
+        root.editing-id = id;
+        root.draft = name;
+        root.editor = kind;
+        ProfilesBridge.error = "";
+    }
+    function submit() {
+        if root.draft == "" || !root.idle { return; }
+        if root.editor == 1 { ProfilesBridge.create-profile(root.draft); }
+        else if root.editor == 2 { ProfilesBridge.rename-profile(root.editing-id, root.draft); }
+        // The host leaves an error in place when the name is refused.
+        if ProfilesBridge.error == "" { root.reset(); }
+    }
+
+    Text {
+        min-width: 0px; wrap: word-wrap; color: Theme.current.text_settings;
+        text: root.required ? @tr("Choose a profile to continue.") : @tr("Each profile keeps its own library, history and reading settings. Profiles sync across your paired devices.");
+    }
+    if ProfilesBridge.error != "": SettingsCard {
+        VerticalLayout { padding: 16px;
+            Text { text: ProfilesBridge.error; color: Theme.current.text_destructive; wrap: word-wrap; min-width: 0px; }
+        }
+    }
+    if root.editor == 0: VerticalLayout {
+        spacing: 12px; alignment: start;
+        for profile[index] in ProfilesBridge.profiles: VerticalLayout {
+            spacing: 6px;
+            ProfileChoiceRow {
+                profile: profile; interactive: root.idle;
+                picked => { ProfilesBridge.select-profile(profile.id); }
+            }
+            if !root.required: HorizontalLayout {
+                spacing: 8px; alignment: end;
+                ActionButton {
+                    text: @tr("Rename"); enabled: root.idle;
+                    clicked => { root.begin(2, profile.id, profile.name); }
+                }
+                ActionButton {
+                    text: @tr("Delete"); enabled: root.idle && ProfilesBridge.profiles.length > 1;
+                    clicked => { root.delete-requested(profile.id, profile.name); }
+                }
+            }
+        }
+        ActionButton {
+            text: @tr("Add profile"); accent: true; enabled: root.idle;
+            clicked => { root.begin(1, "", ""); }
+        }
+        SettingsCard {
+            HorizontalLayout {
+                padding: 16px; spacing: 12px;
+                Text {
+                    horizontal-stretch: 1; min-width: 0px; vertical-alignment: center; wrap: word-wrap;
+                    text: @tr("Open the last profile on startup");
+                    color: Theme.current.text_settings;
+                }
+                ToggleSwitch {
+                    name: @tr("Open the last profile on startup");
+                    enabled: root.idle;
+                    checked: ProfilesBridge.remember-last;
+                    toggled => { ProfilesBridge.remember-last-changed(!ProfilesBridge.remember-last); }
+                    accessible-action-default => { if self.enabled { ProfilesBridge.remember-last-changed(!ProfilesBridge.remember-last); } }
+                }
+            }
+        }
+    }
+    if root.editor != 0: SettingsCard {
+        VerticalLayout {
+            padding: 16px; spacing: 12px;
+            SectionHeader { label: root.editor == 1 ? @tr("New profile") : @tr("Rename profile"); }
+            ReaderField {
+                enabled: root.idle;
+                text <=> root.draft;
+                placeholder-text: @tr("Profile name");
+                accepted(value) => { root.submit(); }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                ActionButton { text: @tr("Save"); accent: true; enabled: root.idle && root.draft != ""; clicked => { root.submit(); } }
+                ActionButton { text: @tr("Cancel"); enabled: root.idle; clicked => { root.reset(); ProfilesBridge.error = ""; } }
+            }
+        }
+    }
+}

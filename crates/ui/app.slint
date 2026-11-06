@@ -1,5 +1,6 @@
 export { ReaderSettingsSync, SettingSyncInfo } from "settings-sync.slint";
 import { SettingSyncBadge } from "settings-sync.slint";
+import { ProfilesBridge } from "profiles.slint";
 import { ControlTouchArea } from "@NovaUiBase/control-input.slint";
 import { Spinner } from "std-widgets.slint";
 import { Theme, Anim, SettingsStyle, ControlInput, SliderGesture } from "@NovaUiShared";
@@ -50,6 +51,7 @@ export { LicenseSource } from "about-models.slint";
 export { Appearance } from "appearance.slint";
 export { ImageLimitSettings } from "image-limit-settings.slint";
 export { DownloadCleanupSettings } from "download-cleanup-settings.slint";
+export { ProfilesBridge, ProfileRow } from "profiles.slint";
 export { CaptureSettings } from "capture-settings.slint";
 import { CaptureSettings } from "capture-settings.slint";
 export { ImageStorageSettings } from "image-storage-settings.slint";
@@ -148,6 +150,7 @@ export component AppWindow inherits Window {
             else if root.action-confirm-kind == "library" { root.toggle-library(); }
             else if root.action-confirm-kind == "entry" { root.entry-action(root.action-confirm-a, root.action-confirm-b); }
             else if root.action-confirm-kind == "chapter" { root.item-action(root.action-confirm-index, root.action-confirm-a); }
+            else if root.action-confirm-kind == "profile" { ProfilesBridge.delete-profile(root.action-confirm-a); }
         }
         keyboard.focus();
     }
@@ -619,6 +622,8 @@ export component AppWindow inherits Window {
     callback flush-progress;
 
     public function go-back() {
+        // The startup picker cannot be dismissed without choosing a profile.
+        if ProfilesBridge.require-selection && root.section == 24 && !root.action-confirm-open { return; }
         if root.action-confirm-open { root.resolve-action-confirm(1); return; }
         if root.restore-confirm-open { root.resolve-restore-confirm(1); return; }
         if root.download-confirm-open { root.resolve-download-confirm(1); return; }
@@ -674,7 +679,7 @@ export component AppWindow inherits Window {
         if root.section == 6 { root.reader-osd = false; root.show-reader-options = false; }
         root.immersive-changed(root.section == 6 && ReaderSettings.fullscreen);
         keyboard.focus();
-        if root.section == 4 || (root.section >= 9 && root.section <= 22) { more-page.focus_shell(); }
+        if root.section == 4 || (root.section >= 9 && root.section <= 22) || root.section == 24 { more-page.focus_shell(); }
     }
 
     changed reader-width => { if root.section == 6 && !root.reader-zoom-animating {root.reader-reflow(root.reader-width / 1px, root.reader-viewport-height / 1px);} }
@@ -1312,7 +1317,7 @@ export component AppWindow inherits Window {
                             // Keep More's retained landing viewport unchanged
                             // when its child pages hide the external bottom bar.
                             width: parent.width; height: parent.height + (Theme.transparent_navbar ? 0px : root.bottom-navigation-height);
-                            visible: root.section == 4 || (root.section >= 9 && root.section <= 22);
+                            visible: root.section == 4 || (root.section >= 9 && root.section <= 22) || root.section == 24;
                             section: root.section; narrow: root.mobile-ui;
                             app-version: root.app-version; status: root.status;
                             license-text-chunks: root.license-text-chunks;
@@ -1324,6 +1329,7 @@ export component AppWindow inherits Window {
                             update-checks-enabled: root.about-update-checks-enabled;
                             update-checking: root.update-checking;
                             license-source-requested(url) => { root.license-source-requested(url); }
+                            profile-delete-requested(id, name) => { root.ask-confirm("profile", id, name, 0, @tr("Delete this profile? Its library, history and settings are removed on every paired device. Downloaded chapter files are kept."), @tr("Delete profile")); }
                             category-text <=> root.category-text;
                             image-cache-info: root.image-cache-info;
                             image-cache-status: root.image-cache-status;

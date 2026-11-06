@@ -44,6 +44,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `crates/ui/source-settings.slint` | Addon settings page with slider-owned Flickable gestures, keyboard focus reveal and existing catalogue/custom-field callbacks |
 | `src/source_compression.rs`, `crates/ui/source-compression-settings.slint`, `tests/source_compression.rs` | Host-owned per-addon global/explicit cache and download compression, worker snapshots and addon sync projection; budgets remain device-wide |
 | `src/source_catalogs.rs` | Host-owned per-addon catalogue switches under `reader:disabled-catalogs:<JSON package ID>`; filters Browse while preserving direct/history/offline access |
+| `src/profiles.rs`, `src/profile_actions.rs`, `crates/reader-domain/src/profile.rs`, `crates/ui/profiles.slint`, `tests/profiles.rs`, `tests/profiles_ui.rs` | Per-user profiles ([profiles](profiles.md)): directory and retirement in the `profiles`/`profile_deletions` sync domains, device-local selection, the personal-key whitelist and active pointer, legacy migration, switching/deletion on the UI thread and the Profiles page (section 24) |
 | `src/content_presentation.rs`, `tests/content_presentation.rs`, `tests/presentation_sync.rs` | Versioned `reader:content-presentation:<JSON SeriesId>` records, synced per entry through the `reader_presentation` domain; explicit Default/Reader/Gallery choice and last addon hint, captured before domain conversion and retained for offline use |
 | `src/reading_preferences.rs` | Fallible Nova KV persistence for adult-source visibility and chapter order keyed by full source-local series identity |
 | `src/reader_modes.rs`, `docs/reader-modes.md` | Pinned TachiyomiJ2K classification, Default/global inheritance, explicit Automatic/manual/gapped selection, and durable per-series mode overrides |
@@ -125,8 +126,10 @@ and UI utilities without introducing reader-domain dependencies into kit.
 
 ## State and work boundaries
 
-`DomainStore` stores validated JSON under `reader:state` through `nova-storage`
-in the Reader application directory. The internal database filename remains
+`DomainStore` stores validated JSON under `reader:state` (physically
+`profile:<id>:reader:state` for the selected profile; every personal key is
+profile-scoped by the whitelist in `reader_domain::profile`, see
+[profiles](profiles.md)) through `nova-storage` in the Reader application directory. The internal database filename remains
 `nova.redb`; the application directory isolates it from Nova. One directory is
 supported per process. Restore validates the replacement before publishing it.
 The native metadata backup excludes executable addons, cookies and chapter bytes.
@@ -523,6 +526,7 @@ generate all installable ZIPs; Reader does not depend on a sibling checkout.
 - Shared cache implementation/settings: Kit `crates/cache` and `crates/ui-base/slint/cache-settings-controls.slint`; Reader `src/chapter_cache.rs`, `src/image_storage.rs` and `tests/image_storage.rs`.
 - Library location, pinned controls, search and per-title actions: `src/library_navigation.rs`, `crates/ui/library-page.slint`, `crates/ui/library-search.slint`, `crates/ui/entry-menu.slint`, `tests/library_navigation.rs`, `tests/entry_menu.rs`.
 - Automatic source paging and Retry: `src/app.rs` (`browse`/`complete_browse`), `crates/ui/app.slint`, `tests/source_paging.rs`.
+- Profiles (identity, key scoping, switching, deletion, picker): `docs/profiles.md`, `src/profiles.rs`, `src/profile_actions.rs`, `crates/reader-domain/src/profile.rs`, `crates/ui/profiles.slint`.
 - Per-entry Reader/Gallery preferences and optional addon hints (local KV plus the `reader_presentation` sync domain): `src/content_presentation.rs`, `src/sync.rs`, `src/services.rs::Services::{series,series_listing}`, `tests/content_presentation.rs`, `tests/presentation_sync.rs`.
 - Automatic/manual reader mode and per-series overrides: `src/reader_modes.rs`, `docs/reader-modes.md`, `tests/reader_modes.rs`.
 - Effective-direction chapter/page controls and progress slider: `crates/ui/reader-osd.slint`, `tests/reader_mode_controls.rs`.
@@ -763,7 +767,7 @@ keeps neutral Pages/zoom restoration from creating progress, history or completi
 across checkpoints and exit. Periodic checkpoint storage remains off the UI thread.
 
 Reader sync stores one record per source-scoped identity under
-`profile_domain("reader", "reader_<kind>")`, never a replicated whole-state
+`profile_domain(<profile>, "reader_<kind>")` (`reader` for the first profile; see [profiles](profiles.md)), never a replicated whole-state
 snapshot. Category IDs survive renames. Existing bookmark identities migrate
 without changing backup schema: their immutable chapter/page/offset tuple is the
 record key, so note edits retain identity and removal retains a tombstone.
