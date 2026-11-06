@@ -65,13 +65,13 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `../nova-kit/crates/cache`, `../nova-kit/crates/ui-base/slint/cache-settings-controls.slint` | Actual Nova cache/settings implementations and NumericSetting/cache controls shared by Nova and Reader; app persistence/search/sync adapters remain local |
 | `src/library_navigation.rs`, `crates/ui/library-page.slint` | Device-local `reader:library-navigation:v1` last selected stable category; session-only per-category SeriesId/row-fraction anchors and Nova's pinned sibling header/native LibraryScroll |
 | `crates/ui/library-search.slint` | Retained Nova search reveal, deferred focus, live filtering and viewport-aware field exposure |
-| `crates/ui/entry-menu.slint`, `crates/ui/status-menu.slint` | Per-title Kit action sheet/anchored desktop menu, copied Nova Change status picker, stable-identity category editing, series mark-all read/unread, series clear-all chapter positions and library/refresh actions, Default/Reader/Gallery presentation and collection Metadata/Download actions |
+| `crates/ui/entry-menu.slint`, `crates/ui/status-menu.slint` | Per-title Kit action sheet/anchored desktop menu, copied Nova Change status picker, stable-identity category editing, series mark-all read/unread, series clear-all chapter positions and library/refresh actions, Default/Reader/Gallery presentation and collection Metadata/Download/thumbnail-density (`density-smaller`/`density-larger`, handled in `app.slint`) actions |
 | `crates/ui/detail-hero.slint`, `crates/ui/title-artwork.slint`, `crates/ui/chapter-row.slint` | Nova detail artwork/title/metadata/actions, retained synopsis state, chapter-ready action gating and backend `resume-action-label` for Start/Continue/Read again, compact chapter rows and accessible action popup |
 | `crates/ui/timeline.slint`, `crates/ui/source-list.slint`, `crates/ui/extensions.slint`, `crates/ui/source-filters.slint` | Dated History/Updates, grouped sources with bundled icons, extension management and actual source-defined browse filters |
 | `crates/ui/reader-context-menu.slint` | Normal selection save/copy plus optional `(simple)` viewport actions, stationary-hold/right-click handling, clamping, keyboard navigation and export feedback |
 | `crates/ui/reader-pager.slint`, `tests/reader_pager.rs` | Touch/mouse gallery dragging and wheel paging in reading order, adjacent-page motion and bounded settling; zoomed artwork yields to image panning |
 | `crates/ui/reader-zoom.slint` | Native pinch scale/moving-midpoint lifecycle and remaining-finger guard; `app.slint` forwards `reader-zoom-by` and `reader-transform` into reader controls, while image interactions consume actual Ctrl+wheel modifiers |
-| `crates/ui/page-overview.slint`, `crates/ui/page-thumbnail.slint`, `tests/page_overview.rs` | Shared row-virtualized overview with labeled manga pages or edge-to-edge square gallery tiles, stable-ID selection, RTL columns, focal pinch/Ctrl+wheel density and logical viewport-anchor restoration; native interaction and opt-in raster previews |
+| `crates/ui/page-overview.slint`, `crates/ui/page-thumbnail.slint`, `tests/page_overview.rs` | Shared row-virtualized overview with labeled manga pages or edge-to-edge square gallery tiles (2px gutters, dark placeholder, motion-aware 150ms fade-in, inset current ring and full-tile keyboard ring, broken-image glyph), a collection header floating over a top scrim that hides while scrolling down and returns on scroll up/top-edge/keyboard, group chips (up to 8 groups, dropdown beyond), a trailing fast scroller with an "Image N of M" bubble for collections over ~3 screens, stable-ID selection, RTL columns, focal pinch/Ctrl+wheel density and logical viewport-anchor restoration; native interaction and opt-in raster previews (`render_gallery_snapshots` writes before/after PNGs) |
 | `crates/ui/navigation.slint` | Nova’s 64px icon rail, flat five-tab bottom bar, icon feedback and keyboard navigation |
 | `crates/ui/controls.slint`, `crates/ui/page-header.slint` | Thin Nova Kit control adapters and Nova’s PageHeader; shared palette, typography and accessibility |
 | `crates/ui/more.slint` | Retained Nova-style More/Settings landings, nested slide/fade layers, scroll/focus restoration and local import/categories/data/About pages |
@@ -725,6 +725,10 @@ Opening Pages cancels pending chapter/boundary intent and snapshots settled zoom
 so Back restores the original reader route even if destination pixels arrive late.
 Collection viewers route directional group actions through their existing group
 overview controller instead of manga continuation.
+Collection viewers are photo viewers: always black, chrome hidden on entry, any
+tap toggles the chrome (no edge tap zones), and an `N / M` counter stays visible
+while the chrome is hidden. A thumbnail filmstrip in the viewer is deferred: the
+thumbnail service publishes only to the overview model while section 23 is open.
 
 Continuous reading attaches prepared chapters to the same page model in Webtoon and paged modes.
 Continuation uses the same metadata-only stable page inventory as direct entry,
