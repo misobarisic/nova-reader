@@ -130,6 +130,45 @@ dropped immediately, and `defers_prefetch`, `handoff_budgets` and the 32 MiB
 model budget are unchanged. A scripted live-worker walk (down 3, up 2, down 2
 pages of 512x768) went from 10 decodes with 4 repeats to 8 decodes with none.
 
+## Split pages (banded decoding)
+
+A tall page can be stored as independently encoded 2,048-row strips (see
+`docs/project-structure.md`, `page_store`). The engine sees only the
+`PageSource` trait: dimensions, an optional `row_granularity`, and
+`decode_rows`. `DisplayDecoder` decodes a source that reports a granularity
+smaller than the page one band at a time and keeps the bands in an LRU capped
+at 64 MiB (and at what the decoded budget leaves after the output window).
+`WindowRenderer::render_rect` loads only the bands its rows touch; a rectangle
+that straddles a seam samples both neighbours through the same resampler as a
+whole decode, so a banded window is byte-identical to the whole-page window.
+Rotation, spread splitting and reversal need the whole page and decode it
+whole. Border cropping scans the bands once in order (`CropScan`), which
+equals whole-page detection.
+
+The `tall_scroll` example generates the same 720x25,000 page as 13 lossless
+PNG strips and runs the same windows against both layouts. Same host and
+command as below, mean of three runs. Host scheduling moves single values by
+up to about 25% (the 720 px banded jump ranged 84-104 ms, the 512 px whole-page
+later-window mean 26-39 ms). Scroll means exclude the first window.
+
+| Output width | Layout | First window | Mean later window | Jump to 78% (fresh) | One-strip shift |
+| --- | --- | --- | --- | --- | --- |
+| 720 px | whole page, decoded once and retained | 211 ms | 2.4 ms | 219 ms | 0.7 ms |
+| 720 px | strips, banded | 52 ms | 28 ms | 91 ms | 12.8 ms |
+| 512 px | whole page, decoded once and retained | 231 ms | 31 ms | 251 ms | 6.3 ms |
+| 512 px | strips, banded | 106 ms | 48 ms | 126 ms | 22.0 ms |
+
+Opening a tall page, or jumping into its middle, now costs the strips that are
+actually shown instead of the whole page: about 4x less at the first window and
+about 2.4x less for a jump at native width (2x at 512 px). The price is paid while scrolling: a
+whole retained original makes later windows nearly free, whereas each strip
+that enters now decodes once (about 13 ms per strip at 720 px). Scrolling
+through a page costs the same decode work in total as before; it is spread
+over the scroll rather than paid up front, and the page is never held as a
+72 MB original. Strips here are lossless PNG; the app's cache stores them in the
+cache format (WebP by default), whose per-strip decode cost is measured in the
+app (see "Split storage in the app" below).
+
 ## Reproduce the CPU profile
 
 ```sh

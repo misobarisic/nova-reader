@@ -3,6 +3,7 @@ use image::ImageDecoder;
 mod avif;
 mod display;
 mod jxl;
+mod source;
 pub use display::{
     DISPLAY_TILE_ROWS, DISPLAY_UPLOAD_ROWS, DISPLAY_WINDOW_BYTES, DisplayDecoder, DisplayOptions,
     DisplayWindow, DisplayWindowPlan, PagePresentation, PageRotation, WindowRenderer,
@@ -12,6 +13,7 @@ pub use display::{
 pub use nova_image::is_jpeg_xl;
 pub use nova_image::{DecodeLimits, PageDimensions};
 use reader_domain::{ReadingMode, ResumeAnchor};
+pub use source::{PageSource, SharedPage};
 use std::{
     collections::{BTreeMap, VecDeque},
     io::Cursor,

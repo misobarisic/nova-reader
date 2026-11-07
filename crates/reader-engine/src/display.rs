@@ -1,6 +1,9 @@
 //! Display admission is by visible rows, never by shrinking a long page's width.
-use crate::{DecodeLimits, Error, PageDimensions, Result, decode_image, inspect_image};
-use std::sync::Arc;
+use crate::{
+    DecodeLimits, Error, PageDimensions, PageSource, Result, SharedPage, decode_image,
+    inspect_image,
+};
+use std::{cell::RefCell, collections::BTreeMap, sync::Arc};
 
 pub const DISPLAY_WINDOW_BYTES: usize = 32 * 1024 * 1024;
 const FULL_DISPLAY_BYTES: u64 = 64 * 1024 * 1024;
@@ -256,45 +259,80 @@ impl CropRect {
 /// page and tiny gutters keep their original framing. Nonwhite edge details,
 /// including low-alpha ink, stop the scan; transparent RGB values are ignored.
 fn detect_crop(original: &image::RgbaImage) -> CropRect {
-    let full = CropRect::full(PageDimensions {
+    let mut scan = CropScan::new(PageDimensions {
         width: original.width(),
         height: original.height(),
     });
-    let (mut left, mut top, mut right, mut bottom) = (full.width, full.height, 0, 0);
-    for (x, y, pixel) in original.enumerate_pixels() {
-        if pixel[3] != 0 && pixel.0[..3].iter().any(|channel| *channel < 248) {
-            left = left.min(x);
-            top = top.min(y);
-            right = right.max(x + 1);
-            bottom = bottom.max(y + 1);
+    scan.rows(0, original);
+    scan.finish()
+}
+/// Incremental form of the crop scan: rows may arrive in any number of bands,
+/// in any order, and the result equals scanning the assembled page at once.
+struct CropScan {
+    full: CropRect,
+    left: u32,
+    top: u32,
+    right: u32,
+    bottom: u32,
+}
+impl CropScan {
+    fn new(dimensions: PageDimensions) -> Self {
+        let full = CropRect::full(dimensions);
+        Self {
+            full,
+            left: full.width,
+            top: full.height,
+            right: 0,
+            bottom: 0,
         }
     }
-    if right <= left
-        || bottom <= top
-        || (right - left) < full.width.div_ceil(2)
-        || (bottom - top) < full.height.div_ceil(2)
-    {
-        return full;
+    /// Fold in `band`, whose first row is page row `first_row`.
+    fn rows(&mut self, first_row: u32, band: &image::RgbaImage) {
+        for (x, y, pixel) in band.enumerate_pixels() {
+            if pixel[3] != 0 && pixel.0[..3].iter().any(|channel| *channel < 248) {
+                let y = y + first_row;
+                self.left = self.left.min(x);
+                self.top = self.top.min(y);
+                self.right = self.right.max(x + 1);
+                self.bottom = self.bottom.max(y + 1);
+            }
+        }
     }
-    let min_x = (full.width / 100).max(2);
-    let min_y = (full.height / 100).max(2);
-    let x = if left >= min_x { left } else { 0 };
-    let y = if top >= min_y { top } else { 0 };
-    let right = if full.width - right >= min_x {
-        right
-    } else {
-        full.width
-    };
-    let bottom = if full.height - bottom >= min_y {
-        bottom
-    } else {
-        full.height
-    };
-    CropRect {
-        x,
-        y,
-        width: right - x,
-        height: bottom - y,
+    fn finish(self) -> CropRect {
+        let Self {
+            full,
+            left,
+            top,
+            right,
+            bottom,
+        } = self;
+        if right <= left
+            || bottom <= top
+            || (right - left) < full.width.div_ceil(2)
+            || (bottom - top) < full.height.div_ceil(2)
+        {
+            return full;
+        }
+        let min_x = (full.width / 100).max(2);
+        let min_y = (full.height / 100).max(2);
+        let x = if left >= min_x { left } else { 0 };
+        let y = if top >= min_y { top } else { 0 };
+        let right = if full.width - right >= min_x {
+            right
+        } else {
+            full.width
+        };
+        let bottom = if full.height - bottom >= min_y {
+            bottom
+        } else {
+            full.height
+        };
+        CropRect {
+            x,
+            y,
+            width: right - x,
+            height: bottom - y,
+        }
     }
 }
 
@@ -323,56 +361,227 @@ pub fn page_presentation(
     Ok(presentation)
 }
 
+/// Decoded bands kept for one split page. Large enough to hold a viewport and
+/// its read-ahead at common widths (about ten 2,048-row bands at 720 px);
+/// admission also keeps cache plus output window within the decoded budget.
+const BAND_CACHE_BYTES: u64 = 64 * 1024 * 1024;
+
 /// One image worker's most recent windowed original, separate from display
 /// buffers. Moving a viewport must not decompress the same long page again.
 ///
-/// The encoded Arc identifies the exact admitted source response (including
+/// The source's shared identity names the exact admitted response (including
 /// source/authentication changes). A miss releases the old original before
 /// decoding, so two originals never overlap within the decoder phase budget.
+///
+/// A source that reports a row granularity smaller than the page (a page
+/// stored as independent strips) is not decoded whole when only rows of it are
+/// shown: its bands are decoded on demand and kept in a small LRU, and the one
+/// resampler samples rows across band seams. Anything that needs the full page
+/// at once (rotation, spread splitting, reversal) decodes it whole instead.
 #[derive(Default)]
 pub struct DisplayDecoder {
     cached: Option<DecodedOriginal>,
+    banded: Option<BandedOriginal>,
 }
 struct DecodedOriginal {
-    bytes: Arc<Vec<u8>>,
+    source: Arc<dyn PageSource>,
     limits: DecodeLimits,
     image: image::RgbaImage,
     crop: Option<CropRect>,
+}
+struct Band {
+    image: image::RgbaImage,
+    used: u64,
+}
+struct BandedOriginal {
+    source: Arc<dyn PageSource>,
+    limits: DecodeLimits,
+    dimensions: PageDimensions,
+    /// Rows per band; every band but the last has exactly this many.
+    rows: u32,
+    bands: BTreeMap<u32, Band>,
+    bytes: u64,
+    clock: u64,
+    crop: Option<CropRect>,
+    background: Option<[u8; 4]>,
+}
+impl BandedOriginal {
+    fn count(&self) -> u32 {
+        self.dimensions.height.div_ceil(self.rows)
+    }
+    fn band_range(&self, band: u32) -> std::ops::Range<u32> {
+        band * self.rows..((band + 1) * self.rows).min(self.dimensions.height)
+    }
+    fn band_bytes(&self, band: u32) -> u64 {
+        let rows = self.band_range(band);
+        u64::from(self.dimensions.width) * u64::from(rows.end - rows.start) * 4
+    }
+    /// Make every band in `needed` resident, evicting least recently used
+    /// bands outside the range. The range itself must fit `budget`.
+    fn load(&mut self, needed: std::ops::Range<u32>, budget: u64) -> Result<()> {
+        let total = needed
+            .clone()
+            .map(|band| self.band_bytes(band))
+            .sum::<u64>();
+        if total > budget {
+            return Err(Error::Limit);
+        }
+        for band in needed.clone() {
+            self.clock += 1;
+            if let Some(resident) = self.bands.get_mut(&band) {
+                resident.used = self.clock;
+                continue;
+            }
+            let size = self.band_bytes(band);
+            while self.bytes + size > budget {
+                let Some(oldest) = self
+                    .bands
+                    .iter()
+                    .filter(|(index, _)| !needed.contains(index))
+                    .min_by_key(|(_, band)| band.used)
+                    .map(|(index, _)| *index)
+                else {
+                    break;
+                };
+                if let Some(old) = self.bands.remove(&oldest) {
+                    self.bytes -= old.image.as_raw().len() as u64;
+                }
+            }
+            let rows = self.band_range(band);
+            let image = self.source.decode_rows(rows.clone(), self.limits)?;
+            if image.width() != self.dimensions.width || image.height() != rows.end - rows.start {
+                return Err(Error::Layout);
+            }
+            self.bytes += image.as_raw().len() as u64;
+            self.bands.insert(
+                band,
+                Band {
+                    image,
+                    used: self.clock,
+                },
+            );
+        }
+        Ok(())
+    }
+    /// Pixel (0, 0): the page's background colour source.
+    fn background(&mut self, budget: u64) -> Result<[u8; 4]> {
+        if let Some(background) = self.background {
+            return Ok(background);
+        }
+        self.load(0..1, budget)?;
+        let pixel = self.bands[&0].image.get_pixel(0, 0).0;
+        self.background = Some(pixel);
+        Ok(pixel)
+    }
+    /// Scan every band once, in order, without holding more than the cache.
+    fn crop(&mut self, budget: u64) -> Result<CropRect> {
+        if let Some(crop) = self.crop {
+            return Ok(crop);
+        }
+        let mut scan = CropScan::new(self.dimensions);
+        for band in 0..self.count() {
+            self.load(band..band + 1, budget)?;
+            scan.rows(self.band_range(band).start, &self.bands[&band].image);
+        }
+        let crop = scan.finish();
+        self.crop = Some(crop);
+        Ok(crop)
+    }
+}
+fn banded_rows(source: &dyn PageSource, dimensions: PageDimensions) -> Option<u32> {
+    source
+        .row_granularity()
+        .filter(|rows| *rows > 0 && *rows < dimensions.height)
+}
+/// Whether display rows are source rows (possibly cropped and resampled), so a
+/// window can be sampled from bands.
+fn row_contiguous(presentation: &PagePresentation) -> bool {
+    !presentation.split && !presentation.reverse_page && presentation.rotation == PageRotation::None
 }
 impl DisplayDecoder {
     /// Release pixels and their response on reader close, generation changes,
     /// or source revocation, including while the worker has no queued images.
     pub fn clear(&mut self) {
         self.cached = None;
+        self.banded = None;
     }
 
-    fn ensure_original(&mut self, bytes: &Arc<Vec<u8>>, limits: DecodeLimits) -> Result<()> {
-        if !self
-            .cached
-            .as_ref()
-            .is_some_and(|cached| Arc::ptr_eq(&cached.bytes, bytes) && cached.limits == limits)
-        {
+    fn holds_whole(&self, source: &impl SharedPage, limits: DecodeLimits) -> bool {
+        self.cached.as_ref().is_some_and(|cached| {
+            Arc::as_ptr(&cached.source).cast::<()>() == source.identity() && cached.limits == limits
+        })
+    }
+    fn holds_bands(&self, source: &impl SharedPage, limits: DecodeLimits) -> bool {
+        self.banded.as_ref().is_some_and(|banded| {
+            Arc::as_ptr(&banded.source).cast::<()>() == source.identity() && banded.limits == limits
+        })
+    }
+
+    fn ensure_original(&mut self, source: &impl SharedPage, limits: DecodeLimits) -> Result<()> {
+        if !self.holds_whole(source, limits) {
             self.cached = None;
+            self.banded = None;
             self.cached = Some(DecodedOriginal {
-                bytes: bytes.clone(),
+                source: source.shared(),
                 limits,
-                image: decode_image(bytes, limits)?,
+                image: source.page().decode(limits)?,
                 crop: None,
             });
         }
         Ok(())
     }
 
+    fn ensure_banded(
+        &mut self,
+        source: &impl SharedPage,
+        limits: DecodeLimits,
+        dimensions: PageDimensions,
+        rows: u32,
+    ) -> &mut BandedOriginal {
+        if !self.holds_bands(source, limits) {
+            self.cached = None;
+            self.banded = Some(BandedOriginal {
+                source: source.shared(),
+                limits,
+                dimensions,
+                rows,
+                bands: BTreeMap::new(),
+                bytes: 0,
+                clock: 0,
+                crop: None,
+                background: None,
+            });
+        }
+        self.banded.as_mut().unwrap()
+    }
+
     /// Obtain virtual geometry before constructing the viewport/window request.
     /// Cropping scans the admitted original once; filter-only changes reuse it.
     pub fn presentation(
         &mut self,
-        bytes: &Arc<Vec<u8>>,
+        source: &impl SharedPage,
         limits: DecodeLimits,
         options: DisplayOptions,
     ) -> Result<PagePresentation> {
-        let dimensions = inspect_image(bytes, limits)?;
-        self.ensure_original(bytes, limits)?;
+        let dimensions = source.page().dimensions(limits)?;
+        if !self.holds_whole(source, limits)
+            && let Some(rows) = banded_rows(source.page(), dimensions)
+        {
+            let budget = BAND_CACHE_BYTES.min(limits.max_decoded_bytes / 2);
+            let banded = self.ensure_banded(source, limits, dimensions, rows);
+            let background = banded.background(budget)?;
+            let crop = if options.crop_borders {
+                banded.crop(budget)?
+            } else {
+                CropRect::full(dimensions)
+            };
+            let mut presentation = PagePresentation::new(dimensions, crop, options)?;
+            let mut background = background;
+            filter_pixel(&mut background, options);
+            presentation.background_color = background;
+            return Ok(presentation);
+        }
+        self.ensure_original(source, limits)?;
         let crop = if options.crop_borders {
             let cached = self.cached.as_mut().unwrap();
             *cached
@@ -390,16 +599,16 @@ impl DisplayDecoder {
 
     pub fn display_dimensions(
         &mut self,
-        bytes: &Arc<Vec<u8>>,
+        source: &impl SharedPage,
         limits: DecodeLimits,
         options: DisplayOptions,
     ) -> Result<PageDimensions> {
-        Ok(self.presentation(bytes, limits, options)?.effective)
+        Ok(self.presentation(source, limits, options)?.effective)
     }
 
     pub fn decode_window(
         &mut self,
-        bytes: &Arc<Vec<u8>>,
+        source: &impl SharedPage,
         limits: DecodeLimits,
         target_width: u32,
         start: f64,
@@ -407,7 +616,7 @@ impl DisplayDecoder {
         max_bytes: usize,
     ) -> Result<DisplayWindow> {
         self.decode_window_with_options(
-            bytes,
+            source,
             limits,
             target_width,
             start,
@@ -422,7 +631,7 @@ impl DisplayDecoder {
     #[allow(clippy::too_many_arguments)]
     pub fn decode_window_with_options(
         &mut self,
-        bytes: &Arc<Vec<u8>>,
+        source: &impl SharedPage,
         limits: DecodeLimits,
         target_width: u32,
         start: f64,
@@ -430,10 +639,23 @@ impl DisplayDecoder {
         max_bytes: usize,
         options: DisplayOptions,
     ) -> Result<DisplayWindow> {
-        let presentation = self.presentation(bytes, limits, options)?;
+        let presentation = self.presentation(source, limits, options)?;
         let plan =
             plan_display_window(presentation.effective, target_width, start, end, max_bytes)?;
-        self.ensure_original(bytes, limits)?;
+        if self.sample_bands(source, limits, &presentation) {
+            let budget = band_budget(limits, plan);
+            let banded = self.banded.as_mut().unwrap();
+            let renderer = WindowRenderer {
+                original: RenderSource::Banded(RefCell::new(banded), budget),
+                presentation,
+                options,
+                plan,
+            };
+            let mut image = image::RgbaImage::new(plan.width, plan.rows);
+            renderer.render_rect(plan.first_row, plan.rows, 0, plan.width, image.as_mut())?;
+            return Ok(DisplayWindow { image, plan });
+        }
+        self.ensure_original(source, limits)?;
         let original = &self.cached.as_ref().unwrap().image;
         // Keep the original for changing filters, but preserve the native
         // identity transfer fast path used by ordinary full-page display.
@@ -456,15 +678,29 @@ impl DisplayDecoder {
         Ok(DisplayWindow { image, plan })
     }
 
+    /// Whether this window is sampled from bands rather than a whole decode.
+    /// A page already decoded whole keeps using that decode.
+    fn sample_bands(
+        &self,
+        source: &impl SharedPage,
+        limits: DecodeLimits,
+        presentation: &PagePresentation,
+    ) -> bool {
+        !self.holds_whole(source, limits)
+            && self.holds_bands(source, limits)
+            && row_contiguous(presentation)
+    }
+
     /// Plan the same window as `decode_window_with_options`, but render nothing
     /// up front. `render` receives a [`WindowRenderer`] that samples any
     /// sub-rectangle of the window straight into a caller-owned buffer (for
     /// example a GPU upload buffer), so a one-strip viewport shift pays only for
     /// the strip that actually enters. Pixels are identical to the full window.
+    /// A split page decodes only the bands those rectangles touch.
     #[allow(clippy::too_many_arguments)]
     pub fn render_window_tiles<R>(
         &mut self,
-        bytes: &Arc<Vec<u8>>,
+        source: &impl SharedPage,
         limits: DecodeLimits,
         target_width: u32,
         start: f64,
@@ -473,10 +709,22 @@ impl DisplayDecoder {
         options: DisplayOptions,
         render: impl FnOnce(&WindowRenderer<'_>) -> Result<R>,
     ) -> Result<(DisplayWindowPlan, R)> {
-        let presentation = self.presentation(bytes, limits, options)?;
+        let presentation = self.presentation(source, limits, options)?;
         let plan =
             plan_display_window(presentation.effective, target_width, start, end, max_bytes)?;
-        self.ensure_original(bytes, limits)?;
+        if self.sample_bands(source, limits, &presentation) {
+            let budget = band_budget(limits, plan);
+            let banded = self.banded.as_mut().unwrap();
+            let renderer = WindowRenderer {
+                original: RenderSource::Banded(RefCell::new(banded), budget),
+                presentation,
+                options,
+                plan,
+            };
+            let result = render(&renderer)?;
+            return Ok((plan, result));
+        }
+        self.ensure_original(source, limits)?;
         let original = &self.cached.as_ref().unwrap().image;
         // A whole-page native identity output used to hand over its allocation
         // without a second admission phase; keep that exemption.
@@ -490,7 +738,7 @@ impl DisplayDecoder {
             return Err(Error::Limit);
         }
         let renderer = WindowRenderer {
-            original,
+            original: RenderSource::Whole(original),
             presentation,
             options,
             plan,
@@ -503,9 +751,22 @@ impl DisplayDecoder {
         Ok((plan, result))
     }
 }
+/// Band budget that leaves room for the output window within the decoded cap.
+fn band_budget(limits: DecodeLimits, plan: DisplayWindowPlan) -> u64 {
+    BAND_CACHE_BYTES.min(
+        limits
+            .max_decoded_bytes
+            .saturating_sub(plan.byte_len() as u64),
+    )
+}
+enum RenderSource<'a> {
+    Whole(&'a image::RgbaImage),
+    /// Bands are loaded as rectangles ask for rows; the budget caps residency.
+    Banded(RefCell<&'a mut BandedOriginal>, u64),
+}
 /// Samples rectangles of one planned display window out of a decoded original.
 pub struct WindowRenderer<'a> {
-    original: &'a image::RgbaImage,
+    original: RenderSource<'a>,
     presentation: PagePresentation,
     options: DisplayOptions,
     plan: DisplayWindowPlan,
@@ -536,22 +797,55 @@ impl WindowRenderer<'_> {
         {
             return Err(Error::Layout);
         }
-        if self.presentation.is_identity() {
-            render_rect(
-                self.original,
-                SourceView::whole(self.original),
-                plan,
-                rect,
-                out,
-            );
-        } else {
-            render_presentation_rect(self.original, self.presentation, plan, rect, out);
+        match &self.original {
+            RenderSource::Whole(original) => {
+                if self.presentation.is_identity() {
+                    render_rect(
+                        &WholeRows::new(original),
+                        SourceView::whole(original),
+                        plan,
+                        rect,
+                        out,
+                    );
+                } else {
+                    render_presentation_rect(original, self.presentation, plan, rect, out);
+                }
+            }
+            RenderSource::Banded(banded, budget) => {
+                let presentation = self.presentation;
+                let view = SourceView {
+                    x: presentation.crop_x,
+                    y: presentation.crop_y,
+                    width: presentation.effective.width,
+                    height: presentation.effective.height,
+                };
+                let (first, last) = source_span(view, plan, top, height);
+                let mut banded = banded.borrow_mut();
+                let needed = first / banded.rows..last / banded.rows + 1;
+                banded.load(needed.clone(), *budget)?;
+                let rows = BandRows {
+                    first_row: needed.start * banded.rows,
+                    band_rows: banded.rows,
+                    bands: needed.map(|band| &banded.bands[&band].image).collect(),
+                };
+                render_rect(&rows, view, plan, rect, out);
+            }
         }
         if self.options.has_filters() {
             apply_filters_raw(out, self.options);
         }
         Ok(())
     }
+}
+/// First and last source rows (inclusive, in page coordinates) that sampling
+/// the output rows `top..top + height` can read.
+fn source_span(view: SourceView, plan: DisplayWindowPlan, top: u32, height: u32) -> (u32, u32) {
+    if view.width == plan.width && view.height == plan.full_height {
+        return (view.y + top, view.y + top + height - 1);
+    }
+    let (first, _, _) = y_tap(top, view.height, plan.full_height);
+    let (_, last, _) = y_tap(top + height - 1, view.height, plan.full_height);
+    (view.y + first, view.y + last)
 }
 fn visible_rows(height: u32, start: f64, end: f64) -> (u32, u32) {
     let first = (start.clamp(0., 1.) * f64::from(height)).floor() as u32;
@@ -697,7 +991,7 @@ fn render_window(
     }
     let mut image = image::RgbaImage::new(plan.width, plan.rows);
     render_rect(
-        original,
+        &WholeRows::new(original),
         SourceView::whole(original),
         plan,
         Rect {
@@ -819,22 +1113,65 @@ fn vertical(top: u32, bottom: u32, wy: u32) -> u8 {
     ((top * (WEIGHT_ONE - wy) + bottom * wy + WEIGHT_ONE * WEIGHT_ONE / 2)
         / (WEIGHT_ONE * WEIGHT_ONE)) as u8
 }
+/// Rows of a decoded original, addressed by absolute page row. A whole decode
+/// and a set of resident bands present the same rows, so one resampler serves
+/// both and a seam between bands samples exactly what the whole page would.
+trait RowSource {
+    /// All `width * 4` bytes of page row `y`.
+    fn row(&self, y: u32) -> &[u8];
+    /// The tightly packed whole page, when it is one allocation.
+    fn contiguous(&self) -> Option<&[u8]> {
+        None
+    }
+}
+struct WholeRows<'a> {
+    raw: &'a [u8],
+    stride: usize,
+}
+impl<'a> WholeRows<'a> {
+    fn new(original: &'a image::RgbaImage) -> Self {
+        Self {
+            raw: original.as_raw(),
+            stride: original.width() as usize * 4,
+        }
+    }
+}
+impl RowSource for WholeRows<'_> {
+    fn row(&self, y: u32) -> &[u8] {
+        &self.raw[y as usize * self.stride..][..self.stride]
+    }
+    fn contiguous(&self) -> Option<&[u8]> {
+        Some(self.raw)
+    }
+}
+/// Consecutive resident bands starting at page row `first_row`.
+struct BandRows<'a> {
+    first_row: u32,
+    band_rows: u32,
+    bands: Vec<&'a image::RgbaImage>,
+}
+impl RowSource for BandRows<'_> {
+    fn row(&self, y: u32) -> &[u8] {
+        let local = y - self.first_row;
+        let band = self.bands[(local / self.band_rows) as usize];
+        let stride = band.width() as usize * 4;
+        &band.as_raw()[(local % self.band_rows) as usize * stride..][..stride]
+    }
+}
 /// Horizontally interpolated source rows. Neighbouring output rows of a
 /// downsampled page share source rows, so the last two are kept.
-struct HorizontalRows<'a> {
-    raw: &'a [u8],
-    source_stride: usize,
+struct HorizontalRows<'a, R: RowSource> {
+    source: &'a R,
     view: SourceView,
     taps: XTaps,
     rows: [(u32, Vec<u16>); 2],
 }
-impl<'a> HorizontalRows<'a> {
+impl<'a, R: RowSource> HorizontalRows<'a, R> {
     const NONE: u32 = u32::MAX;
-    fn new(original: &'a image::RgbaImage, view: SourceView, taps: XTaps) -> Self {
+    fn new(source: &'a R, view: SourceView, taps: XTaps) -> Self {
         let len = taps.x0.len() * 4;
         Self {
-            raw: original.as_raw(),
-            source_stride: original.width() as usize * 4,
+            source,
             view,
             taps,
             rows: [(Self::NONE, vec![0; len]), (Self::NONE, vec![0; len])],
@@ -846,8 +1183,7 @@ impl<'a> HorizontalRows<'a> {
             return found;
         }
         let slot = usize::from(keep == Some(0));
-        let source =
-            &self.raw[(self.view.y + y) as usize * self.source_stride..][..self.source_stride];
+        let source = self.source.row(self.view.y + y);
         let (row, target) = &mut self.rows[slot];
         *row = y;
         for (x, pixel) in target.as_chunks_mut::<4>().0.iter_mut().enumerate() {
@@ -877,36 +1213,35 @@ impl<'a> HorizontalRows<'a> {
 /// Bilinear sampling uses the FULL page's coordinate transform, so two windows
 /// or tiles sample identical source pixels at a shared row. No giant float
 /// intermediate, nearest-neighbour aliasing, or artificial source upscaling.
-fn render_rect(
-    original: &image::RgbaImage,
+fn render_rect<R: RowSource>(
+    source: &R,
     view: SourceView,
     plan: DisplayWindowPlan,
     rect: Rect,
     out: &mut [u8],
 ) {
-    let source_stride = original.width() as usize * 4;
-    let raw = original.as_raw();
     let out_stride = rect.width as usize * 4;
     if view.width == plan.width && view.height == plan.full_height {
         // Native rows stay contiguous: copy directly.
-        if view.x == 0
-            && view.width == original.width()
+        if let Some(raw) = source.contiguous()
+            && view.x == 0
             && rect.left == 0
             && rect.width == plan.width
+            && raw.len() as u64 == u64::from(plan.width) * u64::from(view.y + view.height) * 4
         {
-            let start = (view.y + rect.top) as usize * source_stride;
+            let start = (view.y + rect.top) as usize * out_stride;
             out.copy_from_slice(&raw[start..start + out.len()]);
             return;
         }
         for (row, target) in out.chunks_exact_mut(out_stride).enumerate() {
-            let start = (view.y as usize + rect.top as usize + row) * source_stride
-                + (view.x + rect.left) as usize * 4;
-            target.copy_from_slice(&raw[start..start + out_stride]);
+            let line = source.row(view.y + rect.top + row as u32);
+            let start = (view.x + rect.left) as usize * 4;
+            target.copy_from_slice(&line[start..start + out_stride]);
         }
         return;
     }
     let mut rows = HorizontalRows::new(
-        original,
+        source,
         view,
         XTaps::new(view.width, plan.width, rect.left, rect.width),
     );
@@ -929,7 +1264,7 @@ fn render_presentation_rect(
         && presentation.rotation == PageRotation::None
     {
         render_rect(
-            original,
+            &WholeRows::new(original),
             SourceView {
                 x: presentation.crop_x,
                 y: presentation.crop_y,
@@ -1841,5 +2176,353 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// A page stored as independent PNG strips, counting what is decoded.
+    struct Strips {
+        dimensions: PageDimensions,
+        rows: u32,
+        strips: Vec<Vec<u8>>,
+        decoded: std::sync::Mutex<Vec<u32>>,
+        whole: std::sync::atomic::AtomicUsize,
+    }
+    impl Strips {
+        fn new(image: &image::RgbaImage, rows: u32) -> Arc<Self> {
+            let strips = (0..image.height().div_ceil(rows))
+                .map(|band| {
+                    let top = band * rows;
+                    let height = rows.min(image.height() - top);
+                    let strip =
+                        image::imageops::crop_imm(image, 0, top, image.width(), height).to_image();
+                    let mut bytes = std::io::Cursor::new(Vec::new());
+                    strip.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+                    bytes.into_inner()
+                })
+                .collect();
+            Arc::new(Self {
+                dimensions: PageDimensions {
+                    width: image.width(),
+                    height: image.height(),
+                },
+                rows,
+                strips,
+                decoded: Default::default(),
+                whole: Default::default(),
+            })
+        }
+        fn decoded(&self) -> Vec<u32> {
+            let mut bands = self.decoded.lock().unwrap().clone();
+            bands.sort();
+            bands
+        }
+    }
+    impl PageSource for Strips {
+        fn dimensions(&self, _: DecodeLimits) -> Result<PageDimensions> {
+            Ok(self.dimensions)
+        }
+        fn encoded_len(&self) -> usize {
+            self.strips.iter().map(Vec::len).sum()
+        }
+        fn row_granularity(&self) -> Option<u32> {
+            Some(self.rows)
+        }
+        fn decode_rows(
+            &self,
+            rows: std::ops::Range<u32>,
+            limits: DecodeLimits,
+        ) -> Result<image::RgbaImage> {
+            assert_eq!(rows.start % self.rows, 0, "bands start on the grid");
+            let band = rows.start / self.rows;
+            self.decoded.lock().unwrap().push(band);
+            let image = decode_image(&self.strips[band as usize], limits)?;
+            assert_eq!(image.height(), rows.end - rows.start);
+            Ok(image)
+        }
+        fn decode(&self, limits: DecodeLimits) -> Result<image::RgbaImage> {
+            self.whole.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut page = image::RgbaImage::new(self.dimensions.width, self.dimensions.height);
+            for (band, strip) in self.strips.iter().enumerate() {
+                let strip = decode_image(strip, limits)?;
+                image::imageops::replace(&mut page, &strip, 0, i64::from(band as u32 * self.rows));
+            }
+            Ok(page)
+        }
+    }
+    fn textured(width: u32, height: u32) -> image::RgbaImage {
+        image::RgbaImage::from_fn(width, height, |x, y| {
+            let n = x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503) ^ (y / 7);
+            image::Rgba([
+                n as u8,
+                (n >> 8) as u8,
+                (n >> 16) as u8,
+                255 - (y % 5) as u8,
+            ])
+        })
+    }
+    fn dyn_source(strips: &Arc<Strips>) -> Arc<dyn PageSource> {
+        strips.clone()
+    }
+
+    #[test]
+    fn banded_windows_decode_only_the_bands_they_sample() {
+        let page = textured(40, 1000);
+        let strips = Strips::new(&page, 128);
+        let source = dyn_source(&strips);
+        let mut decoder = DisplayDecoder::default();
+        let (plan, ()) = decoder
+            .render_window_tiles(
+                &source,
+                DecodeLimits::default(),
+                40,
+                0.5,
+                0.6,
+                1 << 20,
+                DisplayOptions::default(),
+                |renderer| {
+                    // Rows 520..580 sit inside band 4 (512..640).
+                    let mut out = vec![0; 40 * 60 * 4];
+                    renderer.render_rect(520, 60, 0, 40, &mut out)?;
+                    assert_eq!(out, page.as_raw()[520 * 160..580 * 160]);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(plan.full_height, 1000);
+        // Band 0 supplies the background colour; band 4 the rows.
+        assert_eq!(strips.decoded(), vec![0, 4]);
+        assert_eq!(strips.whole.load(std::sync::atomic::Ordering::SeqCst), 0);
+        // A rectangle across a seam needs both neighbours, and only those.
+        decoder
+            .render_window_tiles(
+                &source,
+                DecodeLimits::default(),
+                40,
+                0.5,
+                0.6,
+                1 << 20,
+                DisplayOptions::default(),
+                |renderer| {
+                    let mut out = vec![0; 40 * 20 * 4];
+                    renderer.render_rect(630, 20, 0, 40, &mut out)?;
+                    assert_eq!(out, page.as_raw()[630 * 160..650 * 160]);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(strips.decoded(), vec![0, 4, 5], "band 4 stayed cached");
+    }
+
+    #[test]
+    fn banded_and_whole_sources_render_identical_bytes() {
+        let page = textured(37, 900);
+        let strips = Strips::new(&page, 128);
+        let banded = dyn_source(&strips);
+        let whole: Arc<dyn PageSource> = encoded(&page);
+        let limits = DecodeLimits::default();
+        let filters = DisplayOptions {
+            color_filter: true,
+            filter_color: 0x336699,
+            filter_intensity: 30,
+            invert_colors: true,
+            ..Default::default()
+        };
+        for options in [DisplayOptions::default(), filters] {
+            for width in [37, 25, 10] {
+                for (start, end) in [(0., 1.), (0.2, 0.3), (0.77, 0.78), (0.99, 1.)] {
+                    let render = |source: &Arc<dyn PageSource>| {
+                        let mut decoder = DisplayDecoder::default();
+                        let (plan, tiles) = decoder
+                            .render_window_tiles(
+                                source,
+                                limits,
+                                width,
+                                start,
+                                end,
+                                1 << 22,
+                                options,
+                                |renderer| {
+                                    // Rectangles of odd sizes straddle every seam.
+                                    let plan = renderer.plan();
+                                    let mut tiles = Vec::new();
+                                    let mut top = plan.first_row;
+                                    while top < plan.first_row + plan.rows {
+                                        let height = (plan.first_row + plan.rows - top).min(97);
+                                        let mut out =
+                                            vec![0; plan.width as usize * height as usize * 4];
+                                        renderer
+                                            .render_rect(top, height, 0, plan.width, &mut out)?;
+                                        tiles.extend(out);
+                                        top += height;
+                                    }
+                                    Ok(tiles)
+                                },
+                            )
+                            .unwrap();
+                        let window = DisplayDecoder::default()
+                            .decode_window_with_options(
+                                source,
+                                limits,
+                                width,
+                                start,
+                                end,
+                                1 << 22,
+                                options,
+                            )
+                            .unwrap();
+                        assert_eq!(window.plan, plan);
+                        assert_eq!(window.image.as_raw(), &tiles, "tiles equal the window");
+                        tiles
+                    };
+                    assert_eq!(
+                        render(&banded),
+                        render(&whole),
+                        "options {options:?} width {width} rows {start}..{end}"
+                    );
+                }
+            }
+        }
+        assert_eq!(strips.whole.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn banded_pages_needing_the_whole_page_fall_back_and_agree() {
+        let page = textured(30, 400);
+        let strips = Strips::new(&page, 64);
+        let whole: Arc<dyn PageSource> = encoded(&page);
+        let banded = dyn_source(&strips);
+        let options = DisplayOptions {
+            reverse_page: true,
+            ..Default::default()
+        };
+        let limits = DecodeLimits::default();
+        let a = DisplayDecoder::default()
+            .decode_window_with_options(&banded, limits, 30, 0., 1., 1 << 22, options)
+            .unwrap();
+        let b = DisplayDecoder::default()
+            .decode_window_with_options(&whole, limits, 30, 0., 1., 1 << 22, options)
+            .unwrap();
+        assert_eq!(a.image, b.image);
+        assert_eq!(strips.whole.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn streamed_crop_scan_equals_whole_page_detection() {
+        // Ink in a central block, white margins, plus low-alpha edge details.
+        for (width, height, rows) in [(50u32, 300u32, 64u32), (50, 301, 100), (7, 1000, 16)] {
+            let page = image::RgbaImage::from_fn(width, height, |x, y| {
+                if (width / 10..width - width / 10).contains(&x)
+                    && (height / 6..height - height / 5).contains(&y)
+                {
+                    image::Rgba([(x * 3) as u8, 20, (y % 200) as u8, 255])
+                } else {
+                    image::Rgba([255; 4])
+                }
+            });
+            let expected = detect_crop(&page);
+            let strips = Strips::new(&page, rows);
+            let source = dyn_source(&strips);
+            let options = DisplayOptions {
+                crop_borders: true,
+                ..Default::default()
+            };
+            let presentation = DisplayDecoder::default()
+                .presentation(&source, DecodeLimits::default(), options)
+                .unwrap();
+            assert_eq!(
+                (
+                    presentation.crop_x,
+                    presentation.crop_y,
+                    presentation.cropped.width,
+                    presentation.cropped.height
+                ),
+                (expected.x, expected.y, expected.width, expected.height)
+            );
+            assert_eq!(strips.whole.load(std::sync::atomic::Ordering::SeqCst), 0);
+        }
+        // A cropped banded page renders the same bytes as the whole one.
+        let page = image::RgbaImage::from_fn(60, 700, |x, y| {
+            if (6..54).contains(&x) && (100..600).contains(&y) {
+                image::Rgba([(x * 4) as u8, (y % 251) as u8, 9, 255])
+            } else {
+                image::Rgba([255; 4])
+            }
+        });
+        let strips = Strips::new(&page, 128);
+        let options = DisplayOptions {
+            crop_borders: true,
+            ..Default::default()
+        };
+        let whole: Arc<dyn PageSource> = encoded(&page);
+        for width in [48, 20] {
+            let a = DisplayDecoder::default()
+                .decode_window_with_options(
+                    &dyn_source(&strips),
+                    DecodeLimits::default(),
+                    width,
+                    0.1,
+                    0.9,
+                    1 << 22,
+                    options,
+                )
+                .unwrap();
+            let b = DisplayDecoder::default()
+                .decode_window_with_options(
+                    &whole,
+                    DecodeLimits::default(),
+                    width,
+                    0.1,
+                    0.9,
+                    1 << 22,
+                    options,
+                )
+                .unwrap();
+            assert_eq!(a.image, b.image, "cropped width {width}");
+        }
+    }
+
+    #[test]
+    fn band_cache_is_bounded_and_replaced_with_its_source() {
+        let page = textured(64, 1024);
+        let strips = Strips::new(&page, 128);
+        let source = dyn_source(&strips);
+        // A 400-row window is 100 KiB; each band is 32 KiB. Leave room for two.
+        let window = 64 * 400 * 4;
+        let limits = DecodeLimits {
+            max_decoded_bytes: window as u64 + 2 * 32 * 1024,
+            ..DecodeLimits::default()
+        };
+        let mut decoder = DisplayDecoder::default();
+        let options = DisplayOptions::default();
+        let (plan, ()) = decoder
+            .render_window_tiles(&source, limits, 64, 0.2, 0.5, window, options, |renderer| {
+                // Walk the window in seam-straddling pieces; each needs <= 2 bands.
+                let plan = renderer.plan();
+                let mut top = plan.first_row;
+                while top < plan.first_row + plan.rows {
+                    let height = (plan.first_row + plan.rows - top).min(100);
+                    let mut out = vec![0; 64 * height as usize * 4];
+                    renderer.render_rect(top, height, 0, 64, &mut out)?;
+                    assert_eq!(
+                        out,
+                        page.as_raw()[top as usize * 256..(top + height) as usize * 256]
+                    );
+                    top += height;
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(plan.rows, 400);
+        assert!(decoder.banded.as_ref().unwrap().bytes <= 2 * 32 * 1024);
+        // The whole window needs more bands than the budget keeps resident.
+        assert!(matches!(
+            decoder.decode_window_with_options(&source, limits, 64, 0.2, 0.5, window, options),
+            Err(Error::Limit)
+        ));
+        // A different source drops every band of the old one.
+        let other = dyn_source(&Strips::new(&page, 128));
+        decoder.presentation(&other, limits, options).unwrap();
+        assert_eq!(decoder.banded.as_ref().unwrap().bands.len(), 1);
+        decoder.clear();
+        assert!(decoder.banded.is_none() && decoder.cached.is_none());
     }
 }
