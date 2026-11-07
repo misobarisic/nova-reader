@@ -518,10 +518,12 @@ fn paint(
         };
         let y1 = (y0 + 1).min(section_end);
         let row = ((u64::from(y) * u64::from(width) + u64::from(geometry.start_x)) * 4) as usize;
-        for (tap, target) in taps
-            .iter()
-            .zip(output[row..row + taps.len() * 4].chunks_exact_mut(4))
-        {
+        for (tap, target) in taps.iter().zip(
+            output[row..row + taps.len() * 4]
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut(),
+        ) {
             blend(
                 target,
                 image,

@@ -850,7 +850,7 @@ impl<'a> HorizontalRows<'a> {
             &self.raw[(self.view.y + y) as usize * self.source_stride..][..self.source_stride];
         let (row, target) = &mut self.rows[slot];
         *row = y;
-        for (x, pixel) in target.chunks_exact_mut(4).enumerate() {
+        for (x, pixel) in target.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let wx = self.taps.weight[x];
             let a = &source[(self.view.x + self.taps.x0[x]) as usize * 4..][..4];
             let b = &source[(self.view.x + self.taps.x1[x]) as usize * 4..][..4];
@@ -952,7 +952,7 @@ fn render_presentation_rect(
         if presentation.split && y0 < presentation.half_height {
             y1 = y1.min(presentation.half_height - 1);
         }
-        for (x, pixel) in target.chunks_exact_mut(4).enumerate() {
+        for (x, pixel) in target.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let sample = |x, y| {
                 let (sx, sy) = presentation.source_pixel(x, y);
                 &original.as_raw()[(sy as usize * original.width() as usize + sx as usize) * 4..]

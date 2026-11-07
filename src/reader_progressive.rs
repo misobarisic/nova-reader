@@ -812,7 +812,9 @@ mod tests {
                         assert!(
                             pixels
                                 .as_bytes()
-                                .chunks_exact(4)
+                                .as_chunks::<4>()
+                                .0
+                                .iter()
                                 .all(|pixel| pixel[0] == pixel[1] && pixel[1] == pixel[2])
                         );
                     }

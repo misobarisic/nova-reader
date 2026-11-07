@@ -1102,8 +1102,10 @@ mod tests {
             assert!(
                 decoded
                     .as_raw()
-                    .chunks_exact(4)
-                    .zip(pixels.chunks_exact(4))
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .zip(pixels.as_chunks::<4>().0.iter())
                     .all(|(a, b)| a[3] == b[3])
             );
             if format == CaptureFormat::JxlLossless {
