@@ -531,6 +531,7 @@ generate all installable ZIPs; Reader does not depend on a sibling checkout.
 - Library location, pinned controls, search and per-title actions: `src/library_navigation.rs`, `crates/ui/library-page.slint`, `crates/ui/library-search.slint`, `crates/ui/entry-menu.slint`, `tests/library_navigation.rs`, `tests/entry_menu.rs`.
 - Automatic source paging and Retry: `src/app.rs` (`browse`/`complete_browse`), `crates/ui/app.slint`, `tests/source_paging.rs`.
 - Profiles (identity, key scoping, switching, deletion, picker): `docs/profiles.md`, `src/profiles.rs`, `src/profile_actions.rs`, `crates/reader-domain/src/profile.rs`, `crates/ui/profiles.slint`.
+- Deferred, designed-but-unscheduled work (e.g. the lossless JPEG crop for tall-page strips): `docs/follow-ups.md`.
 - Per-entry Reader/Gallery preferences and optional addon hints (local KV plus the `reader_presentation` sync domain): `src/content_presentation.rs`, `src/sync.rs`, `src/services.rs::Services::{series,series_listing}`, `tests/content_presentation.rs`, `tests/presentation_sync.rs`.
 - Automatic/manual reader mode and per-series overrides: `src/reader_modes.rs`, `docs/reader-modes.md`, `tests/reader_modes.rs`.
 - Effective-direction chapter/page controls and progress slider: `crates/ui/reader-osd.slint`, `tests/reader_mode_controls.rs`.
