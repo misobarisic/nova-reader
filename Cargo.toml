@@ -36,6 +36,7 @@ update-check = ["dep:reqwest", "dep:semver"]
 
 [dependencies]
 nova-cache = { workspace = true }
+nova-net = { workspace = true }
 nova-image = { workspace = true }
 nova-sync = { workspace = true }
 anyhow = "1"
@@ -71,8 +72,7 @@ arboard = { version = "3.7", default-features = false, features = ["image-data",
 rqrr = { version = "0.11", default-features = false }
 jni = "0.21"
 ndk-context = "0.1"
-rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "aws-lc-rs"] }
-webpki-roots = "1"
+nova-net = { workspace = true, features = ["rustls"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = { version = "5", default-features = false, features = ["blocking-api", "async-io"] }

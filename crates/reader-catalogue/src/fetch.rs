@@ -6,11 +6,9 @@ use prost::Message;
 use reqwest::{
     blocking::Client,
     header::{ACCEPT_ENCODING, ETAG, IF_NONE_MATCH},
-    redirect::Policy,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io::Read,
     time::Duration,
 };
 
@@ -31,25 +29,10 @@ impl HttpTransport {
         let builder = Client::builder()
             .timeout(Duration::from_secs(30))
             .user_agent("nova-reader/0.1 catalogue")
-            .redirect(Policy::custom(|attempt| {
-                if attempt.previous().len() > 5 {
-                    return attempt.error("catalogue redirect limit");
-                }
-                if attempt.url().scheme() != "https"
-                    || !attempt.url().username().is_empty()
-                    || attempt.url().password().is_some()
-                {
-                    return attempt.error("catalogue redirect requires HTTPS without credentials");
-                }
-                attempt.follow()
-            }));
+            .redirect(nova_net::redirect::https_only(5, "catalogue"));
         #[cfg(target_os = "android")]
         let builder = builder.tls_backend_preconfigured(
-            rustls::ClientConfig::builder()
-                .with_root_certificates(rustls::RootCertStore::from_iter(
-                    webpki_roots::TLS_SERVER_ROOTS.iter().cloned(),
-                ))
-                .with_no_client_auth(),
+            nova_net::tls::client_config().map_err(|e| CatalogueError::Network(e.to_string()))?,
         );
         let client = builder
             .build()
@@ -89,14 +72,11 @@ impl Transport for HttpTransport {
         {
             return Err(CatalogueError::Limit);
         }
-        let mut bytes = Vec::new();
-        response
-            .take((COMPRESSED_LIMIT + 1) as u64)
-            .read_to_end(&mut bytes)
-            .map_err(|e| CatalogueError::Network(e.to_string()))?;
-        if bytes.len() > COMPRESSED_LIMIT {
-            return Err(CatalogueError::Limit);
-        }
+        let bytes =
+            nova_net::read_capped(response, COMPRESSED_LIMIT as u64).map_err(|e| match e {
+                nova_net::ReadError::TooLarge => CatalogueError::Limit,
+                nova_net::ReadError::Io(e) => CatalogueError::Network(e.to_string()),
+            })?;
         Ok(FetchResponse {
             status,
             etag,

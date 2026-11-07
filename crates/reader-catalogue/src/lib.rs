@@ -12,7 +12,7 @@ pub use native::{
 use flate2::read::MultiGzDecoder;
 use prost::Message;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, io::Read};
+use std::collections::BTreeMap;
 use thiserror::Error;
 
 pub const COMPRESSED_LIMIT: usize = 8 * 1024 * 1024;
@@ -82,14 +82,11 @@ pub fn decompress_gzip(bytes: &[u8]) -> Result<Vec<u8>> {
     if bytes.len() > COMPRESSED_LIMIT {
         return Err(CatalogueError::Limit);
     }
-    let mut expanded = Vec::new();
-    MultiGzDecoder::new(bytes)
-        .take((EXPANDED_LIMIT + 1) as u64)
-        .read_to_end(&mut expanded)
-        .map_err(invalid)?;
-    if expanded.len() > EXPANDED_LIMIT {
-        return Err(CatalogueError::Limit);
-    }
+    let expanded = nova_net::read_capped(MultiGzDecoder::new(bytes), EXPANDED_LIMIT as u64)
+        .map_err(|e| match e {
+            nova_net::ReadError::TooLarge => CatalogueError::Limit,
+            nova_net::ReadError::Io(e) => invalid(e),
+        })?;
     Ok(expanded)
 }
 

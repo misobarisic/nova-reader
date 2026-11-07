@@ -4933,6 +4933,7 @@ name = "nova-net"
 version = "0.1.0"
 source = "git+https://github.com/misobarisic/nova-kit?rev=3ee7415f3f9ec298f635fbc03d8c4405554a1006#3ee7415f3f9ec298f635fbc03d8c4405554a1006"
 dependencies = [
+ "reqwest",
  "rustls",
  "webpki-roots",
 ]
@@ -4952,6 +4953,7 @@ dependencies = [
  "ndk-context",
  "nova-cache",
  "nova-image",
+ "nova-net",
  "nova-reader-ui",
  "nova-storage",
  "nova-sync",
@@ -4965,7 +4967,6 @@ dependencies = [
  "reqwest",
  "rfd",
  "rqrr",
- "rustls",
  "semver",
  "serde",
  "serde_json",
@@ -4975,7 +4976,6 @@ dependencies = [
  "time",
  "url",
  "webp",
- "webpki-roots",
  "zbus",
  "zip",
  "zstd",
@@ -6468,16 +6468,15 @@ dependencies = [
  "ed25519-dalek 2.2.0",
  "flate2",
  "hex",
+ "nova-net",
  "prost",
  "reqwest",
- "rustls",
  "semver",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.21",
  "url",
- "webpki-roots",
 ]
 
 [[package]]

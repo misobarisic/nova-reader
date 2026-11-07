@@ -17,7 +17,7 @@ hex = "0.4.3"
 semver = { version = "1", features = ["serde"] }
 thiserror = "2"
 url = "2"
+nova-net = { workspace = true, features = ["reqwest"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
-rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "aws-lc-rs"] }
-webpki-roots = "1"
+nova-net = { workspace = true, features = ["rustls"] }
