@@ -86,7 +86,11 @@ its own state, and no file is deleted because another profile still references i
 
 Delete asks through the shared confirmation sheet, then retires the id, tombstones
 its records, removes `profile:{id}:*`, its sync baselines and its addon-settings
-directory. At least one profile always remains. Deleting the selected profile
+directory. The marker, the tombstones and the removal of the durable keys and
+baselines are staged on a clone of the record owner and published with one
+durable save, so a deletion that fails changes nothing; only the addon settings,
+which live outside the store, are removed afterwards and retried by `list`. At
+least one profile always remains. Deleting the selected profile
 switches to a survivor first. If a peer deletes the selected profile, this device
 falls back to a survivor and shows the picker.
 

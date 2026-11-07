@@ -297,6 +297,37 @@ pub fn rename(id: &str, name: &str) -> Result<(), String> {
     write_profile(id, &name)
 }
 
+// Failure injection stays local to the isolated test's calling thread.
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeleteFailure {
+    AfterTombstone,
+    BeforeScan,
+}
+#[cfg(test)]
+thread_local! {
+    static DELETE_FAILURE: std::cell::Cell<Option<DeleteFailure>> = const { std::cell::Cell::new(None) };
+}
+#[cfg(test)]
+pub(crate) fn with_delete_failure<R>(failure: DeleteFailure, f: impl FnOnce() -> R) -> R {
+    struct Restore(Option<DeleteFailure>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            DELETE_FAILURE.with(|slot| slot.set(self.0));
+        }
+    }
+    let _restore = Restore(DELETE_FAILURE.with(|slot| slot.replace(Some(failure))));
+    f()
+}
+#[cfg(test)]
+fn deletion_checkpoint(point: DeleteFailure) -> Result<(), String> {
+    if DELETE_FAILURE.with(|slot| slot.get() == Some(point)) {
+        Err("Injected profile deletion failure".into())
+    } else {
+        Ok(())
+    }
+}
+
 /// Remove `id`: retire it permanently, tombstone its records and delete this
 /// device's copy. The caller switches away from it first and keeps one profile.
 pub fn delete(id: &str) -> Result<(), String> {
@@ -313,14 +344,42 @@ pub fn delete(id: &str) -> Result<(), String> {
     let owner = store()?;
     let device = nova_sync::local_device().map_err(|e| e.to_string())?;
     {
-        let mut guard = owner.lock().unwrap_or_else(|e| e.into_inner());
-        // The marker first: from here Kit refuses any later live write to the
-        // profile, including delayed workers and stale peers.
-        guard.set(DELETIONS_DOMAIN, id, Some("1".into()), 0, device);
-        guard.set(DOMAIN, id, None, 0, device);
-        guard.save().map_err(|e| e.to_string())?;
+        let mut live = owner.lock().unwrap_or_else(|e| e.into_inner());
+        // Stage the whole retirement on a clone: the marker, the tombstones of
+        // every child record and the removal of the profile's durable keys and
+        // baselines. The live store is replaced only after one durable save, so
+        // a failure leaves the profile exactly as it was.
+        let mut staged = live.clone();
+        let prefix = format!("profile:{id}:");
+        for domain in staged.domains() {
+            if domain.starts_with(&prefix) {
+                for (key, _) in staged.records(&domain) {
+                    staged.set(&domain, &key, None, 0, device);
+                    #[cfg(test)]
+                    deletion_checkpoint(DeleteFailure::AfterTombstone)?;
+                }
+            }
+        }
+        staged.set(DELETIONS_DOMAIN, id, Some("1".into()), 0, device);
+        staged.set(DOMAIN, id, None, 0, device);
+        #[cfg(test)]
+        deletion_checkpoint(DeleteFailure::BeforeScan)?;
+        for prefix in [prefix, format!("sync:baseline:profile:{id}:")] {
+            // Durable scans cannot see newly queued baselines; clear those on
+            // the proposal too.
+            for key in staged.queued_extra_keys_with_prefix(&prefix) {
+                staged.queue_extra(&key, None);
+            }
+            for (key, _) in nova_storage::try_scan_prefix(&prefix).map_err(|e| e.to_string())? {
+                staged.queue_extra(&key, None);
+            }
+        }
+        nova_sync::publish(&mut live, staged, |staged| {
+            staged.save().map_err(|e| e.to_string())
+        })?;
     }
     retire_locally(id);
+    // Settles the registry's per-profile settings, which live outside the store.
     list()?;
     nova_sync::request_local_sync();
     Ok(())
@@ -511,6 +570,123 @@ mod tests {
     fn registry_keeps_the_original_identity_for_the_first_profile() {
         assert_eq!(registry_profile(DEFAULT_ID), "default");
         assert_eq!(registry_profile("p1_2"), "p1_2");
+    }
+
+    /// Storage and the sync owner are per-process, so this scenario re-executes
+    /// itself in a child that owns a fresh directory.
+    fn isolated(name: &str, body: impl FnOnce(&std::path::Path)) {
+        const CHILD: &str = "READER_PROFILES_UNIT_CHILD";
+        if let Some(directory) = std::env::var_os(CHILD) {
+            body(std::path::Path::new(&directory));
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture", "--test-threads=1"])
+            .env(CHILD, directory.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{name} failed\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn everything(
+        owner: &nova_sync::Store,
+        id: &str,
+    ) -> (Vec<(String, Vec<(String, String)>)>, Vec<(String, String)>) {
+        let mut records: Vec<_> = owner
+            .domains()
+            .into_iter()
+            .map(|domain| {
+                let rows = owner.records(&domain);
+                (domain, rows)
+            })
+            .collect();
+        records.sort();
+        let mut durable = nova_storage::try_scan_prefix(&format!("profile:{id}:")).unwrap();
+        durable.extend(
+            nova_storage::try_scan_prefix(&format!("sync:baseline:profile:{id}:")).unwrap(),
+        );
+        (records, durable)
+    }
+
+    #[test]
+    fn a_failed_delete_changes_nothing_and_a_completed_one_removes_everything() {
+        isolated(
+            "profiles::tests::a_failed_delete_changes_nothing_and_a_completed_one_removes_everything",
+            |directory| {
+                let _services = crate::services::Services::open(directory).unwrap();
+                let second = create("Second").unwrap();
+                let id = second.id;
+                let device = nova_sync::local_device().unwrap();
+                {
+                    let owner = store().unwrap();
+                    let mut guard = owner.lock().unwrap();
+                    assert!(guard.set(
+                        &format!("profile:{id}:fixture_rows"),
+                        "a",
+                        Some("{}".into()),
+                        0,
+                        device,
+                    ));
+                    guard.queue_extra(
+                        &format!("sync:baseline:profile:{id}:fixture_rows"),
+                        Some("{}".into()),
+                    );
+                    guard.save().unwrap();
+                }
+                nova_storage::try_set_str(&format!("profile:{id}:fixture_settings"), "{}").unwrap();
+                let before = everything(&store().unwrap().lock().unwrap(), &id);
+                let before_disk = everything(&nova_sync::Store::try_load().unwrap(), &id);
+                assert!(!before.1.is_empty());
+
+                for failure in [DeleteFailure::AfterTombstone, DeleteFailure::BeforeScan] {
+                    let result = with_delete_failure(failure, || delete(&id));
+                    assert!(result.is_err());
+                    assert_eq!(
+                        everything(&store().unwrap().lock().unwrap(), &id),
+                        before,
+                        "live state after a failure"
+                    );
+                    assert_eq!(
+                        everything(&nova_sync::Store::try_load().unwrap(), &id),
+                        before_disk,
+                        "durable state after a failure"
+                    );
+                    assert!(!is_retired(&id));
+                    assert!(list().unwrap().iter().any(|profile| profile.id == id));
+                }
+
+                delete(&id).unwrap();
+                assert!(is_retired(&id));
+                for owner in [
+                    store().unwrap().lock().unwrap().clone(),
+                    nova_sync::Store::try_load().unwrap(),
+                ] {
+                    assert!(owner.record(DOMAIN, &id).unwrap().is_deleted());
+                    assert!(!owner.record(DELETIONS_DOMAIN, &id).unwrap().is_deleted());
+                    assert!(
+                        owner
+                            .record(&format!("profile:{id}:fixture_rows"), "a")
+                            .unwrap()
+                            .is_deleted()
+                    );
+                }
+                assert!(
+                    nova_storage::try_scan_prefix(&format!("profile:{id}:"))
+                        .unwrap()
+                        .is_empty()
+                        && nova_storage::try_scan_prefix(&format!("sync:baseline:profile:{id}:"))
+                            .unwrap()
+                            .is_empty()
+                );
+                assert!(list().unwrap().iter().all(|profile| profile.id != id));
+            },
+        );
     }
 
     #[test]
