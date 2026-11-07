@@ -12,26 +12,15 @@
 //! `profile:reader:reader_*`, so existing data and 0.1.35 peers need no migration.
 //! Storage key scoping, the whitelist and the active pointer live in
 //! `reader_domain::profile`; this module owns identity and lifecycle.
+use nova_sync::profiles::directory::{self, Directory, Host};
 use reader_domain::profile as scope;
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::HashSet,
-    sync::{LazyLock, RwLock},
+use std::sync::{LazyLock, RwLock};
+
+pub use directory::{
+    DEFAULT_NAME, DELETIONS_DOMAIN, DOMAIN, Profile, validate_record, validated_name,
 };
-
 pub use scope::{DEFAULT_ID, DEVICE_KEY, valid_id};
-pub const DOMAIN: &str = "profiles";
-pub const DELETIONS_DOMAIN: &str = "profile_deletions";
-/// Shown for the untouched default profile, translated when rendered.
-pub const DEFAULT_NAME: &str = "Default";
-const MAX_NAME_CHARS: usize = 64;
-const MAX_RECORD_BYTES: usize = 4096;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Profile {
-    pub id: String,
-    pub name: String,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DevicePreferences {
@@ -55,23 +44,47 @@ impl Default for DevicePreferences {
     }
 }
 
-/// Retired IDs known to this process. Lock-free with respect to the record owner
-/// because projection predicates run while that owner is locked.
-static RETIRED: LazyLock<RwLock<HashSet<String>>> = LazyLock::new(Default::default);
-/// Retired IDs whose local data has already been removed this run.
-static CLEANED: LazyLock<RwLock<HashSet<String>>> = LazyLock::new(Default::default);
+/// What Reader adds to the shared directory's sequences: the source registry's
+/// per-profile settings, which live outside the record store.
+struct ReaderDirectory;
+impl Host for ReaderDirectory {
+    type Guard = ();
+
+    fn begin_write(&self, _id: &str) {}
+    /// Never remove the data of the profile on screen; switching away comes first.
+    fn keep_local_data(&self, id: &str) -> bool {
+        id == scope::selected()
+    }
+    fn remove_local_data(&self, id: &str) -> Result<(), String> {
+        remove_registry_settings(id)
+    }
+    fn deleted(&self, id: &str) {
+        // The deletion is durable already; a failure here is retried by the
+        // cleanup that every `list` runs for a retired profile.
+        let _ = remove_registry_settings(id);
+    }
+    #[cfg(test)]
+    fn checkpoint(&self, stage: directory::Stage) -> Result<(), String> {
+        deletion_checkpoint(match stage {
+            directory::Stage::AfterTombstone => DeleteFailure::AfterTombstone,
+            directory::Stage::BeforeScan => DeleteFailure::BeforeScan,
+        })
+    }
+}
+static DIRECTORY: LazyLock<Directory<ReaderDirectory>> =
+    LazyLock::new(|| Directory::new(ReaderDirectory, DEFAULT_ID));
+
+fn remove_registry_settings(id: &str) -> Result<(), String> {
+    match REGISTRY.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        Some(registry) => registry
+            .remove_profile_settings(&registry_profile(id))
+            .map_err(|e| e.to_string()),
+        None => Ok(()),
+    }
+}
 
 pub fn is_retired(id: &str) -> bool {
-    RETIRED
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .contains(id)
-}
-fn retire_locally(id: &str) {
-    RETIRED
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(id.to_owned());
+    DIRECTORY.is_retired(id)
 }
 
 /// Registry profile for a Reader profile. The first profile keeps the registry's
@@ -96,41 +109,6 @@ where
     std::thread::spawn(move || scope::pinned(&profile, work))
 }
 
-pub fn validated_name(name: &str) -> Result<String, String> {
-    let name = name.trim();
-    if name.is_empty()
-        || name.chars().count() > MAX_NAME_CHARS
-        || name.chars().any(char::is_control)
-    {
-        return Err("Enter a profile name of up to 64 characters.".into());
-    }
-    Ok(name.into())
-}
-
-/// Record policy for the two account domains.
-pub fn validate_record(domain: &str, key: &str, record: &nova_sync::Record) -> bool {
-    if !valid_id(key) {
-        return false;
-    }
-    let Some(raw) = record.value.as_deref() else {
-        // Profile removal tombstones its directory row. A retirement marker is
-        // permanent: deleting it would let a deleted ID come back.
-        return domain == DOMAIN && record.is_deleted();
-    };
-    if raw.len() > MAX_RECORD_BYTES {
-        return false;
-    }
-    if domain == DELETIONS_DOMAIN {
-        return raw == "1";
-    }
-    #[derive(Deserialize)]
-    struct Row {
-        name: String,
-    }
-    // Unknown fields from newer peers (for example a future policy) are kept.
-    serde_json::from_str::<Row>(raw).is_ok_and(|row| validated_name(&row.name).is_ok())
-}
-
 fn store() -> Result<std::sync::Arc<std::sync::Mutex<nova_sync::Store>>, String> {
     nova_sync::local_store().map_err(|e| e.to_string())
 }
@@ -138,97 +116,14 @@ fn store() -> Result<std::sync::Arc<std::sync::Mutex<nova_sync::Store>>, String>
 /// Live profiles, default first. Also refreshes the retirement set and removes
 /// local data of profiles that were deleted here or on a peer.
 pub fn list() -> Result<Vec<Profile>, String> {
-    let owner = store()?;
-    let guard = owner.lock().unwrap_or_else(|e| e.into_inner());
-    let deleted: HashSet<String> = guard
-        .records(DELETIONS_DOMAIN)
-        .into_iter()
-        .map(|(id, _)| id)
-        .filter(|id| valid_id(id))
-        .collect();
-    RETIRED
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .extend(deleted.iter().cloned());
-    #[derive(Deserialize)]
-    struct Row {
-        name: String,
-    }
-    let mut profiles = Vec::new();
-    for (id, raw) in guard.records(DOMAIN) {
-        if !valid_id(&id) || deleted.contains(&id) {
-            continue;
-        }
-        if let Ok(row) = serde_json::from_str::<Row>(&raw) {
-            profiles.push(Profile { id, name: row.name });
-        }
-    }
-    drop(guard);
+    let mut profiles = DIRECTORY.list()?;
     profiles.sort_by(|a, b| {
         (b.id == DEFAULT_ID)
             .cmp(&(a.id == DEFAULT_ID))
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
             .then_with(|| a.id.cmp(&b.id))
     });
-    cleanup_retired(deleted)?;
     Ok(profiles)
-}
-
-/// Tombstone any live child record a stale peer delivered after retirement and
-/// remove this device's copy of the profile's data. Idempotent.
-fn cleanup_retired(ids: HashSet<String>) -> Result<(), String> {
-    for id in ids {
-        let owner = store()?;
-        let device = nova_sync::local_device().map_err(|e| e.to_string())?;
-        let mut guard = owner.lock().unwrap_or_else(|e| e.into_inner());
-        let prefix = format!("profile:{id}:");
-        let mut changed = false;
-        for domain in guard.domains() {
-            if domain.starts_with(&prefix) {
-                for (key, _) in guard.records(&domain) {
-                    changed |= guard.set(&domain, &key, None, 0, device);
-                }
-            }
-        }
-        if changed {
-            guard.save().map_err(|e| e.to_string())?;
-        }
-        drop(guard);
-        if changed {
-            nova_sync::request_local_sync();
-        }
-        if CLEANED
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .contains(&id)
-        {
-            continue;
-        }
-        // Never remove the data of the profile on screen; switching away comes first.
-        if id == scope::selected() {
-            continue;
-        }
-        let mut edits = Vec::new();
-        for prefix in [
-            format!("profile:{id}:"),
-            format!("sync:baseline:profile:{id}:"),
-        ] {
-            for (key, _) in nova_storage::try_scan_prefix(&prefix).map_err(|e| e.to_string())? {
-                edits.push((key, None));
-            }
-        }
-        nova_storage::try_write_batch(&edits).map_err(|e| e.to_string())?;
-        if let Some(registry) = REGISTRY.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
-            registry
-                .remove_profile_settings(&registry_profile(&id))
-                .map_err(|e| e.to_string())?;
-        }
-        CLEANED
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(id);
-    }
-    Ok(())
 }
 
 /// The source registry whose per-profile settings follow the selection.
@@ -244,49 +139,8 @@ pub fn apply_registry_profile() {
     }
 }
 
-fn write_profile(id: &str, name: &str) -> Result<(), String> {
-    let owner = store()?;
-    let device = nova_sync::local_device().map_err(|e| e.to_string())?;
-    let mut guard = owner.lock().unwrap_or_else(|e| e.into_inner());
-    if guard
-        .record(DELETIONS_DOMAIN, id)
-        .is_some_and(|record| !record.is_deleted())
-    {
-        return Err("This profile was deleted.".into());
-    }
-    guard.set(
-        DOMAIN,
-        id,
-        Some(serde_json::json!({"name": name}).to_string()),
-        0,
-        device,
-    );
-    guard.save().map_err(|e| e.to_string())?;
-    drop(guard);
-    nova_sync::request_local_sync();
-    Ok(())
-}
-
-/// `p{device}_{sequence}`: the device ID is stable per account member and the
-/// durable local sequence never repeats, so concurrent devices never collide and
-/// a retired ID is never handed out again.
-fn allocate_id() -> Result<String, String> {
-    let device = nova_sync::local_device().map_err(|e| e.to_string())?;
-    let sequence =
-        nova_storage::try_allocate_local_sequence("profiles", 1).map_err(|e| e.to_string())?;
-    let id = format!("p{device:x}_{sequence:x}");
-    debug_assert!(valid_id(&id));
-    if is_retired(&id) {
-        return Err("profile id was retired".into());
-    }
-    Ok(id)
-}
-
 pub fn create(name: &str) -> Result<Profile, String> {
-    let name = validated_name(name)?;
-    let id = allocate_id()?;
-    write_profile(&id, &name)?;
-    Ok(Profile { id, name })
+    DIRECTORY.create(name)
 }
 
 pub fn rename(id: &str, name: &str) -> Result<(), String> {
@@ -294,7 +148,7 @@ pub fn rename(id: &str, name: &str) -> Result<(), String> {
     if !list()?.iter().any(|profile| profile.id == id) {
         return Err("This profile no longer exists.".into());
     }
-    write_profile(id, &name)
+    DIRECTORY.write(id, &name)
 }
 
 // Failure injection stays local to the isolated test's calling thread.
@@ -341,69 +195,7 @@ pub fn delete(id: &str) -> Result<(), String> {
     if profiles.len() < 2 {
         return Err("At least one profile must remain.".into());
     }
-    let owner = store()?;
-    let device = nova_sync::local_device().map_err(|e| e.to_string())?;
-    {
-        let mut live = owner.lock().unwrap_or_else(|e| e.into_inner());
-        // Stage the whole retirement on a clone: the marker, the tombstones of
-        // every child record and the removal of the profile's durable keys and
-        // baselines. The live store is replaced only after one durable save, so
-        // a failure leaves the profile exactly as it was.
-        let mut staged = live.clone();
-        let prefix = format!("profile:{id}:");
-        for domain in staged.domains() {
-            if domain.starts_with(&prefix) {
-                for (key, _) in staged.records(&domain) {
-                    staged.set(&domain, &key, None, 0, device);
-                    #[cfg(test)]
-                    deletion_checkpoint(DeleteFailure::AfterTombstone)?;
-                }
-            }
-        }
-        staged.set(DELETIONS_DOMAIN, id, Some("1".into()), 0, device);
-        staged.set(DOMAIN, id, None, 0, device);
-        #[cfg(test)]
-        deletion_checkpoint(DeleteFailure::BeforeScan)?;
-        for prefix in [prefix, format!("sync:baseline:profile:{id}:")] {
-            // Durable scans cannot see newly queued baselines; clear those on
-            // the proposal too.
-            for key in staged.queued_extra_keys_with_prefix(&prefix) {
-                staged.queue_extra(&key, None);
-            }
-            for (key, _) in nova_storage::try_scan_prefix(&prefix).map_err(|e| e.to_string())? {
-                staged.queue_extra(&key, None);
-            }
-        }
-        nova_sync::publish(&mut live, staged, |staged| {
-            staged.save().map_err(|e| e.to_string())
-        })?;
-    }
-    retire_locally(id);
-    // Settles the registry's per-profile settings, which live outside the store.
-    list()?;
-    nova_sync::request_local_sync();
-    Ok(())
-}
-
-fn neutral_default(store: &mut nova_sync::Store, device: u64) -> bool {
-    if store.record(DOMAIN, DEFAULT_ID).is_some()
-        || store
-            .record(DELETIONS_DOMAIN, DEFAULT_ID)
-            .is_some_and(|record| !record.is_deleted())
-    {
-        return false;
-    }
-    // The default is scaffolding, never an explicit rename: its neutral version
-    // loses to any real edit, so a device joining later cannot overwrite a name
-    // another device chose.
-    store.apply(
-        DOMAIN,
-        DEFAULT_ID,
-        nova_sync::Record {
-            value: Some(serde_json::json!({"name": DEFAULT_NAME}).to_string()),
-            version: nova_sync::Version::new(0, 0, device, false),
-        },
-    )
+    DIRECTORY.retire(id)
 }
 
 pub fn device_preferences() -> DevicePreferences {
@@ -434,7 +226,7 @@ pub fn initialize() -> Result<DevicePreferences, String> {
         let device = nova_sync::local_device().map_err(|e| e.to_string())?;
         let seeded = {
             let mut guard = owner.lock().unwrap_or_else(|e| e.into_inner());
-            let changed = neutral_default(&mut guard, device);
+            let changed = DIRECTORY.seed_default(&mut guard, device);
             if changed {
                 guard.save().map_err(|e| e.to_string())?;
                 // Our own seed is not news: leave nothing pending for a UI refresh.
@@ -553,17 +345,6 @@ mod tests {
             );
         }
         assert_eq!(avatar("p1_1"), avatar("p1_1"));
-    }
-
-    #[test]
-    fn names_are_trimmed_bounded_and_printable() {
-        assert_eq!(validated_name("  Mina  ").unwrap(), "Mina");
-        assert_eq!(validated_name(&"é".repeat(64)).unwrap().chars().count(), 64);
-        for bad in ["", "   ", "tab\there", "new\nline", &"x".repeat(65)] {
-            assert!(validated_name(bad).is_err(), "{bad:?}");
-        }
-        assert_eq!(initial(" mina"), "M");
-        assert_eq!(initial(""), "?");
     }
 
     #[test]
@@ -687,30 +468,5 @@ mod tests {
                 assert!(list().unwrap().iter().all(|profile| profile.id != id));
             },
         );
-    }
-
-    #[test]
-    fn directory_records_are_validated() {
-        let live = |value: &str| nova_sync::Record {
-            value: Some(value.into()),
-            version: nova_sync::Version::new(1, 0, 1, false),
-        };
-        let tombstone = nova_sync::Record {
-            value: None,
-            version: nova_sync::Version::new(1, 0, 1, true),
-        };
-        assert!(validate_record(DOMAIN, "p1_2", &live(r#"{"name":"Mina"}"#)));
-        assert!(validate_record(
-            DOMAIN,
-            "p1_2",
-            &live(r#"{"name":"Mina","future":{"a":1}}"#)
-        ));
-        assert!(validate_record(DOMAIN, "p1_2", &tombstone));
-        assert!(!validate_record(DOMAIN, "a:b", &live(r#"{"name":"Mina"}"#)));
-        assert!(!validate_record(DOMAIN, "p1_2", &live(r#"{"name":""}"#)));
-        assert!(!validate_record(DOMAIN, "p1_2", &live("not json")));
-        assert!(validate_record(DELETIONS_DOMAIN, "p1_2", &live("1")));
-        assert!(!validate_record(DELETIONS_DOMAIN, "p1_2", &live("0")));
-        assert!(!validate_record(DELETIONS_DOMAIN, "p1_2", &tombstone));
     }
 }
