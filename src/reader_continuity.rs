@@ -3,6 +3,12 @@
 use super::*;
 
 const MAX_SEGMENTS: usize = 3;
+/// How close to a chapter edge its neighbour's metadata starts loading. Pixel
+/// read-ahead wants the neighbour's first pages two viewport heights (or two
+/// pages) before the edge, and the inventory is a network round trip, so the
+/// metadata starts two more viewports (or one more page) earlier.
+const NEAR_VIEWPORTS: f32 = 4.;
+const NEAR_PAGES: usize = 3;
 
 type MetadataWork = Box<dyn FnOnce() + Send>;
 #[derive(Default)]
@@ -153,7 +159,7 @@ impl Reader {
             .expect("page identity serializes")
     }
     fn near_continuation(&self, segment: &ChapterSegment) -> bool {
-        if self.visible_end().saturating_add(2) >= segment.end {
+        if self.visible_end().saturating_add(NEAR_PAGES) >= segment.end {
             return true;
         }
         if self.mode != ReadingMode::Webtoon {
@@ -164,10 +170,10 @@ impl Reader {
             - self.page_position(self.anchor.page_index)
             - self.ratios[self.anchor.page_index] * self.anchor.offset() as f32;
         self.viewport_width > 0.
-            && remaining * self.viewport_width <= self.viewport_height.max(0.) * 2.
+            && remaining * self.viewport_width <= self.viewport_height.max(0.) * NEAR_VIEWPORTS
     }
     fn near_previous(&self, segment: &ChapterSegment) -> bool {
-        if self.anchor.page_index < segment.start.saturating_add(2) {
+        if self.anchor.page_index < segment.start.saturating_add(NEAR_PAGES) {
             return true;
         }
         let distance = self.page_position(self.anchor.page_index)
@@ -175,7 +181,7 @@ impl Reader {
             - self.page_position(segment.start);
         self.mode == ReadingMode::Webtoon
             && self.viewport_width > 0.
-            && distance * self.viewport_width <= self.viewport_height.max(0.) * 2.
+            && distance * self.viewport_width <= self.viewport_height.max(0.) * NEAR_VIEWPORTS
     }
 
     fn continuation_candidates(
@@ -1902,25 +1908,79 @@ mod tests {
             .is_err()
         );
     }
+    /// Next-chapter metadata (an inventory, possibly a network round trip) must
+    /// be in hand by the time the read-ahead wants that chapter's first pixels,
+    /// so it starts a lead ahead of them: pixels read two viewport heights (or
+    /// two pages) ahead, metadata two more.
     #[test]
-    fn prefetch_uses_last_two_source_pages_or_two_viewports_and_pruning_protects_visible_pages() {
+    fn next_chapter_metadata_starts_ahead_of_the_pixel_read_ahead() {
+        let mut reader = reader();
+        reader.pages = (0..12)
+            .map(|index| PageInput::Local {
+                path: PathBuf::new(),
+                id: format!("page-{index}"),
+            })
+            .collect();
+        reader.ratios = vec![1.; 12];
+        reader.segments.clear();
+        reader.initialise_segments("One chapter".into());
+        let (tail, head) = (reader.segments[0].clone(), reader.segments[0].clone());
+        // 400 px pages in a 600 px viewport: 4.5 pages left is 3 viewports.
+        reader.anchor = ResumeAnchor::new("page-7", 7, 0.5).unwrap();
+        assert!(
+            reader.near_continuation(&tail),
+            "metadata is requested two viewports before the pixel read-ahead reaches it"
+        );
+        reader.anchor = ResumeAnchor::new("page-2", 2, 0.).unwrap();
+        assert!(
+            !reader.near_continuation(&tail),
+            "ten pages away is too early"
+        );
+        // Backwards: the same lead from the first page.
+        reader.anchor = ResumeAnchor::new("page-4", 4, 0.5).unwrap();
+        assert!(reader.near_previous(&head));
+        reader.anchor = ResumeAnchor::new("page-9", 9, 0.).unwrap();
+        assert!(!reader.near_previous(&head));
+        // Paged modes flip a page at a time: three from the end is near.
+        for mode in [
+            ReadingMode::LeftToRight,
+            ReadingMode::RightToLeft,
+            ReadingMode::Vertical,
+        ] {
+            reader.mode = mode;
+            reader.anchor = ResumeAnchor::new("page-9", 9, 0.).unwrap();
+            assert!(reader.near_continuation(&tail), "{mode:?}");
+            reader.anchor = ResumeAnchor::new("page-8", 8, 0.).unwrap();
+            assert!(!reader.near_continuation(&tail), "{mode:?}");
+            reader.anchor = ResumeAnchor::new("page-2", 2, 0.).unwrap();
+            assert!(reader.near_previous(&head), "{mode:?}");
+            reader.anchor = ResumeAnchor::new("page-3", 3, 0.).unwrap();
+            assert!(!reader.near_previous(&head), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn prefetch_uses_last_three_source_pages_or_four_viewports_and_pruning_protects_visible_pages()
+    {
         let mut reader = reader();
         reader.segments.clear();
         reader.initialise_segments("One chapter".into());
         let segment = reader.segments[0].clone();
+        reader.viewport_height = 500.;
         reader.anchor = ResumeAnchor::new(reader.page_id(0), 0, 0.).unwrap();
+        assert!(!reader.near_continuation(&segment));
+        reader.anchor = ResumeAnchor::new(reader.page_id(1), 1, 0.).unwrap();
+        assert!(
+            reader.near_continuation(&segment),
+            "five page heights are within four 500px viewports"
+        );
+        reader.viewport_height = 100.;
+        reader.anchor = ResumeAnchor::new(reader.page_id(2), 2, 0.).unwrap();
         assert!(!reader.near_continuation(&segment));
         reader.anchor = ResumeAnchor::new(reader.page_id(3), 3, 0.).unwrap();
         assert!(
             reader.near_continuation(&segment),
-            "three page heights are within two 600px viewports"
-        );
-        reader.viewport_height = 100.;
-        assert!(!reader.near_continuation(&segment));
-        reader.anchor = ResumeAnchor::new(reader.page_id(4), 4, 0.).unwrap();
-        assert!(
-            reader.near_continuation(&segment),
-            "last two source pages prefetch even when tall"
+            "last three source pages prefetch even when tall"
         );
         for mode in [
             ReadingMode::LeftToRight,
@@ -1934,10 +1994,10 @@ mod tests {
                 !reader.near_continuation(&segment),
                 "paged prefetch ignores stacked scroll extent"
             );
-            reader.anchor.page_index = 4;
+            reader.anchor.page_index = 3;
             assert!(
                 reader.near_continuation(&segment),
-                "paged modes preload at the last two source pages"
+                "paged modes preload at the last three source pages"
             );
         }
 

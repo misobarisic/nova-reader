@@ -25,11 +25,10 @@ impl Reader {
     /// retained is bounded by the model budget, farthest first.
     pub(super) fn read_ahead_pages(&self, from: usize, backwards: bool) -> usize {
         const MAX_PAGES: usize = 4;
-        if self.mode != ReadingMode::Webtoon
-            || self.viewport_width <= 0.
-            || self.viewport_height <= 0.
-            || from >= self.pages.len()
-        {
+        if self.mode != ReadingMode::Webtoon {
+            return self.paged_read_ahead_pages(from, backwards);
+        }
+        if self.viewport_width <= 0. || self.viewport_height <= 0. || from >= self.pages.len() {
             return 1;
         }
         let wanted = self.viewport_height * 2.;
@@ -49,6 +48,37 @@ impl Reader {
             pages += 1;
         }
         pages.max(1)
+    }
+
+    /// Paged modes show one page, but flipping quickly outruns a single page of
+    /// lookahead: read two ahead in the reading direction (one stays behind)
+    /// while the pages that would be kept all fit the model budget, one
+    /// otherwise. Completions still enforce the budget exactly; this only
+    /// avoids decoding a page that could not be retained.
+    fn paged_read_ahead_pages(&self, from: usize, backwards: bool) -> usize {
+        const PAGED_PAGES: usize = 2;
+        if from >= self.pages.len() || self.target_width == 0 {
+            return 1;
+        }
+        let bytes = |index: usize| {
+            self.decoded_bytes.get(&index).copied().unwrap_or_else(|| {
+                let width = f64::from(self.target_width);
+                ((width * width * f64::from(self.ratios[index]) * 4.) as usize)
+                    .min(reader_engine::DISPLAY_WINDOW_BYTES)
+            })
+        };
+        let last = self.pages.len() - 1;
+        let kept = if backwards {
+            from.saturating_sub(PAGED_PAGES)..=(from + 1).min(last)
+        } else {
+            from.saturating_sub(1)..=(from + PAGED_PAGES).min(last)
+        };
+        let total = kept.map(bytes).fold(0usize, usize::saturating_add);
+        if total <= READER_MODEL_BYTES {
+            PAGED_PAGES
+        } else {
+            1
+        }
     }
 
     pub(super) fn window_demand_target(&self) -> Option<usize> {
@@ -350,5 +380,38 @@ mod tests {
         assert_eq!(r.loaded_scroll_offset(0., 400., 600., |i| i == 1), 896.);
         r.anchor = ResumeAnchor::new("page-0", 0, 0.).unwrap();
         assert_eq!(r.loaded_scroll_offset(9000., 400., 600., |i| i == 0), 344.);
+    }
+
+    #[test]
+    fn paged_read_ahead_is_two_pages_when_the_kept_pages_fit_else_one() {
+        let mut r = super::super::tests::tall_reader();
+        r.pages = (0..8)
+            .map(|i| PageInput::Local {
+                path: PathBuf::new(),
+                id: format!("page-{i}"),
+            })
+            .collect();
+        r.ratios = vec![1.5; 8];
+        r.mode = ReadingMode::LeftToRight;
+        r.target_width = 512;
+        // 1.5 MiB pages: one behind, the current and two ahead all fit.
+        assert_eq!(r.read_ahead_pages(3, false), 2);
+        assert_eq!(r.read_ahead_pages(3, true), 2);
+        // Near either end only the pages that exist count.
+        assert_eq!(r.read_ahead_pages(7, false), 2);
+        // Full-size 32 MiB pages cannot be kept three or four at a time.
+        r.target_width = 4096;
+        assert_eq!(r.read_ahead_pages(3, false), 1);
+        // Pages already decoded count for what they really hold.
+        r.target_width = 512;
+        for i in 2..=5 {
+            r.decoded_bytes.insert(i, 12 * 1024 * 1024);
+        }
+        assert_eq!(r.read_ahead_pages(3, false), 1);
+        // Webtoon keeps its viewport-height rule.
+        r.mode = ReadingMode::Webtoon;
+        r.viewport_width = 400.;
+        r.viewport_height = 600.;
+        assert_eq!(r.read_ahead_pages(0, false), 2);
     }
 }

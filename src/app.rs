@@ -56,6 +56,9 @@ mod reader_open;
 mod reader_preview;
 #[path = "reader_progressive.rs"]
 mod reader_progressive;
+#[cfg(test)]
+#[path = "reader_read_ahead_tests.rs"]
+mod reader_read_ahead_tests;
 #[path = "reader_scroll_admission.rs"]
 mod reader_scroll_admission;
 #[path = "thumbnail_cache_settings.rs"]
