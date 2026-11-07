@@ -31,13 +31,21 @@ fn fetch_download_page(
         )
         .map_err(error)?;
     cancel.check().map_err(error)?;
+    // Sources serve images. Bytes that look like Reader's own stored layout
+    // would later be read back as one, so they never reach the store.
+    crate::page_store::check_fetched(&original)?;
     let bytes = if compression.enabled {
-        // Preserve source bytes when a codec cannot represent this page. The
-        // download store still validates every committed image and checksum.
-        crate::reader_export::reencode_storage_image(
+        // A tall page becomes strips when downloads may split; anything the
+        // codec cannot represent keeps its source bytes. The download store
+        // still validates every committed page and checksum.
+        let limits = reader_engine::current_limits();
+        crate::page_store::storage_form(
             &original,
             compression,
-            reader_engine::current_limits(),
+            compression.split_plan(),
+            limits,
+            limits.max_encoded_bytes,
+            &|| !cancel.is_cancelled(),
         )
         .unwrap_or(original)
     } else {
@@ -106,6 +114,9 @@ impl Services {
                 .map_err(error)?,
             sources: SourceRegistry::open(path.join("addons")).map_err(error)?,
         };
+        services
+            .downloads
+            .set_page_validator(std::sync::Arc::new(crate::page_store::validate_stored));
         crate::sync::initialize(&services.domain).map_err(error)?;
         // The directory, selection and per-profile registry settings are settled
         // before addon sync captures the selected profile's domain.
@@ -583,5 +594,274 @@ mod tests {
             chapter_from_source(&series, provider_chapter(Some("2026-10-09"))).unwrap_err(),
             "Source returned a chapter for another series"
         );
+    }
+}
+
+#[cfg(test)]
+mod download_page_tests {
+    use super::*;
+    use crate::{
+        image_storage::{ImageCompression, ImageStorageFormat},
+        page_store::{PageImage, SplitPlan},
+    };
+    use reader_engine::PageSource;
+    use reader_sources::{HttpRequest, HttpResponse, SourceTransport};
+    use sha2::Digest;
+    use std::{io::Write, sync::Arc};
+
+    struct Transport(Vec<u8>);
+    impl SourceTransport for Transport {
+        fn request(
+            &self,
+            request: &HttpRequest,
+            _: usize,
+            cancel: &CancelToken,
+        ) -> reader_sources::Result<HttpResponse> {
+            cancel.check()?;
+            Ok(HttpResponse {
+                status: 200,
+                url: request.url.clone(),
+                body: self.0.clone(),
+                ..Default::default()
+            })
+        }
+    }
+    fn source(directory: &Path, body: Vec<u8>) -> (SourceRegistry, Source) {
+        let registry = SourceRegistry::open(directory).unwrap();
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let manifest = json!({"formatVersion":2,"contract":"nova-reader1","api":"^1.0","id":"download-fixture","name":"Download fixture","version":"1.0.0","language":"en","nsfw":false,"entry":"main.js","permissions":{"domains":["example.com"],"httpPost":false},"capabilities":["pages"]});
+        zip.start_file("manifest.json", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(manifest.to_string().as_bytes()).unwrap();
+        zip.start_file("main.js", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"globalThis.nova={request:()=>({pages:[]})};")
+            .unwrap();
+        registry
+            .install_zip(&zip.finish().unwrap().into_inner())
+            .unwrap();
+        registry.set_enabled("download-fixture", true).unwrap();
+        let source = registry
+            .source("download-fixture")
+            .unwrap()
+            .with_transport(Arc::new(Transport(body)));
+        (registry, source)
+    }
+    fn textured(width: u32, height: u32) -> image::RgbaImage {
+        image::RgbaImage::from_fn(width, height, |x, y| {
+            let n = x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503) ^ (y / 9);
+            image::Rgba([n as u8, (n >> 8) as u8, (n >> 16) as u8, 255])
+        })
+    }
+    fn png(image: &image::RgbaImage) -> Vec<u8> {
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        bytes.into_inner()
+    }
+    fn resource() -> PageResource {
+        PageResource {
+            id: "p".into(),
+            url: "https://example.com/p.png".into(),
+            headers: Default::default(),
+        }
+    }
+    fn compression(split: bool, enabled: bool) -> ImageCompression {
+        ImageCompression {
+            enabled,
+            format: ImageStorageFormat::Webp,
+            lossless_inputs: true,
+            split_tall_pages: split,
+            split_threshold_rows: 1024,
+            strip_rows: 256,
+            ..ImageCompression::downloads_default()
+        }
+    }
+    fn fetch(directory: &Path, body: &[u8], compression: ImageCompression) -> Result<Vec<u8>> {
+        let (_registry, source) = source(directory, body.to_vec());
+        fetch_download_page(&source, &resource(), &CancelToken::default(), compression)
+    }
+    fn granularity(bytes: Vec<u8>) -> Option<u32> {
+        PageImage::from_stored(bytes).unwrap().row_granularity()
+    }
+
+    #[test]
+    fn new_download_pages_split_only_when_download_compression_and_the_toggle_are_on() {
+        let directory = tempfile::tempdir().unwrap();
+        let original = textured(40, 1500);
+        let body = png(&original);
+        // Compression and toggle on: strips, in the download format, same pixels.
+        let split = fetch(directory.path(), &body, compression(true, true)).unwrap();
+        assert_eq!(granularity(split.clone()), Some(256));
+        let page = PageImage::from_stored(split).unwrap();
+        assert_eq!(
+            page.dimensions(reader_engine::current_limits()).unwrap(),
+            reader_engine::PageDimensions {
+                width: 40,
+                height: 1500
+            }
+        );
+        assert_eq!(
+            page.decode(reader_engine::current_limits()).unwrap(),
+            original
+        );
+        // Toggle off: a whole recompressed image.
+        let whole = fetch(directory.path(), &body, compression(false, true)).unwrap();
+        assert_eq!(granularity(whole), None);
+        // Compression off: the source bytes, whatever the toggle says.
+        assert_eq!(
+            fetch(directory.path(), &body, compression(true, false)).unwrap(),
+            body
+        );
+        // A page that is not tall enough is never split.
+        let short = png(&textured(40, 900));
+        assert_eq!(
+            granularity(fetch(directory.path(), &short, compression(true, true)).unwrap()),
+            None
+        );
+    }
+
+    #[test]
+    fn a_source_cannot_hand_the_download_store_a_stored_container() {
+        let directory = tempfile::tempdir().unwrap();
+        let container = crate::page_store::split_form(
+            &png(&textured(40, 1500)),
+            compression(true, true),
+            Some(SplitPlan {
+                threshold_rows: 1024,
+                strip_rows: 256,
+            }),
+            reader_engine::current_limits(),
+            32 << 20,
+            &|| true,
+        )
+        .unwrap()
+        .unwrap();
+        for settings in [
+            compression(true, true),
+            compression(false, true),
+            compression(true, false),
+        ] {
+            assert!(
+                fetch(directory.path(), &container, settings).is_err(),
+                "{settings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn split_downloads_commit_verify_and_stay_when_the_toggle_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let original = textured(40, 1500);
+        let (_registry, source) = source(&directory.path().join("addons"), png(&original));
+        let store = DownloadStore::open(directory.path().join("chapters"), 64 << 20).unwrap();
+        store.set_page_validator(Arc::new(crate::page_store::validate_stored));
+        let chapter = ChapterId::new(SeriesId::new("download-fixture", "series"), "chapter");
+        store.enqueue(chapter.clone(), vec![resource()]).unwrap();
+        let cancel = CancelToken::default();
+        store
+            .run(&chapter, |page| {
+                fetch_download_page(&source, page, &cancel, compression(true, true))
+            })
+            .unwrap();
+        // Sha-256 and length verification accept the container as one file.
+        let offline = store.offline(&chapter).unwrap();
+        let stored = std::fs::read(&offline.pages[0]).unwrap();
+        let inventory = store.page_inventory(&chapter).unwrap();
+        assert_eq!(inventory[0].bytes, stored.len() as u64);
+        assert_eq!(
+            inventory[0].sha256.as_deref(),
+            Some(format!("{:x}", sha2::Sha256::digest(&stored)).as_str())
+        );
+        let page = PageImage::from_stored(stored.clone()).unwrap();
+        assert_eq!(page.row_granularity(), Some(256));
+        assert_eq!(
+            page.decode(reader_engine::current_limits()).unwrap(),
+            original
+        );
+        // A completed chapter is never run again, so the settings that later
+        // change cannot rewrite it.
+        assert!(store.retry(&chapter).is_err());
+        let mut fetched = 0;
+        assert!(
+            store
+                .run(&chapter, |_| {
+                    fetched += 1;
+                    Err("must not fetch".into())
+                })
+                .is_err()
+        );
+        assert_eq!(fetched, 0);
+        assert_eq!(
+            std::fs::read(&store.offline(&chapter).unwrap().pages[0]).unwrap(),
+            stored
+        );
+    }
+
+    #[test]
+    fn only_pages_downloaded_after_a_toggle_change_follow_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let (_registry, source) =
+            source(&directory.path().join("addons"), png(&textured(40, 1500)));
+        let store = DownloadStore::open(directory.path().join("chapters"), 64 << 20).unwrap();
+        store.set_page_validator(Arc::new(crate::page_store::validate_stored));
+        let chapter = ChapterId::new(SeriesId::new("download-fixture", "series"), "chapter");
+        let second = PageResource {
+            id: "q".into(),
+            ..resource()
+        };
+        store
+            .enqueue(chapter.clone(), vec![resource(), second])
+            .unwrap();
+        let cancel = CancelToken::default();
+        let mut calls = 0;
+        assert!(
+            store
+                .run(&chapter, |page| {
+                    calls += 1;
+                    if calls == 2 {
+                        return Err("interrupted".into());
+                    }
+                    fetch_download_page(&source, page, &cancel, compression(true, true))
+                })
+                .is_err()
+        );
+        let first = store.page_inventory(&chapter).unwrap()[0].path.clone();
+        let split = std::fs::read(&first).unwrap();
+        assert_eq!(granularity(split.clone()), Some(256));
+        // The toggle is off for the rest of the chapter.
+        store.retry(&chapter).unwrap();
+        store
+            .run(&chapter, |page| {
+                fetch_download_page(&source, page, &cancel, compression(false, true))
+            })
+            .unwrap();
+        let pages = store.offline(&chapter).unwrap().pages;
+        assert_eq!(
+            std::fs::read(&pages[0]).unwrap(),
+            split,
+            "verified page untouched"
+        );
+        assert_eq!(granularity(std::fs::read(&pages[1]).unwrap()), None);
+    }
+
+    #[test]
+    fn a_page_that_is_neither_an_image_nor_a_whole_container_is_not_committed() {
+        let directory = tempfile::tempdir().unwrap();
+        let original = textured(40, 1500);
+        let (_registry, source) = source(&directory.path().join("addons"), png(&original));
+        let store = DownloadStore::open(directory.path().join("chapters"), 64 << 20).unwrap();
+        store.set_page_validator(Arc::new(crate::page_store::validate_stored));
+        let chapter = ChapterId::new(SeriesId::new("download-fixture", "series"), "chapter");
+        store.enqueue(chapter.clone(), vec![resource()]).unwrap();
+        let mut container = fetch_download_page(
+            &source,
+            &resource(),
+            &CancelToken::default(),
+            compression(true, true),
+        )
+        .unwrap();
+        container.truncate(container.len() - 8);
+        assert!(store.run(&chapter, |_| Ok(container.clone())).is_err());
+        assert_eq!(store.job(&chapter).unwrap().completed_pages(), 0);
     }
 }

@@ -11,7 +11,7 @@ use std::{
     fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -104,9 +104,14 @@ struct Inner {
     _lock: File,
     next_order: u64,
 }
+/// Decides whether the bytes of a page about to be committed are readable.
+/// The app installs one that understands every layout it writes; without one a
+/// page must decode as an ordinary image.
+pub type PageValidator = Arc<dyn Fn(&[u8]) -> std::result::Result<(), String> + Send + Sync>;
 #[derive(Clone)]
 pub struct DownloadStore {
     inner: Arc<Mutex<Inner>>,
+    validator: Arc<RwLock<Option<PageValidator>>>,
 }
 fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
@@ -480,9 +485,14 @@ impl DownloadStore {
                 _lock: lock,
                 next_order: 1,
             })),
+            validator: Arc::default(),
         };
         store.recover()?;
         Ok(store)
+    }
+    /// Replace how fetched pages are validated before they are committed.
+    pub fn set_page_validator(&self, validator: PageValidator) {
+        *self.validator.write().unwrap_or_else(|e| e.into_inner()) = Some(validator);
     }
     pub fn enqueue(&self, chapter: ChapterId, pages: Vec<PageResource>) -> Result<()> {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -878,8 +888,19 @@ impl DownloadStore {
                 return Ok(());
             }
             // Decode validation rejects truncated streams, not merely forged
-            // headers. The engine checks dimensions before allocation.
-            decode_image(&bytes, reader_engine::current_limits())?;
+            // headers. The engine checks dimensions before allocation. The app
+            // may install a validator that understands its own page layouts.
+            let validator = self
+                .validator
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            match validator {
+                Some(validate) => validate(&bytes).map_err(Error::Invalid)?,
+                None => {
+                    decode_image(&bytes, reader_engine::current_limits())?;
+                }
+            }
             let path = inner
                 .root
                 .join(chapter_key(chapter))
@@ -1165,6 +1186,44 @@ mod tests {
             .unwrap();
         data.into_inner()
     }
+    #[test]
+    fn an_installed_validator_decides_which_fetched_pages_are_committed() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DownloadStore::open(directory.path(), 1_000_000).unwrap();
+        let chapter = chapter();
+        store.enqueue(chapter.clone(), pages()).unwrap();
+        // By default a page must decode as an image.
+        assert!(store.run(&chapter, |_| Ok(b"opaque".to_vec())).is_err());
+        assert_eq!(store.job(&chapter).unwrap().completed_pages(), 0);
+        store.retry(&chapter).unwrap();
+        // The app's validator knows the layouts it writes; the store only asks.
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        store.set_page_validator(Arc::new(move |bytes| {
+            log.lock().unwrap().push(bytes.len());
+            if bytes.starts_with(b"opaque") {
+                Ok(())
+            } else {
+                Err("unreadable page".into())
+            }
+        }));
+        let mut calls = 0;
+        let result = store.run(&chapter, |_| {
+            calls += 1;
+            Ok(if calls == 2 {
+                png()
+            } else {
+                b"opaque".to_vec()
+            })
+        });
+        assert!(matches!(result, Err(Error::Invalid(message)) if message == "unreadable page"));
+        assert_eq!(store.job(&chapter).unwrap().completed_pages(), 1);
+        assert_eq!(seen.lock().unwrap().len(), 2);
+        store.retry(&chapter).unwrap();
+        store.run(&chapter, |_| Ok(b"opaque".to_vec())).unwrap();
+        assert_eq!(store.offline(&chapter).unwrap().pages.len(), 3);
+    }
+
     #[test]
     fn retention_removes_only_complete_inactive_remote_bundles() {
         let directory = tempfile::tempdir().unwrap();
