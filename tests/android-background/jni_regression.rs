@@ -1,5 +1,11 @@
 use super::*;
-use jni::{InitArgsBuilder, JNIVersion, objects::JString};
+use jni::{
+    InitArgsBuilder, JNIVersion, JavaVM,
+    objects::{JObject, JString},
+};
+use nova_android::context::{initialize_foreground_context, with_app_context};
+use nova_android::service::NOTIFICATION_REFRESH;
+use std::time::{Duration, Instant};
 
 const FIXTURE: &str = "dev/misob/nova/reader/BackgroundServiceFixture";
 fn fixture_run(env: &mut jni::JNIEnv<'_>, method: &str) {
@@ -102,11 +108,17 @@ fn production_download_service_jni_survives_activity_drop_and_throttles_notifica
         1,
         "native threads reuse the global service class"
     );
-    {
-        let mut last = LAST_NOTIFICATION.lock().unwrap();
-        last.as_mut().unwrap().1 = Instant::now() - NOTIFICATION_REFRESH - Duration::from_millis(1);
-    }
-    native_tick(true, "Reader downloads", "2 / 4 pages");
+    // The refresh window has elapsed (the shared service takes the clock).
+    std::thread::spawn(|| {
+        DOWNLOAD_SERVICE.set_at(
+            true,
+            "Reader downloads",
+            "2 / 4 pages",
+            Instant::now() + NOTIFICATION_REFRESH + Duration::from_millis(1),
+        )
+    })
+    .join()
+    .unwrap();
     assert_eq!(
         fixture_int(&mut env, "notificationUpdates"),
         initial + 2,
@@ -140,7 +152,7 @@ fn production_download_service_jni_survives_activity_drop_and_throttles_notifica
         "a rejected start must clear the existing caller thread's exception"
     );
     assert!(
-        !DOWNLOAD_SERVICE_ACTIVE.load(Ordering::Acquire),
+        !DOWNLOAD_SERVICE.is_active(),
         "failed promotion must leave a rising edge available for retry"
     );
     assert_eq!(fixture_int(&mut env, "foregroundStarts"), 3);

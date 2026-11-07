@@ -4,6 +4,7 @@ Nova shared storage (096ec5e6c4cf2c30303a01eed42ca2debc165f56)	GPL-3.0-or-later	
 Nova shared network policy (096ec5e6c4cf2c30303a01eed42ca2debc165f56)	GPL-3.0-or-later	https://github.com/misobarisic/nova-kit/tree/096ec5e6c4cf2c30303a01eed42ca2debc165f56/crates/net
 Nova shared UI sources (096ec5e6c4cf2c30303a01eed42ca2debc165f56)	GPL-3.0-or-later	https://github.com/misobarisic/nova-kit/tree/096ec5e6c4cf2c30303a01eed42ca2debc165f56/crates/ui-base
 Nova shared sync (096ec5e6c4cf2c30303a01eed42ca2debc165f56)	GPL-3.0-or-later	https://github.com/misobarisic/nova-kit/tree/096ec5e6c4cf2c30303a01eed42ca2debc165f56/crates/sync
+Nova shared Android glue (096ec5e6c4cf2c30303a01eed42ca2debc165f56)	GPL-3.0-or-later	https://github.com/misobarisic/nova-kit/tree/096ec5e6c4cf2c30303a01eed42ca2debc165f56/crates/android
 Reader domain, sources, engine, downloads and catalogue crates	GPL-3.0-or-later	https://github.com/misobarisic/nova-reader/tree/main/crates
 Roboto Regular/Bold (38062f4b4a0be4346d07a928408da21602545e9e)	Apache-2.0	https://github.com/googlefonts/roboto-2/tree/38062f4b4a0be4346d07a928408da21602545e9e
 AVIF adapter and independent fixture (avif-decode 3.0.0)	BSD-3-Clause	https://github.com/kornelski/avif-decode

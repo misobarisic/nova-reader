@@ -67,8 +67,7 @@ fn android_main(app: slint::android::AndroidApp) {
     if let Some(path) = app.internal_data_path() {
         let _ = paths::ANDROID_DATA.set(path.join("nova-reader"));
     }
-    crate::android_sync::initialize_foreground_context(app.vm_as_ptr(), app.activity_as_ptr());
-    crate::android_downloads::initialize_foreground_context(app.vm_as_ptr(), app.activity_as_ptr());
+    nova_android::context::initialize_foreground_context(app.vm_as_ptr(), app.activity_as_ptr());
     slint::android::init_with_event_listener(app, |event| {
         use slint::android::android_activity::{MainEvent, PollEvent};
         match event {

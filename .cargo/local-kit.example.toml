@@ -6,3 +6,4 @@ nova-cache = { path = "../nova-kit/crates/cache" }
 nova-image = { path = "../nova-kit/crates/image" }
 nova-sync = { path = "../nova-kit/crates/sync" }
 nova-net = { path = "../nova-kit/crates/net" }
+nova-android = { path = "../nova-kit/crates/android" }

@@ -2,6 +2,7 @@
 """Verify Nova's exact copied service and run its Android lifecycle in a host JVM."""
 import argparse
 import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
@@ -10,6 +11,16 @@ import tempfile
 import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def kit_crate(name):
+    """Directory of a nova-kit crate in the dependency graph of this checkout."""
+    metadata = subprocess.run(["cargo", "metadata", "--format-version", "1", "--locked"],
+                              cwd=ROOT, check=True, capture_output=True, text=True).stdout
+    for package in json.loads(metadata)["packages"]:
+        if package["name"] == name:
+            return Path(package["manifest_path"]).parent
+    raise SystemExit(f"{name} is not in the dependency graph")
 # Source: https://github.com/misobarisic/nova/tree/ee3877808764d70362a6e0b442e79e5128317abf
 # android/java/dev/misob/nova/{NovaBackgroundService,NovaActivity}.java
 NOVA_SERVICE_SHA256 = "bd4fdd9fde4fc45fed915ffd8b7b3b8bf89c7c8d4c931e9f1cdd7f66d7efe29c"
@@ -81,7 +92,8 @@ def main():
             (work / "src").mkdir()
             (work / "Cargo.toml").write_text(
                 '[package]\nname="reader-background-jni-regression"\nversion="0.0.0"\nedition="2024"\n'
-                '[workspace]\n[dependencies]\njni={version="=0.21.1",features=["invocation"]}\n')
+                '[workspace]\n[dependencies]\njni={version="=0.21.1",features=["invocation"]}\n'
+                f'nova-android={{path="{kit_crate("nova-android")}",features=["jni"]}}\n')
             production = (ROOT / "src/android_downloads.rs").read_text().replace('#![cfg(target_os = "android")]\n', '')
             fixture = (ROOT / "tests/android-background/jni_regression.rs").read_text()
             (work / "src/lib.rs").write_text('#![allow(dead_code)]\n' + production + '\n#[cfg(test)] mod regression {\n' + fixture + '\n}\n')

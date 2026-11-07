@@ -1,4 +1,11 @@
 // Host boundary doubles leave the production JNI adapter unmodified.
+mod nova_reader_ui {
+    pub mod backend_text {
+        pub fn tr(text: &str) -> String {
+            text.into()
+        }
+    }
+}
 mod paths {
     pub static ANDROID_DATA: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 }
@@ -111,7 +118,7 @@ mod tests {
             JNI_FALSE
         );
         let (tx, rx) = std::sync::mpsc::channel();
-        *SCAN.lock().unwrap() = Some(Box::new(move |result| tx.send(result).unwrap()));
+        assert!(SCAN.begin(Box::new(move |result| tx.send(result).unwrap())).is_ok());
         assert_eq!(
             Java_dev_misob_nova_reader_QrScanActivity_nativeHasRequest(
                 unsafe { env.unsafe_clone() },
@@ -124,7 +131,7 @@ mod tests {
             JObject::null(),
         );
         assert!(rx.recv().unwrap().is_err());
-        assert!(SCAN.lock().unwrap().is_none());
+        assert!(!SCAN.is_pending());
         Java_dev_misob_nova_reader_ReaderSyncJobService_nativePrepareSync(
             unsafe { env.unsafe_clone() },
             JObject::null(),

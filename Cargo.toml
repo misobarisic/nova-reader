@@ -10,6 +10,7 @@ license = "GPL-3.0-or-later"
 nova-storage = { git = "https://github.com/misobarisic/nova-kit", rev = "096ec5e6c4cf2c30303a01eed42ca2debc165f56" }
 nova-ui-base = { git = "https://github.com/misobarisic/nova-kit", rev = "096ec5e6c4cf2c30303a01eed42ca2debc165f56" }
 nova-net = { git = "https://github.com/misobarisic/nova-kit", rev = "096ec5e6c4cf2c30303a01eed42ca2debc165f56" }
+nova-android = { git = "https://github.com/misobarisic/nova-kit", rev = "096ec5e6c4cf2c30303a01eed42ca2debc165f56" }
 nova-cache = { git = "https://github.com/misobarisic/nova-kit", rev = "096ec5e6c4cf2c30303a01eed42ca2debc165f56" }
 nova-image = { git = "https://github.com/misobarisic/nova-kit", rev = "096ec5e6c4cf2c30303a01eed42ca2debc165f56" }
 nova-sync = { git = "https://github.com/misobarisic/nova-kit", rev = "096ec5e6c4cf2c30303a01eed42ca2debc165f56", default-features = false }
@@ -73,6 +74,7 @@ rqrr = { version = "0.11", default-features = false }
 jni = "0.21"
 ndk-context = "0.1"
 nova-net = { workspace = true, features = ["rustls"] }
+nova-android = { workspace = true, features = ["jni"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = { version = "5", default-features = false, features = ["blocking-api", "async-io"] }
@@ -81,6 +83,7 @@ zbus = { version = "5", default-features = false, features = ["blocking-api", "a
 zstd = { version = "0.13", default-features = false }
 
 [dev-dependencies]
+nova-android = { workspace = true }
 euclid = { version = "0.22.14", default-features = false }
 i-slint-core = { version = "=1.18.0", default-features = false }
 i-slint-backend-testing = { version = "=1.18.0", features = ["renderer-software"] }

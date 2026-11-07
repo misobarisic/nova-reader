@@ -4897,6 +4897,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "nova-android"
+version = "0.1.0"
+source = "git+https://github.com/misobarisic/nova-kit?rev=096ec5e6c4cf2c30303a01eed42ca2debc165f56#096ec5e6c4cf2c30303a01eed42ca2debc165f56"
+dependencies = [
+ "jni 0.21.1",
+]
+
+[[package]]
 name = "nova-cache"
 version = "0.1.0"
 source = "git+https://github.com/misobarisic/nova-kit?rev=096ec5e6c4cf2c30303a01eed42ca2debc165f56#096ec5e6c4cf2c30303a01eed42ca2debc165f56"
@@ -4951,6 +4959,7 @@ dependencies = [
  "image",
  "jni 0.21.1",
  "ndk-context",
+ "nova-android",
  "nova-cache",
  "nova-image",
  "nova-net",

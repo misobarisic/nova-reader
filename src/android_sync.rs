@@ -2,90 +2,28 @@
 //! only the Application context and never construct Slint or launch an Activity.
 #![cfg(target_os = "android")]
 use jni::{
-    JavaVM,
-    objects::{GlobalRef, JByteArray, JObject, JString, JValue},
+    objects::{JByteArray, JObject, JValue},
     sys::{JNI_FALSE, JNI_TRUE, jboolean, jint, jstring},
 };
+use nova_android::{
+    context::{call as call_class, load_class as app_class},
+    slot::Slot,
+};
 use std::{
-    path::PathBuf,
     sync::{
-        Arc, LazyLock, Mutex, OnceLock,
+        Arc, LazyLock, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
 };
 
-static CONTEXT: OnceLock<(JavaVM, GlobalRef)> = OnceLock::new();
 static CANCEL: LazyLock<Mutex<Arc<AtomicBool>>> =
     LazyLock::new(|| Mutex::new(Arc::new(AtomicBool::new(false))));
 fn job_cancel() -> Arc<AtomicBool> {
     CANCEL.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 type ScanCallback = Box<dyn FnOnce(Result<String, String>) + Send>;
-static SCAN: Mutex<Option<ScanCallback>> = Mutex::new(None);
-
-fn retain_context(env: &mut jni::JNIEnv, context: &JObject) -> jni::errors::Result<()> {
-    if CONTEXT.get().is_none() {
-        let app = env
-            .call_method(
-                context,
-                "getApplicationContext",
-                "()Landroid/content/Context;",
-                &[],
-            )?
-            .l()?;
-        let _ = CONTEXT.set((env.get_java_vm()?, env.new_global_ref(app)?));
-    }
-    Ok(())
-}
-
-pub(crate) fn initialize_foreground_context(
-    vm: *mut std::ffi::c_void,
-    activity: *mut std::ffi::c_void,
-) {
-    let result = (|| -> jni::errors::Result<()> {
-        // AndroidApp owns the VM and Activity throughout android_main.
-        let vm = unsafe { JavaVM::from_raw(vm.cast()) }?;
-        let mut env = vm.attach_current_thread()?;
-        let activity = unsafe { JObject::from_raw(activity.cast()) };
-        retain_context(&mut env, &activity)
-    })();
-    if let Err(error) = result {
-        eprintln!("Reader Android sync context: {error}");
-    }
-}
-
-fn call_class(
-    f: impl FnOnce(&mut jni::JNIEnv, &JObject) -> jni::errors::Result<()>,
-) -> Result<(), String> {
-    let (vm, context) = CONTEXT.get().ok_or("Android context unavailable")?;
-    let mut env = vm.attach_current_thread().map_err(|e| e.to_string())?;
-    let result = f(&mut env, context.as_obj()).map_err(|e| e.to_string());
-    // Never leave a pending Java exception attached to an event-loop thread.
-    if env.exception_check().unwrap_or(false) {
-        let _ = env.exception_clear();
-    }
-    result
-}
-fn app_class<'a>(
-    env: &mut jni::JNIEnv<'a>,
-    context: &JObject,
-    name: &str,
-) -> jni::errors::Result<jni::objects::JClass<'a>> {
-    let loader = env
-        .call_method(context, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])?
-        .l()?;
-    let name = env.new_string(name)?;
-    Ok(env
-        .call_method(
-            loader,
-            "loadClass",
-            "(Ljava/lang/String;)Ljava/lang/Class;",
-            &[JValue::Object(&name)],
-        )?
-        .l()?
-        .into())
-}
+static SCAN: Slot<ScanCallback> = Slot::new();
 
 /// Idempotent schedule/cancel. Call with sync && background enabled.
 pub(crate) fn schedule_background(enabled: bool) {
@@ -135,16 +73,11 @@ pub(crate) fn copy_text(text: &str) -> Result<(), String> {
 
 /// Callback runs on the camera thread; caller dispatches onto its UI event loop.
 pub(crate) fn scan_invite(callback: impl FnOnce(Result<String, String>) + Send + 'static) {
-    {
-        let mut pending = SCAN.lock().unwrap_or_else(|e| e.into_inner());
-        if pending.is_some() {
-            drop(pending);
-            callback(Err(nova_reader_ui::backend_text::tr(
-                "A QR scan is already active",
-            )));
-            return;
-        }
-        *pending = Some(Box::new(callback));
+    if let Err(callback) = SCAN.begin(Box::new(callback)) {
+        callback(Err(nova_reader_ui::backend_text::tr(
+            "A QR scan is already active",
+        )));
+        return;
     }
     if let Err(error) = call_class(|env, context| {
         let class = app_class(env, context, "dev.misob.nova.reader.QrScanActivity")?;
@@ -160,7 +93,7 @@ pub(crate) fn scan_invite(callback: impl FnOnce(Result<String, String>) + Send +
     }
 }
 fn finish_scan(result: Result<String, String>) {
-    let callback = SCAN.lock().unwrap_or_else(|e| e.into_inner()).take();
+    let callback = SCAN.take();
     if let Some(callback) = callback {
         callback(result);
     }
@@ -200,22 +133,8 @@ pub extern "system" fn Java_dev_misob_nova_reader_ReaderSyncJobService_nativeRun
 fn run_headless(env: &mut jni::JNIEnv, context: &JObject) -> Result<String, String> {
     let started = Instant::now();
     let cancel = job_cancel();
-    retain_context(env, context).map_err(|e| e.to_string())?;
-    let files = env
-        .call_method(context, "getFilesDir", "()Ljava/io/File;", &[])
-        .map_err(|e| e.to_string())?
-        .l()
-        .map_err(|e| e.to_string())?;
-    let path = env
-        .call_method(files, "getAbsolutePath", "()Ljava/lang/String;", &[])
-        .map_err(|e| e.to_string())?
-        .l()
-        .map_err(|e| e.to_string())?;
-    let path: String = env
-        .get_string(&JString::from(path))
-        .map_err(|e| e.to_string())?
-        .into();
-    let path = PathBuf::from(path).join("nova-reader");
+    nova_android::context::retain_app_context(env, context).map_err(|e| e.to_string())?;
+    let path = nova_android::context::files_dir(env, context)?.join("nova-reader");
     let _ = crate::paths::ANDROID_DATA.set(path.clone());
     // Storage initialization must precede settings access; no Activity exists.
     let services = crate::services::Services::open(&path)?;
@@ -264,7 +183,7 @@ pub extern "system" fn Java_dev_misob_nova_reader_QrScanActivity_nativeHasReques
     _env: jni::JNIEnv,
     _this: JObject,
 ) -> jboolean {
-    if SCAN.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+    if SCAN.is_pending() {
         JNI_TRUE
     } else {
         JNI_FALSE
