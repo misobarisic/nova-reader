@@ -166,5 +166,6 @@ pub(crate) fn persist(path: &Path, value: &Value, fields: &[SettingField]) -> Re
     if bytes.len() > MAX_SETTINGS {
         return Err(invalid());
     }
-    crate::package::atomic_write(path, &bytes)
+    nova_storage::fs::atomic_write(path, &bytes)?;
+    Ok(())
 }

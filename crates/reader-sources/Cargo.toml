@@ -9,6 +9,8 @@ rquickjs = { version = "0.14", default-features = false, features = ["std"] }
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls", "cookies"] }
 scraper = "0.24"
 zip = { version = "2.4", default-features = false, features = ["deflate"] }
+nova-net = { workspace = true }
+nova-storage = { workspace = true, features = ["zip"] }
 sha2 = "0.10"
 semver = "1"
 serde = { version = "1", features = ["derive"] }
@@ -18,9 +20,7 @@ url = "2"
 
 [target.'cfg(target_os = "android")'.dependencies]
 rquickjs = { version = "0.14", default-features = false, features = ["std", "bindgen"] }
-
-rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "aws-lc-rs"] }
-webpki-roots = "1"
+nova-net = { workspace = true, features = ["rustls"] }
 
 [dev-dependencies]
 tempfile = "3"

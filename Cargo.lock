@@ -4929,6 +4929,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nova-net"
+version = "0.1.0"
+source = "git+https://github.com/misobarisic/nova-kit?rev=3ee7415f3f9ec298f635fbc03d8c4405554a1006#3ee7415f3f9ec298f635fbc03d8c4405554a1006"
+dependencies = [
+ "rustls",
+ "webpki-roots",
+]
+
+[[package]]
 name = "nova-reader"
 version = "0.1.35"
 dependencies = [
@@ -4991,6 +5000,7 @@ dependencies = [
  "redb",
  "serde",
  "serde_json",
+ "zip",
  "zstd",
 ]
 
@@ -6510,9 +6520,10 @@ dependencies = [
 name = "reader-sources"
 version = "0.1.0"
 dependencies = [
+ "nova-net",
+ "nova-storage",
  "reqwest",
  "rquickjs",
- "rustls",
  "scraper",
  "semver",
  "serde",
@@ -6521,7 +6532,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "url",
- "webpki-roots",
  "zip",
 ]
 

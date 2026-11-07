@@ -1,10 +1,14 @@
 use crate::{Result, Source, SourceError, network::NetworkTransport};
+use nova_storage::{
+    fs::atomic_write,
+    zip::{self as bounded, Limits, PathRule, Policy, printable_path},
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    io::{Cursor, Read, Write},
+    io::{Cursor, Read},
     path::Path,
     sync::{
         Arc, Mutex, RwLock,
@@ -13,6 +17,7 @@ use std::{
 };
 const MAX_ARCHIVE: usize = 8 * 1024 * 1024;
 const MAX_EXPANDED: usize = 8 * 1024 * 1024;
+const MAX_ENTRIES: usize = 162;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Manifest {
@@ -127,14 +132,6 @@ fn invalid(s: impl Into<String>) -> SourceError {
 fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
-fn valid_path(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 240
-        && !s.contains('\\')
-        && !s.contains(':')
-        && s.split('/')
-            .all(|x| !x.is_empty() && x != "." && x != ".." && !x.chars().any(char::is_control))
-}
 fn validate_manifest(m: &Manifest) -> Result<BTreeSet<String>> {
     crate::settings::validate_schema(&m.configuration)?;
     if m.format_version != 2 || m.contract != "nova-reader1" {
@@ -224,7 +221,7 @@ fn validate_manifest(m: &Manifest) -> Result<BTreeSet<String>> {
         .chain(m.scripts.iter())
         .chain(m.assets.iter())
     {
-        if !valid_path(path) || !paths.insert(path.clone()) {
+        if !printable_path(path) || !paths.insert(path.clone()) {
             return Err(invalid("unsafe or duplicate declared file"));
         }
     }
@@ -240,64 +237,45 @@ fn validate_manifest(m: &Manifest) -> Result<BTreeSet<String>> {
     }
     Ok(paths)
 }
+fn archive_error(error: bounded::Error) -> SourceError {
+    use bounded::Error::*;
+    invalid(match error {
+        Archive(_) => "invalid ZIP",
+        TruncatedDirectory | TooManyEntries => "invalid or oversized ZIP directory",
+        DuplicateEntry => "duplicate ZIP entry",
+        UnsafePath | NotRegular | Directory | Encrypted => {
+            "unsafe, duplicate or non-file ZIP entry"
+        }
+        EntryTooLarge | ExpandedTooLarge => "expanded archive limit",
+        SizeMismatch | Missing | Io(_) => "unreadable ZIP entry",
+    })
+}
 pub(crate) fn validate(bytes: &[u8]) -> Result<(Manifest, String)> {
     if bytes.len() > MAX_ARCHIVE {
         return Err(invalid("archive exceeds 8 MiB"));
     }
-    let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|_| invalid("invalid ZIP"))?;
-    // zip indexes by name and silently coalesces duplicate central records.
-    // Count the original central directory before trusting that index.
-    let mut offset = usize::try_from(zip.central_directory_start())
-        .map_err(|_| invalid("invalid ZIP directory"))?;
-    let mut records = 0;
-    while bytes.get(offset..offset.saturating_add(4)) == Some(b"PK\x01\x02".as_slice()) {
-        let header = bytes
-            .get(offset..offset.saturating_add(46))
-            .ok_or_else(|| invalid("truncated ZIP directory"))?;
-        let length = |i| usize::from(u16::from_le_bytes([header[i], header[i + 1]]));
-        offset = offset
-            .checked_add(46 + length(28) + length(30) + length(32))
-            .ok_or_else(|| invalid("ZIP directory overflow"))?;
-        records += 1;
-        if offset > bytes.len() || records > 162 {
-            return Err(invalid("invalid or oversized ZIP directory"));
-        }
-    }
-    if records != zip.len() {
-        return Err(invalid("duplicate ZIP entry"));
-    }
-    if zip.len() > 162 {
-        return Err(invalid("too many ZIP entries"));
-    }
+    // The zip crate indexes by name and silently coalesces duplicate central
+    // records; the bounded reader counts the raw directory before trusting it.
+    let mut zip = bounded::Archive::open(
+        Cursor::new(bytes),
+        Limits {
+            max_entries: MAX_ENTRIES,
+            max_entry_bytes: MAX_EXPANDED as u64,
+            max_expanded_bytes: MAX_EXPANDED as u64,
+        },
+        Policy {
+            paths: PathRule::Printable,
+            directories: false,
+            regular_files_only: true,
+        },
+    )
+    .map_err(archive_error)?;
     let mut files = BTreeMap::new();
-    let mut total = 0usize;
-    for i in 0..zip.len() {
-        let mut file = zip
-            .by_index(i)
-            .map_err(|_| invalid("unreadable ZIP entry"))?;
-        let name = file.name().to_owned();
-        if !valid_path(&name)
-            || file.is_dir()
-            || file
-                .unix_mode()
-                .is_some_and(|m| m & 0o170000 != 0 && m & 0o170000 != 0o100000)
-            || files.contains_key(&name)
-        {
-            return Err(invalid("unsafe, duplicate or non-file ZIP entry"));
-        }
-        if file.size() > MAX_EXPANDED as u64
-            || total.saturating_add(file.size() as usize) > MAX_EXPANDED
-        {
-            return Err(invalid("expanded archive limit"));
-        }
-        let mut data = Vec::new();
-        file.by_ref()
-            .take((MAX_EXPANDED - total + 1) as u64)
-            .read_to_end(&mut data)?;
-        total += data.len();
-        if total > MAX_EXPANDED {
-            return Err(invalid("expanded archive limit"));
-        }
+    for index in 0..zip.entries().len() {
+        let name = zip.entries()[index].name.clone();
+        let data = zip
+            .read(index, MAX_EXPANDED as u64)
+            .map_err(archive_error)?;
         files.insert(name, data);
     }
     let m: Manifest = serde_json::from_slice(
@@ -334,38 +312,6 @@ pub(crate) fn validate(bytes: &[u8]) -> Result<(Manifest, String)> {
         script.push_str("\n;\n");
     }
     Ok((m, script))
-}
-pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let temporary = path.with_extension(format!(
-        "tmp-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    let result = (|| {
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut f = options.open(&temporary)?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
-        fs::rename(&temporary, path)?;
-        #[cfg(unix)]
-        fs::File::open(
-            path.parent()
-                .ok_or_else(|| invalid("missing parent directory"))?,
-        )?
-        .sync_all()?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(temporary);
-    }
-    result
 }
 impl SourceRegistry {
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {

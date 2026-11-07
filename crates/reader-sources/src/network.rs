@@ -1,4 +1,5 @@
 use crate::{Permissions, Result, SourceError};
+use nova_net::is_public_ip;
 use reqwest::cookie::CookieStore;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -210,7 +211,9 @@ impl CookieSession {
             .pool_max_idle_per_host(4)
             .resolve_to_addrs(&host, route_addresses);
         #[cfg(target_os = "android")]
-        let builder = builder.tls_backend_preconfigured(android_tls_config()?);
+        let builder = builder.tls_backend_preconfigured(
+            nova_net::tls::client_config().map_err(|_| network("TLS versions unavailable"))?,
+        );
         let client = Arc::new(builder.build().map_err(|_| network("HTTP client failed"))?);
         if clients.len() == MAX_SESSION_CLIENTS {
             clients.remove(0);
@@ -686,45 +689,6 @@ impl NetworkTransport {
             });
         }
         Err(network("redirect loop"))
-    }
-}
-
-pub(crate) fn is_public_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(ip) => {
-            let [a, b, c, _] = ip.octets();
-            !ip.is_private()
-                && !ip.is_loopback()
-                && !ip.is_link_local()
-                && !ip.is_broadcast()
-                && !ip.is_unspecified()
-                && !ip.is_multicast()
-                && a != 0
-                && !(a == 100 && (64..=127).contains(&b))
-                && !(a == 192 && b == 0 && c == 0)
-                && !(a == 192 && b == 0 && c == 2)
-                && !(a == 192 && b == 88 && c == 99)
-                && !(a == 198 && (b == 18 || b == 19))
-                && !(a == 198 && b == 51 && c == 100)
-                && !(a == 203 && b == 0 && c == 113)
-                && a < 224
-        }
-        IpAddr::V6(ip) => {
-            if let Some(mapped) = ip.to_ipv4_mapped() {
-                return is_public_ip(IpAddr::V4(mapped));
-            }
-            let segments = ip.segments();
-            (0x2000..=0x3fff).contains(&segments[0])
-                && !ip.is_loopback()
-                && !ip.is_unspecified()
-                && !ip.is_multicast()
-                && !ip.is_unique_local()
-                && !ip.is_unicast_link_local()
-                && !(segments[0] == 0x2001 && segments[1] == 0x0db8)
-                && !(segments[0] == 0x2001 && segments[1] <= 0x01ff)
-                && segments[0] != 0x2002
-                && !(segments[0] == 0x3fff && segments[1] <= 0x0fff)
-        }
     }
 }
 
@@ -1265,16 +1229,4 @@ mod tests {
             "previews stay provisional when the final transfer fails"
         );
     }
-}
-
-#[cfg(target_os = "android")]
-fn android_tls_config() -> Result<rustls::ClientConfig> {
-    let mut roots = rustls::RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    rustls::ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::aws_lc_rs::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .map_err(|_| network("TLS versions unavailable"))
-    .map(|builder| builder.with_root_certificates(roots).with_no_client_auth())
 }
