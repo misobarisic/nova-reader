@@ -122,6 +122,15 @@ pub fn inspect_image(bytes: &[u8], limits: DecodeLimits) -> Result<PageDimension
         return avif::inspect(bytes, limits);
     }
     let (width, height) = reader(bytes, limits)?.into_dimensions()?;
+    admit_dimensions(PageDimensions { width, height }, limits)
+}
+/// The dimension rules every page obeys, however it is stored: nonzero, within
+/// the width/height/pixel caps, and with an RGBA decode that fits the budget.
+pub fn admit_dimensions(
+    dimensions: PageDimensions,
+    limits: DecodeLimits,
+) -> Result<PageDimensions> {
+    let PageDimensions { width, height } = dimensions;
     let pixels = u64::from(width) * u64::from(height);
     if width == 0
         || height == 0
@@ -134,7 +143,7 @@ pub fn inspect_image(bytes: &[u8], limits: DecodeLimits) -> Result<PageDimension
     {
         return Err(Error::Limit);
     }
-    Ok(PageDimensions { width, height })
+    Ok(dimensions)
 }
 /// Full decode is admitted only after dimension probing. Images larger than the
 /// supported budget fail explicitly; post-decode tiling is never used to claim

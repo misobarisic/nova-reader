@@ -194,13 +194,22 @@ fn clipboard_pixels(image: &mut ExportImage) -> Result<image::RgbaImage, String>
     .map_err(|error| format!("{}: {error}", text::tr("Cannot decode clipboard image")))
 }
 
-/// Reencode only newly fetched storage bytes. Source dimensions are preserved;
-/// callers choose their admission limits and retain existing stored files.
-pub(crate) fn reencode_storage_image(
+/// How `reencode_storage_image` would store a page, decided from its bytes.
+/// Splitting a tall page into strips needs the same decision per strip.
+pub(crate) enum StorageRecipe {
+    /// Keep the source bytes: the codec cannot hold what they carry.
+    Original,
+    /// A lossless JPEG to JPEG XL transcode of the whole file.
+    Transcoded(Vec<u8>),
+    /// Decode, then encode pixels. `lossless` preserves a lossless input.
+    Pixels { lossless: bool },
+}
+
+pub(crate) fn storage_recipe(
     bytes: &[u8],
     compression: crate::image_storage::ImageCompression,
     limits: reader_engine::DecodeLimits,
-) -> Result<Vec<u8>, String> {
+) -> Result<StorageRecipe, String> {
     let lossless = compression.lossless_inputs
         && matches!(
             compression.format,
@@ -213,7 +222,7 @@ pub(crate) fn reencode_storage_image(
         // The shared display decoder produces RGBA8. Keep high-depth source
         // samples intact until an encoder can preserve them.
         reader_engine::inspect_image(bytes, limits).map_err(|error| error.to_string())?;
-        return Ok(bytes.to_vec());
+        return Ok(StorageRecipe::Original);
     }
     if compression.jxl_lossless_jpeg
         && matches!(
@@ -225,15 +234,31 @@ pub(crate) fn reencode_storage_image(
         // A valid JXL header does not establish that its float grids fit the
         // reader's decode budget. Never commit an unreadable offline variant.
         nova_image::decode_jxl(&encoded, limits).map_err(|error| error.to_string())?;
-        return Ok(encoded);
+        return Ok(StorageRecipe::Transcoded(encoded));
     }
-    reencode_image_with_lossless(
-        bytes,
-        compression.format,
-        compression.quality,
-        limits,
-        lossless,
-    )
+    Ok(StorageRecipe::Pixels { lossless })
+}
+
+/// Reencode only newly fetched storage bytes. Source dimensions are preserved;
+/// callers choose their admission limits and retain existing stored files.
+pub(crate) fn reencode_storage_image(
+    bytes: &[u8],
+    compression: crate::image_storage::ImageCompression,
+    limits: reader_engine::DecodeLimits,
+) -> Result<Vec<u8>, String> {
+    match storage_recipe(bytes, compression, limits)? {
+        StorageRecipe::Original => Ok(bytes.to_vec()),
+        StorageRecipe::Transcoded(encoded) => Ok(encoded),
+        StorageRecipe::Pixels { lossless } => {
+            let image = reader_engine::decode_image(bytes, limits).map_err(|error| {
+                format!(
+                    "{}: {error}",
+                    text::tr("Cannot decode image for compression")
+                )
+            })?;
+            reencode_storage_pixels(image, compression, lossless, limits)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -243,22 +268,39 @@ pub(crate) fn reencode_image(
     quality: u8,
     limits: reader_engine::DecodeLimits,
 ) -> Result<Vec<u8>, String> {
-    reencode_image_with_lossless(bytes, format, quality, limits, false)
-}
-
-fn reencode_image_with_lossless(
-    bytes: &[u8],
-    format: ImageStorageFormat,
-    quality: u8,
-    limits: reader_engine::DecodeLimits,
-    lossless: bool,
-) -> Result<Vec<u8>, String> {
     let image = reader_engine::decode_image(bytes, limits).map_err(|error| {
         format!(
             "{}: {error}",
             text::tr("Cannot decode image for compression")
         )
     })?;
+    encode_storage_pixels(image, format, quality, limits, false)
+}
+
+/// Encode decoded pixels (a whole page, or one strip of it) with a store's
+/// format and quality. This is the single pixel-to-storage path.
+pub(crate) fn reencode_storage_pixels(
+    image: image::RgbaImage,
+    compression: crate::image_storage::ImageCompression,
+    lossless: bool,
+    limits: reader_engine::DecodeLimits,
+) -> Result<Vec<u8>, String> {
+    encode_storage_pixels(
+        image,
+        compression.format,
+        compression.quality,
+        limits,
+        lossless,
+    )
+}
+
+fn encode_storage_pixels(
+    image: image::RgbaImage,
+    format: ImageStorageFormat,
+    quality: u8,
+    limits: reader_engine::DecodeLimits,
+    lossless: bool,
+) -> Result<Vec<u8>, String> {
     // Keep transparent artwork readable: callers retain the original when
     // JPEG cannot represent it. Screenshot exports use Nova's separate rules.
     if format == ImageStorageFormat::Jpeg && image.pixels().any(|pixel| pixel[3] != 255) {

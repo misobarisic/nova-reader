@@ -28,6 +28,7 @@ mod image_limits_ui;
 pub mod image_storage;
 mod metadata_refresh;
 pub mod page_inventory;
+pub mod page_store;
 pub mod page_thumbnails;
 mod paths;
 pub mod profiles;
