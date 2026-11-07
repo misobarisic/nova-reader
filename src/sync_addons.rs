@@ -256,8 +256,9 @@ fn commit_locked(
         &format!("sync:baseline:{}", domain()),
         Some(serde_json::to_string(&materialized).map_err(|e| e.to_string())?),
     );
-    next.save().map_err(|e| e.to_string())?;
-    *guard = next;
+    nova_sync::publish(&mut guard, next, |staged| {
+        staged.save().map_err(|e| e.to_string())
+    })?;
     drop(guard);
     if changed && !projection && !seed {
         nova_sync::request_local_sync();
@@ -452,13 +453,17 @@ fn acknowledge_projection(
     basis: &BTreeMap<String, nova_sync::Version>,
 ) -> Result<(), String> {
     let mut guard = owner.lock().unwrap_or_else(|e| e.into_inner());
-    let mut next = guard.clone();
     // Store checks the current digest against the ORIGINAL input snapshot.
     // A merge during package transfer remains pending for a subsequent pass.
-    next.mark_projected(&domain(), basis)
-        .map_err(|e| e.to_string())?;
-    *guard = next;
-    Ok(())
+    nova_sync::stage_with(
+        &mut guard,
+        |staged| {
+            staged
+                .mark_projected(&domain(), basis)
+                .map_err(|e| e.to_string())
+        },
+        |_| Ok(()),
+    )
 }
 
 fn install_receipt(

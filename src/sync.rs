@@ -329,8 +329,7 @@ fn persist(
     for (key, value) in DomainStore::storage_entries(profile, state)? {
         records.queue_extra(&key, value);
     }
-    records.save()?;
-    *guard = records;
+    nova_sync::publish(&mut guard, records, |staged| staged.save())?;
     if projection {
         let digest = guard.digest();
         let mut owned = vec![

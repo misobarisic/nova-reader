@@ -222,8 +222,7 @@ fn publish(series: &SeriesId, settings: &Settings, raw: String) -> nova_sync::Re
         changed = records.set(&domain, &identity, Some(value), 0, dev);
     }
     records.queue_extra(&cache_key(series), Some(raw));
-    records.save()?;
-    *guard = records;
+    nova_sync::publish(&mut guard, records, |staged| staged.save())?;
     drop(guard);
     if changed {
         nova_sync::request_local_sync();
