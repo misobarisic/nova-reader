@@ -1,13 +1,6 @@
 //! Original source reuse for capture. Disk display variants are never admitted.
 use super::*;
 
-pub(super) struct Bytes(pub Arc<Vec<u8>>);
-impl AsRef<[u8]> for Bytes {
-    fn as_ref(&self) -> &[u8] {
-        self.0.as_slice()
-    }
-}
-
 const RETAINED_BYTES: usize = 16 * 1024 * 1024;
 /// Decoded originals kept between editor refreshes. Reserved up front with the
 /// encoded retention (see `Session::reservation`), so every capture admission
@@ -54,7 +47,7 @@ pub(super) fn scope(input: &PageInput, source: Option<&Source>) -> Result<Option
 }
 #[derive(Clone)]
 struct Original {
-    bytes: Weak<Vec<u8>>,
+    bytes: WeakPage,
     scope: Scope,
 }
 /// Weak references never extend the image worker's encoded-memory allowance.
@@ -68,7 +61,7 @@ impl Originals {
         &mut self,
         generation: u64,
         index: usize,
-        bytes: &Arc<Vec<u8>>,
+        page: &PageImage,
         scope: Option<Scope>,
         original: bool,
     ) {
@@ -81,7 +74,7 @@ impl Originals {
         // from the compressed disk cache must remove its old provenance.
         if !original {
             if self.pages.get(&index).is_some_and(|entry| {
-                !entry.bytes.ptr_eq(&Arc::downgrade(bytes)) || Some(&entry.scope) != scope.as_ref()
+                !entry.bytes.ptr_eq(&page.downgrade()) || Some(&entry.scope) != scope.as_ref()
             }) {
                 self.pages.remove(&index);
             }
@@ -91,7 +84,7 @@ impl Originals {
             self.pages.insert(
                 index,
                 Original {
-                    bytes: Arc::downgrade(bytes),
+                    bytes: page.downgrade(),
                     scope,
                 },
             );
@@ -120,7 +113,7 @@ impl Originals {
 #[derive(Default)]
 struct Cache {
     originals: BTreeMap<usize, Original>,
-    retained: BTreeMap<usize, Arc<Vec<u8>>>,
+    retained: BTreeMap<usize, PageImage>,
     decoded: BTreeMap<usize, DecodedOriginal>,
     clock: u64,
     disabled: bool,
@@ -129,7 +122,7 @@ struct Cache {
 }
 /// A decoded page, valid only for the exact encoded response it came from.
 struct DecodedOriginal {
-    bytes: Weak<Vec<u8>>,
+    bytes: WeakPage,
     image: reader_capture::Decoded,
     used: u64,
 }
@@ -167,7 +160,7 @@ impl Session {
     pub fn decode(
         &self,
         index: usize,
-        bytes: &Arc<Vec<u8>>,
+        bytes: &PageImage,
         limits: reader_engine::DecodeLimits,
     ) -> std::result::Result<reader_capture::Decoded, reader_engine::Error> {
         {
@@ -175,7 +168,7 @@ impl Session {
             cache.clock += 1;
             let clock = cache.clock;
             if let Some(hit) = cache.decoded.get_mut(&index).filter(|hit| {
-                hit.bytes.upgrade().is_some_and(|b| Arc::ptr_eq(&b, bytes))
+                hit.bytes.upgrade().is_some_and(|b| b.ptr_eq(bytes))
                     && hit.image.width() <= limits.max_width
                     && hit.image.height() <= limits.max_height
                     && hit.image.as_raw().len() as u64 <= limits.max_decoded_bytes
@@ -184,7 +177,7 @@ impl Session {
                 return Ok(hit.image.clone());
             }
         }
-        let image = Arc::new(reader_engine::decode_image(bytes, limits)?);
+        let image = Arc::new(bytes.decode(limits)?);
         let mut cache = self.0.lock().unwrap_or_else(|e| e.into_inner());
         cache.decodes += 1;
         // Entries whose response is gone can never hit again; free them first.
@@ -211,7 +204,7 @@ impl Session {
             cache.decoded.insert(
                 index,
                 DecodedOriginal {
-                    bytes: Arc::downgrade(bytes),
+                    bytes: bytes.downgrade(),
                     image: image.clone(),
                     used,
                 },
@@ -225,7 +218,7 @@ impl Session {
         input: &PageInput,
         source: Option<&Source>,
         cancel: &CancelToken,
-    ) -> Result<Arc<Vec<u8>>> {
+    ) -> Result<PageImage> {
         cancel.check().map_err(error)?;
         let before = scope(input, source)?;
         let reused = {
@@ -240,7 +233,7 @@ impl Session {
         let bytes = if let Some(bytes) = reused {
             bytes
         } else {
-            Arc::new(input.read(source, cancel)?)
+            input.read(source, cancel)?
         };
         cancel.check().map_err(error)?;
         let after = scope(input, source)?;
@@ -254,16 +247,16 @@ impl Session {
             cache.originals.insert(
                 index,
                 Original {
-                    bytes: Arc::downgrade(&bytes),
+                    bytes: bytes.downgrade(),
                     scope: before,
                 },
             );
-            if !cache.disabled && bytes.len() <= RETAINED_BYTES {
+            if !cache.disabled && bytes.encoded_len() <= RETAINED_BYTES {
                 cache.retained.remove(&index);
-                let mut used: usize = cache.retained.values().map(|bytes| bytes.len()).sum();
-                while used + bytes.len() > RETAINED_BYTES {
+                let mut used: usize = cache.retained.values().map(|page| page.encoded_len()).sum();
+                while used + bytes.encoded_len() > RETAINED_BYTES {
                     if let Some((_, old)) = cache.retained.pop_first() {
-                        used -= old.len();
+                        used -= old.encoded_len();
                     } else {
                         break;
                     }
@@ -359,15 +352,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (registry, source, transport, input) = source(dir.path(), std::time::Duration::ZERO);
         let cancel = CancelToken::default();
-        let bytes = Arc::new(input.read(Some(&source), &cancel).unwrap());
+        let bytes = input.read(Some(&source), &cancel).unwrap();
         let mut originals = Originals::default();
         originals.record(4, 0, &bytes, scope(&input, Some(&source)).unwrap(), true);
         let session = originals.session(4, [0].into_iter());
         for _ in 0..3 {
-            assert!(Arc::ptr_eq(
-                &bytes,
-                &session.read(0, &input, Some(&source), &cancel).unwrap()
-            ));
+            assert!(bytes.ptr_eq(&session.read(0, &input, Some(&source), &cancel).unwrap()));
         }
         assert_eq!(
             transport.reads.load(Ordering::Acquire),
@@ -394,7 +384,7 @@ mod tests {
     #[test]
     fn compressed_responses_and_old_generations_never_seed_originals() {
         let mut originals = Originals::default();
-        let bytes = Arc::new(vec![1, 2, 3]);
+        let bytes = PageImage::from_encoded(vec![1, 2, 3]);
         let stamp = Some(Scope::Remote("profile".into()));
         originals.record(1, 0, &bytes, stamp.clone(), true);
         assert_eq!(
@@ -413,7 +403,7 @@ mod tests {
             1,
             "same response keeps provenance when re-windowing"
         );
-        let compressed = Arc::new(vec![4, 5]);
+        let compressed = PageImage::from_encoded(vec![4, 5]);
         originals.record(1, 0, &compressed, stamp, false);
         assert!(originals.pages.is_empty());
     }
@@ -559,7 +549,7 @@ mod tests {
             image::RgbaImage::from_pixel(width, height, image::Rgba([1, 2, 3, 255]))
                 .write_to(&mut out, image::ImageFormat::Png)
                 .unwrap();
-            Arc::new(out.into_inner())
+            PageImage::from_encoded(out.into_inner())
         };
         let limits = reader_engine::DecodeLimits::default();
         let session = Session::default();
@@ -569,7 +559,7 @@ mod tests {
         assert!(Arc::ptr_eq(&a, &b), "same response reuses the decoded page");
         assert_eq!(session.decodes(), 1);
         // Identical bytes in a new response are a new source: never trusted.
-        let replaced = Arc::new(first.as_ref().clone());
+        let replaced = PageImage::from_encoded(first.stored_bytes().to_vec());
         let c = session.decode(0, &replaced, limits).unwrap();
         assert!(!Arc::ptr_eq(&a, &c));
         assert_eq!(session.decodes(), 2);

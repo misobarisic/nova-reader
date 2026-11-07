@@ -113,7 +113,7 @@ fn prepare(
     extension: Option<bool>,
     cancel: &CancelToken,
     ticket: Option<&Ticket>,
-) -> Result<BTreeMap<usize, Arc<Vec<u8>>>> {
+) -> Result<BTreeMap<usize, PageImage>> {
     let mut encoded = BTreeMap::new();
     let mut encoded_bytes = 0usize;
     loop {
@@ -142,7 +142,7 @@ fn prepare(
             .originals
             .read(index, input, source.as_ref(), cancel)?;
         encoded_bytes = encoded_bytes
-            .checked_add(bytes.len())
+            .checked_add(bytes.encoded_len())
             .filter(|total| *total <= PREPARED_BYTES)
             .ok_or_else(|| {
                 text::tr("Incoming capture pages exceed the memory limit. Extend a smaller area.")
@@ -168,10 +168,7 @@ fn prepare(
                 reader_engine::page_presentation(&image, capture.options).map_err(error)?;
             (presentation.effective, presentation.split)
         } else {
-            (
-                reader_engine::inspect_image(&bytes, limits).map_err(error)?,
-                false,
-            )
+            (bytes.dimensions(limits).map_err(error)?, false)
         };
         check(cancel, ticket)?;
         let previous = capture.pages.clone();
@@ -446,12 +443,12 @@ fn render_prepared(
     capture: &ChapterScreencap,
     cancel: &CancelToken,
     ticket: Option<&Ticket>,
-    mut encoded: BTreeMap<usize, Arc<Vec<u8>>>,
+    mut encoded: BTreeMap<usize, PageImage>,
 ) -> Result<(ReaderScreencap, FrozenExportName)> {
     check(cancel, ticket)?;
     let reserved = encoded
         .values()
-        .map(|bytes| bytes.len() as u64)
+        .map(|page| page.encoded_len() as u64)
         .sum::<u64>();
     let mut rendered = crate::chapter_capture::capture_at_scale_with_decoder(
         capture.viewport,
@@ -463,8 +460,8 @@ fn render_prepared(
         CAPTURE_MEMORY - reserved - capture.originals.reservation(),
         |index| {
             check(cancel, ticket)?;
-            if let Some(bytes) = encoded.remove(&index) {
-                return Ok(reader_capture_sources::Bytes(bytes));
+            if let Some(page) = encoded.remove(&index) {
+                return Ok(page);
             }
             let (input, source) = capture
                 .inputs
@@ -473,9 +470,8 @@ fn render_prepared(
             capture
                 .originals
                 .read(index, input, source.as_ref(), cancel)
-                .map(reader_capture_sources::Bytes)
         },
-        |index, bytes, limits| capture.originals.decode(index, &bytes.0, limits),
+        |index, page, limits| capture.originals.decode(index, page, limits),
     )?;
     check(cancel, ticket)?;
     if capture.brightness < 100 {

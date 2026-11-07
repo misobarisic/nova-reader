@@ -83,12 +83,12 @@ fn budget_error() -> String {
 /// A decoded original, shareable with a caller-owned cache.
 pub type Decoded = Arc<image::RgbaImage>;
 type DecodeResult = Result<Decoded, reader_engine::Error>;
-fn plain_decode<B: AsRef<[u8]>>(
+fn plain_decode<B: reader_engine::PageSource>(
     _: usize,
-    bytes: &B,
+    page: &B,
     limits: reader_engine::DecodeLimits,
 ) -> DecodeResult {
-    reader_engine::decode_image(bytes.as_ref(), limits).map(Arc::new)
+    page.decode(limits).map(Arc::new)
 }
 
 /// Rectangles use one common logical coordinate space. Paint order follows
@@ -138,7 +138,7 @@ pub fn capture_with_options(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn capture_with_budget<B: AsRef<[u8]>>(
+fn capture_with_budget<B: reader_engine::PageSource>(
     viewport: Rect,
     reference_index: usize,
     pages: &[PageRect],
@@ -162,7 +162,7 @@ fn capture_with_budget<B: AsRef<[u8]>>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn capture_core<B: AsRef<[u8]>>(
+fn capture_core<B: reader_engine::PageSource>(
     viewport: Rect,
     reference_index: usize,
     pages: &[PageRect],
@@ -196,7 +196,7 @@ fn capture_core<B: AsRef<[u8]>>(
             .find(|page| page.index == reference_index)
             .ok_or_else(geometry_error)?;
         let reference_bytes = fetch(reference_index)?;
-        let reference_encoded = reference_bytes.as_ref().len() as u64;
+        let reference_encoded = reference_bytes.encoded_len() as u64;
         let limits = reader_engine::DecodeLimits {
             max_decoded_bytes: memory_limit
                 .checked_sub(reference_encoded)
@@ -225,7 +225,8 @@ fn capture_core<B: AsRef<[u8]>>(
         let dimensions = if let Some(presentation) = reference_presentation {
             presentation.effective
         } else {
-            reader_engine::inspect_image(reference_bytes.as_ref(), limits)
+            reference_bytes
+                .dimensions(limits)
                 .map_err(|error| format!("Cannot inspect original chapter image: {error}"))?
         };
         let scale = target_scale.unwrap_or(f64::from(dimensions.width) / reference.rect.width);
@@ -298,7 +299,7 @@ fn capture_core<B: AsRef<[u8]>>(
         })?)
         } else {
             // Preserve decode admission without decompressing this source twice.
-            reader_engine::inspect_image(reference_bytes.as_ref(), limits).map_err(|error| {
+            reference_bytes.dimensions(limits).map_err(|error| {
                 format!("Original chapter image exceeds capture admission: {error}")
             })?;
             None
@@ -330,12 +331,12 @@ fn capture_core<B: AsRef<[u8]>>(
                 let bytes = fetch(page.index)?;
                 let live_reference = reference_bytes
                     .as_ref()
-                    .map_or(0, |bytes| bytes.as_ref().len() as u64);
+                    .map_or(0, |bytes| bytes.encoded_len() as u64);
                 let limits = reader_engine::DecodeLimits {
                     max_decoded_bytes: memory_limit
                         .checked_sub(output_bytes)
                         .and_then(|remaining| remaining.checked_sub(live_reference))
-                        .and_then(|remaining| remaining.checked_sub(bytes.as_ref().len() as u64))
+                        .and_then(|remaining| remaining.checked_sub(bytes.encoded_len() as u64))
                         .ok_or_else(budget_error)?
                         .min(reader_engine::current_limits().max_decoded_bytes),
                     ..limits
@@ -1316,7 +1317,7 @@ pub mod selection;
 /// Same compositor with an explicit resident-memory reservation for originals
 /// prefetched while resolving incoming page geometry.
 #[allow(clippy::too_many_arguments)]
-pub fn capture_at_scale_with_memory<B: AsRef<[u8]>>(
+pub fn capture_at_scale_with_memory<B: reader_engine::PageSource>(
     viewport: Rect,
     reference: usize,
     pages: &[PageRect],
@@ -1344,7 +1345,7 @@ pub fn capture_at_scale_with_memory<B: AsRef<[u8]>>(
 /// must enforce the limits for anything it returns. Pages the caller retains
 /// must be covered by `memory_limit`.
 #[allow(clippy::too_many_arguments)]
-pub fn capture_at_scale_with_decoder<B: AsRef<[u8]>>(
+pub fn capture_at_scale_with_decoder<B: reader_engine::PageSource>(
     viewport: Rect,
     reference: usize,
     pages: &[PageRect],

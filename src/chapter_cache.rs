@@ -3,6 +3,7 @@
 //! Explicit downloads/imports remain owned by reader-downloads in data storage.
 use crate::{
     image_storage::{self, CacheKind, ImageCompression, ImageStorageFormat},
+    page_store::{self, PageImage},
     services::Result,
 };
 use nova_cache::{blob, gc};
@@ -37,10 +38,9 @@ fn chapter_group(chapter: &ChapterId) -> String {
         digest(&serde_json::to_vec(chapter).expect("chapter identity serializes"))
     )
 }
+/// Entry check for the cache: dimensions of a stored page, whatever its layout.
 fn inspect(bytes: &[u8]) -> Result<(u32, u32)> {
-    let dimensions = reader_engine::inspect_image(bytes, reader_engine::current_limits())
-        .map_err(|e| e.to_string())?;
-    Ok((dimensions.width, dimensions.height))
+    page_store::inspect_stored(bytes)
 }
 fn private_directory(path: &Path) -> io::Result<()> {
     let mut builder = fs::DirBuilder::new();
@@ -149,7 +149,7 @@ impl Request {
     }
 }
 pub struct Read {
-    pub bytes: Vec<u8>,
+    pub page: PageImage,
     pub pending: Option<PendingWrite>,
     pub from_cache: bool,
 }
@@ -176,7 +176,7 @@ impl Drop for Reservation {
 }
 struct Job {
     pending: PendingWrite,
-    bytes: Arc<Vec<u8>>,
+    page: PageImage,
 }
 struct Active {
     generation: u64,
@@ -249,10 +249,10 @@ impl ChapterCache {
                         .pending
                         .compression
                         .enabled
-                        .then(|| encoder(&job.bytes, job.pending.compression));
+                        .then(|| encoder(job.page.stored_bytes(), job.pending.compression));
                     let stored = match transformed {
                         Some(Ok(ref bytes)) if bytes.len() <= ENTRY_BYTES => bytes.as_slice(),
-                        _ => job.bytes.as_slice(),
+                        _ => job.page.stored_bytes(),
                     };
                     if !current() {
                         continue;
@@ -368,11 +368,13 @@ impl ChapterCache {
             .as_deref()
             .and_then(|key| self.cache.get(key, inspect).ok().flatten());
         request.validate_scope()?;
-        Ok(bytes.map(|bytes| Read {
-            bytes,
-            pending: None,
-            from_cache: true,
-        }))
+        Ok(bytes
+            .and_then(|bytes| PageImage::from_stored(bytes).ok())
+            .map(|page| Read {
+                page,
+                pending: None,
+                from_cache: true,
+            }))
     }
     pub(crate) fn thumbnail_key(chapter: &ChapterId, identity: &[u8]) -> String {
         format!("{}:thumb:{}", chapter_group(chapter), digest(identity))
@@ -453,10 +455,11 @@ impl ChapterCache {
                 && request.validate_scope().is_ok()
                 && let Some(key) = request.key.as_deref()
                 && let Some(bytes) = self.cache.get(key, inspect).ok().flatten()
+                && let Ok(page) = PageImage::from_stored(bytes)
                 && request.validate_scope().is_ok()
             {
                 return Ok(Read {
-                    bytes,
+                    page,
                     pending: None,
                     from_cache: true,
                 });
@@ -472,16 +475,21 @@ impl ChapterCache {
                 )
                 .map_err(|e| e.to_string())?;
             request.validate_active()?;
-            inspect(&bytes)?;
+            // Network bytes are an image, never a stored layout.
+            page_store::check_fetched(&bytes)?;
+            let page = PageImage::from_encoded(bytes);
+            page.dimensions(reader_engine::current_limits())
+                .map_err(|e| e.to_string())?;
             let pending = if enabled && request.key.is_some() && request.validate_scope().is_ok() {
-                self.reserve(bytes.len()).map(|reservation| PendingWrite {
-                    request: request.clone(),
-                    compression: image_storage::effective_for_source(
-                        &request.source.descriptor().id,
-                    )
-                    .cache,
-                    _reservation: reservation,
-                })
+                self.reserve(page.encoded_len())
+                    .map(|reservation| PendingWrite {
+                        request: request.clone(),
+                        compression: image_storage::effective_for_source(
+                            &request.source.descriptor().id,
+                        )
+                        .cache,
+                        _reservation: reservation,
+                    })
             } else {
                 None
             };
@@ -489,7 +497,7 @@ impl ChapterCache {
             // fetched bytes may display, but never publish under the old scope.
             request.validate_active()?;
             Ok(Read {
-                bytes,
+                page,
                 pending,
                 from_cache: false,
             })
@@ -502,15 +510,15 @@ impl ChapterCache {
     }
     /// Called only after foreground decode and successful UI model publication.
     /// Active+pending writes together admit at most32MiB of encoded source data.
-    pub fn enqueue(&self, pending: PendingWrite, bytes: Arc<Vec<u8>>) {
+    pub fn enqueue(&self, pending: PendingWrite, page: PageImage) {
         if !self.usable
-            || bytes.is_empty()
-            || bytes.len() > ENTRY_BYTES
+            || page.encoded_len() == 0
+            || page.encoded_len() > ENTRY_BYTES
             || pending.request.validate_scope().is_err()
         {
             return;
         }
-        let job = Job { pending, bytes };
+        let job = Job { pending, page };
         if let Some(sender) = self
             .sender
             .lock()
@@ -790,9 +798,9 @@ mod tests {
     }
     fn persist(cache: &ChapterCache, request: &Request) -> Vec<u8> {
         let read = cache.read(request).unwrap();
-        let bytes = read.bytes.clone();
+        let bytes = read.page.stored_bytes().to_vec();
         if let Some(pending) = read.pending {
-            cache.enqueue(pending, Arc::new(read.bytes));
+            cache.enqueue(pending, read.page);
             assert!(cache.flush_writes());
         }
         bytes
@@ -876,7 +884,7 @@ mod tests {
         let request = prepare(&cache, &source, "c", "p");
         transport.rotate.store(true, Ordering::Release);
         let read = cache.read(&request).unwrap();
-        assert_eq!(read.bytes, original);
+        assert_eq!(read.page.stored_bytes(), original);
         assert!(read.pending.is_none());
         assert!(!read.from_cache);
         assert!(request.validate_for_publication(false).is_ok());
@@ -896,7 +904,7 @@ mod tests {
         );
         assert!(!next.cancel.is_cancelled());
         let fresh = cache.read(&next).unwrap();
-        assert_eq!(fresh.bytes, original);
+        assert_eq!(fresh.page.stored_bytes(), original);
         assert!(fresh.pending.is_none());
         assert!(!next.cancel.is_cancelled());
     }
@@ -908,7 +916,7 @@ mod tests {
         let request = prepare(&cache, &source, "c", "p");
         persist(&cache, &request);
         let reads = transport.reads.load(Ordering::Acquire);
-        assert_eq!(cache.read(&request).unwrap().bytes, png(80));
+        assert_eq!(cache.read(&request).unwrap().page.stored_bytes(), png(80));
         assert_eq!(transport.reads.load(Ordering::Acquire), reads);
         let first = registry
             .source("cache-fixture")
@@ -961,13 +969,16 @@ mod tests {
         );
         let request = prepare(&cache, &source, "c", "p");
         let mut read = cache.read(&request).unwrap();
-        assert_eq!(read.bytes, original);
+        assert_eq!(read.page.stored_bytes(), original);
         assert_eq!(calls.load(Ordering::Acquire), 0);
         let mut pending = read.pending.take().unwrap();
         pending.compression.enabled = true;
-        cache.enqueue(pending, Arc::new(read.bytes));
+        cache.enqueue(pending, read.page);
         assert!(cache.flush_writes());
-        assert_eq!(cache.read(&request).unwrap().bytes, transformed);
+        assert_eq!(
+            cache.read(&request).unwrap().page.stored_bytes(),
+            transformed
+        );
         assert_eq!(calls.load(Ordering::Acquire), 1);
         assert_eq!(transport.reads.load(Ordering::Acquire), 1);
     }
@@ -995,7 +1006,7 @@ mod tests {
             let mut read = cache.read(&request).unwrap();
             let mut pending = read.pending.take().unwrap();
             pending.compression.enabled = true;
-            cache.enqueue(pending, Arc::new(read.bytes));
+            cache.enqueue(pending, read.page);
             start.recv_timeout(Duration::from_secs(2)).unwrap();
             if clear {
                 cache.clear();
@@ -1041,11 +1052,11 @@ mod tests {
         );
         let mut pending = read.pending.take().unwrap();
         pending.compression.enabled = true;
-        cache.enqueue(pending, Arc::new(read.bytes));
+        cache.enqueue(pending, read.page);
         start.recv_timeout(Duration::from_secs(2)).unwrap();
         let second = prepare(&cache, &source, "c", "second");
         let other = cache.read(&second).unwrap();
-        assert_eq!(other.bytes.len(), 20 * 1024 * 1024);
+        assert_eq!(other.page.stored_bytes().len(), 20 * 1024 * 1024);
         assert!(
             other.pending.is_none(),
             "cache pressure must skip write, never block foreground bytes"

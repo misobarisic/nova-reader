@@ -1,4 +1,5 @@
 //! Page identities and resources shared by overview loading and the viewer.
+use crate::page_store::PageImage;
 use reader_domain::ChapterId;
 use reader_sources::{Page, Source};
 use std::{path::PathBuf, sync::Arc};
@@ -27,8 +28,10 @@ pub enum ResourceKind {
 }
 
 impl Resource {
-    /// Read original bytes only. A cached thumbnail is never sufficient here.
-    pub fn read(&self, cancel: &reader_sources::CancelToken) -> Result<Vec<u8>, String> {
+    /// Read the original page only. A cached thumbnail is never sufficient here.
+    /// A downloaded page may be stored in any layout; it is verified as the file
+    /// it is, then presented as a page.
+    pub fn read(&self, cancel: &reader_sources::CancelToken) -> Result<PageImage, String> {
         use sha2::{Digest, Sha256};
         use std::io::Read;
         cancel.check().map_err(crate::services::error)?;
@@ -37,6 +40,7 @@ impl Resource {
             ResourceKind::Unavailable { message } => Err(message.clone()),
             ResourceKind::Remote { source, page } => source
                 .fetch_page_limited(&page.url, &page.headers, cancel, cap)
+                .map(PageImage::from_encoded)
                 .map_err(crate::services::error),
             ResourceKind::Local {
                 path,
@@ -82,7 +86,7 @@ impl Resource {
                 {
                     return Err(unavailable());
                 }
-                Ok(bytes)
+                PageImage::from_stored(bytes).map_err(|_| unavailable())
             }
         }
     }

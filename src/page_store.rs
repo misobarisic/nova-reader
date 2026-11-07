@@ -70,6 +70,14 @@ impl PageSource for Stored {
 #[derive(Clone)]
 pub struct PageImage(Arc<Stored>);
 
+impl std::fmt::Debug for PageImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PageImage")
+            .field("encoded_len", &self.0.encoded_len())
+            .finish()
+    }
+}
+
 /// A non-owning reference that never extends a page's lifetime.
 #[derive(Clone)]
 pub struct WeakPage(Weak<Stored>);
@@ -128,6 +136,19 @@ impl PageImage {
                 .map(Export::Pixels)
                 .map_err(|error| error.to_string()),
         }
+    }
+    pub fn encoded_len(&self) -> usize {
+        self.0.encoded_len()
+    }
+    pub fn dimensions(&self, limits: DecodeLimits) -> Result<PageDimensions> {
+        self.0.dimensions(limits)
+    }
+    pub fn decode(&self, limits: DecodeLimits) -> Result<image::RgbaImage> {
+        self.0.decode(limits)
+    }
+    /// Rows `[start, end)` at the page's width.
+    pub fn decode_rows(&self, rows: Range<u32>, limits: DecodeLimits) -> Result<image::RgbaImage> {
+        self.0.decode_rows(rows, limits)
     }
     /// The file as stored: the fetched image for a whole page, the container
     /// for a split one. Only the stores that write and checksum files use this.

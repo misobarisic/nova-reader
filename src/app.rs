@@ -1,6 +1,7 @@
 use crate::reader_modes::{self, ModeChoice};
 use crate::{
     AppWindow, Appearance, EntryCategoryRow, ExtensionRow, ItemRow, PageRow, SettingRow, TileRow,
+    page_store::{PageImage, WeakPage},
     services::{Result, Services, error, now},
 };
 use nova_reader_ui::backend_text as text;
@@ -111,10 +112,10 @@ enum PageInput {
     Remote(reader_sources::Page),
 }
 impl PageInput {
-    fn read(&self, source: Option<&Source>, cancel: &CancelToken) -> Result<Vec<u8>> {
+    fn read(&self, source: Option<&Source>, cancel: &CancelToken) -> Result<PageImage> {
         cancel.check().map_err(error)?;
         let cap = reader_engine::current_limits().max_encoded_bytes;
-        let bytes = match self {
+        let page = match self {
             Self::Verified(resource) => resource.read(cancel)?,
             #[cfg(test)]
             Self::Local { path, .. } => {
@@ -127,18 +128,20 @@ impl PageInput {
                 file.take(cap as u64 + 1)
                     .read_to_end(&mut bytes)
                     .map_err(error)?;
-                bytes
+                PageImage::from_stored(bytes)?
             }
-            Self::Remote(page) => source
-                .ok_or_else(|| text::tr("Source unavailable"))?
-                .fetch_page_limited(&page.url, &page.headers, cancel, cap)
-                .map_err(error)?,
+            Self::Remote(page) => PageImage::from_encoded(
+                source
+                    .ok_or_else(|| text::tr("Source unavailable"))?
+                    .fetch_page_limited(&page.url, &page.headers, cancel, cap)
+                    .map_err(error)?,
+            ),
         };
         cancel.check().map_err(error)?;
-        if bytes.len() > cap {
+        if page.encoded_len() > cap {
             return Err(text::tr("Image exceeds byte limit"));
         }
-        Ok(bytes)
+        Ok(page)
     }
 }
 // Leave half of the 64MiB display allowance for replacements: renderer/model
@@ -275,7 +278,7 @@ struct Reader {
     decoded_widths: BTreeMap<usize, u32>,
     decoded_windows: BTreeMap<usize, reader_engine::DisplayWindowPlan>,
     // Weak identity never extends the encoded-response memory cache budget.
-    decoded_responses: BTreeMap<usize, Weak<Vec<u8>>>,
+    decoded_responses: BTreeMap<usize, WeakPage>,
     native_dimensions: BTreeMap<usize, reader_engine::PageDimensions>,
     progressive_job: Option<(usize, u64)>,
     presentations: BTreeMap<usize, reader_engine::PagePresentation>,
@@ -976,7 +979,7 @@ fn record_task_presentation(
 #[derive(Default)]
 struct EncodedPages {
     generation: u64,
-    pages: BTreeMap<usize, Arc<Vec<u8>>>,
+    pages: BTreeMap<usize, PageImage>,
     order: std::collections::VecDeque<usize>,
     bytes: usize,
     contexts: BTreeMap<usize, String>,
@@ -986,16 +989,16 @@ impl EncodedPages {
         &mut self,
         generation: u64,
         index: usize,
-        fetch: impl FnOnce() -> Result<Vec<u8>>,
-    ) -> Result<Arc<Vec<u8>>> {
+        fetch: impl FnOnce() -> Result<PageImage>,
+    ) -> Result<PageImage> {
         self.read_scoped(generation, index, "", fetch)
     }
     fn discard(&mut self, generation: u64, index: usize) {
         if self.generation != generation {
             return;
         }
-        if let Some(bytes) = self.pages.remove(&index) {
-            self.bytes = self.bytes.saturating_sub(bytes.len());
+        if let Some(page) = self.pages.remove(&index) {
+            self.bytes = self.bytes.saturating_sub(page.encoded_len());
         }
         self.order.retain(|i| *i != index);
         self.contexts.remove(&index);
@@ -1005,8 +1008,8 @@ impl EncodedPages {
         generation: u64,
         index: usize,
         context: &str,
-        fetch: impl FnOnce() -> Result<Vec<u8>>,
-    ) -> Result<Arc<Vec<u8>>> {
+        fetch: impl FnOnce() -> Result<PageImage>,
+    ) -> Result<PageImage> {
         if self.generation != generation {
             self.pages.clear();
             self.order.clear();
@@ -1016,33 +1019,34 @@ impl EncodedPages {
         }
         if self.contexts.get(&index).is_some_and(|old| old != context) {
             if let Some(old) = self.pages.remove(&index) {
-                self.bytes -= old.len();
+                self.bytes -= old.encoded_len();
             }
             self.order.retain(|i| *i != index);
             self.contexts.remove(&index);
         }
-        if let Some(bytes) = self.pages.get(&index) {
+        if let Some(page) = self.pages.get(&index) {
             self.order.retain(|i| *i != index);
             self.order.push_back(index);
-            return Ok(bytes.clone());
+            return Ok(page.clone());
         }
-        let bytes = Arc::new(fetch()?);
-        while self.bytes + bytes.len() > 32 * 1024 * 1024 {
+        let page = fetch()?;
+        let len = page.encoded_len();
+        while self.bytes + len > 32 * 1024 * 1024 {
             let Some(old) = self.order.pop_front() else {
                 break;
             };
             if let Some(old) = self.pages.remove(&old) {
-                self.bytes -= old.len();
+                self.bytes -= old.encoded_len();
             }
             self.contexts.remove(&old);
         }
-        if bytes.len() <= 32 * 1024 * 1024 {
-            self.bytes += bytes.len();
-            self.pages.insert(index, bytes.clone());
+        if len <= 32 * 1024 * 1024 {
+            self.bytes += len;
+            self.pages.insert(index, page.clone());
             self.order.push_back(index);
             self.contexts.insert(index, context.into());
         }
-        Ok(bytes)
+        Ok(page)
     }
 }
 /// Library titles a manual refresh can ask a source about. Imported folders and
@@ -3432,7 +3436,7 @@ impl Controller {
                 let mut cache_request = None;
                 let before_scope = reader_capture_sources::scope(&input, source.as_ref())?;
                 let mut fresh_original = false;
-                let bytes = match &input {
+                let page = match &input {
                     PageInput::Verified(_) => encoded.read(task.generation, task.index, || {
                         decoded.clear();
                         decode_permit.take();
@@ -3491,12 +3495,12 @@ impl Controller {
                             }
                             reused = read.from_cache;
                             pending_write = read.pending;
-                            Ok(read.bytes)
+                            Ok(read.page)
                         };
-                        let mut bytes = if let Some(key) = request.memory_key() {
+                        let mut page = if let Some(key) = request.memory_key() {
                             encoded.read_scoped(task.generation, task.index, &key, &mut load)?
                         } else {
-                            Arc::new(load()?)
+                            load()?
                         };
                         if !fetched {
                             reused = true;
@@ -3525,13 +3529,13 @@ impl Controller {
                                 })?;
                             reused = read.from_cache;
                             pending_write = read.pending;
-                            bytes = Arc::new(read.bytes);
+                            page = read.page;
                         }
                         request.validate_active()?;
                         fresh_original = fetched && !reused;
                         app.chapter_cache.touch(&request);
                         cache_request = Some((request, reused));
-                        bytes
+                        page
                     }
                 };
                 if let Some(stream) = progressive.as_mut() {
@@ -3545,7 +3549,7 @@ impl Controller {
                     .record(
                         task.generation,
                         task.index,
-                        &bytes,
+                        &page,
                         if before_scope == after_scope {
                             before_scope
                         } else {
@@ -3553,9 +3557,9 @@ impl Controller {
                         },
                         fresh_original,
                     );
-                let source_dimensions =
-                    reader_engine::inspect_image(&bytes, reader_engine::current_limits())
-                        .map_err(error)?;
+                let source_dimensions = page
+                    .dimensions(reader_engine::current_limits())
+                    .map_err(error)?;
                 let options = {
                     let view = app.view();
                     view.reader
@@ -3576,7 +3580,7 @@ impl Controller {
                     }
                 }
                 let presentation = decoded
-                    .presentation(&bytes, reader_engine::current_limits(), options)
+                    .presentation(&page, reader_engine::current_limits(), options)
                     .map_err(error)?;
                 let dimensions = presentation.effective;
                 {
@@ -3621,7 +3625,7 @@ impl Controller {
                     .max_decoded_bytes
                     .saturating_sub(native_bytes)
                     / 2) as usize;
-                let response = Arc::downgrade(&bytes);
+                let response = page.downgrade();
                 let reuse = {
                     let view = app.view();
                     view.reader.as_ref().and_then(|reader| {
@@ -3639,7 +3643,7 @@ impl Controller {
                 // entering the window, straight into their upload buffers.
                 let (plan, prepared) = decoded
                     .render_window_tiles(
-                        &bytes,
+                        &page,
                         reader_engine::current_limits(),
                         display_width,
                         start,
@@ -3660,7 +3664,7 @@ impl Controller {
                     )
                     .map_err(error)?;
                 cancel.check().map_err(error)?;
-                let write = pending_write.map(|pending| (pending, bytes));
+                let write = pending_write.map(|pending| (pending, page));
                 Ok((
                     dimensions,
                     plan,
@@ -3884,8 +3888,8 @@ impl Controller {
                             ui.set_total_ratio(reader.total_extent());
                             geometry_updated = true;
                         }
-                        if let Some((pending, bytes)) = write {
-                            app.chapter_cache.enqueue(pending, bytes);
+                        if let Some((pending, page)) = write {
+                            app.chapter_cache.enqueue(pending, page);
                         }
                     }
                     Err(error) => {
@@ -4807,8 +4811,8 @@ pub(crate) fn toggle_chapter_read(
 fn display_tiles(pixels: &[u8], width: u32, height: u32) -> Vec<TileRow> {
     display_window_tiles(pixels, width, height, 0, height)
 }
-fn same_response(previous: Option<&Weak<Vec<u8>>>, current: &Weak<Vec<u8>>) -> bool {
-    previous.is_some_and(|previous| previous.strong_count() > 0 && Weak::ptr_eq(previous, current))
+fn same_response(previous: Option<&WeakPage>, current: &WeakPage) -> bool {
+    previous.is_some_and(|previous| previous.strong_count() > 0 && previous.ptr_eq(current))
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct TileRect {
@@ -5701,11 +5705,14 @@ fn wire_reader_context(app: &Arc<Controller>, ui: &AppWindow) {
                         .map(|page| (page, reader.source_for(index as usize)))
                 })
             };
+            // Said after a successful delivery, e.g. a format fallback.
+            let notice = Arc::new(Mutex::new(None::<String>));
             let done = {
                 let weak = weak.clone();
                 let exporting = exporting.clone();
                 let app = app.clone();
                 let selection_ticket = selection_ticket.clone();
+                let notice = notice.clone();
                 move |result: Result<()>| {
                     exporting.store(false, Ordering::Release);
                     let _ = weak.upgrade_in_event_loop(move |ui| {
@@ -5733,11 +5740,21 @@ fn wire_reader_context(app: &Arc<Controller>, ui: &AppWindow) {
                         {
                             ui.set_reader_context_status(
                                 match result {
-                                    Ok(()) => text::tr(if clipboard {
-                                        "Image copied to clipboard."
-                                    } else {
-                                        "Image saved."
-                                    }),
+                                    Ok(()) => {
+                                        let done = text::tr(if clipboard {
+                                            "Image copied to clipboard."
+                                        } else {
+                                            "Image saved."
+                                        });
+                                        match notice
+                                            .lock()
+                                            .unwrap_or_else(|e| e.into_inner())
+                                            .take()
+                                        {
+                                            Some(notice) => format!("{done} {notice}"),
+                                            None => done,
+                                        }
+                                    }
                                     Err(message) => text::tr(&message),
                                 }
                                 .into(),
@@ -5791,15 +5808,18 @@ fn wire_reader_context(app: &Arc<Controller>, ui: &AppWindow) {
                     } else {
                         let (page, source) =
                             input.ok_or_else(|| text::tr("Chapter image is unavailable"))?;
-                        let bytes = page.read(source.as_ref(), &cancel)?;
-                        crate::reader_export::ExportImage::original(
-                            bytes,
+                        let page = page.read(source.as_ref(), &cancel)?;
+                        crate::reader_export::ExportImage::from_page(
+                            &page,
                             &format!("nova-reader-page-{}", index + 1),
+                            &preferences,
+                            clipboard,
                         )
                     }
                 })();
                 match image {
                     Ok(image) if !cancel.is_cancelled() => {
+                        *notice.lock().unwrap_or_else(|e| e.into_inner()) = image.notice.clone();
                         let current: crate::reader_export::ExportCurrent = Arc::new(move || {
                             !cancel.is_cancelled()
                                 && selection_ticket
@@ -7182,7 +7202,7 @@ mod tests {
         let first = cache
             .read_scoped(1, 0, "scope-a", || {
                 calls += 1;
-                Ok(vec![1])
+                Ok(PageImage::from_encoded(vec![1]))
             })
             .unwrap();
         let again = cache
@@ -7190,16 +7210,16 @@ mod tests {
                 panic!("same authorized context should reuse")
             })
             .unwrap();
-        assert!(Arc::ptr_eq(&first, &again));
+        assert!(first.ptr_eq(&again));
         let changed = cache
             .read_scoped(1, 0, "scope-b", || {
                 calls += 1;
-                Ok(vec![2])
+                Ok(PageImage::from_encoded(vec![2]))
             })
             .unwrap();
         assert_eq!(calls, 2);
-        assert_eq!(changed.as_slice(), [2]);
-        assert!(!Arc::ptr_eq(&first, &changed));
+        assert_eq!(changed.stored_bytes(), [2]);
+        assert!(!first.ptr_eq(&changed));
     }
     pub(super) fn tall_reader() -> Reader {
         Reader {
@@ -8046,29 +8066,29 @@ mod tests {
             let bytes = cache
                 .read(1, 0, || {
                     requests += 1;
-                    Ok(vec![7; 1000])
+                    Ok(PageImage::from_encoded(vec![7; 1000]))
                 })
                 .unwrap();
-            assert_eq!(bytes[0], 7);
+            assert_eq!(bytes.stored_bytes()[0], 7);
         }
         assert_eq!(requests, 1, "window movement must not refetch source bytes");
         cache
             .read(1, 1, || {
                 requests += 1;
-                Ok(vec![9; 1000])
+                Ok(PageImage::from_encoded(vec![9; 1000]))
             })
             .unwrap();
         cache
             .read(1, 0, || {
                 requests += 1;
-                Ok(vec![7; 1000])
+                Ok(PageImage::from_encoded(vec![7; 1000]))
             })
             .unwrap();
         assert_eq!(requests, 2);
         cache
             .read(2, 0, || {
                 requests += 1;
-                Ok(vec![8; 1000])
+                Ok(PageImage::from_encoded(vec![8; 1000]))
             })
             .unwrap();
         assert_eq!(requests, 3);
@@ -8234,12 +8254,12 @@ mod tests {
             refreshed >= 8,
             "exercise repeated slow-scroll window transitions"
         );
-        let source = Arc::new(vec![1]);
-        let identity = Arc::downgrade(&source);
+        let source = PageImage::from_encoded(vec![1]);
+        let identity = source.downgrade();
         assert!(same_response(Some(&identity), &identity));
-        let replacement = Arc::new(vec![1]);
+        let replacement = PageImage::from_encoded(vec![1]);
         assert!(
-            !same_response(Some(&identity), &Arc::downgrade(&replacement)),
+            !same_response(Some(&identity), &replacement.downgrade()),
             "same bytes in a new response must not reuse old tiles"
         );
         let plan = previous.unwrap();

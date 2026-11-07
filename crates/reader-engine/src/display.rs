@@ -933,7 +933,39 @@ pub fn decode_display_image(
     if max_width == 0 || max_height == 0 {
         return Err(Error::Limit);
     }
-    let dimensions = inspect_image(bytes, limits)?;
+    display_image(
+        inspect_image(bytes, limits)?,
+        limits,
+        max_width,
+        max_height,
+        || decode_image(bytes, limits),
+    )
+}
+/// [`decode_display_image`] for a page that may be stored in strips.
+pub fn decode_display_page(
+    page: &(impl PageSource + ?Sized),
+    limits: DecodeLimits,
+    max_width: u32,
+    max_height: u32,
+) -> Result<image::RgbaImage> {
+    if max_width == 0 || max_height == 0 {
+        return Err(Error::Limit);
+    }
+    display_image(
+        page.dimensions(limits)?,
+        limits,
+        max_width,
+        max_height,
+        || page.decode(limits),
+    )
+}
+fn display_image(
+    dimensions: PageDimensions,
+    limits: DecodeLimits,
+    max_width: u32,
+    max_height: u32,
+    decode: impl FnOnce() -> Result<image::RgbaImage>,
+) -> Result<image::RgbaImage> {
     let scale = (f64::from(max_width) / f64::from(dimensions.width))
         .min(f64::from(max_height) / f64::from(dimensions.height))
         .min(1.);
@@ -943,7 +975,7 @@ pub fn decode_display_image(
         return Err(Error::Limit);
     }
     render(
-        decode_image(bytes, limits)?,
+        decode()?,
         DisplayWindowPlan {
             width,
             full_height: height,

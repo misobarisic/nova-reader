@@ -1790,7 +1790,7 @@ mod tests {
         let changes = Box::pin(ModelChangeListenerContainer::<Changes>::default());
         rows.model_tracker()
             .attach_peer(changes.as_ref().model_peer());
-        let encoded = Arc::new(vec![7_u8; 16]);
+        let encoded = crate::page_store::PageImage::from_encoded(vec![7_u8; 16]);
         reader.requested = BTreeSet::from([0, 4, 5]);
         reader.retained = BTreeSet::from([0, 4, 5]);
         reader.desired = BTreeSet::from([3, 4, 5]);
@@ -1808,7 +1808,7 @@ mod tests {
                 rows: 8,
             },
         )]);
-        reader.decoded_responses = BTreeMap::from([(4, Arc::downgrade(&encoded))]);
+        reader.decoded_responses = BTreeMap::from([(4, encoded.downgrade())]);
         reader.native_dimensions = BTreeMap::from([(
             4,
             reader_engine::PageDimensions {
@@ -1852,10 +1852,12 @@ mod tests {
         assert!(reader.decoded_windows.contains_key(&2));
         assert!(reader.native_dimensions.contains_key(&2));
         assert_eq!(reader.presentations.get(&2), Some(&presentation));
-        assert!(Arc::ptr_eq(
-            &reader.decoded_responses[&2].upgrade().unwrap(),
-            &encoded
-        ));
+        assert!(
+            reader.decoded_responses[&2]
+                .upgrade()
+                .unwrap()
+                .ptr_eq(&encoded)
+        );
         assert_eq!(rows.row_count(), 6);
         for index in 0..4 {
             assert!(rows.row_data(index).unwrap().tiles == tiles);

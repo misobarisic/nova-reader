@@ -3,6 +3,7 @@ use crate::{
     chapter_cache::ChapterCache,
     decode_admission::{Priority, SHARED},
     page_inventory::{Resource, ResourceKind},
+    page_store::PageImage,
 };
 use reader_engine::PageDimensions;
 use reader_sources::{CancelToken, PageChunkControl};
@@ -729,7 +730,7 @@ fn load(
     };
     if decoded.is_none() {
         let mut preview = Preview::new(priority, active.clone(), mode);
-        let bytes = match &resource.kind {
+        let page = match &resource.kind {
             ResourceKind::Unavailable { message } => return Err(message.clone()),
             ResourceKind::Local {
                 path,
@@ -743,7 +744,15 @@ fn load(
                 if !metadata.is_file() || metadata.len() != *expected_bytes || !active() {
                     return Err("Saved page is unavailable or damaged".into());
                 }
-                read_local_preview(&mut file, *expected_bytes, sha256, &mut preview, &active)?
+                // A preview prefix is a truncated JPEG XL stream; a complete
+                // file is whatever layout the download store wrote.
+                PageImage::from_stored(read_local_preview(
+                    &mut file,
+                    *expected_bytes,
+                    sha256,
+                    &mut preview,
+                    &active,
+                )?)?
             }
             ResourceKind::Remote { source, page } => {
                 let request = shared.cache.prepare(
@@ -755,12 +764,12 @@ fn load(
                 )?;
                 if let Some(read) = shared.cache.read_cached(&request)? {
                     reused_resource = true;
-                    for chunk in read.bytes.chunks(16 * 1024) {
+                    for chunk in read.page.stored_bytes().chunks(16 * 1024) {
                         if preview.feed(chunk)?.is_break() {
                             break;
                         }
                     }
-                    read.bytes
+                    read.page
                 } else {
                     let transfer = source
                         .fetch_page_until(
@@ -781,7 +790,7 @@ fn load(
                     if !transfer.complete && preview.image.is_none() {
                         return Err("Incomplete thumbnail response".into());
                     }
-                    transfer.bytes
+                    PageImage::from_encoded(transfer.bytes)
                 }
             }
         };
@@ -796,7 +805,7 @@ fn load(
             payload.extend_from_slice(&dimensions.width.to_le_bytes());
             payload.extend_from_slice(&dimensions.height.to_le_bytes());
             payload.extend_from_slice(
-                bytes
+                page.stored_bytes()
                     .get(..consumed)
                     .ok_or_else(|| "Incomplete thumbnail response".to_string())?,
             );
@@ -806,16 +815,18 @@ fn load(
             let _permit = SHARED
                 .acquire(priority, || active())
                 .ok_or_else(|| "operation cancelled".to_string())?;
-            let dimensions = reader_engine::inspect_image(&bytes, reader_engine::current_limits())
+            let dimensions = page
+                .dimensions(reader_engine::current_limits())
                 .map_err(|e| e.to_string())?;
             let top = mode.top_preview(dimensions);
             let image = if mode == RenderingMode::Gallery {
                 center_square(
-                    reader_engine::decode_image(&bytes, reader_engine::current_limits())
+                    page.decode(reader_engine::current_limits())
                         .map_err(|e| e.to_string())?,
                 )?
             } else if top {
-                let bytes = Arc::new(bytes);
+                // A page stored in strips decodes only the strips this window
+                // touches: the first one, for a top-of-page preview.
                 let mut decoder = reader_engine::DisplayDecoder::default();
                 let height = (u64::from(dimensions.height)
                     * u64::from(WIDTH.min(dimensions.width))
@@ -823,7 +834,7 @@ fn load(
                 .max(1);
                 decoder
                     .decode_window(
-                        &bytes,
+                        &page,
                         reader_engine::current_limits(),
                         WIDTH,
                         0.,
@@ -833,8 +844,8 @@ fn load(
                     .map_err(|e| e.to_string())?
                     .image
             } else {
-                reader_engine::decode_display_image(
-                    &bytes,
+                reader_engine::decode_display_page(
+                    &page,
                     reader_engine::current_limits(),
                     WIDTH,
                     HEIGHT,

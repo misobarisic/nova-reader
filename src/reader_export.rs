@@ -11,6 +11,8 @@ pub struct ExportImage {
     pub bytes: Vec<u8>,
     pub mime: String,
     pub name: String,
+    /// Something the person should hear after a successful delivery.
+    pub notice: Option<String>,
     #[cfg(not(target_os = "android"))]
     clipboard_rgba: Option<image::RgbaImage>,
 }
@@ -31,26 +33,84 @@ impl ExportImage {
                 _ => return Err(text::tr("Unsupported page image format")),
             }
         };
-        let stem = std::path::Path::new(name)
-            .file_stem()
-            .and_then(|name| name.to_str())
-            .filter(|name| !name.is_empty())
-            .unwrap_or("page");
-        let stem = stem
-            .chars()
-            .take(120)
-            .map(|character| {
-                if character.is_control() || r#"/\:*?"<>|"#.contains(character) {
-                    '_'
-                } else {
-                    character
-                }
-            })
-            .collect::<String>();
+        let stem = file_stem(name);
         Ok(Self {
             bytes,
             mime: mime.into(),
             name: format!("{stem}.{extension}"),
+            notice: None,
+            #[cfg(not(target_os = "android"))]
+            clipboard_rgba: None,
+        })
+    }
+
+    /// Export a page. One stored as a single file keeps its original bytes. A
+    /// page stored in another layout has no such file: its strips are put back
+    /// together and encoded with the screenshot format and quality, or as PNG
+    /// (with a notice) when that format cannot hold the page. The desktop
+    /// clipboard receives the pixels themselves.
+    pub fn from_page(
+        page: &crate::page_store::PageImage,
+        name: &str,
+        preferences: &CapturePreferences,
+        clipboard: bool,
+    ) -> Result<Self, String> {
+        reader_engine::with_current_limits(|| {
+            let limits = reader_engine::current_limits();
+            match page.export(limits)? {
+                crate::page_store::Export::Original(bytes) => Self::original(bytes, name),
+                crate::page_store::Export::Pixels(pixels) => {
+                    Self::from_page_pixels(pixels, name, preferences, clipboard, limits)
+                }
+            }
+        })
+    }
+
+    fn from_page_pixels(
+        pixels: image::RgbaImage,
+        name: &str,
+        preferences: &CapturePreferences,
+        clipboard: bool,
+        limits: reader_engine::DecodeLimits,
+    ) -> Result<Self, String> {
+        let stem = file_stem(name);
+        #[cfg(not(target_os = "android"))]
+        if clipboard {
+            return Ok(Self {
+                bytes: Vec::new(),
+                mime: "image/png".into(),
+                name: format!("{stem}.png"),
+                notice: None,
+                clipboard_rgba: Some(pixels),
+            });
+        }
+        #[cfg(target_os = "android")]
+        let _ = clipboard;
+        let (width, height) = pixels.dimensions();
+        let (bytes, mime, extension, notice) =
+            match encode_with_preferences(width, height, pixels.as_raw(), preferences, limits) {
+                Ok((bytes, mime, extension)) => (bytes, mime, extension, None),
+                Err(_) => (
+                    encode_rgba(
+                        width,
+                        height,
+                        pixels.as_raw(),
+                        CaptureFormat::Png,
+                        0,
+                        limits,
+                    )?,
+                    "image/png",
+                    "png",
+                    Some(text::tr(
+                        "The screenshot format cannot hold this page, so it was written as PNG.",
+                    )),
+                ),
+            };
+        Ok(Self {
+            bytes,
+            mime: mime.into(),
+            name: format!("{stem}.{extension}"),
+            notice,
             #[cfg(not(target_os = "android"))]
             clipboard_rgba: None,
         })
@@ -80,6 +140,7 @@ impl ExportImage {
                 bytes: Vec::new(),
                 mime: "image/png".into(),
                 name: "screencap.png".into(),
+                notice: None,
                 clipboard_rgba: Some(
                     image::RgbaImage::from_raw(width, height, pixels)
                         .ok_or_else(|| text::tr("Screenshot pixels do not match its dimensions"))?,
@@ -99,71 +160,98 @@ impl ExportImage {
     ) -> Result<Self, String> {
         reader_engine::with_current_limits(|| {
             validate_screencap(width, height, pixels.len())?;
-            let quality = match preferences.format {
-                CaptureFormat::Jpeg => preferences.jpeg_quality,
-                CaptureFormat::Avif => preferences.avif_quality,
-                CaptureFormat::JxlLossless | CaptureFormat::JxlLossy => preferences.jxl_quality,
-                _ => preferences.webp_quality,
-            };
-            let bytes = encode_rgba(
+            let (bytes, mime, extension) = encode_with_preferences(
                 width,
                 height,
                 pixels,
-                preferences.format,
-                quality,
+                preferences,
                 reader_engine::current_limits(),
             )?;
-            if preferences.format == CaptureFormat::Avif {
-                reader_engine::inspect_image(&bytes, reader_engine::current_limits()).map_err(
-                    |error| {
-                        format!(
-                            "{}: {error}",
-                            text::tr("AVIF screenshot exceeds decode admission")
-                        )
-                    },
-                )?;
-            }
-            if matches!(
-                preferences.format,
-                CaptureFormat::JxlLossless | CaptureFormat::JxlLossy
-            ) {
-                // Clipboard decoding and later Reader imports use the same bounds.
-                // Header admission plus an exact dimension check replaces a full
-                // decode of the bytes this process just encoded (~17% of export).
-                let inspected =
-                    reader_engine::inspect_image(&bytes, reader_engine::current_limits()).map_err(
-                        |error| {
-                            format!(
-                                "{}: {error}",
-                                text::tr("JPEG XL screencap exceeds decode admission")
-                            )
-                        },
-                    )?;
-                if (inspected.width, inspected.height) != (width, height) {
-                    return Err(format!(
-                        "{}: {}x{}",
-                        text::tr("JPEG XL screencap exceeds decode admission"),
-                        inspected.width,
-                        inspected.height
-                    ));
-                }
-            }
-            let (mime, extension) = match preferences.format {
-                CaptureFormat::Png => ("image/png", "png"),
-                CaptureFormat::Jpeg => ("image/jpeg", "jpg"),
-                CaptureFormat::WebpLossless | CaptureFormat::WebpLossy => ("image/webp", "webp"),
-                CaptureFormat::Avif => ("image/avif", "avif"),
-                CaptureFormat::JxlLossless | CaptureFormat::JxlLossy => ("image/jxl", "jxl"),
-            };
             Ok(Self {
                 bytes,
                 mime: mime.into(),
                 name: format!("screencap.{extension}"),
+                notice: None,
                 #[cfg(not(target_os = "android"))]
                 clipboard_rgba: None,
             })
         })
     }
+}
+
+/// A safe file stem for an exported page: no separators or control characters.
+fn file_stem(name: &str) -> String {
+    std::path::Path::new(name)
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("page")
+        .chars()
+        .take(120)
+        .map(|character| {
+            if character.is_control() || r#"/\:*?"<>|"#.contains(character) {
+                '_'
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
+/// Encode RGBA with the screenshot format and quality, then check that the
+/// result is something this app can open again.
+fn encode_with_preferences(
+    width: u32,
+    height: u32,
+    pixels: &[u8],
+    preferences: &CapturePreferences,
+    limits: reader_engine::DecodeLimits,
+) -> Result<(Vec<u8>, &'static str, &'static str), String> {
+    let quality = match preferences.format {
+        CaptureFormat::Jpeg => preferences.jpeg_quality,
+        CaptureFormat::Avif => preferences.avif_quality,
+        CaptureFormat::JxlLossless | CaptureFormat::JxlLossy => preferences.jxl_quality,
+        _ => preferences.webp_quality,
+    };
+    let bytes = encode_rgba(width, height, pixels, preferences.format, quality, limits)?;
+    if preferences.format == CaptureFormat::Avif {
+        reader_engine::inspect_image(&bytes, limits).map_err(|error| {
+            format!(
+                "{}: {error}",
+                text::tr("AVIF screenshot exceeds decode admission")
+            )
+        })?;
+    }
+    if matches!(
+        preferences.format,
+        CaptureFormat::JxlLossless | CaptureFormat::JxlLossy
+    ) {
+        // Clipboard decoding and later Reader imports use the same bounds.
+        // Header admission plus an exact dimension check replaces a full
+        // decode of the bytes this process just encoded (~17% of export).
+        let inspected = reader_engine::inspect_image(&bytes, limits).map_err(|error| {
+            format!(
+                "{}: {error}",
+                text::tr("JPEG XL screencap exceeds decode admission")
+            )
+        })?;
+        if (inspected.width, inspected.height) != (width, height) {
+            return Err(format!(
+                "{}: {}x{}",
+                text::tr("JPEG XL screencap exceeds decode admission"),
+                inspected.width,
+                inspected.height
+            ));
+        }
+    }
+    let (mime, extension) = match preferences.format {
+        CaptureFormat::Png => ("image/png", "png"),
+        CaptureFormat::Jpeg => ("image/jpeg", "jpg"),
+        CaptureFormat::WebpLossless | CaptureFormat::WebpLossy => ("image/webp", "webp"),
+        CaptureFormat::Avif => ("image/avif", "avif"),
+        CaptureFormat::JxlLossless | CaptureFormat::JxlLossy => ("image/jxl", "jxl"),
+    };
+    Ok((bytes, mime, extension))
 }
 
 fn validate_screencap(width: u32, height: u32, bytes: usize) -> Result<(), String> {
