@@ -5,6 +5,42 @@ use super::*;
 /// (controller, page) for every window the image worker rendered.
 pub(super) static DECODE_LOG: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
 
+/// Bands the image worker decoded, per page: for each window render, how many
+/// the render waited for (`on_demand`); for each idle step, how many it read
+/// ahead. `resident` is the band cache's size after the event.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct BandEvent {
+    pub owner: usize,
+    pub page: usize,
+    pub on_demand: u64,
+    pub ahead: u64,
+    pub resident: u64,
+}
+/// Ids of the pages whose bytes were read (fetched), in order.
+pub(super) static PAGE_READS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+pub(super) static BAND_LOG: Mutex<Vec<BandEvent>> = Mutex::new(Vec::new());
+/// Counts every time the worker found nothing left to do while idle.
+pub(super) static WORKER_IDLE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub(super) fn log_bands(
+    app: &Arc<Controller>,
+    page: usize,
+    before: reader_engine::BandStats,
+    decoder: &reader_engine::DisplayDecoder,
+) {
+    let now = decoder.band_stats();
+    BAND_LOG
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(BandEvent {
+            owner: Arc::as_ptr(app) as usize,
+            page,
+            on_demand: now.on_demand - before.on_demand,
+            ahead: now.ahead - before.ahead,
+            resident: decoder.resident_bands().1,
+        });
+}
+
 pub(super) fn fixture_app(
     ui: &AppWindow,
     directory: &std::path::Path,
@@ -1221,4 +1257,350 @@ fn live_scripted_scroll(test: &str, page_height: u32, each_once: bool) {
     app.image_worker_live.store(false, Ordering::Release);
     app.invalidate();
     worker.join().unwrap();
+}
+
+/// Re-run `test` in a child process (one Slint platform per process) and
+/// report whether this call is that child.
+pub(super) fn in_child(test: &str, marker: &str) -> bool {
+    if std::env::var_os(marker).is_some() {
+        return true;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            &if test.contains("::") {
+                test.to_string()
+            } else {
+                format!("app::reader_handoff_tests::{test}")
+            },
+            "--nocapture",
+        ])
+        .env(marker, "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // A name that matches nothing would "pass" without running anything.
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+        "child ran no test named {test}"
+    );
+    // Show the child's report (the numbers) under `--nocapture`.
+    eprint!("{}", String::from_utf8_lossy(&output.stderr));
+    false
+}
+
+pub(super) fn gradient_png(width: u32, height: u32, tag: u8) -> Vec<u8> {
+    let image = image::RgbaImage::from_fn(width, height, |x, y| {
+        image::Rgba([(x % 251) as u8, (y % 251) as u8, 40 + tag, 255])
+    });
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+    bytes.into_inner()
+}
+
+/// A page stored the way the chapter cache stores a tall one: independently
+/// encoded 2,048-row WebP strips.
+pub(super) fn split_page(
+    dir: &std::path::Path,
+    index: usize,
+    width: u32,
+    height: u32,
+) -> PageInput {
+    let compression = crate::image_storage::ImageCompression {
+        enabled: true,
+        format: crate::image_storage::ImageStorageFormat::Webp,
+        quality: 85,
+        lossless_inputs: true,
+        ..Default::default()
+    };
+    let form = crate::page_store::split_form(
+        &gradient_png(width, height, index as u8),
+        compression,
+        Some(crate::page_store::SplitPlan {
+            threshold_rows: 4096,
+            strip_rows: 2048,
+        }),
+        reader_engine::current_limits(),
+        64 << 20,
+        &|| true,
+    )
+    .unwrap()
+    .expect("a tall page is split");
+    let path = dir.join(format!("{index}.strips"));
+    std::fs::write(&path, form).unwrap();
+    PageInput::Local {
+        path,
+        id: format!("page-{index}"),
+    }
+}
+
+pub(super) fn whole_page(
+    dir: &std::path::Path,
+    index: usize,
+    width: u32,
+    height: u32,
+) -> PageInput {
+    let path = dir.join(format!("{index}.png"));
+    std::fs::write(&path, gradient_png(width, height, index as u8)).unwrap();
+    PageInput::Local {
+        path,
+        id: format!("page-{index}"),
+    }
+}
+
+pub(super) fn band_events(app: &Arc<Controller>) -> Vec<BandEvent> {
+    let me = Arc::as_ptr(app) as usize;
+    BAND_LOG
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|event| event.owner == me)
+        .copied()
+        .collect()
+}
+
+/// The viewer's dwell between gestures: everything the worker owes is done,
+/// including whatever it does while idle.
+pub(super) fn settle_and_wait_idle(app: &Arc<Controller>) {
+    let settled = |r: &Reader| {
+        r.requested.is_empty()
+            && r.desired.iter().all(|i| {
+                r.retained.contains(i) || r.budget_blocked.contains(i) || r.defers_prefetch(*i)
+            })
+            && (r.anchor.page_index..=r.visible_end()).all(|i| r.has_visible_pixels(i))
+    };
+    pump_reader_until(app, settled);
+    let idle = WORKER_IDLE.load(Ordering::Acquire);
+    pump_reader_until(app, move |_| WORKER_IDLE.load(Ordering::Acquire) > idle);
+}
+
+pub(super) struct LiveReader {
+    pub ui: AppWindow,
+    pub app: Arc<Controller>,
+    worker: Option<std::thread::JoinHandle<()>>,
+    _dir: tempfile::TempDir,
+}
+impl LiveReader {
+    pub(super) fn start(
+        pages: impl FnOnce(&std::path::Path) -> Vec<PageInput>,
+        anchor: (usize, f64),
+    ) -> Self {
+        Self::start_in(ReadingMode::Webtoon, pages, anchor)
+    }
+    pub(super) fn start_in(
+        mode: ReadingMode,
+        pages: impl FnOnce(&std::path::Path) -> Vec<PageInput>,
+        anchor: (usize, f64),
+    ) -> Self {
+        Self::start_configured(mode, pages, anchor, |_| {})
+    }
+    pub(super) fn start_configured(
+        mode: ReadingMode,
+        pages: impl FnOnce(&std::path::Path) -> Vec<PageInput>,
+        anchor: (usize, f64),
+        configure: impl FnOnce(&mut Reader),
+    ) -> Self {
+        static PLATFORM: std::sync::Once = std::sync::Once::new();
+        PLATFORM.call_once(i_slint_backend_testing::init_integration_test_with_system_time);
+        let ui = AppWindow::new().unwrap();
+        ui.set_section(6);
+        ui.set_reading_mode(mode_index(mode));
+        ui.set_reader_side_padding(0);
+        ui.window().set_size(slint::PhysicalSize::new(512, 800));
+        let dir = tempfile::tempdir().unwrap();
+        let mut reader = super::tests::tall_reader();
+        reader.mode = mode;
+        reader.automatic_mode = mode;
+        reader.pages = pages(dir.path());
+        reader.ratios = vec![1.5; reader.pages.len()];
+        for (index, page) in reader.pages.iter().enumerate() {
+            let PageInput::Local { path, .. } = page else {
+                unreachable!()
+            };
+            let (width, height) =
+                crate::page_store::inspect_stored(&std::fs::read(path).unwrap()).unwrap();
+            reader.ratios[index] = height as f32 / width as f32;
+        }
+        reader.viewport_width = 512.;
+        reader.viewport_height = 800.;
+        reader.target_width = 512;
+        reader.anchor =
+            ResumeAnchor::new(format!("page-{}", anchor.0), anchor.0, anchor.1).unwrap();
+        configure(&mut reader);
+        let (app, receiver) = fixture_app(&ui, dir.path(), reader, true);
+        app.mount_pages(&ui);
+        app.restore_position(&ui);
+        let weak = Arc::downgrade(&app);
+        let ui_weak = ui.as_weak();
+        let worker = std::thread::spawn(move || Controller::image_worker(weak, receiver, ui_weak));
+        app.request_images(&ui, anchor.0);
+        settle_and_wait_idle(&app);
+        Self {
+            ui,
+            app,
+            worker: Some(worker),
+            _dir: dir,
+        }
+    }
+    /// One gesture to layout offset `at`, then the dwell. Returns the band
+    /// events the gesture and its dwell produced.
+    pub(super) fn scroll_to(&self, at: f32) -> Vec<BandEvent> {
+        let mark = band_events(&self.app).len();
+        self.ui.set_scroll_y(-at);
+        self.app.position(&self.ui, at, 512., 800.);
+        settle_and_wait_idle(&self.app);
+        band_events(&self.app).split_off(mark)
+    }
+    pub(super) fn anchor(&self) -> usize {
+        self.app.view().reader.as_ref().unwrap().anchor.page_index
+    }
+    pub(super) fn page_top(&self, index: usize) -> f32 {
+        self.app
+            .view()
+            .reader
+            .as_ref()
+            .unwrap()
+            .page_position(index)
+            * 512.
+    }
+}
+impl Drop for LiveReader {
+    fn drop(&mut self) {
+        self.app.image_worker_live.store(false, Ordering::Release);
+        self.app.invalidate();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+/// Scrolling down through a split page must never make a window shift wait for
+/// a strip: the bands beyond the window edge are decoded while the viewer is
+/// idle, so each shift finds its entering strip already resident.
+#[test]
+fn scrolling_down_a_split_page_decodes_no_band_on_entry() {
+    if !in_child(
+        "scrolling_down_a_split_page_decodes_no_band_on_entry",
+        "READER_SPLIT_SCROLL_DOWN_CHILD",
+    ) {
+        return;
+    }
+    let scroll = LiveReader::start(|dir| vec![split_page(dir, 0, 512, 24576)], (0, 0.));
+    let first = band_events(&scroll.app);
+    let mut waited = Vec::new();
+    let mut ahead = 0;
+    let mut at = 0.;
+    while at + 1400. < scroll.page_top(1).max(24576.) {
+        at += 700.;
+        let events = scroll.scroll_to(at);
+        waited.push(events.iter().map(|e| e.on_demand).sum::<u64>());
+        ahead += events.iter().map(|e| e.ahead).sum::<u64>();
+        assert!(
+            events
+                .iter()
+                .all(|e| e.resident <= READER_MODEL_BYTES as u64),
+            "band cache over the model budget: {events:?}"
+        );
+    }
+    eprintln!(
+        "split_scroll_down first_window={:?} bands_waited_on_per_gesture={waited:?} read_ahead_bands={ahead}",
+        first.iter().map(|e| e.on_demand).sum::<u64>()
+    );
+    assert_eq!(
+        waited.iter().sum::<u64>(),
+        0,
+        "every shift decoded its entering strip synchronously: {waited:?}"
+    );
+    assert!(ahead > 0);
+}
+
+/// Reversing inside a split page: read-ahead turns round with the scroll
+/// direction, so after the first reverse gestures the strips above the window
+/// are already resident when it shifts up.
+#[test]
+fn scrolling_up_a_split_page_decodes_no_band_on_entry() {
+    if !in_child(
+        "scrolling_up_a_split_page_decodes_no_band_on_entry",
+        "READER_SPLIT_SCROLL_UP_CHILD",
+    ) {
+        return;
+    }
+    let scroll = LiveReader::start(|dir| vec![split_page(dir, 0, 512, 24576)], (0, 0.9));
+    let mut waited = Vec::new();
+    let mut at = scroll.page_top(0) + 0.9 * 24576.;
+    while at > 3000. {
+        at -= 700.;
+        let events = scroll.scroll_to(at);
+        waited.push(events.iter().map(|e| e.on_demand).sum::<u64>());
+    }
+    eprintln!("split_scroll_up bands_waited_on_per_gesture={waited:?}");
+    assert!(waited.len() > 20);
+    // The direction is known from the first gesture; the window may still
+    // shift once or twice from forward read-ahead.
+    assert_eq!(
+        waited[3..].iter().sum::<u64>(),
+        0,
+        "reverse shifts decoded strips synchronously: {waited:?}"
+    );
+}
+
+/// Across the boundary between two split pages the next page's first bands
+/// are decoded before the viewport enters it, and once inside, its shifts wait
+/// for nothing either.
+#[test]
+fn split_page_boundary_decodes_the_next_pages_first_bands_ahead() {
+    if !in_child(
+        "split_page_boundary_decodes_the_next_pages_first_bands_ahead",
+        "READER_SPLIT_BOUNDARY_CHILD",
+    ) {
+        return;
+    }
+    let scroll = LiveReader::start(
+        |dir| {
+            vec![
+                split_page(dir, 0, 512, 12288),
+                split_page(dir, 1, 512, 12288),
+                whole_page(dir, 2, 512, 6000),
+            ]
+        },
+        (0, 0.),
+    );
+    let mut log = Vec::new();
+    let mut at = 0.;
+    let end = scroll.page_top(2);
+    let mut first_event_for_next = None;
+    let mut entered_next = None;
+    while at < end - 700. {
+        at += 700.;
+        let events = scroll.scroll_to(at);
+        let anchor = scroll.anchor();
+        for event in &events {
+            log.push((anchor, event.page, event.on_demand, event.ahead));
+            if event.page == 1 && first_event_for_next.is_none() {
+                first_event_for_next = Some(anchor);
+            }
+            // Once the viewer is on a page, nothing it shows waits for a band.
+            assert!(
+                event.page != anchor || event.on_demand == 0,
+                "page {} waited for {} bands on entry: {log:?}",
+                event.page,
+                event.on_demand
+            );
+        }
+        if anchor == 1 && entered_next.is_none() {
+            entered_next = Some(at);
+        }
+    }
+    eprintln!("split_boundary (anchor, page, waited, ahead) = {log:?}");
+    assert_eq!(
+        first_event_for_next,
+        Some(0),
+        "the next page's first bands were decoded while the viewer was still on page 0: {log:?}"
+    );
+    assert!(entered_next.is_some());
 }

@@ -34,6 +34,8 @@ mod gallery_presentation;
 mod page_overview;
 #[path = "profile_actions.rs"]
 mod profile_actions;
+#[path = "reader_band_read_ahead.rs"]
+mod reader_band_read_ahead;
 #[path = "reader_capture_editor.rs"]
 mod reader_capture_editor;
 #[path = "reader_capture_sources.rs"]
@@ -118,8 +120,12 @@ impl PageInput {
         let page = match self {
             Self::Verified(resource) => resource.read(cancel)?,
             #[cfg(test)]
-            Self::Local { path, .. } => {
+            Self::Local { path, id } => {
                 use std::io::Read;
+                reader_handoff_tests::PAGE_READS
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(id.clone());
                 let file = std::fs::File::open(path).map_err(error)?;
                 if file.metadata().map_err(error)?.len() > cap as u64 {
                     return Err(text::tr("Image exceeds byte limit"));
@@ -983,8 +989,59 @@ struct EncodedPages {
     order: std::collections::VecDeque<usize>,
     bytes: usize,
     contexts: BTreeMap<usize, String>,
+    /// What idle fetch-ahead learned about a page it fetched before any task
+    /// asked: the deferred disk-cache write and whether the bytes came from
+    /// the disk cache. The page's own task takes it, as if it had fetched.
+    ahead: BTreeMap<usize, FetchedAhead>,
+    /// Pages whose idle fetch failed: only a task fetches them (and reports).
+    skipped: BTreeSet<usize>,
+}
+struct FetchedAhead {
+    pending: Option<crate::chapter_cache::PendingWrite>,
+    reused: bool,
 }
 impl EncodedPages {
+    fn holds(&self, generation: u64, index: usize) -> bool {
+        self.generation == generation && self.pages.contains_key(&index)
+    }
+    fn skipped(&self, generation: u64, index: usize) -> bool {
+        self.generation == generation && self.skipped.contains(&index)
+    }
+    fn skip(&mut self, generation: u64, index: usize) {
+        if self.generation == generation {
+            self.skipped.insert(index);
+        }
+    }
+    /// Bytes held for `indices`, for bounding what fetch-ahead keeps.
+    fn bytes_of(&self, indices: impl Iterator<Item = usize>) -> usize {
+        indices
+            .filter_map(|index| self.pages.get(&index))
+            .map(PageImage::encoded_len)
+            .sum()
+    }
+    fn insert_ahead(
+        &mut self,
+        generation: u64,
+        index: usize,
+        context: &str,
+        page: PageImage,
+        fetched: Option<FetchedAhead>,
+    ) {
+        let _ = self.read_scoped(generation, index, context, || Ok(page));
+        match fetched {
+            Some(fetched) if self.pages.contains_key(&index) => {
+                self.ahead.insert(index, fetched);
+            }
+            _ => {
+                self.ahead.remove(&index);
+            }
+        }
+    }
+    fn take_ahead(&mut self, generation: u64, index: usize) -> Option<FetchedAhead> {
+        (self.generation == generation)
+            .then(|| self.ahead.remove(&index))
+            .flatten()
+    }
     fn read(
         &mut self,
         generation: u64,
@@ -997,6 +1054,7 @@ impl EncodedPages {
         if self.generation != generation {
             return;
         }
+        self.ahead.remove(&index);
         if let Some(page) = self.pages.remove(&index) {
             self.bytes = self.bytes.saturating_sub(page.encoded_len());
         }
@@ -1016,8 +1074,11 @@ impl EncodedPages {
             self.bytes = 0;
             self.generation = generation;
             self.contexts.clear();
+            self.ahead.clear();
+            self.skipped.clear();
         }
         if self.contexts.get(&index).is_some_and(|old| old != context) {
+            self.ahead.remove(&index);
             if let Some(old) = self.pages.remove(&index) {
                 self.bytes -= old.encoded_len();
             }
@@ -3324,6 +3385,16 @@ impl Controller {
                 && !reader.budget_blocked.contains(&target)
             {
                 reader.requested.insert(target);
+                // Visible work wins over an idle fetch that would delay it.
+                if let Some((slot, cancel)) = self
+                    .active_image
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_ref()
+                    && *slot == reader_band_read_ahead::FETCH_AHEAD_SLOT
+                {
+                    cancel.cancel();
+                }
                 let _ = self.images.send(ImageTask {
                     generation,
                     index: target,
@@ -3345,6 +3416,9 @@ impl Controller {
         let mut decode_permit = None;
         let mut epoch = u64::MAX;
         let mut limits_epoch = reader_engine::limits_revision();
+        // The page the decoder last rendered a window of: the one whose bands
+        // are read ahead while idle.
+        let mut ahead_page: Option<usize> = None;
         loop {
             if limits_epoch != reader_engine::limits_revision() {
                 decoded.clear();
@@ -3352,10 +3426,38 @@ impl Controller {
                 encoded = EncodedPages::default();
                 limits_epoch = reader_engine::limits_revision();
             }
-            let task = match receiver.recv_timeout(std::time::Duration::from_millis(250)) {
+            // Queued work always goes first. With none, the viewer is idle and
+            // the worker spends the time decoding bands the next window shift
+            // will need, one band at a time so a new task is never kept waiting.
+            let queued = match receiver.try_recv() {
+                Ok(task) => Some(task),
+                Err(mpsc::TryRecvError::Disconnected) => break,
+                Err(mpsc::TryRecvError::Empty) => None,
+            };
+            let task = match queued.map_or_else(
+                || {
+                    if Self::read_ahead_step(
+                        &app,
+                        epoch,
+                        &mut ahead_page,
+                        &mut encoded,
+                        &mut decoded,
+                        &mut decode_permit,
+                    ) {
+                        return Err(None);
+                    }
+                    #[cfg(test)]
+                    reader_handoff_tests::WORKER_IDLE.fetch_add(1, Ordering::AcqRel);
+                    receiver
+                        .recv_timeout(std::time::Duration::from_millis(250))
+                        .map_err(Some)
+                },
+                Ok,
+            ) {
                 Ok(task) => task,
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                Err(mpsc::RecvTimeoutError::Timeout) => {
+                Err(None) => continue,
+                Err(Some(mpsc::RecvTimeoutError::Disconnected)) => break,
+                Err(Some(mpsc::RecvTimeoutError::Timeout)) => {
                     let Some(owner) = app.upgrade() else {
                         break;
                     };
@@ -3430,6 +3532,8 @@ impl Controller {
             }
             let mut progressive = None;
             let mut limits_revision = reader_engine::limits_revision();
+            #[cfg(test)]
+            let bands_before = decoded.band_stats();
             let result: Result<_> = reader_engine::with_current_limits(|| {
                 limits_revision = reader_engine::current_limits_revision();
                 let mut pending_write = None;
@@ -3502,6 +3606,15 @@ impl Controller {
                         } else {
                             load()?
                         };
+                        // Idle fetch-ahead may have fetched this page already; it
+                        // is then handled as if this task had fetched it.
+                        if !fetched
+                            && let Some(ahead) = encoded.take_ahead(task.generation, task.index)
+                        {
+                            fetched = true;
+                            reused = ahead.reused;
+                            pending_write = ahead.pending;
+                        }
                         if !fetched {
                             reused = true;
                         }
@@ -3678,10 +3791,13 @@ impl Controller {
                     presentation,
                 ))
             });
+            #[cfg(test)]
+            reader_handoff_tests::log_bands(&app, task.index, bands_before, &decoded);
             let preview_cleanup = progressive
                 .as_ref()
                 .map(reader_progressive::Stream::cleanup);
             drop(progressive);
+            ahead_page = result.is_ok().then_some(task.index);
             if result.is_err() {
                 encoded.discard(task.generation, task.index);
                 decoded.clear();

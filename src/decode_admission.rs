@@ -21,6 +21,17 @@ pub(crate) static SHARED: LazyLock<Arc<Admission>> =
     LazyLock::new(|| Arc::new(Admission::default()));
 pub(crate) struct Permit(Arc<Admission>);
 impl Admission {
+    /// Take the decoder only if it is free right now and nothing of higher
+    /// priority is waiting for it; never waits.
+    pub(crate) fn try_acquire(self: &Arc<Self>, priority: Priority) -> Option<Permit> {
+        let index = priority as usize;
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.active || state.waiting[..=index].iter().any(|count| *count != 0) {
+            return None;
+        }
+        state.active = true;
+        Some(Permit(self.clone()))
+    }
     pub(crate) fn acquire(
         self: &Arc<Self>,
         priority: Priority,
@@ -106,5 +117,27 @@ mod tests {
         for worker in workers {
             worker.join().unwrap();
         }
+    }
+
+    #[test]
+    fn try_acquire_never_waits_and_never_jumps_the_queue() {
+        let admission = Arc::new(Admission::default());
+        let active = admission.try_acquire(Priority::Prefetch).unwrap();
+        assert!(admission.try_acquire(Priority::Prefetch).is_none());
+        assert!(admission.try_acquire(Priority::Viewer).is_none());
+        drop(active);
+        // A waiting viewer (or an equal-priority waiter) comes first even
+        // while the decoder is free; a waiting lower priority does not.
+        for (waiter, priority, free) in [
+            (0, Priority::Prefetch, false),
+            (1, Priority::Prefetch, false),
+            (2, Priority::Prefetch, false),
+            (2, Priority::VisibleThumbnail, true),
+        ] {
+            admission.state.lock().unwrap().waiting[waiter] += 1;
+            assert_eq!(admission.try_acquire(priority).is_some(), free);
+            admission.state.lock().unwrap().waiting[waiter] -= 1;
+        }
+        assert!(admission.try_acquire(Priority::Prefetch).is_some());
     }
 }
