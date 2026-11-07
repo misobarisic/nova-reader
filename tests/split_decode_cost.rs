@@ -160,6 +160,95 @@ fn report_decode_cost_of_whole_and_split_cached_pages() {
                 mean(&jumps),
                 mean(&shifts)
             );
+            // Scrolling half a viewport at a time, with and without the idle
+            // read-ahead the image worker runs between steps.
+            for read_ahead in [false, true] {
+                let (times, waited, stalled) = continuous(page, limits, output_width, read_ahead);
+                println!(
+                    "    continuous scroll, read-ahead {}: mean window {:.1} ms, max {:.1} ms, windows that waited for a strip {stalled}/{}, strips decoded on entry {waited}",
+                    if read_ahead { "on " } else { "off" },
+                    mean(&times),
+                    times.iter().copied().fold(0., f64::max),
+                    times.len(),
+                );
+            }
         }
     }
+}
+
+/// Walk the page half a viewport (3% of it) at a time, rendering the strips
+/// that enter each window as the worker does. Returns each window's time, the
+/// bands decoded while a window waited, and how many windows waited.
+fn continuous(
+    page: &PageImage,
+    limits: DecodeLimits,
+    output_width: u32,
+    read_ahead: bool,
+) -> (Vec<f64>, u64, usize) {
+    let mut decoder = DisplayDecoder::default();
+    let mut previous: Option<reader_engine::DisplayWindowPlan> = None;
+    let (mut times, mut waited, mut stalled) = (Vec::new(), 0, 0);
+    let mut start = 0.;
+    while start + 0.06 <= 1. {
+        let before = decoder.band_stats().on_demand;
+        let started = Instant::now();
+        let (plan, ()) = decoder
+            .render_window_tiles(
+                page,
+                limits,
+                output_width,
+                start,
+                start + 0.06,
+                DISPLAY_WINDOW_BYTES,
+                reader_engine::DisplayOptions::default(),
+                |renderer| {
+                    let plan = renderer.plan();
+                    let mut top = plan.first_row;
+                    while top < plan.first_row + plan.rows {
+                        let bottom = ((top / DISPLAY_TILE_ROWS + 1) * DISPLAY_TILE_ROWS)
+                            .min(plan.first_row + plan.rows);
+                        if previous
+                            .is_none_or(|p| top < p.first_row || bottom > p.first_row + p.rows)
+                        {
+                            let mut out =
+                                vec![0u8; (bottom - top) as usize * plan.width as usize * 4];
+                            renderer.render_rect(top, bottom - top, 0, plan.width, &mut out)?;
+                            black_box(out);
+                        }
+                        top = bottom;
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap();
+        if previous.is_some() && previous != Some(plan) {
+            let new = decoder.band_stats().on_demand - before;
+            times.push(ms(started));
+            waited += new;
+            stalled += usize::from(new > 0);
+        }
+        previous = Some(plan);
+        if read_ahead {
+            // A viewport is 6% of the page; read two of them ahead.
+            let depth_rows = (f64::from(plan.full_height) * 0.12) as u32;
+            while decoder
+                .read_ahead(
+                    page,
+                    limits,
+                    reader_engine::ReadAhead {
+                        width: output_width,
+                        options: reader_engine::DisplayOptions::default(),
+                        window: plan,
+                        backwards: false,
+                        depth_rows,
+                        max_bytes: 32 << 20,
+                    },
+                )
+                .unwrap()
+                == reader_engine::ReadAheadStep::Decoded
+            {}
+        }
+        start += 0.03;
+    }
+    (times, waited, stalled)
 }

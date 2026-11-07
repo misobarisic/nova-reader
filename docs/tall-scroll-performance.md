@@ -209,6 +209,106 @@ What the numbers say, without rounding in the strips' favour:
   77 ms at 720 px) and would have turned the first column of the table into a
   loss.
 
+## Band read-ahead for split pages
+
+Strips are decoded when they enter the display window, which is what made
+scrolling a split page slower: the window shift (and the scroll admission behind
+it, `loaded_scroll_offset`/`decoded_scroll_offset`) waited for a codec.
+Between tasks the image worker now decodes the next bands itself.
+
+- **What.** Beyond the edge of the window the viewer holds, in the scroll
+  direction (`continuity_backwards`), nearest first: about two viewport heights
+  and never less than the two display strips a shift can bring in (the edge sits
+  one to two strips past the viewport and snaps to the strip grid). One band per
+  step, `DisplayDecoder::read_ahead`; the worker looks at its queue between
+  bands, so a queued task waits for at most one band.
+- **When.** Only with an empty queue and pixels for everything visible, for the
+  page being read or its neighbour in the scroll direction, never while
+  `defers_prefetch` holds the page back, a reverse handoff owns the budget
+  (`handoff_budgets`) or a chapter navigation is running. It uses the worker's
+  own decode permit or, with none, a prefetch-priority one taken without waiting
+  (`Admission::try_acquire`), so a visible thumbnail or the viewer wins.
+- **Cancellation.** A new generation (navigation, chapter or profile switch,
+  reader close), a limits change, a cancelled active-image token or a band that
+  fails to decode ends it; what it decoded is only a cache.
+- **Budget.** Resident bands are trimmed to 32 MiB (`BAND_RETAIN_BYTES`, the
+  reader's `READER_MODEL_BYTES`, asserted equal) after every render and every
+  read-ahead step, farthest from the window edge first. The rows one rectangle
+  samples may exceed it for the moment they are needed. Before this the band
+  cache could hold 64 MiB.
+- **Across pages.** The next page's first bands are decoded while the viewer is
+  still on the previous one: the previous page's last window is reached earlier
+  (its strips were read ahead), which releases `defers_prefetch`, and the next
+  page's own task then reads its first window and its next two bands. A page
+  stored whole keeps its single decode; the existing page read-ahead
+  (`read_ahead_pages`) covers it.
+
+`tall_scroll` (same host, opt-level 2, 720x25,000 as 13 lossless PNG strips)
+and `tests/split_decode_cost.rs` (WebP 85 strips) now also walk the page half a
+viewport at a time with and without the idle read-ahead between steps. "Stall on
+entry" is a window that had to decode a strip before it could render:
+
+| Output width | Strips | Case | Mean window | Max window | Windows that waited | One-strip shift |
+| --- | --- | --- | --- | --- | --- | --- |
+| 720 px | PNG | no read-ahead | 8.3 ms | 15.9 ms | 10 of 17 | 12.1 ms (4 strips decoded on entry) |
+| 720 px | PNG | read-ahead | 0.5 ms | 1.3 ms | 0 of 17 | 0.9 ms (0 on entry) |
+| 512 px | PNG | no read-ahead | 11.9 ms | 35.7 ms | 6 of 12 | 20.6 ms |
+| 512 px | PNG | read-ahead | 3.6 ms | 7.9 ms | 0 of 12 | 6.3 ms |
+| 720 px | WebP 85 | no read-ahead | 16.1 ms | 32.3 ms | 10 of 17 | 23.4 ms |
+| 720 px | WebP 85 | read-ahead | 0.6 ms | 1.5 ms | 0 of 17 | - |
+| 512 px | WebP 85 | no read-ahead | 23.9 ms | 77.1 ms | 6 of 12 | 35.6 ms |
+| 512 px | WebP 85 | read-ahead | 3.5 ms | 7.9 ms | 0 of 12 | - |
+
+A strip is still decoded once; read-ahead moves that cost to the idle time
+between gestures, so scrolling is back to the resampling cost of a retained
+original (0.4-0.6 ms per window at 720 px, against 0.5 ms for the whole page).
+The "mean later window" column of the tables above (windows 13% of the page
+apart) is unchanged on purpose: a jump that far is not continuous scrolling and
+nothing is ahead of it. Opening and jumping stay as fast as before. The tests
+(`reader_handoff_tests.rs`: scrolling down, up and across two split pages with
+the real worker, waiting for it to go idle after each gesture) assert that no
+band is decoded on entry; before read-ahead nine of the twelve strips of a
+512x24,576 page were decoded by the window shift that needed them.
+
+## Read-ahead for ordinary chapters
+
+Audit of what existed before, and what changed (tests in
+`src/reader_read_ahead_tests.rs`, driving the real worker):
+
+| Case | Before | Now |
+| --- | --- | --- |
+| Webtoon, whole pages, scrolling down and back up | pages within about two viewport heights (one to four pages, one behind) decoded ahead, following `continuity_backwards`; retained and evicted farthest first (`17cb2ac`) | unchanged, now pinned by a test in both directions |
+| Next chapter's first pages in a Webtoon list | decoded like any page once its metadata is in the list | unchanged; pinned by a test crossing the boundary and returning |
+| Paged modes (LTR, RTL, vertical) | one page ahead and one behind, so quick flips outran decoding | two pages ahead in the reading direction (one behind) while those pages fit the 32 MiB model budget by their estimated or measured size, one otherwise; completions still enforce the budget |
+| Next/previous chapter metadata | requested two viewport heights (Webtoon) or two pages (paged) from the edge, i.e. when its first pixels were already wanted | four viewport heights / three pages, in both directions, so the inventory is in hand when the pixels are wanted |
+| Encoded bytes ahead of decode | a page's bytes were fetched only when its decode was due | up to three pages past the decode window (12 MiB at most) are fetched while idle, in the scroll direction, not decoded; the page's own task finds them (and still queues the disk-cache write), a failed page is left to its task, and the fetch is cancelled the moment visible work is queued |
+| Reverse scrolling | followed the direction for whole pages | same, and for bands and fetch-ahead |
+
+## Capture and editor strips
+
+Chapter-resolution screencaps and the capture editor decoded each page they
+touched whole. A page stored in bands that is painted without border cropping,
+splitting or rotation now decodes only the bands holding the rows it samples
+(`reader-capture` asks `decode_rows` for `needed_rows`, aligned to whole bands);
+the compositor reads pixels through a row-offset view, so output is
+byte-identical. The editor's decoded cache keeps those bands, per page and
+response; a refresh inside them is a hit, one outside decodes the bands it
+needs. Recipes that need pixels or reorder rows decode whole, as before.
+
+Editor refresh on the 720x25,000 line-art page (opt-level 2, selection dragged
+200 px per refresh; `report_capture_refresh_cost_on_a_tall_page`, ignored):
+
+| Page | Native width, first / later | Half scale, first / later |
+| --- | --- | --- |
+| WebP 85 strips, before | 407 / 424 ms | 458 / 418 ms |
+| WebP 85 strips, after | 78 / 44 ms | 98 / 49 ms |
+| whole source PNG | 238 / 227 ms | 218 / 216 ms (unchanged) |
+
+At 25,000 rows the whole page (72 MB) does not fit beside the editor's retention,
+so its decoded cache is released at the first refresh and every refresh decodes
+(the strips now decode only 1-2 of 13). A 720x12,000 page fits: strips first
+refresh 195 -> 69 ms, later refreshes 4 ms either way.
+
 ## Reproduce the CPU profile
 
 ```sh
