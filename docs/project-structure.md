@@ -18,8 +18,8 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `src/android_downloads.rs`, `src/download_background.rs`, `android/java/dev/misob/nova/reader/ReaderBackgroundService.java` | Nova's copied download foreground service and JNI adapter; Reader queue leases, independent notification progress, wake lock, resumed-only permission prompt and error-safe native calls |
 | `src/addon_icons.rs`, `crates/ui/addon-icon.slint` | Verified bundled addon PNGs decoded on workers, retained UI-thread image handles shared by language variants, Sources/Extensions decoration and Kit fallback |
 | `src/artwork.rs` | Kit decoded-poster LRU and encoded variants, synchronous cross-page hits, source permits, UI handles, four bounded fetchers, serialized display decoding, independent bounded cache encoding, and legacy artwork migration |
-| `src/chapter_cache.rs` | Kit-backed disposable viewed pages and thumbnail derivatives sharing one disk namespace/quota, authorization scopes, chapter-group eviction/active leases, filtered thumbnail clear and bounded background encoding |
-| `src/page_store.rs`, `src/page_store/strips.rs` | The stored-page boundary: opaque `PageImage` (`from_encoded` for network/import bytes, `from_stored` for cache/download files), `storage_form`/`split_form` for what gets written, `inspect_stored`/`validate_stored` for entry checks. A tall page may be stored as one file of independently encoded row strips; the container and its magic are private to `strips.rs`, so counters, anchors, ratios, captures and thumbnails see only dimensions and decoded rows |
+| `src/chapter_cache.rs` | Kit-backed disposable viewed pages and thumbnail derivatives sharing one disk namespace/quota, authorization scopes, chapter-group eviction/active leases, filtered thumbnail clear and bounded background encoding; reads return `PageImage` and entries are checked with `page_store::inspect_stored`, so a tall page the writer stored as strips is still one entry |
+| `src/page_store.rs`, `src/page_store/strips.rs` | The stored-page boundary. Opaque `PageImage` (`from_encoded` for network/import bytes, which are never interpreted as a stored layout; `from_stored` for cache/download files) implements the engine's `PageSource` and exposes `dimensions`, `decode`, `decode_rows`, `export`, identity (`ptr_eq`/`downgrade`) and nothing else. `storage_form`/`split_form` produce what gets written, `inspect_stored`/`validate_stored` check entries and committed downloads, `check_fetched` rejects a source response carrying the container header. A tall page may be stored as one file of independently encoded row strips (magic `NRSTRIP\0`, FNV-checked header, strip table); that container, its magic and its strip types are private to `strips.rs`, so page counters, IDs, anchors, ratios, dimensions, inventory, thumbnails, captures and the capture editor see only dimensions and decoded rows. |
 | `src/page_inventory.rs`, `tests/page_inventory.rs` | Reader-free stable page/resource inventory; source-free downloaded/imported metadata and selection-time original integrity checks |
 | `src/page_overview.rs`, `src/gallery_presentation.rs` | Shared overview orchestration, reader anchor restoration, atomic focal gallery density changes, gallery-first entry/groups, explicit metadata and full-resolution selection; native controller regressions live beside these modules |
 | `src/page_thumbnails.rs`, `src/decode_admission.rs` | Lazy viewport-bounded thumbnail worker, mode-specific derivatives, adaptive gallery pixel leases/reflow recycling, direct progressive JXL prefixes and shared foreground-first heavy decode admission; service/admission regressions live beside the modules |
@@ -31,17 +31,17 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `src/reader_desktop.rs` | Nova-derived latest-state native keep-awake worker; Linux portal/screensaver, Windows execution state and macOS caffeinate lifetime |
 | `crates/ui/reader-osd.slint`, `crates/ui/reader-settings.slint` | Responsive bottom OSD with fixed 44px chapter buttons and a single expanding bottom progress slider, aligned compact actions labeled with the effective mode, one More action per layout, animated phone-sheet/desktop-panel controls and shared global settings form under More → Settings → Reader |
 | `src/progress_checkpoint.rs` | One background checkpoint writer, latest offsets coalesced per chapter, failure retry and ordered durable navigation/lifecycle barriers; the 600 ms UI timer only queues progress |
-| `src/reader_export.rs` | Original-image validation, screencap encoding, bounded platform delivery and persistent desktop clipboard ownership; reader/selection guards extend through actual Android clipboard dispatch |
+| `src/reader_export.rs` | Original-image validation, screencap encoding, bounded platform delivery and persistent desktop clipboard ownership; reader/selection guards extend through actual Android clipboard dispatch. Save/Copy image keeps a whole page's original bytes; a page stored as strips is reassembled and encoded with the screenshot format and quality (PNG, with a status notice, when that format cannot hold it; the desktop clipboard gets RGBA). The one pixel-to-storage encoder (`reencode_storage_pixels`) serves whole pages and strips |
 | `src/export_names.rs` | Portable UTF-8 series folders and bounded title/chapter/page/vertical-position filenames, including duplicate numbering |
 | `crates/ui/action-confirm-sheet.slint` | The one confirmation sheet (MenuSheet pattern) for clear history, backup restore (`restore-confirm-open`), download deletes (`download-confirm-open`), remove addon, remove from library, mark all read/unread, clear positions and chapter-row delete; `app.slint` captures the pending call in `ask-confirm` and dispatches it from `resolve-action-confirm` only on confirm |
 | `crates/ui/save-conflict-sheet.slint` | Retained modal Overwrite/Add number/Cancel sheet; `app.slint` owns name/open/choice properties and callbacks |
-| `crates/reader-capture`, `src/chapter_capture.rs` | Leaf bounded source compositor and source-coordinate selection/revision tickets; app re-export supports Chapter or frozen Device scale |
+| `crates/reader-capture`, `src/chapter_capture.rs` | Leaf bounded source compositor and source-coordinate selection/revision tickets, generic over any engine `PageSource` (a whole encoded response or a `PageImage`); app re-export supports Chapter or frozen Device scale |
 | `src/reader_capture_editor.rs`, `crates/ui/capture-editor.slint` | Source-anchored draggable crop borders/handles, dimmed initial context, continuous outward extension, bounded worker previews, Preview/Adjust/Save/Copy, stale-result guards and selected-position naming |
 | `src/reader_capture_sources.rs` | Generation/profile-scoped original-source reuse for captures, weak viewer provenance, bounded shared session bytes, a decoded-original LRU keyed by exact response (reserved with the encoded retention) and cancellation/permission revalidation; compressed display variants are excluded |
 | `src/download_cleanup.rs`, `crates/ui/download-cleanup-settings.slint`, `tests/download_cleanup_settings.rs` | Device-local opt-in read-completion retention, stable category exclusions, post-commit manual/checkpoint cleanup and native settings previews |
 | `src/capture_settings.rs`, `crates/ui/capture-settings.slint` | Capture format/quality, Device/Chapter resolution, folders, duplicates and optional immediate simple save/copy context actions |
 | `src/image_limits.rs`, `src/image_limits_ui.rs`, `crates/ui/image-limit-settings.slint` | Device-local encoded bytes, dimensions, pixels and decoded-memory admission, durable validation/reset and operation snapshots with stale-publication guards |
-| `src/image_storage.rs`, `crates/ui/image-storage-settings.slint` | Durable cache policy, unified codecs and independent input-aware lossless WebP/JXL cache/download compression; shared Kit cache controls with chapter-first maintenance and separate artwork settings |
+| `src/image_storage.rs`, `crates/ui/image-storage-settings.slint` | Durable cache policy, unified codecs and independent input-aware lossless WebP/JXL cache/download compression; per-store tall-page strip settings (`split_tall_pages`, `split_threshold_rows`, `strip_rows`) inside the `cache`/`downloads` objects, with store-specific defaults for files saved before they existed; shared Kit cache controls with chapter-first maintenance and separate artwork settings |
 | `crates/ui/source-settings.slint` | Addon settings page with slider-owned Flickable gestures, keyboard focus reveal and existing catalogue/custom-field callbacks |
 | `src/source_compression.rs`, `crates/ui/source-compression-settings.slint`, `tests/source_compression.rs` | Host-owned per-addon global/explicit cache and download compression, worker snapshots and addon sync projection; budgets remain device-wide |
 | `src/source_catalogs.rs` | Host-owned per-addon catalogue switches under `reader:disabled-catalogs:<JSON package ID>`; filters Browse while preserving direct/history/offline access |
@@ -91,7 +91,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `crates/reader-engine/src/display.rs`, `crates/reader-engine/src/source.rs`, `crates/reader-engine/src/avif.rs` | Width-preserving visible-row display admission/resampling (x-tap fixed-point bilinear, `WindowRenderer` tile-direct rendering of only entering strips) and one-original worker reuse; `PageSource` is the engine's strip-agnostic page boundary (dimensions, `decode_rows`, optional `row_granularity`) and `DisplayDecoder` keeps an LRU band cache for sources that report one, sampling rows across band seams with the same resampler; thin boundary to Kit `nova-image` AVIF/JPEG XL with independent Reader fixture/display/admission regressions |
 | `crates/reader-engine/examples/tall_scroll.rs`, `docs/tall-scroll-performance.md` | Deterministic 720×25,000 CPU scroll profile and actual Mihon stable/main rendering comparison |
 | Kit `crates/image`, `vendor/ferri-pdf-rav1d` | Shared bounded AVIF/JPEG XL codecs and published 1.1.2 portable decoder; Reader retains only thin adapters, fixture attribution and distribution licenses |
-| `crates/reader-downloads` | Durable queue, checksummed page bundles, owned-file crash recovery, panic-safe active admission, quota, source-free offline lookup, local folder/CBZ import, bundle removal and manifest-only status/progress hints |
+| `crates/reader-downloads` | Durable queue, checksummed page bundles, owned-file crash recovery, panic-safe active admission, quota, source-free offline lookup, local folder/CBZ import, bundle removal and manifest-only status/progress hints; an installable page validator (`set_page_validator`) lets the app accept the layouts it writes, defaulting to "must decode as an image" |
 | `crates/reader-catalogue` | Bounded Keiyoushi protobuf discovery, exact port mappings, signed native catalogue verification and availability states |
 | `addons/README.md` | Installation instructions and external nova-addons link; no real site sources or ZIPs are bundled |
 | `examples/addons/neutral-fixture` | Installable network-free fixture, bundled geometric PNGs and 320-page chapter |
@@ -218,6 +218,24 @@ the entire addon descriptor when its new `compression` field is present. Global
 inheritance omits that field and preserves the legacy wire shape; newer Reader
 versions also accept older descriptors without it. Workers resolve policies by
 stable package ID; existing cache files and downloads stay unchanged.
+
+Tall pages can be stored as strips (`page_store`). The cache and downloads each
+carry `split_tall_pages`, `split_threshold_rows` (default 4096) and `strip_rows`
+(default 2048, a multiple of 16) inside their `reader:image-storage` objects, so
+they sync field by field and take the usual device-local override; they are not
+part of the device-only `policy`. The cache splits by default; downloads do not.
+Splitting happens only when that store's compression is on (and, for the cache,
+the disk cache too), each strip uses the store's format and quality, and pages
+the codec rules keep whole (high-depth lossless PNG, a lossless JPEG transcode)
+or that cannot be split are stored as before. The toggle is shown disabled, with
+its saved choice kept, while a prerequisite is off. Splitting applies to pages
+written afterwards: existing cache entries are replaced only when evicted, and a
+completed download is never rewritten. A file saved before these fields existed
+reads with each store's own default (cache on, downloads off); per-addon
+compression overrides choose a codec but not where pages split. Older versions
+of Reader discard split cache entries as malformed and cannot open split
+downloads. The lossless JPEG crop that would make JPEG strips exact is deferred
+(`docs/follow-ups.md`).
 
 `reader:image-storage` stores independent cache/download compression switches,
 formats, quality and separate `lossless_inputs` policies for new writes, plus backward-compatible cache budgets:
@@ -520,6 +538,7 @@ generate all installable ZIPs; Reader does not depend on a sibling checkout.
 - Saved chapter groups, bulk selection and live queue: `src/downloads.rs`, `crates/ui/downloads.slint`, `tests/downloads.rs`; durable dispatch/reordering: `DownloadStore::run_next` / `move_before` and `Services::run_next_download`.
 - Background download service, notifications and interruption cleanup: `src/android_downloads.rs`, `src/download_background.rs`, `crates/reader-downloads/src/lib.rs`, `tools/test-android-background.py`.
 - Viewed chapter cache, grouped eviction and pins: `src/chapter_cache.rs`, `src/app.rs`, Kit `nova-cache::gc`/`blob`.
+- Tall pages stored as strips (what is written, how it is read back, why nothing else can tell): `src/page_store.rs`, `src/page_store/strips.rs`, engine `PageSource`/band cache in `crates/reader-engine/src/{source,display}.rs`, cache writes in `src/chapter_cache.rs::compress`, download writes in `src/services.rs::fetch_download_page`, settings in `src/image_storage.rs`.
 - Image admission, device persistence/reset and live policy regressions: `src/image_limits.rs`, `tests/image_limits_backend.rs`; source streaming bounds: `crates/reader-sources/tests/streaming.rs`.
 - Cache quotas, disk master switch and worker snapshots: `src/image_storage.rs`, `crates/ui/image-storage-settings.slint`, `tests/image_storage.rs`.
 - Shared Nova settings controls: Kit `slint/cache-settings-controls.slint`; Nova keeps SettingsRow/search/sync/keyboard wrappers.

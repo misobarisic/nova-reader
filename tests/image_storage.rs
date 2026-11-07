@@ -108,7 +108,7 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
                     settings.invoke_settings_changed(key.into(), value);
                 }
                 ui.show().unwrap();
-                ui.window().set_size(slint::LogicalSize::new(390., 3000.));
+                ui.window().set_size(slint::LogicalSize::new(390., 4600.));
                 ui.set_section(17);
                 settle();
                 toggle(&ui, "Losslessly transcode cache JPEG");
@@ -131,7 +131,7 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
                 // Check actual row adjacency, including the narrow stacked layout:
                 // the optional JPEG transcode row must never separate format/quality.
                 for width in [390., 1120.] {
-                    ui.window().set_size(slint::LogicalSize::new(width, 3000.));
+                    ui.window().set_size(slint::LogicalSize::new(width, 4600.));
                     settle();
                     for prefix in ["cache", "downloads"] {
                         let row = |kind: &str| {
@@ -162,7 +162,7 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
                         }
                     }
                 }
-                ui.window().set_size(slint::LogicalSize::new(390., 3000.));
+                ui.window().set_size(slint::LogicalSize::new(390., 4600.));
                 settle();
                 for (id, index, label) in [
                     ("cache_format", 3, "JPEG XL"),
@@ -252,7 +252,7 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
                 assert!(!image_storage::load().cache.enabled);
                 assert!(image_storage::load().downloads.enabled);
                 for width in [320., 390., 768., 1120.] {
-                    ui.window().set_size(slint::LogicalSize::new(width, 3000.));
+                    ui.window().set_size(slint::LogicalSize::new(width, 4600.));
                     settle();
                     for id in ["cache_format", "downloads_format"] {
                         let dropdown = ElementHandle::find_by_element_id(
@@ -267,6 +267,80 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
                         );
                     }
                 }
+            }
+            "split" => {
+                ui.show().unwrap();
+                ui.window().set_size(slint::LogicalSize::new(390., 4600.));
+                ui.set_section(17);
+                settle();
+                let enabled = |label: &str| {
+                    ElementHandle::find_by_accessible_label(&ui, label)
+                        .find(|element| element.accessible_checkable() == Some(true))
+                        .unwrap_or_else(|| panic!("missing toggle {label}"))
+                        .accessible_enabled()
+                        .unwrap()
+                };
+                const CACHE: &str = "Split tall cached pages into strips";
+                const DOWNLOADS: &str = "Split tall downloaded pages into strips";
+                // The earlier mode left cache compression off. The toggle is shown
+                // disabled, keeps its saved choice (on by default), and splits nothing.
+                assert!(!image_storage::load().cache.enabled);
+                assert!(settings.get_cache_split_tall_pages());
+                assert!(!enabled(CACHE));
+                assert_eq!(image_storage::load().cache_split(), None);
+                toggle(&ui, "Compress new cached images");
+                assert!(enabled(CACHE));
+                assert!(image_storage::load().cache_split().is_some());
+                // Disk caching is the other prerequisite.
+                settings.invoke_settings_changed("disk_enabled".into(), 0);
+                settle();
+                assert!(!enabled(CACHE));
+                assert_eq!(image_storage::load().cache_split(), None);
+                assert!(image_storage::load().cache.split_tall_pages);
+                settings.invoke_settings_changed("disk_enabled".into(), 1);
+                settle();
+                toggle(&ui, CACHE);
+                assert!(!image_storage::load().cache.split_tall_pages);
+                assert!(!settings.get_cache_split_tall_pages());
+                toggle(&ui, CACHE);
+                assert!(image_storage::load().cache_split().is_some());
+                // Downloads: off by default, usable with download compression, independent.
+                assert!(settings.get_downloads_enabled());
+                assert!(!image_storage::load().downloads.split_tall_pages);
+                assert!(enabled(DOWNLOADS));
+                toggle(&ui, DOWNLOADS);
+                assert!(image_storage::load().downloads_split().is_some());
+                assert!(image_storage::load().cache.split_tall_pages);
+                toggle(&ui, "Compress new chapter downloads");
+                assert!(!enabled(DOWNLOADS));
+                assert!(image_storage::load().downloads.split_tall_pages);
+                assert_eq!(image_storage::load().downloads_split(), None);
+                toggle(&ui, "Compress new chapter downloads");
+                // Threshold and strip choices are stored per store, in rows.
+                for (key, value) in [
+                    ("cache_split_threshold_index", 4),
+                    ("downloads_strip_index", 1),
+                    ("cache_strip_index", 99),
+                    ("cache_split_threshold_index", -1),
+                ] {
+                    settings.invoke_settings_changed(key.into(), value);
+                }
+                let saved = image_storage::load();
+                assert_eq!(saved.cache.split_threshold_rows, 8192);
+                assert_eq!(saved.cache.strip_rows, 2048);
+                assert_eq!(saved.downloads.strip_rows, 1024);
+                assert_eq!(saved.downloads.split_threshold_rows, 4096);
+                assert_eq!(settings.get_cache_split_threshold_index(), 4);
+                assert_eq!(settings.get_downloads_strip_index(), 1);
+                let raw: serde_json::Value = serde_json::from_str(
+                    &nova_storage::try_get_str("reader:image-storage")
+                        .unwrap()
+                        .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(raw["cache"]["split_threshold_rows"], 8192);
+                assert_eq!(raw["downloads"]["strip_rows"], 1024);
+                assert_eq!(raw["downloads"]["split_tall_pages"], true);
             }
             "legacy-jxl" => {
                 let raw = r#"{"cache":{"enabled":true,"format":3,"quality":63},"downloads":{"enabled":true,"format":3,"quality":72}}"#;
@@ -371,6 +445,7 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
         "write",
         "reload",
         "controls",
+        "split",
         "legacy-jxl",
         "legacy-reload",
         "corrupt",
@@ -537,7 +612,7 @@ fn cache_policy_migrates_persists_and_publishes_cached_snapshots_after_commits()
                     move || artwork_clear.set(artwork_clear.get() + 1)
                 });
                 ui.show().unwrap();
-                ui.window().set_size(slint::LogicalSize::new(390., 3000.));
+                ui.window().set_size(slint::LogicalSize::new(390., 4600.));
                 ui.set_section(17);
                 settle();
                 let button = |label: &str| {
@@ -613,7 +688,7 @@ fn cache_policy_migrates_persists_and_publishes_cached_snapshots_after_commits()
                 );
                 settings.set_chapter_cache_busy(false);
                 for width in [320., 390., 768., 1120.] {
-                    ui.window().set_size(slint::LogicalSize::new(width, 3000.));
+                    ui.window().set_size(slint::LogicalSize::new(width, 4600.));
                     settle();
                     let artwork = button("Artwork disk-cache limit");
                     let poster = button("Poster resolution");

@@ -17,6 +17,14 @@ export global ImageStorageSettings {
     in-out property <float> downloads-quality: 85;
     in-out property <bool> downloads-jxl-lossless-jpeg: false;
     in-out property <bool> downloads-lossless-inputs: false;
+    in-out property <bool> cache-split-tall-pages: true;
+    in-out property <int> cache-split-threshold-index: 2;
+    in-out property <int> cache-strip-index: 2;
+    in-out property <bool> downloads-split-tall-pages: false;
+    in-out property <int> downloads-split-threshold-index: 2;
+    in-out property <int> downloads-strip-index: 2;
+    in-out property <[string]> split-threshold-names;
+    in-out property <[string]> strip-names;
     in-out property <bool> disk-enabled: true;
     in-out property <[string]> disk-limit-names;
     in-out property <int> chapter-disk-limit-index: 3;
@@ -152,6 +160,38 @@ export component ImageStorageSettingsPage inherits VerticalLayout {
                 toggled => { ImageStorageSettings.settings-changed("cache_jxl_lossless_jpeg", self.checked ? 1 : 0); }
             }
         }
+        cache_split_row := SettingsRow { setting-key: "reader:image-storage/cache/split_tall_pages";
+            row-title: @tr("Split tall pages into strips");
+            row-desc: @tr("Store a tall cached page as separate strips so scrolling decodes only the rows on screen. Strips use the cache format and quality. Needs disk caching and cache compression. New pages only; existing files stay as they are.");
+            CacheCompressionToggle {
+                name: @tr("Split tall cached pages into strips");
+                busy: !root.interactive || root.maintenance || !ImageStorageSettings.disk-enabled || !ImageStorageSettings.cache-enabled;
+                checked <=> ImageStorageSettings.cache-split-tall-pages;
+                toggled => { ImageStorageSettings.settings-changed("cache_split_tall_pages", self.checked ? 1 : 0); }
+            }
+        }
+        cache_split_threshold_row := SettingsRow { setting-key: "reader:image-storage/cache/split_threshold_rows";
+            row-title: @tr("Split pages taller than");
+            row-desc: @tr("Rows of the original page. Shorter pages are stored whole.");
+            Dropdown {
+                width: Math.min(252px, Math.max(0px, root.width - 32px)); roomy: true;
+                model: ImageStorageSettings.split-threshold-names;
+                enabled: !(!root.interactive || root.maintenance || !ImageStorageSettings.disk-enabled) && ImageStorageSettings.cache-enabled && ImageStorageSettings.cache-split-tall-pages;
+                current-index <=> ImageStorageSettings.cache-split-threshold-index;
+                selected(i) => { ImageStorageSettings.settings-changed("cache_split_threshold_index", self.current-index); }
+            }
+        }
+        cache_strip_row := SettingsRow { setting-key: "reader:image-storage/cache/strip_rows";
+            row-title: @tr("Strip height");
+            row-desc: @tr("Rows per strip. Smaller strips decode less when scrolling; larger ones compress slightly better.");
+            Dropdown {
+                width: Math.min(252px, Math.max(0px, root.width - 32px)); roomy: true;
+                model: ImageStorageSettings.strip-names;
+                enabled: !(!root.interactive || root.maintenance || !ImageStorageSettings.disk-enabled) && ImageStorageSettings.cache-enabled && ImageStorageSettings.cache-split-tall-pages;
+                current-index <=> ImageStorageSettings.cache-strip-index;
+                selected(i) => { ImageStorageSettings.settings-changed("cache_strip_index", self.current-index); }
+            }
+        }
     }
     SectionHeader { label: @tr("Artwork and memory"); }
     SettingsCard {
@@ -254,6 +294,38 @@ export component ImageStorageSettingsPage inherits VerticalLayout {
                 busy: !root.interactive || !ImageStorageSettings.downloads-enabled;
                 checked <=> ImageStorageSettings.downloads-jxl-lossless-jpeg;
                 toggled => { ImageStorageSettings.settings-changed("downloads_jxl_lossless_jpeg", self.checked ? 1 : 0); }
+            }
+        }
+        downloads_split_row := SettingsRow { setting-key: "reader:image-storage/downloads/split_tall_pages";
+            row-title: @tr("Split tall pages into strips");
+            row-desc: @tr("Save a tall downloaded page as separate strips so scrolling decodes only the rows on screen. Strips use the download format and quality. Needs download compression. New downloads only; saved chapters are never rewritten, and older versions of Reader cannot open split pages.");
+            CacheCompressionToggle {
+                name: @tr("Split tall downloaded pages into strips");
+                busy: !root.interactive || !ImageStorageSettings.downloads-enabled;
+                checked <=> ImageStorageSettings.downloads-split-tall-pages;
+                toggled => { ImageStorageSettings.settings-changed("downloads_split_tall_pages", self.checked ? 1 : 0); }
+            }
+        }
+        downloads_split_threshold_row := SettingsRow { setting-key: "reader:image-storage/downloads/split_threshold_rows";
+            row-title: @tr("Split pages taller than");
+            row-desc: @tr("Rows of the original page. Shorter pages are saved whole.");
+            Dropdown {
+                width: Math.min(252px, Math.max(0px, root.width - 32px)); roomy: true;
+                model: ImageStorageSettings.split-threshold-names;
+                enabled: root.interactive && ImageStorageSettings.downloads-enabled && ImageStorageSettings.downloads-split-tall-pages;
+                current-index <=> ImageStorageSettings.downloads-split-threshold-index;
+                selected(i) => { ImageStorageSettings.settings-changed("downloads_split_threshold_index", self.current-index); }
+            }
+        }
+        downloads_strip_row := SettingsRow { setting-key: "reader:image-storage/downloads/strip_rows";
+            row-title: @tr("Strip height");
+            row-desc: @tr("Rows per strip. Smaller strips decode less when scrolling; larger ones compress slightly better.");
+            Dropdown {
+                width: Math.min(252px, Math.max(0px, root.width - 32px)); roomy: true;
+                model: ImageStorageSettings.strip-names;
+                enabled: root.interactive && ImageStorageSettings.downloads-enabled && ImageStorageSettings.downloads-split-tall-pages;
+                current-index <=> ImageStorageSettings.downloads-strip-index;
+                selected(i) => { ImageStorageSettings.settings-changed("downloads_strip_index", self.current-index); }
             }
         }
     }

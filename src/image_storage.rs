@@ -12,6 +12,27 @@ use std::{
 
 const KEY: &str = "reader:image-storage";
 
+/// Choices offered for where and how finely tall pages split. The saved values
+/// may be any valid number (a synced device can hold one the list lacks); the
+/// controls then show the nearest choice until the person picks another.
+const SPLIT_THRESHOLD_PRESETS: [u32; 7] = [2048, 3072, 4096, 6144, 8192, 12288, 16384];
+const STRIP_PRESETS: [u32; 4] = [512, 1024, 2048, 4096];
+fn preset_index(presets: &[u32], value: u32) -> i32 {
+    presets
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, preset)| preset.abs_diff(value))
+        .map_or(0, |(index, _)| index as i32)
+}
+fn preset_names(presets: &[u32]) -> ModelRc<slint::SharedString> {
+    ModelRc::new(VecModel::from(
+        presets
+            .iter()
+            .map(|rows| format!("{rows} {}", text::tr("rows")).into())
+            .collect::<Vec<slint::SharedString>>(),
+    ))
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "i32", into = "i32")]
 #[repr(i32)]
@@ -331,6 +352,20 @@ impl ImageStoragePreferences {
         settings.set_cache_lossless_inputs(self.cache.lossless_inputs);
         settings.set_cache_quality(f32::from(self.cache.quality));
         settings.set_cache_jxl_lossless_jpeg(self.cache.jxl_lossless_jpeg);
+        settings.set_cache_split_tall_pages(self.cache.split_tall_pages);
+        settings.set_cache_split_threshold_index(preset_index(
+            &SPLIT_THRESHOLD_PRESETS,
+            self.cache.split_threshold_rows,
+        ));
+        settings.set_cache_strip_index(preset_index(&STRIP_PRESETS, self.cache.strip_rows));
+        settings.set_downloads_split_tall_pages(self.downloads.split_tall_pages);
+        settings.set_downloads_split_threshold_index(preset_index(
+            &SPLIT_THRESHOLD_PRESETS,
+            self.downloads.split_threshold_rows,
+        ));
+        settings.set_downloads_strip_index(preset_index(&STRIP_PRESETS, self.downloads.strip_rows));
+        settings.set_split_threshold_names(preset_names(&SPLIT_THRESHOLD_PRESETS));
+        settings.set_strip_names(preset_names(&STRIP_PRESETS));
         settings.set_downloads_enabled(self.downloads.enabled);
         settings.set_downloads_format(match self.downloads.format {
             ImageStorageFormat::JxlLossless | ImageStorageFormat::JxlLossy => 3,
@@ -445,6 +480,24 @@ impl ImageStoragePreferences {
             }
             "split_tall_pages" if value == 0 || value == 1 => {
                 compression.split_tall_pages = value == 1
+            }
+            "split_threshold_index" => {
+                let Some(rows) = usize::try_from(value)
+                    .ok()
+                    .and_then(|i| SPLIT_THRESHOLD_PRESETS.get(i))
+                else {
+                    return false;
+                };
+                compression.split_threshold_rows = *rows;
+            }
+            "strip_index" => {
+                let Some(rows) = usize::try_from(value)
+                    .ok()
+                    .and_then(|i| STRIP_PRESETS.get(i))
+                else {
+                    return false;
+                };
+                compression.strip_rows = *rows;
             }
             "split_threshold_rows"
                 if SplitPlan::THRESHOLD_ROWS.contains(&(value as u32)) && value > 0 =>
@@ -744,5 +797,34 @@ mod tests {
         assert_eq!(overridden.split_threshold_rows, 8192);
         assert!(overridden.split_tall_pages);
         assert_eq!(overridden.strip_rows, 2048);
+    }
+
+    #[test]
+    fn split_choices_map_to_presets_and_show_the_nearest_for_other_saved_values() {
+        let mut settings = ImageStoragePreferences::default();
+        assert!(settings.change("cache_split_threshold_index", 4));
+        assert!(settings.change("downloads_strip_index", 3));
+        assert_eq!(settings.cache.split_threshold_rows, 8192);
+        assert_eq!(settings.downloads.strip_rows, 4096);
+        for (key, value) in [
+            ("cache_split_threshold_index", 7),
+            ("cache_split_threshold_index", -1),
+            ("cache_strip_index", 4),
+        ] {
+            assert!(!settings.change(key, value), "{key} {value}");
+        }
+        // Every choice the controls offer is itself a valid setting.
+        for rows in SPLIT_THRESHOLD_PRESETS {
+            assert!(SplitPlan::THRESHOLD_ROWS.contains(&rows));
+        }
+        for rows in STRIP_PRESETS {
+            assert!(SplitPlan::STRIP_ROWS.contains(&rows) && rows.is_multiple_of(16));
+        }
+        // A value synced from another device that the list lacks shows as the
+        // nearest choice, without being rewritten.
+        assert_eq!(preset_index(&SPLIT_THRESHOLD_PRESETS, 4096), 2);
+        assert_eq!(preset_index(&SPLIT_THRESHOLD_PRESETS, 5200), 3);
+        assert_eq!(preset_index(&STRIP_PRESETS, 1500), 1);
+        assert_eq!(preset_index(&STRIP_PRESETS, 8192), 3);
     }
 }
