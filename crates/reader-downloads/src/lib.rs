@@ -1,15 +1,19 @@
 //! Durable ordered chapter bundles. Networking remains in the source adapter;
 //! this crate receives bytes through a callback and never opens a URL itself.
+use nova_storage::{
+    fs::{atomic_write_via, available_bytes, private_dir},
+    zip::{self as bounded, Limits, PathRule, Policy},
+};
 use reader_domain::ChapterId;
 use reader_engine::decode_image;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File},
-    io::{Read, Write},
+    io::Read,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, RwLock},
 };
@@ -23,11 +27,13 @@ pub enum Error {
     #[error(transparent)]
     Image(#[from] reader_engine::Error),
     #[error(transparent)]
-    Zip(#[from] zip::result::ZipError),
+    Archive(#[from] bounded::Error),
     #[error("{0}")]
     Invalid(String),
     #[error("download quota exceeded")]
     Quota,
+    #[error("not enough free storage for this download")]
+    InsufficientSpace,
     #[error("chapter is not fully available offline")]
     Incomplete,
 }
@@ -108,10 +114,18 @@ struct Inner {
 /// The app installs one that understands every layout it writes; without one a
 /// page must decode as an ordinary image.
 pub type PageValidator = Arc<dyn Fn(&[u8]) -> std::result::Result<(), String> + Send + Sync>;
+/// Reports the bytes available on the filesystem holding a directory.
+pub type FreeSpaceProbe = Arc<dyn Fn(&Path) -> Option<u64> + Send + Sync>;
+/// Space left untouched on the device: a download that would eat into it stops
+/// with [`Error::InsufficientSpace`] instead of filling the filesystem.
+pub const RESERVED_FREE_BYTES: u64 = 64 * 1024 * 1024;
+/// Most records accepted in one imported archive's central directory.
+const MAX_ARCHIVE_ENTRIES: usize = 10000;
 #[derive(Clone)]
 pub struct DownloadStore {
     inner: Arc<Mutex<Inner>>,
     validator: Arc<RwLock<Option<PageValidator>>>,
+    free_space: Arc<RwLock<Option<FreeSpaceProbe>>>,
 }
 fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
@@ -191,19 +205,16 @@ fn clean_uncommitted_directory(directory: &Path) -> Result<()> {
     Ok(())
 }
 fn private_directory(path: &Path) -> Result<()> {
-    let mut builder = fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    builder.mode(0o700);
-    builder.create(path)?;
-    if fs::symlink_metadata(path)?.file_type().is_symlink() {
-        return Err(Error::Invalid(
-            "download directories cannot be symlinks".into(),
-        ));
-    }
-    #[cfg(unix)]
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-    Ok(())
+    private_dir(path).map_err(|error| {
+        // The shared helper reports a symlink as a generic "other" error.
+        if error.kind() == std::io::ErrorKind::Other
+            && fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
+        {
+            Error::Invalid("download directories cannot be symlinks".into())
+        } else {
+            Error::Io(error)
+        }
+    })
 }
 /// Existing manifests can contain signed URLs and source authorization headers.
 /// Repair old permissive stores before reading any manifests or creating files.
@@ -234,41 +245,14 @@ fn protect_existing_tree(root: &Path) -> Result<()> {
     }
     Ok(())
 }
+/// Page and manifest writes stage at a fixed `.pending` sibling, because
+/// `recover` recognizes exactly those generated names after a killed writer.
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
-    let temporary = path.with_extension("pending");
-    // A prior killed writer may leave a pending file. Never follow a planted
-    // symlink or keep failed-write bytes charged against every subsequent retry.
-    match fs::remove_file(&temporary) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
-    }
-    // Cleanup also runs if a writer unwinds. A killed process is reconciled by
-    // recover(), which recognizes the same generated pending filenames.
-    struct PendingFile(PathBuf);
-    impl Drop for PendingFile {
-        fn drop(&mut self) {
-            let _ = fs::remove_file(&self.0);
-        }
-    }
-    let _pending = PendingFile(temporary.clone());
-    (|| {
-        let mut options = File::options();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        options.mode(0o600);
-        let mut file = options.open(&temporary)?;
-        #[cfg(unix)]
-        file.set_permissions(fs::Permissions::from_mode(0o600))?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        drop(file);
-        // std uses replacement-capable file rename on Windows as well as Unix.
-        fs::rename(&temporary, path)?;
-        #[cfg(unix)]
-        File::open(path.parent().unwrap())?.sync_all()?;
-        Ok(())
-    })()
+    Ok(atomic_write_via(
+        path,
+        &path.with_extension("pending"),
+        bytes,
+    )?)
 }
 fn save(root: &Path, job: &ChapterDownload) -> Result<()> {
     let bytes = serde_json::to_vec(job)?;
@@ -486,6 +470,7 @@ impl DownloadStore {
                 next_order: 1,
             })),
             validator: Arc::default(),
+            free_space: Arc::default(),
         };
         store.recover()?;
         Ok(store)
@@ -493,6 +478,24 @@ impl DownloadStore {
     /// Replace how fetched pages are validated before they are committed.
     pub fn set_page_validator(&self, validator: PageValidator) {
         *self.validator.write().unwrap_or_else(|e| e.into_inner()) = Some(validator);
+    }
+    /// Replace how free space is measured (the filesystem by default).
+    pub fn set_free_space_probe(&self, probe: FreeSpaceProbe) {
+        *self.free_space.write().unwrap_or_else(|e| e.into_inner()) = Some(probe);
+    }
+    /// Whether committing `incoming` more bytes under `root` leaves the
+    /// reserve free. An unmeasurable filesystem is not blocked.
+    fn has_room(&self, root: &Path, incoming: u64) -> bool {
+        let probe = self
+            .free_space
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let free = match probe {
+            Some(probe) => probe(root),
+            None => available_bytes(root),
+        };
+        free.is_none_or(|free| free.saturating_sub(RESERVED_FREE_BYTES) >= incoming)
     }
     pub fn enqueue(&self, chapter: ChapterId, pages: Vec<PageResource>) -> Result<()> {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -911,6 +914,9 @@ impl DownloadStore {
             {
                 return Err(Error::Quota);
             }
+            if !self.has_room(&inner.root, bytes.len() as u64) {
+                return Err(Error::InsufficientSpace);
+            }
             atomic_write(&path, &bytes)?;
             job.pages[index].bytes = bytes.len() as u64;
             job.pages[index].sha256 = Some(hash(&bytes));
@@ -1044,31 +1050,42 @@ impl DownloadStore {
     }
     pub fn import_cbz(&self, chapter: ChapterId, path: impl AsRef<Path>) -> Result<()> {
         reader_engine::with_current_limits(|| {
-            let mut archive = zip::ZipArchive::new(File::open(path)?)?;
-            if archive.len() > 10000 {
-                return Err(Error::Invalid("too many archive entries".into()));
-            }
+            // Count the raw central directory before trusting the zip crate's
+            // name index, which folds duplicate records into one entry.
+            let mut archive = bounded::Archive::open(
+                File::open(path)?,
+                Limits {
+                    max_entries: MAX_ARCHIVE_ENTRIES,
+                    // Only pages are read; other entries may be any size.
+                    max_entry_bytes: u64::MAX,
+                    max_expanded_bytes: u64::MAX,
+                },
+                Policy {
+                    paths: PathRule::Enclosed,
+                    directories: true,
+                    regular_files_only: false,
+                },
+            )
+            .map_err(|error| match error {
+                bounded::Error::TooManyEntries => Error::Invalid("too many archive entries".into()),
+                bounded::Error::UnsafePath => Error::Invalid("unsafe archive path".into()),
+                bounded::Error::NotRegular => Error::Invalid("archive symlink".into()),
+                other => Error::Archive(other),
+            })?;
             let mut entries = Vec::new();
             let cap = reader_engine::current_limits().max_encoded_bytes;
             let mut total = 0u64;
-            for index in 0..archive.len() {
-                let entry = archive.by_index(index)?;
-                let name = entry
-                    .enclosed_name()
-                    .ok_or_else(|| Error::Invalid("unsafe archive path".into()))?
-                    .to_owned();
-                if entry.is_dir() {
+            for entry in archive.entries() {
+                if entry.is_dir {
                     continue;
                 }
-                if entry.unix_mode().is_some_and(|m| m & 0o170000 == 0o120000) {
-                    return Err(Error::Invalid("archive symlink".into()));
-                }
+                let name = PathBuf::from(&entry.name);
                 if supported(&name) {
-                    if entry.size() > cap as u64 {
+                    if entry.size > cap as u64 {
                         return Err(Error::Invalid("oversized archive page".into()));
                     }
-                    total = total.checked_add(entry.size()).ok_or(Error::Quota)?;
-                    entries.push((name, index));
+                    total = total.checked_add(entry.size).ok_or(Error::Quota)?;
+                    entries.push((name, entry.index));
                 }
             }
             if total > self.inner.lock().unwrap_or_else(|e| e.into_inner()).quota {
@@ -1092,17 +1109,12 @@ impl DownloadStore {
                     .unwrap()
                     .parse::<usize>()
                     .unwrap();
-                let mut bytes = Vec::new();
                 archive
-                    .by_index(entries[index].1)
-                    .map_err(|e| e.to_string())?
-                    .take(cap as u64 + 1)
-                    .read_to_end(&mut bytes)
-                    .map_err(|e| e.to_string())?;
-                if bytes.len() > cap {
-                    return Err("oversized archive page".into());
-                }
-                Ok(bytes)
+                    .read(entries[index].1, cap as u64)
+                    .map_err(|error| match error {
+                        bounded::Error::EntryTooLarge => "oversized archive page".to_owned(),
+                        other => other.to_string(),
+                    })
             })
         })
     }
@@ -1167,6 +1179,7 @@ fn bounded_read(path: &Path, cap: usize) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     use reader_domain::SeriesId;
+    use std::io::Write;
     fn chapter() -> ChapterId {
         ChapterId::new(SeriesId::new("missing-addon", "series"), "12.5")
     }
@@ -2068,6 +2081,95 @@ mod tests {
         let other = ChapterId::new(chapter.series.clone(), "unsafe");
         assert!(store.import_cbz(other, &archive_path).is_err());
         assert!(!directory.path().join("escape.png").exists());
+    }
+    /// A CBZ of `names` (all of equal length) in which every record after the
+    /// first is renamed, in its local and central headers, to the first name.
+    /// The zip crate's index folds those records into a single entry.
+    fn archive_with_folded_records(names: &[String]) -> Vec<u8> {
+        use zip::write::SimpleFileOptions;
+        let page = png();
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for name in names {
+            zip.start_file(name.as_str(), SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(&page).unwrap();
+        }
+        let mut bytes = zip.finish().unwrap().into_inner();
+        let first = names[0].as_bytes();
+        let (mut locals, mut centrals, mut at) = (0, 0, 0);
+        while at + 46 <= bytes.len() {
+            let (start, kept) = if &bytes[at..at + 4] == b"PK\x03\x04" {
+                locals += 1;
+                (at + 30, locals == 1)
+            } else if &bytes[at..at + 4] == b"PK\x01\x02" {
+                centrals += 1;
+                (at + 46, centrals == 1)
+            } else {
+                at += 1;
+                continue;
+            };
+            if !kept {
+                bytes[start..start + first.len()].copy_from_slice(first);
+            }
+            at = start;
+        }
+        bytes
+    }
+    #[test]
+    fn cbz_import_rejects_duplicate_central_directory_records() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = tempfile::tempdir().unwrap();
+        let names = vec!["1.png".to_owned(), "2.png".to_owned()];
+        let path = input.path().join("duplicate.cbz");
+        fs::write(&path, archive_with_folded_records(&names)).unwrap();
+        let store = DownloadStore::open(directory.path(), 1_000_000).unwrap();
+        let imported = ChapterId::new(chapter().series, "duplicate");
+        assert!(
+            store.import_cbz(imported.clone(), &path).is_err(),
+            "two records named 1.png must not import as one page"
+        );
+        assert!(store.job(&imported).is_err(), "nothing was queued");
+    }
+    #[test]
+    fn cbz_import_counts_directory_records_not_the_names_the_zip_crate_kept() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = tempfile::tempdir().unwrap();
+        // 10,050 records folded into one name: the crate reports a single entry.
+        let names: Vec<String> = (0..10_050).map(|i| format!("{i:05}.png")).collect();
+        let path = input.path().join("flood.cbz");
+        fs::write(&path, archive_with_folded_records(&names)).unwrap();
+        let store = DownloadStore::open(directory.path(), 1_000_000).unwrap();
+        let imported = ChapterId::new(chapter().series, "flood");
+        assert!(store.import_cbz(imported.clone(), &path).is_err());
+        assert!(store.job(&imported).is_err(), "nothing was queued");
+    }
+    #[test]
+    fn a_page_that_would_eat_into_the_free_space_reserve_stops_the_download() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DownloadStore::open(directory.path(), 1_000_000).unwrap();
+        let chapter = chapter();
+        store.enqueue(chapter.clone(), pages()).unwrap();
+        let page = png().len() as u64;
+        // Room for the reserve plus a little less than one page.
+        store.set_free_space_probe(Arc::new(move |_| Some(RESERVED_FREE_BYTES + page - 1)));
+        assert!(matches!(
+            store.run(&chapter, |_| Ok(png())),
+            Err(Error::InsufficientSpace)
+        ));
+        let job = store.job(&chapter).unwrap();
+        assert_eq!(job.completed_pages(), 0);
+        assert!(job.error.is_some());
+        assert!(store.offline(&chapter).is_err());
+        // Space returns: the same job resumes and completes.
+        store.set_free_space_probe(Arc::new(|_| Some(RESERVED_FREE_BYTES + (1 << 30))));
+        store.retry(&chapter).unwrap();
+        store.run(&chapter, |_| Ok(png())).unwrap();
+        assert!(store.offline(&chapter).is_ok());
+        // An unmeasurable filesystem never blocks a download.
+        let other = ChapterId::new(chapter.series.clone(), "unmeasured");
+        store.enqueue(other.clone(), pages()).unwrap();
+        store.set_free_space_probe(Arc::new(|_| None));
+        store.run(&other, |_| Ok(png())).unwrap();
     }
     #[cfg(unix)]
     #[test]
