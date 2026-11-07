@@ -9,7 +9,7 @@ pub use display::{
     DisplayDecoder, DisplayOptions, DisplayWindow, DisplayWindowPlan, PagePresentation,
     PageRotation, ReadAhead, ReadAheadStep, WindowRenderer, decode_display_image,
     decode_display_page, decode_display_window, filter_pixel, page_presentation,
-    plan_display_window,
+    page_presentation_for, plan_display_window,
 };
 pub use nova_image::is_jpeg_xl;
 pub use nova_image::{DecodeLimits, PageDimensions};

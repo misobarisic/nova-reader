@@ -82,13 +82,55 @@ fn budget_error() -> String {
 
 /// A decoded original, shareable with a caller-owned cache.
 pub type Decoded = Arc<image::RgbaImage>;
-type DecodeResult = Result<Decoded, reader_engine::Error>;
+/// Decoded rows `[first_row, first_row + image.height())` of one page; the
+/// whole page when `first_row` is 0 and the image is as tall as the page.
+#[derive(Clone)]
+pub struct DecodedRows {
+    pub first_row: u32,
+    pub image: Decoded,
+}
+impl DecodedRows {
+    pub fn whole(image: Decoded) -> Self {
+        Self {
+            first_row: 0,
+            image,
+        }
+    }
+    fn pixel(&self, x: u32, y: u32) -> [u8; 4] {
+        self.image.get_pixel(x, y - self.first_row).0
+    }
+}
+type DecodeResult = Result<DecodedRows, reader_engine::Error>;
+/// Source rows to decode for `rows` of a page `height` tall: whole bands of
+/// `granularity` rows, which is all a stored strip can be decoded in.
+pub fn band_aligned(
+    rows: std::ops::Range<u32>,
+    granularity: u32,
+    height: u32,
+) -> std::ops::Range<u32> {
+    let granularity = granularity.max(1);
+    let start = rows.start / granularity * granularity;
+    let end = rows.end.div_ceil(granularity).saturating_mul(granularity);
+    start..end.min(height)
+}
+/// `rows` of the page when it is stored in bands and only rows were asked for,
+/// otherwise the whole page.
 fn plain_decode<B: reader_engine::PageSource>(
     _: usize,
     page: &B,
+    rows: Option<std::ops::Range<u32>>,
     limits: reader_engine::DecodeLimits,
 ) -> DecodeResult {
-    page.decode(limits).map(Arc::new)
+    if let (Some(rows), Some(granularity)) = (rows, page.row_granularity()) {
+        let height = page.dimensions(limits)?.height;
+        let rows = band_aligned(rows, granularity, height);
+        return Ok(DecodedRows {
+            image: Arc::new(page.decode_rows(rows.clone(), limits)?),
+            first_row: rows.start,
+        });
+    }
+    page.decode(limits)
+        .map(|image| DecodedRows::whole(Arc::new(image)))
 }
 
 /// Rectangles use one common logical coordinate space. Paint order follows
@@ -171,7 +213,12 @@ fn capture_core<B: reader_engine::PageSource>(
     memory_limit: u64,
     target_scale: Option<f64>,
     mut fetch: impl FnMut(usize) -> Result<B, String>,
-    mut decode: impl FnMut(usize, &B, reader_engine::DecodeLimits) -> DecodeResult,
+    mut decode: impl FnMut(
+        usize,
+        &B,
+        Option<std::ops::Range<u32>>,
+        reader_engine::DecodeLimits,
+    ) -> DecodeResult,
 ) -> Result<Capture, String> {
     reader_engine::with_current_limits(|| {
         if !viewport.valid() || pages.len() > 10_000 {
@@ -207,13 +254,18 @@ fn capture_core<B: reader_engine::PageSource>(
         // Crop geometry depends on pixels. Admit this decode before output exists;
         // later, admit its retained original plus output as a separate phase.
         // Default keeps the legacy probe-first/reduced-decode admission unchanged.
-        let early_reference = if options.crop_borders || options.split_wide || options.rotate_wide {
-            let image = decode(reference_index, &reference_bytes, limits).map_err(|error| {
+        // A page stored in bands that is painted without cropping, splitting or
+        // rotating needs only the rows under the capture, never the whole page.
+        let reference_rows = rows_presentation(&reference_bytes, limits, options);
+        let early_reference = if reference_rows.is_none()
+            && (options.crop_borders || options.split_wide || options.rotate_wide)
+        {
+            let image = decode(reference_index, &reference_bytes, None, limits).map_err(|error| {
             format!(
                 "Original chapter image exceeds capture admission: {error}. Use Device resolution."
             )
         })?;
-            let presentation = reader_engine::page_presentation(&image, options)
+            let presentation = reader_engine::page_presentation(&image.image, options)
                 .map_err(|error| format!("Cannot present original chapter image: {error}"))?;
             Some((image, presentation))
         } else {
@@ -221,7 +273,8 @@ fn capture_core<B: reader_engine::PageSource>(
         };
         let reference_presentation = early_reference
             .as_ref()
-            .map(|(_, presentation)| *presentation);
+            .map(|(_, presentation)| *presentation)
+            .or(reference_rows);
         let dimensions = if let Some(presentation) = reference_presentation {
             presentation.effective
         } else {
@@ -287,12 +340,12 @@ fn capture_core<B: reader_engine::PageSource>(
             .first()
             .is_some_and(|page| page.index == reference_index);
         let reference_image = if let Some((image, _)) = early_reference {
-            if image.as_raw().len() as u64 > remaining {
+            if image.image.as_raw().len() as u64 > remaining {
                 return Err(budget_error());
             }
             reference_first.then_some(image)
-        } else if reference_first {
-            Some(decode(reference_index, &reference_bytes, limits).map_err(|error| {
+        } else if reference_first && reference_rows.is_none() {
+            Some(decode(reference_index, &reference_bytes, None, limits).map_err(|error| {
             format!(
                 "Original chapter image exceeds capture admission: {error}. Use Device resolution."
             )
@@ -316,17 +369,8 @@ fn capture_core<B: reader_engine::PageSource>(
         }
         let mut source_start = None;
         for page in visible {
-            let image = if page.index == reference_index {
-                let bytes = reference_bytes.take().ok_or_else(geometry_error)?;
-                if let Some(image) = reference_image.take() {
-                    image
-                } else {
-                    decode(page.index, &bytes, limits).map_err(|error| {
-                        format!(
-                            "Cannot decode original chapter image: {error}. Use Device resolution."
-                        )
-                    })?
-                }
+            let (bytes, limits) = if page.index == reference_index {
+                (reference_bytes.take().ok_or_else(geometry_error)?, limits)
             } else {
                 let bytes = fetch(page.index)?;
                 let live_reference = reference_bytes
@@ -341,18 +385,49 @@ fn capture_core<B: reader_engine::PageSource>(
                         .min(reader_engine::current_limits().max_decoded_bytes),
                     ..limits
                 };
-                decode(page.index, &bytes, limits).map_err(|error| {
-                    format!("Cannot decode original chapter image: {error}. Use Device resolution.")
-                })?
+                (bytes, limits)
             };
-            let presentation = if page.index == reference_index {
-                reference_presentation
-                    .map(Ok)
-                    .unwrap_or_else(|| reader_engine::page_presentation(&image, options))
+            let banded = if page.index == reference_index {
+                reference_rows
             } else {
-                reader_engine::page_presentation(&image, options)
-            }
-            .map_err(|error| format!("Cannot present original chapter image: {error}"))?;
+                rows_presentation(&bytes, limits, options)
+            };
+            let (image, presentation) = if let Some(presentation) = banded {
+                // Decode only the rows this capture samples (none when it
+                // paints nothing of the page).
+                let geometry = paint_geometry(&raster, page, presentation)?;
+                let image = needed_rows(&geometry, presentation)
+                    .map(|rows| {
+                        decode(page.index, &bytes, Some(rows), limits).map_err(|error| {
+                            format!(
+                                "Cannot decode original chapter image: {error}. Use Device resolution."
+                            )
+                        })
+                    })
+                    .transpose()?;
+                (image, presentation)
+            } else {
+                let image = match (page.index == reference_index)
+                    .then(|| reference_image.take())
+                    .flatten()
+                {
+                    Some(image) => image,
+                    None => decode(page.index, &bytes, None, limits).map_err(|error| {
+                        format!(
+                            "Cannot decode original chapter image: {error}. Use Device resolution."
+                        )
+                    })?,
+                };
+                let presentation = if page.index == reference_index {
+                    reference_presentation
+                        .map(Ok)
+                        .unwrap_or_else(|| reader_engine::page_presentation(&image.image, options))
+                } else {
+                    reader_engine::page_presentation(&image.image, options)
+                }
+                .map_err(|error| format!("Cannot present original chapter image: {error}"))?;
+                (Some(image), presentation)
+            };
             let geometry = paint_geometry(&raster, page, presentation)?;
             if source_start.is_none()
                 && geometry.start_x < geometry.end_x
@@ -372,6 +447,9 @@ fn capture_core<B: reader_engine::PageSource>(
                         as u32,
                 });
             }
+            let Some(image) = image else {
+                continue;
+            };
             paint(
                 &mut output,
                 &raster,
@@ -389,6 +467,40 @@ fn capture_core<B: reader_engine::PageSource>(
             source_start,
         })
     })
+}
+
+/// The page's presentation when it is stored in bands and painting it needs
+/// only a range of its rows: border cropping is off and no split, rotation or
+/// reversal reorders the rows, so display rows are source rows one for one.
+fn rows_presentation<B: reader_engine::PageSource>(
+    page: &B,
+    limits: reader_engine::DecodeLimits,
+    options: reader_engine::DisplayOptions,
+) -> Option<reader_engine::PagePresentation> {
+    let granularity = page.row_granularity().filter(|rows| *rows > 0)?;
+    let dimensions = page.dimensions(limits).ok()?;
+    if granularity >= dimensions.height {
+        return None;
+    }
+    reader_engine::page_presentation_for(dimensions, options)
+        .ok()
+        .flatten()
+        .filter(reader_engine::PagePresentation::is_row_contiguous)
+}
+/// Source rows `[first, end)` the painter reads for this geometry, including
+/// the neighbour row of the bottom sample's interpolation; `None` when the
+/// page paints nothing.
+fn needed_rows(
+    geometry: &PaintGeometry,
+    presentation: reader_engine::PagePresentation,
+) -> Option<std::ops::Range<u32>> {
+    if geometry.start_x >= geometry.end_x || geometry.start_y >= geometry.end_y {
+        return None;
+    }
+    let height = presentation.effective.height;
+    let first = geometry.source_y(geometry.start_y, height).floor() as u32;
+    let last = geometry.source_y(geometry.end_y - 1, height).floor() as u32;
+    Some(first..(last + 1).min(height - 1) + 1)
 }
 
 struct PaintGeometry {
@@ -482,7 +594,7 @@ fn paint(
     output: &mut [u8],
     raster: &Raster,
     geometry: &PaintGeometry,
-    image: &image::RgbaImage,
+    image: &DecodedRows,
     presentation: reader_engine::PagePresentation,
     options: reader_engine::DisplayOptions,
 ) {
@@ -542,7 +654,7 @@ fn paint(
 /// transparent source pixels. Integer source coordinates remain exact.
 fn blend(
     target: &mut [u8],
-    image: &image::RgbaImage,
+    image: &DecodedRows,
     presentation: reader_engine::PagePresentation,
     tap: &XTap,
     (y0, y1, fy): (u32, u32, f64),
@@ -552,10 +664,10 @@ fn blend(
     let (x0, x1, fx) = (tap.x0, tap.x1, tap.fx);
     let sample = |x, y| {
         if identity {
-            return image.get_pixel(x, y).0;
+            return image.pixel(x, y);
         }
         let (x, y) = presentation.source_coordinate(f64::from(x), f64::from(y));
-        image.get_pixel(x as u32, y as u32).0
+        image.pixel(x as u32, y as u32)
     };
     let mut first = sample(x0, y0);
     if fx == 0. && fy == 0. && first[3] == 255 {
@@ -1341,9 +1453,12 @@ pub fn capture_at_scale_with_memory<B: reader_engine::PageSource>(
 
 /// Same compositor, decoding originals through `decode` so a caller can serve
 /// repeated renders from a decoded-original cache. The decoder receives the
-/// page index, the fetched bytes and the admission limits for that decode, and
-/// must enforce the limits for anything it returns. Pages the caller retains
-/// must be covered by `memory_limit`.
+/// page index, the fetched bytes, the source rows the capture samples and the
+/// admission limits for that decode, and must enforce the limits for anything
+/// it returns. `None` asks for the whole page; `Some(rows)` is asked only of a
+/// page stored in bands, and may be answered with more rows (whole bands, or
+/// a cached superset) as long as they cover the range. Pages the caller
+/// retains must be covered by `memory_limit`.
 #[allow(clippy::too_many_arguments)]
 pub fn capture_at_scale_with_decoder<B: reader_engine::PageSource>(
     viewport: Rect,
@@ -1354,7 +1469,12 @@ pub fn capture_at_scale_with_decoder<B: reader_engine::PageSource>(
     scale: Option<f64>,
     memory_limit: u64,
     fetch: impl FnMut(usize) -> Result<B, String>,
-    decode: impl FnMut(usize, &B, reader_engine::DecodeLimits) -> Result<Decoded, reader_engine::Error>,
+    decode: impl FnMut(
+        usize,
+        &B,
+        Option<std::ops::Range<u32>>,
+        reader_engine::DecodeLimits,
+    ) -> Result<DecodedRows, reader_engine::Error>,
 ) -> Result<Capture, String> {
     capture_core(
         viewport,
@@ -1367,4 +1487,299 @@ pub fn capture_at_scale_with_decoder<B: reader_engine::PageSource>(
         fetch,
         decode,
     )
+}
+
+#[cfg(test)]
+mod band_tests {
+    use super::*;
+    use reader_engine::{DecodeLimits, PageDimensions, PageSource};
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    /// A page stored in independently decodable bands, counting what is decoded.
+    struct Banded {
+        page: image::RgbaImage,
+        rows: u32,
+        decoded: Mutex<Vec<u32>>,
+        whole: AtomicUsize,
+    }
+    #[derive(Clone)]
+    struct Shared(Arc<Banded>);
+    impl Shared {
+        fn new(page: image::RgbaImage, rows: u32) -> Self {
+            Self(Arc::new(Banded {
+                page,
+                rows,
+                decoded: Mutex::default(),
+                whole: AtomicUsize::new(0),
+            }))
+        }
+    }
+    impl PageSource for Shared {
+        fn dimensions(&self, _: DecodeLimits) -> reader_engine::Result<PageDimensions> {
+            Ok(PageDimensions {
+                width: self.0.page.width(),
+                height: self.0.page.height(),
+            })
+        }
+        fn encoded_len(&self) -> usize {
+            1000
+        }
+        fn row_granularity(&self) -> Option<u32> {
+            Some(self.0.rows)
+        }
+        fn decode_rows(
+            &self,
+            rows: std::ops::Range<u32>,
+            _: DecodeLimits,
+        ) -> reader_engine::Result<image::RgbaImage> {
+            assert_eq!(rows.start % self.0.rows, 0, "bands start on the grid");
+            let mut decoded = self.0.decoded.lock().unwrap();
+            for band in rows.start / self.0.rows..rows.end.div_ceil(self.0.rows) {
+                decoded.push(band);
+            }
+            Ok(image::imageops::crop_imm(
+                &self.0.page,
+                0,
+                rows.start,
+                self.0.page.width(),
+                rows.end - rows.start,
+            )
+            .to_image())
+        }
+        fn decode(&self, _: DecodeLimits) -> reader_engine::Result<image::RgbaImage> {
+            self.0.whole.fetch_add(1, Ordering::SeqCst);
+            Ok(self.0.page.clone())
+        }
+    }
+    /// The same pixels as one image: what a page stored whole decodes to.
+    struct Whole(image::RgbaImage);
+    impl PageSource for Whole {
+        fn dimensions(&self, _: DecodeLimits) -> reader_engine::Result<PageDimensions> {
+            Ok(PageDimensions {
+                width: self.0.width(),
+                height: self.0.height(),
+            })
+        }
+        fn encoded_len(&self) -> usize {
+            1000
+        }
+        fn decode_rows(
+            &self,
+            _: std::ops::Range<u32>,
+            _: DecodeLimits,
+        ) -> reader_engine::Result<image::RgbaImage> {
+            unreachable!("a whole page is decoded whole")
+        }
+        fn decode(&self, _: DecodeLimits) -> reader_engine::Result<image::RgbaImage> {
+            Ok(self.0.clone())
+        }
+    }
+    fn textured(width: u32, height: u32, tag: u32) -> image::RgbaImage {
+        image::RgbaImage::from_fn(width, height, |x, y| {
+            let n = x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503) ^ (y / 7) ^ tag;
+            image::Rgba([
+                n as u8,
+                (n >> 8) as u8,
+                (n >> 16) as u8,
+                255 - (y % 5) as u8,
+            ])
+        })
+    }
+    fn rect(x: f64, y: f64, width: f64, height: f64) -> Rect {
+        Rect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    /// Capture `viewport` over stacked pages of the given source images, as
+    /// bands and as whole images, and require identical results.
+    fn both(
+        images: &[image::RgbaImage],
+        layout: &[Rect],
+        viewport: Rect,
+        reference: usize,
+        scale: Option<f64>,
+        options: reader_engine::DisplayOptions,
+    ) -> (Capture, Vec<Vec<u32>>, usize) {
+        let pages = layout
+            .iter()
+            .enumerate()
+            .map(|(index, rect)| PageRect { index, rect: *rect })
+            .collect::<Vec<_>>();
+        let bands = images
+            .iter()
+            .map(|image| Shared::new(image.clone(), 512))
+            .collect::<Vec<_>>();
+        let split = capture_at_scale_with_memory(
+            viewport,
+            reference,
+            &pages,
+            [9, 9, 9, 255],
+            options,
+            scale,
+            MEMORY_LIMIT,
+            |index| Ok(bands[index].clone()),
+        )
+        .unwrap();
+        let whole = capture_at_scale_with_memory(
+            viewport,
+            reference,
+            &pages,
+            [9, 9, 9, 255],
+            options,
+            scale,
+            MEMORY_LIMIT,
+            |index| Ok(Whole(images[index].clone())),
+        )
+        .unwrap();
+        assert_eq!(
+            (split.width, split.height, split.source_start),
+            (whole.width, whole.height, whole.source_start)
+        );
+        assert!(
+            split.pixels == whole.pixels,
+            "banded and whole captures differ"
+        );
+        let decoded = bands
+            .iter()
+            .map(|band| {
+                let mut bands = band.0.decoded.lock().unwrap().clone();
+                bands.sort();
+                bands.dedup();
+                bands
+            })
+            .collect();
+        let wholes = bands.iter().map(|b| b.0.whole.load(Ordering::SeqCst)).sum();
+        (split, decoded, wholes)
+    }
+
+    #[test]
+    fn a_capture_decodes_only_the_bands_under_it_and_matches_the_whole_page() {
+        let page = textured(64, 6000, 1);
+        let layout = [rect(0., 0., 64., 6000.)];
+        let options = reader_engine::DisplayOptions::default();
+        // Rows 2600..3400 lie in bands 5 (2560..3072) and 6 (3072..3584).
+        let (capture, decoded, wholes) = both(
+            std::slice::from_ref(&page),
+            &layout,
+            rect(0., 2600., 64., 800.),
+            0,
+            None,
+            options,
+        );
+        assert_eq!((capture.width, capture.height), (64, 800));
+        assert_eq!(decoded, [vec![5, 6]]);
+        assert_eq!(wholes, 0);
+        // Inside one band: one decode. The page's top and bottom rows too.
+        for (y, bands) in [(100., vec![0]), (5900., vec![11]), (3100., vec![6])] {
+            let (_, decoded, wholes) = both(
+                std::slice::from_ref(&page),
+                &layout,
+                rect(0., y, 64., 90.),
+                0,
+                None,
+                options,
+            );
+            assert_eq!((decoded, wholes), (vec![bands], 0), "y={y}");
+        }
+        // A viewport that is also scaled, fractional and filtered, and shown
+        // wider than the page: the same bytes, still only the bands it samples.
+        let filtered = reader_engine::DisplayOptions {
+            grayscale: true,
+            ..options
+        };
+        let (_, decoded, _) = both(
+            std::slice::from_ref(&page),
+            &[rect(0., 0., 32., 3000.)],
+            rect(0., 1500.4, 32., 300.7),
+            0,
+            None,
+            filtered,
+        );
+        assert_eq!(decoded, [vec![5, 6, 7]], "rows 3000..3603 of the source");
+        let (_, decoded, _) = both(
+            std::slice::from_ref(&page),
+            &layout,
+            rect(0., 4000.3, 64., 200.2),
+            0,
+            Some(0.5),
+            options,
+        );
+        assert_eq!(decoded, [vec![7, 8]]);
+    }
+
+    #[test]
+    fn stacked_split_pages_decode_their_own_visible_bands_only() {
+        let first = textured(64, 3000, 2);
+        let second = textured(64, 3000, 3);
+        let third = textured(64, 3000, 4);
+        let images = [first, second, third];
+        let layout = [
+            rect(0., 0., 64., 3000.),
+            rect(0., 3016., 64., 3000.),
+            rect(0., 6032., 64., 3000.),
+        ];
+        // The bottom of page 0, the gap, the top of page 1; page 2 is off screen.
+        let (capture, decoded, wholes) = both(
+            &images,
+            &layout,
+            rect(0., 2800., 64., 400.),
+            1,
+            None,
+            reader_engine::DisplayOptions::default(),
+        );
+        assert_eq!(capture.source_start.map(|s| s.index), Some(0));
+        assert_eq!(decoded, [vec![5], vec![0], vec![]]);
+        assert_eq!(wholes, 0);
+    }
+
+    #[test]
+    fn pages_that_need_their_pixels_are_still_decoded_whole() {
+        // Border cropping measures pixels, so every band is read; the result
+        // matches the page stored whole.
+        let page = textured(64, 2048, 5);
+        let options = reader_engine::DisplayOptions {
+            crop_borders: true,
+            ..Default::default()
+        };
+        let (_, _, wholes) = both(
+            std::slice::from_ref(&page),
+            &[rect(0., 0., 64., 2048.)],
+            rect(0., 300., 64., 200.),
+            0,
+            None,
+            options,
+        );
+        assert_eq!(wholes, 1);
+        // A wide page split in two (or rotated) reorders its rows.
+        let wide = textured(300, 200, 6);
+        let split = reader_engine::DisplayOptions {
+            split_wide: true,
+            ..Default::default()
+        };
+        let banded = Shared::new(wide.clone(), 64);
+        let rects = [PageRect {
+            index: 0,
+            rect: rect(0., 0., 150., 400.),
+        }];
+        let result = capture_at_scale_with_memory(
+            rect(0., 0., 150., 400.),
+            0,
+            &rects,
+            [9, 9, 9, 255],
+            split,
+            None,
+            MEMORY_LIMIT,
+            |_| Ok(banded.clone()),
+        )
+        .unwrap();
+        assert_eq!(banded.0.whole.load(Ordering::SeqCst), 1);
+        assert!(result.pixels.len() >= 150 * 400 * 4);
+    }
 }

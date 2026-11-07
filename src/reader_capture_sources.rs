@@ -1,5 +1,6 @@
 //! Original source reuse for capture. Disk display variants are never admitted.
 use super::*;
+use reader_engine::PageSource as _;
 
 const RETAINED_BYTES: usize = 16 * 1024 * 1024;
 /// Decoded originals kept between editor refreshes. Reserved up front with the
@@ -117,12 +118,15 @@ struct Cache {
     decoded: BTreeMap<usize, DecodedOriginal>,
     clock: u64,
     disabled: bool,
-    /// Real (non-cached) decodes, for tests.
+    /// Real (non-cached) decodes, and the rows they produced, for tests.
     decodes: usize,
+    decoded_rows: u64,
 }
-/// A decoded page, valid only for the exact encoded response it came from.
+/// Decoded rows of a page (all of it, or whole bands of a page stored in
+/// strips), valid only for the exact encoded response they came from.
 struct DecodedOriginal {
     bytes: WeakPage,
+    first_row: u32,
     image: reader_capture::Decoded,
     used: u64,
 }
@@ -148,21 +152,31 @@ impl Session {
     pub fn decodes(&self) -> usize {
         self.0.lock().unwrap_or_else(|e| e.into_inner()).decodes
     }
+    #[cfg(test)]
+    pub fn decoded_rows(&self) -> u64 {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .decoded_rows
+    }
     pub fn release(&self) {
         let mut cache = self.0.lock().unwrap_or_else(|e| e.into_inner());
         cache.retained.clear();
         cache.decoded.clear();
         cache.disabled = true;
     }
-    /// Decode `bytes`, or return the page decoded earlier from this same
-    /// response. A hit is admitted against the caller's current limits exactly
-    /// like a fresh decode of its RGBA allocation would be.
+    /// Decode `bytes`, or return what was decoded earlier from this same
+    /// response. `rows` asks for part of a page stored in bands: whole bands
+    /// are decoded and kept, and a later capture of rows inside them hits. A hit
+    /// is admitted against the caller's current limits exactly like a fresh
+    /// decode of its RGBA allocation would be.
     pub fn decode(
         &self,
         index: usize,
         bytes: &PageImage,
+        rows: Option<std::ops::Range<u32>>,
         limits: reader_engine::DecodeLimits,
-    ) -> std::result::Result<reader_capture::Decoded, reader_engine::Error> {
+    ) -> std::result::Result<reader_capture::DecodedRows, reader_engine::Error> {
         {
             let mut cache = self.0.lock().unwrap_or_else(|e| e.into_inner());
             cache.clock += 1;
@@ -172,14 +186,37 @@ impl Session {
                     && hit.image.width() <= limits.max_width
                     && hit.image.height() <= limits.max_height
                     && hit.image.as_raw().len() as u64 <= limits.max_decoded_bytes
+                    && match &rows {
+                        Some(rows) => {
+                            hit.first_row <= rows.start
+                                && rows.end <= hit.first_row + hit.image.height()
+                        }
+                        None => {
+                            hit.first_row == 0
+                                && bytes
+                                    .dimensions(limits)
+                                    .is_ok_and(|d| d.height == hit.image.height())
+                        }
+                    }
             }) {
                 hit.used = clock;
-                return Ok(hit.image.clone());
+                return Ok(reader_capture::DecodedRows {
+                    first_row: hit.first_row,
+                    image: hit.image.clone(),
+                });
             }
         }
-        let image = Arc::new(bytes.decode(limits)?);
+        let (first_row, image) = match (rows, bytes.row_granularity()) {
+            (Some(rows), Some(granularity)) => {
+                let height = bytes.dimensions(limits)?.height;
+                let rows = reader_capture::band_aligned(rows, granularity, height);
+                (rows.start, Arc::new(bytes.decode_rows(rows, limits)?))
+            }
+            _ => (0, Arc::new(bytes.decode(limits)?)),
+        };
         let mut cache = self.0.lock().unwrap_or_else(|e| e.into_inner());
         cache.decodes += 1;
+        cache.decoded_rows += u64::from(image.height());
         // Entries whose response is gone can never hit again; free them first.
         cache
             .decoded
@@ -205,12 +242,13 @@ impl Session {
                 index,
                 DecodedOriginal {
                     bytes: bytes.downgrade(),
+                    first_row,
                     image: image.clone(),
                     used,
                 },
             );
         }
-        Ok(image)
+        Ok(reader_capture::DecodedRows { first_row, image })
     }
     pub fn read(
         &self,
@@ -532,6 +570,134 @@ mod tests {
         }
     }
     #[test]
+    fn a_capture_of_a_split_page_decodes_only_the_strips_under_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (width, height) = (160u32, 3000u32);
+        let page = image::RgbaImage::from_fn(width, height, |x, y| {
+            let n = x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503) ^ (y / 7);
+            image::Rgba([n as u8, (n >> 8) as u8, (y / 3) as u8, 255])
+        });
+        let whole = dir.path().join("whole.png");
+        page.save(&whole).unwrap();
+        let split = dir.path().join("split.page");
+        std::fs::write(
+            &split,
+            crate::page_store::split_form(
+                &std::fs::read(&whole).unwrap(),
+                crate::image_storage::ImageCompression {
+                    lossless_inputs: true,
+                    ..Default::default()
+                },
+                Some(crate::page_store::SplitPlan {
+                    threshold_rows: 1024,
+                    strip_rows: 256,
+                }),
+                reader_engine::current_limits(),
+                32 << 20,
+                &|| true,
+            )
+            .unwrap()
+            .expect("tall page splits"),
+        )
+        .unwrap();
+        let cancel = CancelToken::default();
+        let mut rendered = Vec::new();
+        for path in [&whole, &split] {
+            let mut capture = capture(
+                PageInput::Local {
+                    path: path.clone(),
+                    id: "page".into(),
+                },
+                None,
+                f64::from(width),
+                f64::from(height),
+            );
+            // Rows 1300..1500 lie in strips 5 (1280..1536) only.
+            capture.viewport.y = 1300.;
+            capture.viewport.height = 200.;
+            let (image, naming) =
+                reader_capture_editor::render_capture(&capture, &cancel, None).unwrap();
+            rendered.push((image.pixels, naming.source_y));
+            let decoded = capture.originals.decoded_rows();
+            if path == &whole {
+                assert_eq!(decoded, u64::from(height), "a whole page decodes whole");
+            } else {
+                assert_eq!(decoded, 256, "one strip of the thirteen");
+                assert_eq!(capture.originals.decodes(), 1);
+                // The refresh inside that strip is served from the kept rows;
+                // one that crosses into the next strip decodes both bands.
+                capture.viewport.y = 1320.;
+                reader_capture_editor::render_capture(&capture, &cancel, None).unwrap();
+                assert_eq!(
+                    (
+                        capture.originals.decodes(),
+                        capture.originals.decoded_rows()
+                    ),
+                    (1, 256)
+                );
+                capture.viewport.y = 1450.;
+                reader_capture_editor::render_capture(&capture, &cancel, None).unwrap();
+                assert_eq!(
+                    (
+                        capture.originals.decodes(),
+                        capture.originals.decoded_rows()
+                    ),
+                    (2, 256 + 512)
+                );
+            }
+        }
+        assert!(rendered[0] == rendered[1], "pixels and naming agree");
+    }
+    #[test]
+    fn decoded_bands_are_served_to_rows_inside_them_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let page =
+            image::RgbaImage::from_fn(32, 2000, |x, y| image::Rgba([x as u8, y as u8, 1, 255]));
+        let png = dir.path().join("p.png");
+        page.save(&png).unwrap();
+        let form = crate::page_store::split_form(
+            &std::fs::read(&png).unwrap(),
+            crate::image_storage::ImageCompression {
+                lossless_inputs: true,
+                ..Default::default()
+            },
+            Some(crate::page_store::SplitPlan {
+                threshold_rows: 1024,
+                strip_rows: 256,
+            }),
+            reader_engine::current_limits(),
+            32 << 20,
+            &|| true,
+        )
+        .unwrap()
+        .expect("splits");
+        let split = PageImage::from_stored(form).unwrap();
+        let limits = reader_engine::current_limits();
+        let session = Session::default();
+        let first = session.decode(0, &split, Some(300..400), limits).unwrap();
+        assert_eq!((first.first_row, first.image.height()), (256, 256));
+        assert_eq!(
+            first.image.get_pixel(3, 44).0,
+            [3, (300 % 256) as u8, 1, 255]
+        );
+        // Inside the kept band: a hit. Outside it: the new bands replace it.
+        session.decode(0, &split, Some(260..511), limits).unwrap();
+        assert_eq!(session.decodes(), 1);
+        let second = session.decode(0, &split, Some(500..600), limits).unwrap();
+        assert_eq!((second.first_row, second.image.height()), (256, 512));
+        assert_eq!((session.decodes(), session.decoded_rows()), (2, 768));
+        // The whole page is not satisfied by rows, nor rows by another response.
+        session.decode(0, &split, None, limits).unwrap();
+        assert_eq!(session.decoded_rows(), 768 + 2000);
+        let other = PageImage::from_stored(split.stored_bytes().to_vec()).unwrap();
+        session.decode(0, &other, Some(300..400), limits).unwrap();
+        assert_eq!(session.decodes(), 4);
+        // A page stored whole has no bands: rows are the whole page.
+        let whole = PageImage::from_encoded(std::fs::read(&png).unwrap());
+        let all = session.decode(1, &whole, Some(300..400), limits).unwrap();
+        assert_eq!((all.first_row, all.image.height()), (0, 2000));
+    }
+    #[test]
     fn repeated_editor_refreshes_reuse_the_decoded_original() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("long.png");
@@ -594,6 +760,83 @@ mod tests {
             );
         }
     }
+    /// Editor refresh cost on a 720x25,000 page stored whole (PNG, as pages over
+    /// 8 MP were) and as the cache's WebP strips. Not a regression test: it
+    /// prints timings. Run with
+    /// `cargo test --test-threads 1 report_capture_refresh -- --ignored --nocapture`
+    /// (see docs/tall-scroll-performance.md for the full command).
+    #[test]
+    #[ignore = "timing report"]
+    fn report_capture_refresh_cost_on_a_tall_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let cancel = CancelToken::default();
+        // 25,000 rows is 72 MB decoded: more than a capture may hold beside the
+        // editor's retention, so its decoded cache is released at the first
+        // refresh. 12,000 rows (35 MB) keeps its cache.
+        for height in [25_000u32, 12_000] {
+            let width = 720u32;
+            let image = image::RgbImage::from_fn(width, height, |x, y| {
+                if x.is_multiple_of(9) || y.is_multiple_of(13) || (x % 9 == 6 && y % 13 < 7) {
+                    image::Rgb([0, 0, 0])
+                } else {
+                    image::Rgb([255, 255, 255])
+                }
+            });
+            let whole = dir.path().join(format!("whole-{height}.png"));
+            image.save(&whole).unwrap();
+            drop(image);
+            let split = dir.path().join(format!("strips-{height}.page"));
+            std::fs::write(
+                &split,
+                crate::page_store::split_form(
+                    &std::fs::read(&whole).unwrap(),
+                    crate::image_storage::ImageCompression::cache_default(),
+                    Some(crate::page_store::SplitPlan {
+                        threshold_rows: 4096,
+                        strip_rows: 2048,
+                    }),
+                    reader_engine::current_limits(),
+                    32 << 20,
+                    &|| true,
+                )
+                .unwrap()
+                .expect("tall page splits"),
+            )
+            .unwrap();
+            for (name, path) in [("whole source PNG", &whole), ("WebP 85 strips", &split)] {
+                for scale in [None, Some(0.5)] {
+                    let mut capture = capture(
+                        PageInput::Local {
+                            path: path.clone(),
+                            id: "tall".into(),
+                        },
+                        None,
+                        f64::from(width),
+                        f64::from(height),
+                    );
+                    capture.output_scale = scale;
+                    capture.viewport.y = f64::from(height) * 0.48;
+                    let mut times = Vec::new();
+                    // The first refresh opens the editor; the others drag the
+                    // selection down 200 px at a time, as the editor refreshes.
+                    for _ in 0..5 {
+                        let started = Instant::now();
+                        std::hint::black_box(
+                            reader_capture_editor::render_capture(&capture, &cancel, None).unwrap(),
+                        );
+                        times.push(started.elapsed().as_secs_f64() * 1000.);
+                        capture.viewport.y += 200.;
+                    }
+                    eprintln!(
+                        "capture_refresh 720x{height} {name} scale={scale:?}: first {:.1} ms, later mean {:.1} ms, decodes {}",
+                        times[0],
+                        times[1..].iter().sum::<f64>() / 4.,
+                        capture.originals.decodes()
+                    );
+                }
+            }
+        }
+    }
     #[test]
     fn decoded_cache_is_keyed_by_response_bounded_and_admitted() {
         let png = |width: u32, height: u32| {
@@ -606,13 +849,13 @@ mod tests {
         let limits = reader_engine::DecodeLimits::default();
         let session = Session::default();
         let first = png(8, 8);
-        let a = session.decode(0, &first, limits).unwrap();
-        let b = session.decode(0, &first, limits).unwrap();
+        let a = session.decode(0, &first, None, limits).unwrap().image;
+        let b = session.decode(0, &first, None, limits).unwrap().image;
         assert!(Arc::ptr_eq(&a, &b), "same response reuses the decoded page");
         assert_eq!(session.decodes(), 1);
         // Identical bytes in a new response are a new source: never trusted.
         let replaced = PageImage::from_encoded(first.stored_bytes().to_vec());
-        let c = session.decode(0, &replaced, limits).unwrap();
+        let c = session.decode(0, &replaced, None, limits).unwrap().image;
         assert!(!Arc::ptr_eq(&a, &c));
         assert_eq!(session.decodes(), 2);
         // A hit is admitted like a fresh decode of its RGBA allocation.
@@ -620,16 +863,16 @@ mod tests {
             max_decoded_bytes: 8 * 8 * 4 - 1,
             ..limits
         };
-        assert!(session.decode(0, &replaced, tight).is_err());
+        assert!(session.decode(0, &replaced, None, tight).is_err());
         let narrow = reader_engine::DecodeLimits {
             max_width: 7,
             ..limits
         };
-        assert!(session.decode(0, &replaced, narrow).is_err());
+        assert!(session.decode(0, &replaced, None, narrow).is_err());
         // Total decoded retention never exceeds its reservation.
         let pages = (0..6).map(|_| png(1000, 2600)).collect::<Vec<_>>();
         for (index, page) in pages.iter().enumerate() {
-            session.decode(index + 10, page, limits).unwrap();
+            session.decode(index + 10, page, None, limits).unwrap();
             let cache = session.0.lock().unwrap();
             assert!(cache.decoded_total() <= DECODED_BYTES);
         }
@@ -641,7 +884,7 @@ mod tests {
         assert!(newest, "the most recent page stays cached");
         // Entries whose response is gone are dropped rather than held.
         drop(pages);
-        session.decode(99, &png(4, 4), limits).unwrap();
+        session.decode(99, &png(4, 4), None, limits).unwrap();
         assert_eq!(session.0.lock().unwrap().decoded.len(), 1);
         assert_eq!(
             session.reservation(),
@@ -652,7 +895,7 @@ mod tests {
         assert_eq!(session.reservation(), 0);
         // After release nothing is cached any more.
         let page = png(8, 8);
-        session.decode(0, &page, limits).unwrap();
+        session.decode(0, &page, None, limits).unwrap();
         assert!(session.0.lock().unwrap().decoded.is_empty());
     }
     #[test]

@@ -1,6 +1,7 @@
 //! Event-loop adapter for the source-anchored capture leaf.
 use super::*;
 use reader_capture::selection::{Revision, Selection, Ticket};
+use reader_engine::PageSource as _;
 
 const CAPTURE_MEMORY: u64 = 128 * 1024 * 1024;
 const PREPARED_BYTES: usize = 32 * 1024 * 1024;
@@ -155,17 +156,32 @@ fn prepare(
             .min(reader_engine::current_limits().max_decoded_bytes),
             ..reader_engine::current_limits()
         };
-        let (effective, split) = if capture.options.crop_borders
+        // Only border cropping measures pixels. A page stored in strips needs
+        // none of them to learn its shape, so it is not decoded here at all.
+        let from_shape = bytes
+            .row_granularity()
+            .and_then(|_| {
+                reader_engine::page_presentation_for(
+                    bytes.dimensions(limits).ok()?,
+                    capture.options,
+                )
+                .ok()
+                .flatten()
+            })
+            .map(|presentation| (presentation.effective, presentation.split));
+        let (effective, split) = if let Some(shape) = from_shape {
+            shape
+        } else if capture.options.crop_borders
             || capture.options.split_wide
             || capture.options.rotate_wide
         {
             let image = capture
                 .originals
-                .decode(index, &bytes, limits)
+                .decode(index, &bytes, None, limits)
                 .map_err(error)?;
             check(cancel, ticket)?;
             let presentation =
-                reader_engine::page_presentation(&image, capture.options).map_err(error)?;
+                reader_engine::page_presentation(&image.image, capture.options).map_err(error)?;
             (presentation.effective, presentation.split)
         } else {
             (bytes.dimensions(limits).map_err(error)?, false)
@@ -471,7 +487,7 @@ fn render_prepared(
                 .originals
                 .read(index, input, source.as_ref(), cancel)
         },
-        |index, page, limits| capture.originals.decode(index, page, limits),
+        |index, page, rows, limits| capture.originals.decode(index, page, rows, limits),
     )?;
     check(cancel, ticket)?;
     if capture.brightness < 100 {

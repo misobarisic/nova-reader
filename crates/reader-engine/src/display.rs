@@ -361,6 +361,31 @@ pub fn page_presentation(
     Ok(presentation)
 }
 
+/// The presentation of a page of `dimensions`, without its pixels, when
+/// `options` do not need them (border cropping measures pixels; every other
+/// option depends on dimensions alone). Capture uses it to decode only the rows
+/// it paints. `background_color` is white: nothing here read a pixel.
+pub fn page_presentation_for(
+    dimensions: PageDimensions,
+    options: DisplayOptions,
+) -> Result<Option<PagePresentation>> {
+    if dimensions.width == 0 || dimensions.height == 0 {
+        return Err(Error::Layout);
+    }
+    if options.crop_borders {
+        return Ok(None);
+    }
+    PagePresentation::new(dimensions, CropRect::full(dimensions), options).map(Some)
+}
+
+/// Whether display rows are source rows one for one, so a row range of the
+/// page is all a painter of those rows needs.
+impl PagePresentation {
+    pub fn is_row_contiguous(&self) -> bool {
+        self.is_identity()
+    }
+}
+
 /// Decoded bands kept for one split page. Large enough to hold a viewport and
 /// its read-ahead at common widths (about ten 2,048-row bands at 720 px);
 /// admission also keeps cache plus output window within the decoded budget.

@@ -336,7 +336,20 @@ fn captures_of_whole_and_split_pages_match() {
             scale,
             128 * 1024 * 1024,
             |index| Ok(pages[index].clone()),
-            |_, page, limits| page.decode(limits).map(Arc::new),
+            |_, page, rows, limits| match (rows, page.row_granularity()) {
+                // Like the app: only the bands under the capture, when stored in bands.
+                (Some(rows), Some(granularity)) => {
+                    let height = page.dimensions(limits)?.height;
+                    let rows = reader_capture::band_aligned(rows, granularity, height);
+                    Ok(reader_capture::DecodedRows {
+                        first_row: rows.start,
+                        image: Arc::new(page.decode_rows(rows, limits)?),
+                    })
+                }
+                _ => page
+                    .decode(limits)
+                    .map(|image| reader_capture::DecodedRows::whole(Arc::new(image))),
+            },
         )
         .unwrap()
     };
