@@ -260,8 +260,12 @@ pub fn storage_form(
     split: Option<SplitPlan>,
     limits: DecodeLimits,
     max_bytes: usize,
+    current: &dyn Fn() -> bool,
 ) -> std::result::Result<Vec<u8>, String> {
-    if let Some(form) = split_form(original, compression, split, limits, max_bytes)? {
+    check_fetched(original)?;
+    // A page that cannot be split (an over-large result, an encoder that
+    // refuses a strip) is stored whole, exactly as it would be without splitting.
+    if let Ok(Some(form)) = split_form(original, compression, split, limits, max_bytes, current) {
         return Ok(form);
     }
     reader_export::reencode_storage_image(original, compression, limits)
@@ -271,12 +275,17 @@ pub fn storage_form(
 /// as strips: splitting off, compression off, a page that is not tall, or one
 /// whose codec choice requires keeping the whole file (a lossless input the
 /// pipeline cannot hold, or a lossless JPEG transcode).
+///
+/// Splitting decodes the whole page once. That decode is background work: it
+/// queues behind the viewer and visible thumbnails for the shared heavy-decode
+/// permit, and gives up if `current` turns false while waiting.
 pub fn split_form(
     original: &[u8],
     compression: ImageCompression,
     split: Option<SplitPlan>,
     limits: DecodeLimits,
     max_bytes: usize,
+    current: &dyn Fn() -> bool,
 ) -> std::result::Result<Option<Vec<u8>>, String> {
     // Without compression the store keeps the source bytes; a strip must be
     // encoded with the store's format and quality, so there is nothing to do.
@@ -292,7 +301,12 @@ pub fn split_form(
         StorageRecipe::Original | StorageRecipe::Transcoded(_) => return Ok(None),
         StorageRecipe::Pixels { lossless } => lossless,
     };
-    let page = reader_engine::decode_image(original, limits).map_err(|e| e.to_string())?;
+    let page = {
+        let _permit = crate::decode_admission::SHARED
+            .acquire(crate::decode_admission::Priority::Prefetch, current)
+            .ok_or_else(|| "Operation cancelled".to_string())?;
+        reader_engine::decode_image(original, limits).map_err(|e| e.to_string())?
+    };
     let mut strips = Vec::new();
     let mut top = 0;
     while top < page.height() {
@@ -353,9 +367,16 @@ mod tests {
         }
     }
     fn split(image: &image::RgbaImage, compression: ImageCompression) -> Vec<u8> {
-        split_form(&png(image), compression, Some(PLAN), LIMITS, 32 << 20)
-            .unwrap()
-            .expect("tall page splits")
+        split_form(
+            &png(image),
+            compression,
+            Some(PLAN),
+            LIMITS,
+            32 << 20,
+            &|| true,
+        )
+        .unwrap()
+        .expect("tall page splits")
     }
 
     #[test]
@@ -525,7 +546,7 @@ mod tests {
         let tall_png = png(&tall);
         let on = compression(ImageStorageFormat::Webp, 85, false);
         let form = |compression, plan, bytes: &[u8]| {
-            split_form(bytes, compression, plan, LIMITS, 32 << 20).unwrap()
+            split_form(bytes, compression, plan, LIMITS, 32 << 20, &|| true).unwrap()
         };
         // Compression off: nothing is split, whatever the plan says.
         assert!(
@@ -577,7 +598,7 @@ mod tests {
             .is_none()
         );
         // storage_form without a plan is the ordinary whole-image transform.
-        let whole = storage_form(&tall_png, on, None, LIMITS, 32 << 20).unwrap();
+        let whole = storage_form(&tall_png, on, None, LIMITS, 32 << 20, &|| true).unwrap();
         assert_eq!(
             whole,
             reader_export::reencode_storage_image(&tall_png, on, LIMITS).unwrap()
@@ -602,9 +623,26 @@ mod tests {
             "lossless transcode stays whole"
         );
         // A forged container from a source is rejected, never stored.
-        assert!(split_form(&split(&tall, on), on, Some(PLAN), LIMITS, 32 << 20).is_err());
-        // The stored-size cap falls back to the original.
-        assert!(split_form(&tall_png, on, Some(PLAN), LIMITS, 100).is_err());
+        assert!(
+            split_form(&split(&tall, on), on, Some(PLAN), LIMITS, 32 << 20, &|| {
+                true
+            })
+            .is_err()
+        );
+        // A split that cannot be stored falls back to the whole-image transform.
+        let fallback = storage_form(&tall_png, on, Some(PLAN), LIMITS, 100, &|| true).unwrap();
+        assert!(!strips::looks_like(&fallback));
+        assert_eq!(fallback, whole);
+        assert!(
+            storage_form(&split(&tall, on), on, Some(PLAN), LIMITS, 32 << 20, &|| {
+                true
+            })
+            .is_err()
+        );
+        // The stored-size cap makes the split itself fail.
+        assert!(split_form(&tall_png, on, Some(PLAN), LIMITS, 100, &|| true).is_err());
+        // A write nobody wants any more never starts the whole-page decode.
+        assert!(split_form(&tall_png, on, Some(PLAN), LIMITS, 32 << 20, &|| false).is_err());
     }
 
     #[test]

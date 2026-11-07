@@ -1929,3 +1929,149 @@ mod jxl_storage_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod page_export_tests {
+    use super::*;
+    use crate::{
+        image_storage::ImageCompression,
+        page_store::{PageImage, SplitPlan, split_form},
+    };
+
+    const PLAN: SplitPlan = SplitPlan {
+        threshold_rows: 1024,
+        strip_rows: 256,
+    };
+    fn textured(width: u32, height: u32) -> image::RgbaImage {
+        image::RgbaImage::from_fn(width, height, |x, y| {
+            let n = x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503) ^ (y / 9);
+            image::Rgba([
+                n as u8,
+                (n >> 8) as u8,
+                (n >> 16) as u8,
+                255 - (y % 3) as u8,
+            ])
+        })
+    }
+    fn png(image: &image::RgbaImage) -> Vec<u8> {
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        bytes.into_inner()
+    }
+    /// The page as the cache would store it: strips, losslessly.
+    fn split_page(image: &image::RgbaImage) -> PageImage {
+        let compression = ImageCompression {
+            lossless_inputs: true,
+            ..ImageCompression::default()
+        };
+        let form = split_form(
+            &png(image),
+            compression,
+            Some(PLAN),
+            reader_engine::DecodeLimits::default(),
+            32 << 20,
+            &|| true,
+        )
+        .unwrap()
+        .expect("tall page splits");
+        PageImage::from_stored(form).unwrap()
+    }
+    fn decoded(export: &ExportImage) -> image::RgbaImage {
+        reader_engine::decode_image(&export.bytes, reader_engine::DecodeLimits::default()).unwrap()
+    }
+
+    #[test]
+    fn a_page_stored_whole_exports_its_original_bytes() {
+        let original = png(&textured(40, 900));
+        let page = PageImage::from_encoded(original.clone());
+        for clipboard in [false, true] {
+            let export = ExportImage::from_page(
+                &page,
+                "nova-reader-page-3",
+                &CapturePreferences {
+                    format: CaptureFormat::Jpeg,
+                    ..CapturePreferences::default()
+                },
+                clipboard,
+            )
+            .unwrap();
+            assert_eq!(export.bytes, original, "not re-encoded");
+            assert_eq!(export.name, "nova-reader-page-3.png");
+            assert_eq!(export.mime, "image/png");
+            assert!(export.notice.is_none());
+        }
+    }
+
+    #[test]
+    fn a_split_page_saves_as_the_reassembled_pixels_in_the_screenshot_format() {
+        let original = textured(48, 1500);
+        let page = split_page(&original);
+        for (format, mime, extension, exact) in [
+            (CaptureFormat::Png, "image/png", "png", true),
+            (CaptureFormat::WebpLossless, "image/webp", "webp", true),
+            (CaptureFormat::Jpeg, "image/jpeg", "jpg", false),
+        ] {
+            let export = ExportImage::from_page(
+                &page,
+                "nova-reader-page-1",
+                &CapturePreferences {
+                    format,
+                    ..CapturePreferences::default()
+                },
+                false,
+            )
+            .unwrap();
+            assert_eq!(export.mime, mime);
+            assert_eq!(export.name, format!("nova-reader-page-1.{extension}"));
+            assert!(export.notice.is_none(), "{format:?}");
+            let pixels = decoded(&export);
+            assert_eq!(pixels.dimensions(), (48, 1500));
+            if exact {
+                assert_eq!(pixels, original, "{format:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_format_that_cannot_hold_the_page_falls_back_to_png_with_a_notice() {
+        // WebP stops at 16,383 pixels per side; the strips themselves are fine.
+        let original = textured(8, 17_000);
+        let page = split_page(&original);
+        let export = ExportImage::from_page(
+            &page,
+            "nova-reader-page-2",
+            &CapturePreferences {
+                format: CaptureFormat::WebpLossy,
+                ..CapturePreferences::default()
+            },
+            false,
+        )
+        .unwrap();
+        assert_eq!(export.mime, "image/png");
+        assert_eq!(export.name, "nova-reader-page-2.png");
+        assert!(export.notice.as_deref().is_some_and(|n| n.contains("PNG")));
+        assert_eq!(decoded(&export), original);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn copying_a_split_page_hands_the_clipboard_its_rgba_pixels() {
+        let original = textured(48, 1500);
+        let page = split_page(&original);
+        let mut export = ExportImage::from_page(
+            &page,
+            "nova-reader-page-1",
+            &CapturePreferences {
+                format: CaptureFormat::Jpeg,
+                ..CapturePreferences::default()
+            },
+            true,
+        )
+        .unwrap();
+        assert!(
+            export.bytes.is_empty(),
+            "no encoder between page and clipboard"
+        );
+        assert_eq!(clipboard_pixels(&mut export).unwrap(), original);
+    }
+}

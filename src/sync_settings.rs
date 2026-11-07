@@ -1594,4 +1594,149 @@ mod tests {
         assert!(persist_preferences("reader:show-adult", &false, &true).is_err());
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
+
+    #[test]
+    fn split_settings_sync_field_by_field_and_device_overrides_stay_local() {
+        const CHILD: &str = "READER_SPLIT_SETTINGS_SYNC_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            assert!(std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "sync_settings::tests::split_settings_sync_field_by_field_and_device_overrides_stay_local", "--nocapture"])
+                .env(CHILD, "1").env("READER_SPLIT_SETTINGS_SYNC_DIR", directory.path()).status().unwrap().success());
+            return;
+        }
+        nova_storage::init_at(std::path::Path::new(
+            &std::env::var("READER_SPLIT_SETTINGS_SYNC_DIR").unwrap(),
+        ));
+        nova_sync::configure_protocol(nova_sync::ProtocolConfig::reader()).unwrap();
+        let toggle = "reader:image-storage/cache/split_tall_pages";
+        let threshold = "reader:image-storage/cache/split_threshold_rows";
+        let strip = "reader:image-storage/downloads/strip_rows";
+        let downloads_toggle = "reader:image-storage/downloads/split_tall_pages";
+        // Portable schema: both stores' split fields, validated like any value.
+        for key in [toggle, downloads_toggle] {
+            assert!(supported(key, &Value::Bool(false)), "{key}");
+            assert!(!supported(key, &Value::from(7)), "{key}");
+        }
+        assert!(supported(threshold, &Value::from(8192)));
+        assert!(!supported(threshold, &Value::from(100)));
+        assert!(supported(strip, &Value::from(1024)));
+        assert!(!supported(strip, &Value::from(1000)), "multiple of 16 rows");
+        assert!(!supported(
+            "reader:image-storage/cache/surprise",
+            &Value::from(1)
+        ));
+        // Device policy stays out of the account.
+        assert!(!supported(
+            "reader:image-storage/policy/disk_enabled",
+            &Value::Bool(true)
+        ));
+
+        fn isolated_owner() -> nova_sync::Store {
+            let mut owner = nova_sync::Store::default();
+            for key in templates().keys() {
+                owner.queue_extra(key, None);
+            }
+            owner.queue_extra(BASELINE, None);
+            owner.queue_extra(OVERRIDES, None);
+            owner
+        }
+        let mut host = isolated_owner();
+        let mut choices = templates();
+        {
+            let storage = &mut choices.get_mut("reader:image-storage").unwrap();
+            storage["cache"]["split_tall_pages"] = Value::Bool(false);
+            storage["cache"]["split_threshold_rows"] = Value::from(8192);
+            storage["downloads"]["split_tall_pages"] = Value::Bool(true);
+            storage["downloads"]["strip_rows"] = Value::from(1024);
+        }
+        queue_documents(&mut host, &choices).unwrap();
+        assert!(prepare(&mut host, 1, false, true).unwrap());
+        // Only the four fields that differ from the defaults are published.
+        let published = host
+            .records(&domain())
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            published,
+            [toggle, threshold, strip, downloads_toggle]
+                .into_iter()
+                .map(String::from)
+                .collect()
+        );
+        // A second device receives them and its typed preferences follow.
+        let mut fresh = isolated_owner();
+        prepare(&mut fresh, 2, false, true).unwrap();
+        for out in host.outbound(&fresh.digest()) {
+            fresh.apply(&out.domain, &out.key, out.record);
+        }
+        apply_remote(&mut fresh).unwrap();
+        let received: crate::image_storage::ImageStoragePreferences =
+            serde_json::from_value(documents(&fresh).unwrap()["reader:image-storage"].clone())
+                .unwrap();
+        assert!(!received.cache.split_tall_pages);
+        assert_eq!(received.cache.split_threshold_rows, 8192);
+        assert_eq!(
+            received.cache.strip_rows, 2048,
+            "untouched fields keep the default"
+        );
+        assert!(received.downloads.split_tall_pages);
+        assert_eq!(received.downloads.strip_rows, 1024);
+        assert!(!prepare(&mut fresh, 2, false, false).unwrap(), "no echo");
+
+        // The second device overrides one field. It wins locally and the
+        // account keeps the shared value; nothing is published.
+        let shared = fresh.record(&domain(), toggle).unwrap().clone();
+        set_override(&mut fresh, toggle, true).unwrap();
+        let mut local = documents(&fresh).unwrap();
+        local.get_mut("reader:image-storage").unwrap()["cache"]["split_tall_pages"] =
+            Value::Bool(true);
+        queue_documents(&mut fresh, &local).unwrap();
+        assert!(!prepare(&mut fresh, 2, false, false).unwrap());
+        assert_eq!(fresh.record(&domain(), toggle), Some(&shared));
+        assert_eq!(
+            fields(&documents(&fresh).unwrap())[toggle],
+            Value::Bool(true)
+        );
+        assert_eq!(
+            read_map(&fresh, OVERRIDES).unwrap()[toggle],
+            Value::Bool(false)
+        );
+        // Another device's later change refreshes the fallback, not the choice.
+        host.set(&domain(), toggle, Some("true".into()), 0, 1);
+        let later = host.record(&domain(), toggle).unwrap().clone();
+        for out in host.outbound(&fresh.digest()) {
+            fresh.apply(&out.domain, &out.key, out.record);
+        }
+        apply_remote(&mut fresh).unwrap();
+        assert_eq!(fresh.record(&domain(), toggle), Some(&later));
+        assert_eq!(
+            fields(&documents(&fresh).unwrap())[toggle],
+            Value::Bool(true)
+        );
+
+        // A peer that predates the fields keeps working: its saved document has
+        // no split fields, and each store reads its own default for them.
+        let mut legacy = isolated_owner();
+        let mut old =
+            serde_json::to_value(crate::image_storage::ImageStoragePreferences::default()).unwrap();
+        for store in ["cache", "downloads"] {
+            let object = old[store].as_object_mut().unwrap();
+            for field in ["split_tall_pages", "split_threshold_rows", "strip_rows"] {
+                object.remove(field);
+            }
+        }
+        old["cache"]["quality"] = Value::from(70);
+        legacy.queue_extra("reader:image-storage", Some(old.to_string()));
+        let normalized = documents(&legacy).unwrap();
+        let typed: crate::image_storage::ImageStoragePreferences =
+            serde_json::from_value(normalized["reader:image-storage"].clone()).unwrap();
+        assert!(typed.cache.split_tall_pages && !typed.downloads.split_tall_pages);
+        assert_eq!(
+            (typed.cache.split_threshold_rows, typed.cache.strip_rows),
+            (4096, 2048)
+        );
+        assert_eq!(typed.cache.quality, 70);
+    }
 }

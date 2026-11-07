@@ -3,7 +3,7 @@
 //! Explicit downloads/imports remain owned by reader-downloads in data storage.
 use crate::{
     image_storage::{self, CacheKind, ImageCompression, ImageStorageFormat},
-    page_store::{self, PageImage},
+    page_store::{self, PageImage, SplitPlan},
     services::Result,
 };
 use nova_cache::{blob, gc};
@@ -26,7 +26,13 @@ use std::{
 const ENTRY_BYTES: usize = 32 * 1024 * 1024;
 const QUEUED_BYTES: usize = 32 * 1024 * 1024;
 type Current = Arc<dyn Fn() -> bool + Send + Sync>;
-type Encoder = Arc<dyn Fn(&[u8], ImageCompression) -> Result<Vec<u8>> + Send + Sync>;
+/// Turns a fetched page into the bytes to store, given the store's compression,
+/// how it may split a tall page, and whether the write is still wanted.
+type Encoder = Arc<
+    dyn Fn(&[u8], ImageCompression, Option<SplitPlan>, &dyn Fn() -> bool) -> Result<Vec<u8>>
+        + Send
+        + Sync,
+>;
 type Policy = Arc<dyn Fn() -> gc::DiskPolicy + Send + Sync>;
 type Notify = Arc<dyn Fn() + Send + Sync>;
 fn digest(bytes: &[u8]) -> String {
@@ -156,6 +162,7 @@ pub struct Read {
 pub struct PendingWrite {
     request: Request,
     compression: ImageCompression,
+    split: Option<SplitPlan>,
     _reservation: Reservation,
 }
 #[derive(Default)]
@@ -245,11 +252,14 @@ impl ChapterCache {
                     if worker_cache.get(key, inspect).ok().flatten().is_some() {
                         continue;
                     }
-                    let transformed = job
-                        .pending
-                        .compression
-                        .enabled
-                        .then(|| encoder(job.page.stored_bytes(), job.pending.compression));
+                    let transformed = job.pending.compression.enabled.then(|| {
+                        encoder(
+                            job.page.stored_bytes(),
+                            job.pending.compression,
+                            job.pending.split,
+                            &current,
+                        )
+                    });
                     let stored = match transformed {
                         Some(Ok(ref bytes)) if bytes.len() <= ENTRY_BYTES => bytes.as_slice(),
                         _ => job.page.stored_bytes(),
@@ -481,13 +491,13 @@ impl ChapterCache {
             page.dimensions(reader_engine::current_limits())
                 .map_err(|e| e.to_string())?;
             let pending = if enabled && request.key.is_some() && request.validate_scope().is_ok() {
+                let preferences =
+                    image_storage::effective_for_source(&request.source.descriptor().id);
                 self.reserve(page.encoded_len())
                     .map(|reservation| PendingWrite {
                         request: request.clone(),
-                        compression: image_storage::effective_for_source(
-                            &request.source.descriptor().id,
-                        )
-                        .cache,
+                        compression: preferences.cache,
+                        split: preferences.cache_split(),
                         _reservation: reservation,
                     })
             } else {
@@ -602,7 +612,29 @@ impl Drop for ChapterCache {
         }
     }
 }
-fn compress(bytes: &[u8], compression: ImageCompression) -> Result<Vec<u8>> {
+fn compress(
+    bytes: &[u8],
+    compression: ImageCompression,
+    split: Option<SplitPlan>,
+    current: &dyn Fn() -> bool,
+) -> Result<Vec<u8>> {
+    // A tall page becomes independently decodable strips in this store's
+    // format and quality. Strips are small, so the whole-image admission below
+    // (which keeps the original of anything over eight megapixels) does not
+    // apply; a page that stays whole follows it exactly as before.
+    //
+    // A page that cannot be split (a strip the encoder refuses, a container over
+    // the entry limit) is stored whole, as it would be with splitting off.
+    if let Ok(Some(form)) = page_store::split_form(
+        bytes,
+        compression,
+        split,
+        reader_engine::current_limits(),
+        ENTRY_BYTES,
+        current,
+    ) {
+        return Ok(form);
+    }
     let dimensions = reader_engine::inspect_image(bytes, reader_engine::current_limits())
         .map_err(|e| e.to_string())?;
     if u64::from(dimensions.width) * u64::from(dimensions.height) > 8_000_000
@@ -782,7 +814,7 @@ mod tests {
                 enabled: true,
                 limit_bytes: None,
             }),
-            Arc::new(|_, _| Err("retain original".into())),
+            Arc::new(|_, _, _, _| Err("retain original".into())),
         )
     }
     fn prepare(cache: &ChapterCache, source: &Source, chapter_id: &str, page_id: &str) -> Request {
@@ -962,7 +994,7 @@ mod tests {
                 enabled: true,
                 limit_bytes: None,
             }),
-            Arc::new(move |_, _| {
+            Arc::new(move |_, _, _, _| {
                 count.fetch_add(1, Ordering::AcqRel);
                 Ok(output.clone())
             }),
@@ -996,7 +1028,7 @@ mod tests {
                     enabled: true,
                     limit_bytes: None,
                 }),
-                Arc::new(move |bytes, _| {
+                Arc::new(move |bytes, _, _, _| {
                     entered.send(()).unwrap();
                     gate.lock().unwrap().recv().unwrap();
                     Ok(bytes.to_vec())
@@ -1037,7 +1069,7 @@ mod tests {
                 enabled: true,
                 limit_bytes: None,
             }),
-            Arc::new(move |_, _| {
+            Arc::new(move |_, _, _, _| {
                 entered.send(()).unwrap();
                 gate.lock().unwrap().recv().unwrap();
                 Err("original".into())
@@ -1079,7 +1111,7 @@ mod tests {
                 enabled: true,
                 limit_bytes: Some(policy_limit.load(Ordering::Acquire)),
             }),
-            Arc::new(|_, _| Err("original".into())),
+            Arc::new(|_, _, _, _| Err("original".into())),
         );
         cache.activate(1, &chapter("active"));
         assert_eq!(
@@ -1126,7 +1158,7 @@ mod tests {
                 enabled: true,
                 limit_bytes: Some(policy_limit.load(Ordering::Acquire)),
             }),
-            Arc::new(|_, _| Err("original".into())),
+            Arc::new(|_, _, _, _| Err("original".into())),
         );
         let old0 = prepare(&cache, &source, "old", "p0");
         let old1 = prepare(&cache, &source, "old", "p1");
@@ -1163,5 +1195,185 @@ mod tests {
             b"explicit download"
         );
         assert!(poster.get("poster", inspect).unwrap().is_some());
+    }
+
+    fn textured(width: u32, height: u32) -> image::RgbaImage {
+        image::RgbaImage::from_fn(width, height, |x, y| {
+            let n = x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503) ^ (y / 9);
+            image::Rgba([n as u8, (n >> 8) as u8, (n >> 16) as u8, 255])
+        })
+    }
+    fn encoded(image: &image::RgbaImage) -> Vec<u8> {
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        bytes.into_inner()
+    }
+    const SMALL_STRIPS: SplitPlan = SplitPlan {
+        threshold_rows: 1024,
+        strip_rows: 256,
+    };
+    /// Fetch a page, then publish it under the given compression and split plan.
+    fn publish(
+        cache: &ChapterCache,
+        request: &Request,
+        compression: ImageCompression,
+        split: Option<SplitPlan>,
+    ) {
+        let mut read = cache.read(request).unwrap();
+        let mut pending = read.pending.take().unwrap();
+        pending.compression = compression;
+        pending.split = split;
+        cache.enqueue(pending, read.page);
+        assert!(cache.flush_writes());
+    }
+    fn lossless_webp() -> ImageCompression {
+        ImageCompression {
+            lossless_inputs: true,
+            ..ImageCompression::cache_default()
+        }
+    }
+
+    #[test]
+    fn tall_pages_are_stored_as_one_entry_of_strips_and_read_back_as_the_same_page() {
+        let root = tempfile::tempdir().unwrap();
+        let original = textured(48, 1500);
+        let (_registry, source, transport) =
+            source(&root.path().join("source"), encoded(&original));
+        let cache = ChapterCache::test_cache(root.path().join("cache"), 64 << 20);
+        let request = prepare(&cache, &source, "c", "tall");
+        publish(&cache, &request, lossless_webp(), Some(SMALL_STRIPS));
+        assert_eq!(entries(&cache), 1, "one file per page, split or not");
+        let cached = cache.read(&request).unwrap();
+        assert!(cached.from_cache);
+        assert_eq!(transport.reads.load(Ordering::Acquire), 1);
+        let limits = reader_engine::current_limits();
+        assert_eq!(
+            cached.page.dimensions(limits).unwrap(),
+            reader_engine::PageDimensions {
+                width: 48,
+                height: 1500
+            }
+        );
+        assert_eq!(
+            reader_engine::PageSource::row_granularity(&cached.page),
+            Some(256),
+            "the cached tall page decodes strip by strip"
+        );
+        assert_eq!(cached.page.decode(limits).unwrap(), original);
+        // Eviction and clearing see a single file.
+        assert_eq!(cache.clear().1, 1);
+        assert_eq!(entries(&cache), 0);
+    }
+
+    #[test]
+    fn split_settings_decide_only_what_is_written_never_what_is_served() {
+        let root = tempfile::tempdir().unwrap();
+        let original = textured(48, 1500);
+        let (_registry, source, _) = source(&root.path().join("source"), encoded(&original));
+        let cache = ChapterCache::test_cache(root.path().join("cache"), 64 << 20);
+        let limits = reader_engine::current_limits();
+        let granularity = |request: &Request| {
+            let read = cache.read(request).unwrap();
+            assert!(read.from_cache);
+            assert_eq!(read.page.decode(limits).unwrap(), original);
+            reader_engine::PageSource::row_granularity(&read.page)
+        };
+        // An entry written whole before the feature stays whole when split is on.
+        let whole = prepare(&cache, &source, "c", "whole");
+        publish(&cache, &whole, lossless_webp(), None);
+        // A split entry, then compression turned off for new writes.
+        let strips = prepare(&cache, &source, "c", "strips");
+        publish(&cache, &strips, lossless_webp(), Some(SMALL_STRIPS));
+        // Nothing is split when the page is not tall enough or compression is off.
+        let short = prepare(&cache, &source, "c", "short");
+        publish(
+            &cache,
+            &short,
+            lossless_webp(),
+            Some(SplitPlan {
+                threshold_rows: 2048,
+                strip_rows: 256,
+            }),
+        );
+        let off = prepare(&cache, &source, "c", "off");
+        publish(
+            &cache,
+            &off,
+            ImageCompression {
+                enabled: false,
+                ..lossless_webp()
+            },
+            Some(SMALL_STRIPS),
+        );
+        assert_eq!(entries(&cache), 4);
+        assert_eq!(granularity(&whole), None);
+        assert_eq!(granularity(&strips), Some(256));
+        assert_eq!(granularity(&short), None);
+        assert_eq!(granularity(&off), None);
+        // Reading never consults the toggles: the process-wide settings can
+        // change under an entry without making it unreadable.
+        assert_eq!(granularity(&strips), Some(256));
+    }
+
+    #[test]
+    fn a_corrupt_split_entry_is_a_miss_that_is_deleted_and_repaired() {
+        let root = tempfile::tempdir().unwrap();
+        let original = textured(48, 1500);
+        let (_registry, source, transport) =
+            source(&root.path().join("source"), encoded(&original));
+        let cache = ChapterCache::test_cache(root.path().join("cache"), 64 << 20);
+        let request = prepare(&cache, &source, "c", "tall");
+        // A file that claims to be a container but is not one. The kit checks
+        // its own checksum, so only the page boundary can reject this.
+        let forged = [b"NRSTRIP\0".as_slice(), &[0u8; 64]].concat();
+        assert!(
+            cache
+                .cache
+                .put_if_current(
+                    request.key.as_deref().unwrap(),
+                    &forged,
+                    cache.revision(),
+                    |_| Ok((48, 1500)),
+                    || true
+                )
+                .unwrap()
+        );
+        assert_eq!(entries(&cache), 1);
+        let read = cache.read(&request).unwrap();
+        assert!(!read.from_cache, "the forged entry is not served");
+        assert_eq!(
+            read.page.decode(reader_engine::current_limits()).unwrap(),
+            original
+        );
+        assert_eq!(entries(&cache), 0, "and it is deleted");
+        assert_eq!(transport.reads.load(Ordering::Acquire), 1);
+        // The repair publishes a good entry under the same key.
+        let mut read = read;
+        let pending = read.pending.take().unwrap();
+        cache.enqueue(pending, read.page);
+        assert!(cache.flush_writes());
+        assert_eq!(entries(&cache), 1);
+        assert!(cache.read(&request).unwrap().from_cache);
+    }
+
+    #[test]
+    fn pending_writes_take_their_split_plan_from_the_store_settings() {
+        let root = tempfile::tempdir().unwrap();
+        let (_registry, source, _) =
+            source(&root.path().join("source"), encoded(&textured(48, 1500)));
+        let cache = ChapterCache::test_cache(root.path().join("cache"), 64 << 20);
+        let request = prepare(&cache, &source, "c", "plan");
+        let pending = cache.read(&request).unwrap().pending.unwrap();
+        let settings = image_storage::effective_for_source("cache-fixture");
+        assert_eq!(pending.split, settings.cache_split());
+        assert_eq!(pending.compression, settings.cache);
+        assert_eq!(
+            pending.split,
+            Some(SplitPlan {
+                threshold_rows: 4096,
+                strip_rows: 2048
+            }),
+            "split is on by default for the cache"
+        );
     }
 }

@@ -81,6 +81,7 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
                         quality: 64,
                         jxl_lossless_jpeg: true,
                         lossless_inputs: true,
+                        ..ImageCompression::cache_default()
                     },
                     downloads: ImageCompression {
                         enabled: true,
@@ -88,6 +89,7 @@ fn image_storage_preferences_persist_recover_and_control_independent_groups() {
                         quality: 73,
                         jxl_lossless_jpeg: true,
                         lossless_inputs: true,
+                        ..ImageCompression::downloads_default()
                     },
                     policy: CachePolicyPreferences::default(),
                 }

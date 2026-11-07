@@ -2535,6 +2535,7 @@ mod tests {
                 quality: 85,
                 jxl_lossless_jpeg: false,
                 lossless_inputs: false,
+                ..ImageCompression::default()
             };
             let key = format!("new-{index}");
             write_fetched(&cache, &key, epoch, &png, compression, None, || true);
@@ -2644,6 +2645,7 @@ mod tests {
                 quality: 85,
                 jxl_lossless_jpeg: false,
                 lossless_inputs: false,
+                ..ImageCompression::default()
             },
             None,
             || true,
