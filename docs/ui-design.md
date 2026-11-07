@@ -22,8 +22,8 @@ navigation or settings design system.
   order as requested. Downloads occupies the desktop shortcut slot before More
   and is a More card on phones. History keeps the bottom bar visible and Back
   returns to Library.
-- `page-header.slint` is adapted directly from Nova's `PageHeader`, with the
-  same typography and back-button placement. Page gutters are 18px.
+- `page-header.slint` re-exports the Kit `PageHeader` (Nova's, with the
+  same typography and back-button placement). Page gutters are 18px.
 - Detail entry copies Nova's 40ms deferred entrance and shared
   `Anim.transition_fade`, applied to the artwork, chapter body and toolbar
   together. It replays for a new title or a return from reading on both desktop
@@ -45,9 +45,9 @@ navigation or settings design system.
   settings (theme, display, look and feel, sources, categories, data, cache and sync) and About. It does not advertise
   unsupported video or tracking features.
 - `theme-settings.slint` adapts Nova's Theme and Look and feel modules with Kit
-  cards, segmented controls, swatches and toggles. `settings-row.slint` preserves
-  Nova's side-by-side/stacked measurement without its app-specific sync/search
-  bridges. Eight accents, three background styles, card/button radius, card
+  cards, segmented controls, swatches and toggles. `settings-row.slint` re-exports the Kit
+  `SettingsRow`, which preserves Nova's side-by-side/stacked measurement; Reader's
+  `SettingsHighlight` is the Kit's disabled one, so rows draw no search highlight. Eight accents, three background styles, card/button radius, card
   spacing and transparent navigation apply live. Motion offers Nova's master,
   page-transition, hover and navigation-feedback switches. Palette derivation
   comes from Nova's Rust implementation. Device preferences persist independently
@@ -80,7 +80,7 @@ physical-device acceptance.
 
 The collection and detail views also reuse Nova b69a1e5. `library-cards.slint`
 adapts its 2:3 poster/list geometry, captions, left-anchored progress rail, hover lift and
-responsive 160px/230px sizing; `title-artwork.slint` is Nova's original component.
+responsive 160px/230px sizing; `title-artwork.slint` re-exports the Kit component, Nova's original.
 `detail-hero.slint` adapts the edge-to-edge artwork, baked palette scrims,
 responsive title/metadata, expandable synopsis and primary/library actions.
 Display settings retain the selected layout and minimum column counts.
