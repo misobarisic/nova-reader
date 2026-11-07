@@ -1,7 +1,7 @@
 // Nova's shared action sheet keeps pointer, keyboard, Cancel and outside-tap
 // behavior identical to Reader's other menus. Preparing bytes never chooses a
 // destructive destination: only these explicit actions reach the export worker.
-import { MenuSheet } from "@ReaderMenuSheet";
+import { MenuSheet } from "@NovaUiBase/menusheet.slint";
 
 export component SaveConflictSheet inherits MenuSheet {
     in property <string> file-name;

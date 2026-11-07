@@ -1,6 +1,6 @@
 import { Theme, SettingsStyle } from "@NovaUiShared";
 import { PillButton, AddonIconButton, SettingsInput, ToggleSwitch, SettingsLink, SettingsBackButton } from "@NovaUiBase/settings-controls.slint";
-import { Dropdown } from "@ReaderDropdown";
+import { Dropdown } from "@NovaUiBase/dropdown.slint";
 
 // Thin Reader API adapters. All painting, motion, pointer/keyboard handling,
 // and geometry come from the same Nova Kit controls used by Nova itself.
@@ -43,6 +43,7 @@ export component MenuLink inherits SettingsLink {
 export component ReaderField inherits SettingsInput { min-width: 0px; }
 export component ReaderSelect inherits Dropdown {
     min-width: 0px; roomy: true;
+    keyboard-input-enabled: true;
     accessible-role: combobox;
     accessible-enabled: root.enabled;
     accessible-label: root.placeholder-text;
