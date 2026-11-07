@@ -7,11 +7,11 @@ resolver = "3"
 license = "GPL-3.0-or-later"
 
 [workspace.dependencies]
-nova-storage = { git = "https://github.com/misobarisic/nova-kit", rev = "1c30a81a576d5d2e0e79778c95d50a4d044b2aaa" }
-nova-ui-base = { git = "https://github.com/misobarisic/nova-kit", rev = "1c30a81a576d5d2e0e79778c95d50a4d044b2aaa" }
-nova-cache = { git = "https://github.com/misobarisic/nova-kit", rev = "1c30a81a576d5d2e0e79778c95d50a4d044b2aaa" }
-nova-image = { git = "https://github.com/misobarisic/nova-kit", rev = "1c30a81a576d5d2e0e79778c95d50a4d044b2aaa" }
-nova-sync = { git = "https://github.com/misobarisic/nova-kit", rev = "1c30a81a576d5d2e0e79778c95d50a4d044b2aaa", default-features = false }
+nova-storage = { git = "https://github.com/misobarisic/nova-kit", rev = "c7853085e6c9c570d72b4803f18ceb01e8cbe16a" }
+nova-ui-base = { git = "https://github.com/misobarisic/nova-kit", rev = "c7853085e6c9c570d72b4803f18ceb01e8cbe16a" }
+nova-cache = { git = "https://github.com/misobarisic/nova-kit", rev = "c7853085e6c9c570d72b4803f18ceb01e8cbe16a" }
+nova-image = { git = "https://github.com/misobarisic/nova-kit", rev = "c7853085e6c9c570d72b4803f18ceb01e8cbe16a" }
+nova-sync = { git = "https://github.com/misobarisic/nova-kit", rev = "c7853085e6c9c570d72b4803f18ceb01e8cbe16a", default-features = false }
 slint = { version = "=1.18.0", default-features = false, features = ["std", "compat-1-2", "accessibility"] }
 slint-build = "=1.18.0"
 
