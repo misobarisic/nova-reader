@@ -1,4 +1,4 @@
-import { ListView, Spinner } from "std-widgets.slint";
+import { Spinner } from "std-widgets.slint";
 import { Theme, SettingsStyle, Anim } from "@NovaUiShared";
 import { ActionButton, IconAction, BackButton, ReaderSelect } from "controls.slint";
 import { OverviewTile, PageThumbnail } from "page-thumbnail.slint";
@@ -237,9 +237,9 @@ component GalleryHeader inherits Rectangle {
 }
 
 // One regular row grid is shared by chapter pages and title image collections.
-// Slint 1.18's ListView calls update_visible_instances in model/repeater.rs;
-// its outer repeater instantiates only rows intersecting the viewport. The
-// inner repeater is bounded by columns, never by the entire page inventory.
+// Only rows intersecting the viewport are instantiated (first-row..last-row
+// below); the inner repeater is bounded by columns, never by the entire page
+// inventory.
 export component PageOverview inherits Rectangle {
     in property <[OverviewTile]> tiles;
     in property <string> title;
@@ -262,14 +262,14 @@ export component PageOverview inherits Rectangle {
     in-out property <int> group-index;
     out property <int> columns: root.columns-for-density(root.density);
     out property <length> row-height: root.collection ? root.tile-width + root.tile-gap : root.tile-width * 1.4 + 44px;
-    out property <length> viewport-height: grid.visible-height;
+    out property <length> viewport-height: grid.height;
     // Collection chrome is visible at the top, while loading, and after an
     // upward scroll, and hides while scrolling down through the photographs.
     out property <bool> header-shown: !root.collection || !root.header-hidden || root.tiles.length == 0 || root.busy || root.status != "";
     out property <length> header-height: root.header-measured;
     out property <bool> scroller-visible: root.scroller-eligible && (root.scroller-recent || root.scroller-dragging || root.scroller-hover);
     private property <length> tile-gap: root.collection ? 2px : 12px;
-    private property <length> tile-width: max(1px, (grid.visible-width - (root.columns - 1) * root.tile-gap) / root.columns);
+    private property <length> tile-width: max(1px, (grid.width - (root.columns - 1) * root.tile-gap) / root.columns);
     private property <int> row-count: Math.ceil(root.tiles.length * 1.0 / root.columns);
     private property <int> tile-count: root.tiles.length;
     private property <int> focus-index: max(0, root.current-index);
@@ -286,10 +286,20 @@ export component PageOverview inherits Rectangle {
     private property <bool> programmatic;
     private property <length> last-scroll-y;
     private property <length> scroll-run;
-    private property <length> total-height: root.row-count * root.row-height;
-    private property <length> scroll-range: max(0px, root.total-height - grid.visible-height);
+    // Content starts below the floating header (a collection's header height)
+    // and the photographs scroll up under its scrim. Row r's top edge in
+    // content coordinates is `pad + r * row-height`. Anchor and restore
+    // fractions are measured from the pad's bottom edge (the content area), so
+    // an entry anchor of 0 on row 0 means "scrolled to the start" at any pad.
+    private property <length> pad: root.collection ? root.header-measured : 0px;
+    private property <length> total-height: root.pad + root.row-count * root.row-height;
+    private property <length> scroll-range: max(0px, root.total-height - grid.height);
+    // Only rows intersecting the viewport are instantiated.
+    private property <int> first-row: max(0, min(root.row-count - 1, Math.floor((-grid.content-y - root.pad) / root.row-height)));
+    private property <int> last-row: max(root.first-row, min(root.row-count - 1, Math.floor((-grid.content-y - root.pad + grid.height) / root.row-height)));
+    private property <int> visible-rows: root.row-count == 0 ? 0 : root.last-row - root.first-row + 1;
     // The fast scroller is for long collections: more than about 3 screens.
-    private property <bool> scroller-eligible: root.collection && root.tiles.length > 0 && root.total-height > grid.visible-height * 3;
+    private property <bool> scroller-eligible: root.collection && root.tiles.length > 0 && root.total-height > grid.height * 3;
     private property <bool> scroller-recent;
     private property <bool> scroller-dragging;
     private property <float> scroller-drag-fraction;
@@ -298,7 +308,7 @@ export component PageOverview inherits Rectangle {
     private property <length> scroller-thumb: 52px;
     private property <float> scroller-fraction: root.scroller-dragging ? root.scroller-drag-fraction
         : root.scroll-range > 0px ? Math.clamp(-grid.content-y / root.scroll-range, 0, 1) : 0;
-    private property <int> scroller-image: min(root.tiles.length, Math.floor(root.scroller-fraction * root.scroll-range / root.row-height) * root.columns + 1);
+    private property <int> scroller-image: min(root.tiles.length, Math.floor(max(0px, root.scroller-fraction * root.scroll-range - root.pad) / root.row-height) * root.columns + 1);
     callback selected(string);
     callback visible-range(int, int, int);
     callback anchor(string, float);
@@ -314,33 +324,33 @@ export component PageOverview inherits Rectangle {
 
     function columns-for-density(value: int) -> int {
         if root.collection {
-            return max(2, min(12, grid.visible-width < 700px ? 4 - value : round(grid.visible-width / 390px * (4 - value))));
+            return max(2, min(12, grid.width < 700px ? 4 - value : round(grid.width / 390px * (4 - value))));
         }
-        return max(1, min(12, Math.floor((grid.visible-width + 12px) / ((value <= 0 ? 104px : value == 1 ? 144px : 190px) + 12px))));
+        return max(1, min(12, Math.floor((grid.width + 12px) / ((value <= 0 ? 104px : value == 1 ? 144px : 190px) + 12px))));
     }
     function begin-pinch(x: length, y: length) {
         root.pinch-start-density = root.density;
-        let row = max(0, Math.floor((y - grid.content-y) / root.row-height));
+        let row = max(0, Math.floor((y - grid.content-y - root.pad) / root.row-height));
         let column = Math.clamp(Math.floor(x / (root.tile-width + root.tile-gap)), 0, root.columns - 1);
         root.pinch-index = min(root.tiles.length - 1, row * root.columns + (root.rtl ? root.columns - column - 1 : column));
-        root.pinch-row-fraction = Math.clamp((y - grid.content-y - row * root.row-height) / root.row-height, 0, 1);
+        root.pinch-row-fraction = Math.clamp((y - grid.content-y - root.pad - row * root.row-height) / root.row-height, 0, 1);
         root.pinch-last-y = y;
     }
     function zoom-at(target: int, y: length) {
         if !root.collection || root.pinch-index < 0 || root.pinch-index >= root.tiles.length
             || (target == root.density && abs(y - root.pinch-last-y) < 0.5px) { return; }
         let next-columns = root.columns-for-density(target);
-        let next-row-height = (grid.visible-width - (next-columns - 1) * root.tile-gap) / next-columns + root.tile-gap;
-        let fraction = (y - root.pinch-row-fraction * next-row-height) / max(1px, grid.visible-height);
+        let next-row-height = (grid.width - (next-columns - 1) * root.tile-gap) / next-columns + root.tile-gap;
+        let fraction = (y - root.pad - root.pinch-row-fraction * next-row-height) / max(1px, grid.height);
         root.keyboard-active = false;
         root.focus-index = root.pinch-index;
         root.restoring = true;
         root.zoom-requested(target, root.tiles[root.pinch-index].page-id, fraction);
         // Follow a moving midpoint immediately. The bounded restore passes
-        // subsequently settle ListView's previous row-height estimate.
+        // subsequently settle the layout.
         if root.density == target {
-            grid.content-y = Math.clamp(y - root.pinch-row-fraction * next-row-height - Math.floor(root.pinch-index / next-columns) * next-row-height,
-                min(0px, grid.visible-height - Math.ceil(root.tiles.length * 1.0 / next-columns) * next-row-height), 0px);
+            grid.content-y = Math.clamp(y - root.pinch-row-fraction * next-row-height - root.pad - Math.floor(root.pinch-index / next-columns) * next-row-height,
+                min(0px, grid.height - root.pad - Math.ceil(root.tiles.length * 1.0 / next-columns) * next-row-height), 0px);
         }
         root.pinch-last-y = y;
     }
@@ -354,12 +364,14 @@ export component PageOverview inherits Rectangle {
     }
 
     function publish-viewport() {
-        if root.tiles.length > 0 && grid.visible-height > 0px {
-            root.visible-range(min(root.tiles.length, max(0, Math.floor(-grid.content-y / root.row-height) * root.columns)),
-                min(root.tiles.length, Math.ceil((-grid.content-y + grid.visible-height) / root.row-height) * root.columns), root.columns);
+        if root.tiles.length > 0 && grid.height > 0px {
+            // Rows above the header-sized pad do not exist; row 0 is the top.
+            let top-row = max(0, Math.floor((-grid.content-y - root.pad) / root.row-height));
+            root.visible-range(min(root.tiles.length, top-row * root.columns),
+                min(root.tiles.length, max(top-row + 1, Math.ceil((-grid.content-y - root.pad + grid.height) / root.row-height)) * root.columns), root.columns);
             if !root.restoring {
-                root.anchor(root.tiles[min(root.tiles.length - 1, max(0, Math.floor(-grid.content-y / root.row-height) * root.columns))].page-id,
-                    (Math.floor(-grid.content-y / root.row-height) * root.row-height + grid.content-y) / max(1px, grid.visible-height));
+                root.anchor(root.tiles[min(root.tiles.length - 1, top-row * root.columns)].page-id,
+                    (top-row * root.row-height + grid.content-y) / max(1px, grid.height));
             }
         } else { root.visible-range(0, 0, root.columns); }
     }
@@ -395,10 +407,11 @@ export component PageOverview inherits Rectangle {
         // A visible floating header covers the top of the grid.
         let inset = root.collection && root.header-shown ? root.header-measured : 0px;
         root.mark-programmatic();
-        if Math.floor(index / root.columns) * root.row-height + grid.content-y < inset {
-            grid.content-y = min(0px, inset - Math.floor(index / root.columns) * root.row-height);
-        } else if (Math.floor(index / root.columns) + 1) * root.row-height + grid.content-y > grid.visible-height {
-            grid.content-y = min(0px, grid.visible-height - (Math.floor(index / root.columns) + 1) * root.row-height);
+        let top = root.pad + Math.floor(index / root.columns) * root.row-height;
+        if top + grid.content-y < inset {
+            grid.content-y = min(0px, inset - top);
+        } else if top + root.row-height + grid.content-y > grid.height {
+            grid.content-y = min(0px, grid.height - top - root.row-height);
         }
     }
     // Move the viewport to a fraction (0..1) of the scrollable range, as the
@@ -430,6 +443,7 @@ export component PageOverview inherits Rectangle {
     changed focus-request => { keyboard.focus(); }
     changed columns => { root.defer-restore(); }
     changed row-height => { root.defer-restore(); }
+    changed pad => { root.defer-restore(); }
     changed tile-count => {
         root.focus-index = max(0, min(root.tiles.length - 1, root.focus-index));
         root.defer-restore();
@@ -442,13 +456,12 @@ export component PageOverview inherits Rectangle {
         triggered => {
             self.stop();
             if root.restore-index >= 0 && root.restore-index < root.tiles.length {
-                grid.content-y = max(min(0px, grid.visible-height - root.row-count * root.row-height),
-                    min(0px, root.restore-fraction * grid.visible-height - Math.floor(root.restore-index / root.columns) * root.row-height));
+                grid.content-y = max(min(0px, grid.height - root.total-height),
+                    min(0px, root.restore-fraction * grid.height - Math.floor(root.restore-index / root.columns) * root.row-height));
             }
-            // Pinned ListView first seeks with its previous average row height
-            // and snaps a distant seek to that row's top. Give layout one pass
-            // to measure the new density, one to seek the exact source row, and
-            // one to apply its viewport fraction without a random-seek snap.
+            // Give layout one pass to measure the new density (and header
+            // pad), one to seek the exact source row, and one to apply its
+            // viewport fraction.
             if root.restore-pass < 2 {
                 root.restore-pass += 1;
                 self.start();
@@ -478,8 +491,8 @@ export component PageOverview inherits Rectangle {
             if event.text == Key.DownArrow { root.move-focus(root.columns); return accept; }
             if event.text == Key.Home { root.move-focus(-root.tiles.length); return accept; }
             if event.text == Key.End { root.move-focus(root.tiles.length); return accept; }
-            if event.text == Key.PageDown { root.move-focus(max(1, Math.floor(grid.visible-height / root.row-height)) * root.columns); return accept; }
-            if event.text == Key.PageUp { root.move-focus(-max(1, Math.floor(grid.visible-height / root.row-height)) * root.columns); return accept; }
+            if event.text == Key.PageDown { root.move-focus(max(1, Math.floor(grid.height / root.row-height)) * root.columns); return accept; }
+            if event.text == Key.PageUp { root.move-focus(-max(1, Math.floor(grid.height / root.row-height)) * root.columns); return accept; }
             if event.text == Key.Return || event.text == " " {
                 if !event.repeat { root.selected(root.tiles[root.focus-index].page-id); }
                 return accept;
@@ -555,25 +568,27 @@ export component PageOverview inherits Rectangle {
             zoom: 1; enabled: root.collection;
             began => { root.begin-pinch(self.center.x, self.center.y); }
             transform(factor,from-x,from-y,to-x,to-y) => { root.pinch(factor, to-y * self.height); }
-            grid := ListView {
-                width: 100%; height: 100%; enabled: !pinch-gesture.blocking;
-                horizontal-scrollbar-policy: always-off; vertical-scrollbar-policy: always-off;
-                mouse-drag-pan-enabled: true; content-width: self.visible-width;
+            // Rows are virtualized by hand: a ListView cannot start its first
+            // row below a header-sized pad, and every row here is one height.
+            grid := Flickable {
+                width: 100%; height: 100%; interactive: !pinch-gesture.blocking;
+                mouse-drag-pan-enabled: true; content-width: self.width; content-height: root.total-height;
                 changed content-y => { root.publish-viewport(); root.track-scroll(); }
-                for row in root.row-count: Rectangle {
-                    width: grid.visible-width; height: root.row-height;
+                for slot-row in root.visible-rows: rowbox := Rectangle {
+                    private property <int> row-index: root.first-row + slot-row;
+                    y: root.pad + self.row-index * root.row-height; width: grid.width; height: root.row-height;
                     for column in root.columns: cell := Rectangle {
                         x: (root.rtl ? root.columns - column - 1 : column) * (root.tile-width + root.tile-gap);
                         y: 0px; width: root.tile-width; height: root.row-height - root.tile-gap;
-                        private property <int> tile-index: row * root.columns + column;
+                        private property <int> tile-index: rowbox.row-index * root.columns + column;
                         if cell.tile-index < root.tiles.length: PageThumbnail {
-                            width: 100%; height: 100%; tile: root.tiles[row * root.columns + column];
-                            collection: root.collection; current: row * root.columns + column == root.current-index;
-                            focused: root.keyboard-active && row * root.columns + column == root.focus-index;
+                            width: 100%; height: 100%; tile: root.tiles[rowbox.row-index * root.columns + column];
+                            collection: root.collection; current: rowbox.row-index * root.columns + column == root.current-index;
+                            focused: root.keyboard-active && rowbox.row-index * root.columns + column == root.focus-index;
                             interaction-enabled: !pinch-gesture.blocking;
                             zoom-requested(factor,x,y) => { root.wheel-zoom(factor, x - grid.absolute-position.x, y - grid.absolute-position.y); }
                             selected(id) => {
-                                root.focus-index = row * root.columns + column;
+                                root.focus-index = rowbox.row-index * root.columns + column;
                                 root.keyboard-active = false; keyboard.focus(); root.selected(id);
                             }
                         }

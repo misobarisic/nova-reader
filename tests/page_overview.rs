@@ -139,7 +139,26 @@ fn keyboard_selection_density_current_and_back_use_shared_callbacks() {
         let selected = selected.clone();
         move |id| selected.borrow_mut().push(id.to_string())
     });
-    tile(&ui, 1).mock_single_click(PointerEventButton::Left);
+    // A real mouse always hovers before it presses; the scrolling container
+    // holds an un-hovered press back to tell a click from a drag.
+    let first = tile(&ui, 1);
+    let center = LogicalPosition::new(
+        first.absolute_position().x + first.size().width / 2.,
+        first.absolute_position().y + first.size().height / 2.,
+    );
+    ui.window()
+        .dispatch_event(WindowEvent::PointerMoved { position: center });
+    mock_elapsed_time(Duration::from_millis(30));
+    ui.window().dispatch_event(WindowEvent::PointerPressed {
+        position: center,
+        button: PointerEventButton::Left,
+    });
+    mock_elapsed_time(Duration::from_millis(30));
+    ui.window().dispatch_event(WindowEvent::PointerReleased {
+        position: center,
+        button: PointerEventButton::Left,
+    });
+    settle();
     key(&ui, Key::RightArrow);
     key(&ui, Key::Return);
     assert_eq!(selected.borrow().last().unwrap(), "stable-page-1");
@@ -873,7 +892,7 @@ fn wheel_grid(ui: &AppWindow, delta: f32) {
 }
 
 #[test]
-fn gallery_images_start_at_the_top_under_a_floating_header() {
+fn gallery_grid_owns_the_window_under_a_floating_header() {
     i_slint_backend_testing::init_no_event_loop();
     for (width, height) in [(360., 800.), (1280., 800.)] {
         let ui = gallery(width, height, 0);
@@ -887,8 +906,12 @@ fn gallery_images_start_at_the_top_under_a_floating_header() {
         let first = ElementHandle::find_by_accessible_label(&ui, "Image 1")
             .find(|element| element.accessible_role() == Some(AccessibleRole::Button))
             .unwrap();
-        assert!(first.absolute_position().y.abs() < 0.01);
         let header = by_id(&ui, "PageOverview::gallery-header");
+        assert!(
+            first.absolute_position().y
+                >= header.absolute_position().y + header.size().height - 0.5,
+            "the first row starts below the header"
+        );
         assert!(
             header.size().height >= 48. && header.size().height < 80.,
             "one compact row: {}",
@@ -918,6 +941,52 @@ fn gallery_images_start_at_the_top_under_a_floating_header() {
                 .next()
                 .is_some()
         );
+    }
+}
+
+#[test]
+fn gallery_content_starts_below_the_header_and_scrolls_under_its_scrim() {
+    i_slint_backend_testing::init_no_event_loop();
+    for (width, height, groups) in [(360., 800., 0), (360., 800., 3), (1280., 800., 3)] {
+        let ui = gallery(width, height, 0);
+        ui.set_overview_groups(ModelRc::new(VecModel::from(
+            (0..groups)
+                .map(|n| format!("Day {}", n + 1).into())
+                .collect::<Vec<slint::SharedString>>(),
+        )));
+        settle();
+        let header = by_id(&ui, "PageOverview::gallery-header");
+        let bottom = header.absolute_position().y + header.size().height;
+        if groups > 0 {
+            assert!(header.size().height > 90., "chips make the header taller");
+        }
+        let first = ElementHandle::find_by_accessible_label(&ui, "Image 1")
+            .find(|element| element.accessible_role() == Some(AccessibleRole::Button))
+            .unwrap();
+        assert!(
+            first.absolute_position().y >= bottom - 0.5,
+            "at content-y 0 the first row ({}) is not under the header ({bottom})",
+            first.absolute_position().y
+        );
+        assert!(
+            (first.absolute_position().y - bottom).abs() < 1.,
+            "and starts exactly at the header's bottom edge"
+        );
+        // Scrolling down a little (then up to bring the header back) slides
+        // the photographs up under the scrim.
+        wheel_grid(&ui, -300.);
+        wheel_grid(&ui, 60.);
+        assert!(header_shown(&ui));
+        let under = ElementHandle::find_by_element_type_name(&ui, "PageThumbnail")
+            .any(|tile| tile.absolute_position().y < bottom - 1.);
+        assert!(under, "images scroll beneath the header");
+        // Back at the very top, the pad is restored exactly.
+        key(&ui, Key::Home);
+        wheel_grid(&ui, 4000.);
+        let first = ElementHandle::find_by_accessible_label(&ui, "Image 1")
+            .find(|element| element.accessible_role() == Some(AccessibleRole::Button))
+            .unwrap();
+        assert!((first.absolute_position().y - bottom).abs() < 1.);
     }
 }
 
@@ -1199,6 +1268,7 @@ fn fast_scroller_appears_for_long_collections_and_jumps_to_the_matching_row() {
         let anchors = anchors.clone();
         move |id, _| anchors.borrow_mut().push(id.to_string())
     });
+    let pad = by_id(&ui, "PageOverview::gallery-header").size().height;
     // Idle: nothing to grab, so it never steals taps from edge tiles.
     assert!(scroller(&ui).is_none_or(|s| s.computed_opacity() < 0.01));
     wheel_grid(&ui, -80.);
@@ -1237,7 +1307,8 @@ fn fast_scroller_appears_for_long_collections_and_jumps_to_the_matching_row() {
         drag(fraction * (size.height - thumb) + thumb / 2.);
         settle();
         // While dragging, a bubble names the image under the thumb.
-        let top_row = ((fraction * (rows as f32 * row - grid_height)) / row).floor() as usize;
+        let top_row = ((fraction * (pad + rows as f32 * row - grid_height) - pad).max(0.) / row)
+            .floor() as usize;
         let expected = (top_row * columns + 1).min(320);
         assert!(
             ElementHandle::find_by_accessible_label(&ui, &format!("Image {expected} of 320"))
