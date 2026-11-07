@@ -12,7 +12,7 @@ use reader_sources::{CancelToken, Page, Source};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashSet,
-    fs, io,
+    io,
     path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex,
@@ -48,30 +48,9 @@ fn chapter_group(chapter: &ChapterId) -> String {
 fn inspect(bytes: &[u8]) -> Result<(u32, u32)> {
     page_store::inspect_stored(bytes)
 }
-fn private_directory(path: &Path) -> io::Result<()> {
-    let mut builder = fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    builder.create(path)?;
-    if fs::symlink_metadata(path)?.file_type().is_symlink() {
-        return Err(io::Error::other(
-            "chapter cache directory cannot be a symlink",
-        ));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(())
-}
 struct Backend {
     policy: Policy,
-    marker: String,
+    marker: gc::Marker,
     notify: Arc<Mutex<Option<Notify>>>,
 }
 impl gc::Backend for Backend {
@@ -81,15 +60,11 @@ impl gc::Backend for Backend {
     fn eviction_group(&self, key: &str) -> String {
         key.split(':').take(3).collect::<Vec<_>>().join(":")
     }
-    fn last_cleanup(&self, _: &Path) -> io::Result<Option<u64>> {
-        Ok(nova_storage::try_get_str(&self.marker)
-            .ok()
-            .flatten()
-            .and_then(|s| s.parse().ok()))
+    fn last_cleanup(&self, directory: &Path) -> io::Result<Option<u64>> {
+        self.marker.load(directory)
     }
-    fn save_cleanup(&self, _: &Path, completed: u64) -> io::Result<()> {
-        let _ = nova_storage::try_set_str(&self.marker, &completed.to_string());
-        Ok(())
+    fn save_cleanup(&self, directory: &Path, completed: u64) -> io::Result<()> {
+        self.marker.save(directory, completed)
     }
     fn preferred_urls(&self) -> io::Result<HashSet<String>> {
         Ok(HashSet::new())
@@ -213,15 +188,15 @@ impl ChapterCache {
         )
     }
     fn with_hooks(directory: PathBuf, policy: Policy, encoder: Encoder) -> Self {
-        let usable = private_directory(&directory).is_ok();
+        let usable = nova_storage::fs::private_dir(&directory).is_ok();
         let cache = blob::Cache::new(directory.clone(), ENTRY_BYTES as u64);
         let notify = Arc::new(Mutex::new(None));
         let backend = Arc::new(Backend {
             policy: policy.clone(),
-            marker: format!(
+            marker: gc::Marker::new(format!(
                 "reader:chapter-cache:cleanup:{}",
                 digest(directory.as_os_str().as_encoded_bytes())
-            ),
+            )),
             notify: notify.clone(),
         });
         let gc = usable.then(|| gc::start(directory, backend).ok()).flatten();
@@ -659,7 +634,43 @@ fn compress(
 mod tests {
     use super::*;
     use reader_sources::{HttpRequest, HttpResponse, SourceRegistry, SourceTransport};
-    use std::{io::Write, sync::atomic::AtomicUsize, time::Instant};
+    use std::{fs, io::Write, sync::atomic::AtomicUsize, time::Instant};
+    fn marker_backend(directory: &Path) -> Backend {
+        Backend {
+            policy: Arc::new(|| gc::DiskPolicy {
+                enabled: true,
+                limit_bytes: None,
+            }),
+            marker: gc::Marker::new(format!(
+                "reader:chapter-cache:cleanup:{}",
+                digest(directory.as_os_str().as_encoded_bytes())
+            )),
+            notify: Arc::default(),
+        }
+    }
+    #[test]
+    fn the_cleanup_marker_belongs_to_the_directory_it_was_saved_for() {
+        use gc::Backend as _;
+        let storage = tempfile::tempdir().unwrap();
+        nova_storage::init_at(storage.path());
+        let directory = tempfile::tempdir().unwrap();
+        let backend = marker_backend(directory.path());
+        assert_eq!(backend.last_cleanup(directory.path()).unwrap(), None);
+        backend.save_cleanup(directory.path(), 77).unwrap();
+        assert_eq!(backend.last_cleanup(directory.path()).unwrap(), Some(77));
+        // A cache that moved must not inherit the old directory's schedule.
+        assert_eq!(
+            backend.last_cleanup(Path::new("/moved/elsewhere")).unwrap(),
+            None
+        );
+        // The bare timestamp older builds stored reads as "never cleaned".
+        let legacy = format!(
+            "reader:chapter-cache:cleanup:{}",
+            digest(directory.path().as_os_str().as_encoded_bytes())
+        );
+        nova_storage::try_set_str(&legacy, "1234").unwrap();
+        assert_eq!(backend.last_cleanup(directory.path()).unwrap(), None);
+    }
     #[test]
     fn thumbnails_share_physical_original_quota_and_clear_preserves_originals() {
         let directory = tempfile::tempdir().unwrap();
