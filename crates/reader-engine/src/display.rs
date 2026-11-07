@@ -365,6 +365,11 @@ pub fn page_presentation(
 /// its read-ahead at common widths (about ten 2,048-row bands at 720 px);
 /// admission also keeps cache plus output window within the decoded budget.
 const BAND_CACHE_BYTES: u64 = 64 * 1024 * 1024;
+/// What decoded bands may keep resident once a render has the ones it needs:
+/// the reader's model budget. The rows a single rectangle samples may exceed it
+/// for the moment they are needed (wide pages), but nothing beyond them stays
+/// above it; the bands farthest from the rows just rendered are evicted first.
+pub const BAND_RETAIN_BYTES: u64 = DISPLAY_WINDOW_BYTES as u64;
 
 /// One image worker's most recent windowed original, separate from display
 /// buffers. Moving a viewport must not decompress the same long page again.
@@ -382,6 +387,22 @@ const BAND_CACHE_BYTES: u64 = 64 * 1024 * 1024;
 pub struct DisplayDecoder {
     cached: Option<DecodedOriginal>,
     banded: Option<BandedOriginal>,
+    counters: Arc<BandCounters>,
+}
+
+/// Bands decoded by one [`DisplayDecoder`] since it was created.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BandStats {
+    /// Decoded because a render, the background pixel or a crop scan needed
+    /// them right now: the viewer waits for each one.
+    pub on_demand: u64,
+    /// Decoded by [`DisplayDecoder::read_ahead`] before any render asked.
+    pub ahead: u64,
+}
+#[derive(Default)]
+struct BandCounters {
+    on_demand: std::sync::atomic::AtomicU64,
+    ahead: std::sync::atomic::AtomicU64,
 }
 struct DecodedOriginal {
     source: Arc<dyn PageSource>,
@@ -404,6 +425,7 @@ struct BandedOriginal {
     clock: u64,
     crop: Option<CropRect>,
     background: Option<[u8; 4]>,
+    counters: Arc<BandCounters>,
 }
 impl BandedOriginal {
     fn count(&self) -> u32 {
@@ -453,6 +475,9 @@ impl BandedOriginal {
                 return Err(Error::Layout);
             }
             self.bytes += image.as_raw().len() as u64;
+            self.counters
+                .on_demand
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             self.bands.insert(
                 band,
                 Band {
@@ -461,7 +486,30 @@ impl BandedOriginal {
                 },
             );
         }
+        if self.bytes > BAND_RETAIN_BYTES {
+            let keep = needed.clone().collect::<Vec<_>>();
+            let middle = (needed.start + needed.end) * self.rows / 2;
+            while self.bytes > BAND_RETAIN_BYTES && self.evict_farthest(&keep, middle) {}
+        }
         Ok(())
+    }
+    /// Evict the resident band outside `keep` that is farthest from source row
+    /// `edge`. `false` when nothing outside `keep` is resident.
+    fn evict_farthest(&mut self, keep: &[u32], edge: u32) -> bool {
+        let rows = self.rows;
+        let Some(far) = self
+            .bands
+            .keys()
+            .copied()
+            .filter(|band| !keep.contains(band))
+            .max_by_key(|band| (band * rows + rows / 2).abs_diff(edge))
+        else {
+            return false;
+        };
+        if let Some(old) = self.bands.remove(&far) {
+            self.bytes -= old.image.as_raw().len() as u64;
+        }
+        true
     }
     /// Pixel (0, 0): the page's background colour source.
     fn background(&mut self, budget: u64) -> Result<[u8; 4]> {
@@ -498,7 +546,158 @@ fn banded_rows(source: &dyn PageSource, dimensions: PageDimensions) -> Option<u3
 fn row_contiguous(presentation: &PagePresentation) -> bool {
     !presentation.split && !presentation.reverse_page && presentation.rotation == PageRotation::None
 }
+/// What to decode ahead of a published window: the bands behind the rows just
+/// beyond its leading edge, so the next window shift finds them resident.
+#[derive(Clone, Copy, Debug)]
+pub struct ReadAhead {
+    /// Target output width the window was planned for.
+    pub width: u32,
+    pub options: DisplayOptions,
+    /// The window the viewer currently holds.
+    pub window: DisplayWindowPlan,
+    /// Scroll direction: ahead is above the window when set.
+    pub backwards: bool,
+    /// Output rows beyond the window edge to cover (about one to two viewport
+    /// heights).
+    pub depth_rows: u32,
+    /// Most band bytes read-ahead may leave resident. Bands outside the wanted
+    /// range are evicted, farthest from the window edge first, to stay within it.
+    pub max_bytes: u64,
+}
+/// Result of one [`DisplayDecoder::read_ahead`] step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadAheadStep {
+    /// One band was decoded; call again for the next.
+    Decoded,
+    /// Every band in range is resident (or does not fit the budget).
+    Done,
+    /// Not a banded page held by this decoder, a stale window, or a
+    /// presentation that needs the whole page: nothing to read ahead.
+    Unavailable,
+}
 impl DisplayDecoder {
+    /// Bands decoded so far, split into those a render waited for and those
+    /// decoded ahead of time.
+    pub fn band_stats(&self) -> BandStats {
+        use std::sync::atomic::Ordering::Relaxed;
+        BandStats {
+            on_demand: self.counters.on_demand.load(Relaxed),
+            ahead: self.counters.ahead.load(Relaxed),
+        }
+    }
+    /// Bands and bytes of the current banded page that are resident.
+    pub fn resident_bands(&self) -> (usize, u64) {
+        self.banded
+            .as_ref()
+            .map_or((0, 0), |banded| (banded.bands.len(), banded.bytes))
+    }
+    /// Decode at most one band of a split page that the next window shift will
+    /// need, in the scroll direction and nearest first. Only a page this
+    /// decoder already holds banded is read ahead; the caller decides when the
+    /// viewer is idle and calls again while it returns `Decoded`. The window's
+    /// own pixels were rendered already, so bands behind the edge are only
+    /// kept while the budget allows: the farthest from the edge go first.
+    pub fn read_ahead(
+        &mut self,
+        source: &impl SharedPage,
+        limits: DecodeLimits,
+        request: ReadAhead,
+    ) -> Result<ReadAheadStep> {
+        if self.holds_whole(source, limits) || !self.holds_bands(source, limits) {
+            return Ok(ReadAheadStep::Unavailable);
+        }
+        let presentation = self.presentation(source, limits, request.options)?;
+        let plan = request.window;
+        let effective = presentation.effective;
+        let width = request.width.min(effective.width).max(1);
+        let full_height = (u64::from(effective.height) * u64::from(width)
+            / u64::from(effective.width))
+        .max(1) as u32;
+        if !row_contiguous(&presentation)
+            || plan.width != width
+            || plan.full_height != full_height
+            || plan.rows == 0
+            || plan.first_row + plan.rows > full_height
+        {
+            return Ok(ReadAheadStep::Unavailable);
+        }
+        let (low, high) = if request.backwards {
+            (
+                plan.first_row.saturating_sub(request.depth_rows),
+                plan.first_row,
+            )
+        } else {
+            let edge = plan.first_row + plan.rows;
+            (
+                edge,
+                edge.saturating_add(request.depth_rows).min(full_height),
+            )
+        };
+        if low >= high {
+            return Ok(ReadAheadStep::Done);
+        }
+        let view = SourceView {
+            x: presentation.crop_x,
+            y: presentation.crop_y,
+            width: effective.width,
+            height: effective.height,
+        };
+        let (first, last) = source_span(view, plan, low, high - low);
+        let edge_row = if request.backwards { last } else { first };
+        let budget = request.max_bytes.min(band_budget(limits, plan));
+        let banded = self.banded.as_mut().unwrap();
+        let count = banded.count();
+        let mut order =
+            (first / banded.rows..=(last / banded.rows).min(count - 1)).collect::<Vec<_>>();
+        if request.backwards {
+            order.reverse();
+        }
+        // Wanted bands, nearest first, as many as the budget holds.
+        let mut wanted = Vec::new();
+        let mut total = 0;
+        for band in order {
+            total += banded.band_bytes(band);
+            if total > budget {
+                break;
+            }
+            wanted.push(band);
+        }
+        // The budget holds for resident bands too, not only for new ones.
+        while banded.bytes > budget && banded.evict_farthest(&wanted, edge_row) {}
+        for band in wanted.iter().copied() {
+            banded.clock += 1;
+            if let Some(resident) = banded.bands.get_mut(&band) {
+                resident.used = banded.clock;
+                continue;
+            }
+            let size = banded.band_bytes(band);
+            while banded.bytes + size > budget {
+                if !banded.evict_farthest(&wanted, edge_row) {
+                    return Ok(ReadAheadStep::Done);
+                }
+            }
+            let rows = banded.band_range(band);
+            let image = banded.source.decode_rows(rows.clone(), banded.limits)?;
+            if image.width() != banded.dimensions.width || image.height() != rows.end - rows.start {
+                return Err(Error::Layout);
+            }
+            banded.bytes += image.as_raw().len() as u64;
+            banded
+                .counters
+                .ahead
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            banded.bands.insert(
+                band,
+                Band {
+                    image,
+                    used: banded.clock,
+                },
+            );
+            return Ok(ReadAheadStep::Decoded);
+        }
+        Ok(ReadAheadStep::Done)
+    }
+
     /// Release pixels and their response on reader close, generation changes,
     /// or source revocation, including while the worker has no queued images.
     pub fn clear(&mut self) {
@@ -550,6 +749,7 @@ impl DisplayDecoder {
                 clock: 0,
                 crop: None,
                 background: None,
+                counters: self.counters.clone(),
             });
         }
         self.banded.as_mut().unwrap()
@@ -2510,6 +2710,285 @@ mod tests {
                 .unwrap();
             assert_eq!(a.image, b.image, "cropped width {width}");
         }
+    }
+
+    /// Render every 512-row upload rect of the window that is not in `previous`
+    /// and return the rows as the viewer would receive them.
+    fn render_entering(
+        decoder: &mut DisplayDecoder,
+        source: &Arc<dyn PageSource>,
+        limits: DecodeLimits,
+        (start, end): (f64, f64),
+        previous: Option<DisplayWindowPlan>,
+    ) -> (DisplayWindowPlan, Vec<(u32, Vec<u8>)>) {
+        decoder
+            .render_window_tiles(
+                source,
+                limits,
+                16,
+                start,
+                end,
+                DISPLAY_WINDOW_BYTES,
+                DisplayOptions::default(),
+                |renderer| {
+                    let plan = renderer.plan();
+                    let mut out = Vec::new();
+                    let mut top = plan.first_row;
+                    while top < plan.first_row + plan.rows {
+                        let bottom = ((top / DISPLAY_TILE_ROWS + 1) * DISPLAY_TILE_ROWS)
+                            .min(plan.first_row + plan.rows);
+                        if previous
+                            .is_none_or(|p| top < p.first_row || bottom > p.first_row + p.rows)
+                        {
+                            let mut pixels = vec![0; 16 * (bottom - top) as usize * 4];
+                            renderer.render_rect(top, bottom - top, 0, 16, &mut pixels)?;
+                            out.push((top, pixels));
+                        }
+                        top = bottom;
+                    }
+                    Ok(out)
+                },
+            )
+            .unwrap()
+    }
+    fn ahead(
+        plan: DisplayWindowPlan,
+        backwards: bool,
+        depth_rows: u32,
+        max_bytes: u64,
+    ) -> ReadAhead {
+        ReadAhead {
+            width: 16,
+            options: DisplayOptions::default(),
+            window: plan,
+            backwards,
+            depth_rows,
+            max_bytes,
+        }
+    }
+    fn drain(
+        decoder: &mut DisplayDecoder,
+        source: &Arc<dyn PageSource>,
+        request: ReadAhead,
+    ) -> usize {
+        let mut steps = 0;
+        while decoder
+            .read_ahead(source, DecodeLimits::default(), request)
+            .unwrap()
+            == ReadAheadStep::Decoded
+        {
+            steps += 1;
+            assert!(steps < 100, "read-ahead must terminate");
+        }
+        steps
+    }
+
+    #[test]
+    fn read_ahead_decodes_the_entering_bands_before_the_window_shift_needs_them() {
+        // 16 bands of 512 rows; the windows are 2,048-row aligned.
+        let page = textured(16, 12288);
+        let strips = Strips::new(&page, 512);
+        let source = dyn_source(&strips);
+        let limits = DecodeLimits::default();
+        let mut decoder = DisplayDecoder::default();
+        let (plan, _) = render_entering(&mut decoder, &source, limits, (0., 0.05), None);
+        assert_eq!((plan.first_row, plan.rows), (0, 6144));
+        let waited = decoder.band_stats();
+        assert_eq!(waited.ahead, 0);
+        // Without read-ahead the next shift decodes four bands the viewer waits for.
+        let mut cold = DisplayDecoder::default();
+        let (cold_plan, _) = render_entering(&mut cold, &source, limits, (0., 0.05), None);
+        let before = cold.band_stats().on_demand;
+        let (_, entering) =
+            render_entering(&mut cold, &source, limits, (0.4, 0.45), Some(cold_plan));
+        assert_eq!(cold.band_stats().on_demand - before, 4, "stall on entry");
+        assert_eq!(entering.len(), 1);
+        // With read-ahead for the same rows, the shift waits for none.
+        assert_eq!(
+            drain(&mut decoder, &source, ahead(plan, false, 2048, 1 << 30)),
+            4
+        );
+        assert_eq!(decoder.band_stats().ahead, 4);
+        let on_demand = decoder.band_stats().on_demand;
+        let (shifted, entering) =
+            render_entering(&mut decoder, &source, limits, (0.4, 0.45), Some(plan));
+        assert_eq!((shifted.first_row, shifted.rows), (2048, 6144));
+        assert_eq!(
+            decoder.band_stats().on_demand,
+            on_demand,
+            "no band decoded on entry"
+        );
+        // And the pixels are the page's own rows.
+        let (top, pixels) = &entering[0];
+        assert_eq!(*top, 6144);
+        assert_eq!(pixels[..], page.as_raw()[6144 * 64..8192 * 64]);
+    }
+
+    #[test]
+    fn read_ahead_follows_the_direction_and_evicts_the_farthest_band_first() {
+        let page = textured(16, 12288);
+        let strips = Strips::new(&page, 512);
+        let source = dyn_source(&strips);
+        let limits = DecodeLimits::default();
+        let mut decoder = DisplayDecoder::default();
+        // Window [4096, 8192) in the middle of the page.
+        let (plan, _) = render_entering(&mut decoder, &source, limits, (0.45, 0.47), None);
+        assert_eq!((plan.first_row, plan.rows), (2048, 6144));
+        // Forward: rows 8192.. are bands 16.. (the page ends at band 24).
+        assert_eq!(
+            drain(&mut decoder, &source, ahead(plan, false, 1024, 1 << 30)),
+            2
+        );
+        let ahead_bands = strips.decoded();
+        assert!(
+            ahead_bands.contains(&16) && ahead_bands.contains(&17),
+            "{ahead_bands:?}"
+        );
+        // Backward: rows below 2048 are bands 3, 2 (nearest first).
+        let before = strips.decoded.lock().unwrap().len();
+        decoder
+            .read_ahead(&source, limits, ahead(plan, true, 1024, 1 << 30))
+            .unwrap();
+        assert_eq!(
+            *strips.decoded.lock().unwrap().last().unwrap(),
+            3,
+            "nearest first"
+        );
+        assert_eq!(strips.decoded.lock().unwrap().len(), before + 1);
+        // A budget of four bands keeps those nearest the leading edge. The
+        // first window left bands 0..=11 resident (the whole window rendered).
+        let band = 16 * 512 * 4;
+        let mut decoder = DisplayDecoder::default();
+        let (plan, _) = render_entering(&mut decoder, &source, limits, (0.1, 0.12), None);
+        assert_eq!((plan.first_row, plan.rows), (0, 6144));
+        assert_eq!(decoder.resident_bands().0, 12);
+        let max = 4 * band as u64;
+        drain(&mut decoder, &source, ahead(plan, false, 1024, max));
+        let (count, bytes) = decoder.resident_bands();
+        assert!(bytes <= max && count <= 4, "{count} bands, {bytes} bytes");
+        let mut resident = decoder
+            .banded
+            .as_ref()
+            .unwrap()
+            .bands
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        resident.sort();
+        assert_eq!(
+            resident,
+            [10, 11, 12, 13],
+            "bands farthest from the edge went first"
+        );
+    }
+
+    #[test]
+    fn read_ahead_declines_whole_pages_stale_windows_and_whole_page_recipes() {
+        let page = textured(16, 12288);
+        let strips = Strips::new(&page, 512);
+        let source = dyn_source(&strips);
+        let limits = DecodeLimits::default();
+        let mut decoder = DisplayDecoder::default();
+        // Nothing held yet.
+        let probe = DisplayWindowPlan {
+            width: 16,
+            full_height: 12288,
+            first_row: 0,
+            rows: 2048,
+        };
+        assert_eq!(
+            decoder
+                .read_ahead(&source, limits, ahead(probe, false, 1024, 1 << 30))
+                .unwrap(),
+            ReadAheadStep::Unavailable
+        );
+        let (plan, _) = render_entering(&mut decoder, &source, limits, (0., 0.05), None);
+        // A window planned for another height is stale.
+        let stale = DisplayWindowPlan {
+            full_height: 9000,
+            ..plan
+        };
+        assert_eq!(
+            decoder
+                .read_ahead(&source, limits, ahead(stale, false, 1024, 1 << 30))
+                .unwrap(),
+            ReadAheadStep::Unavailable
+        );
+        // A recipe that needs the whole page is not sampled from bands.
+        let mut reversed = ahead(plan, false, 1024, 1 << 30);
+        reversed.options.reverse_page = true;
+        assert_eq!(
+            decoder.read_ahead(&source, limits, reversed).unwrap(),
+            ReadAheadStep::Unavailable
+        );
+        // Nothing lies beyond a window that reaches the end of the page.
+        let last = DisplayWindowPlan {
+            first_row: 8192,
+            rows: 4096,
+            ..plan
+        };
+        assert_eq!(
+            decoder
+                .read_ahead(&source, limits, ahead(last, false, 1024, 1 << 30))
+                .unwrap(),
+            ReadAheadStep::Done
+        );
+        // A page decoded whole has no bands to read ahead.
+        let png = {
+            let mut bytes = std::io::Cursor::new(Vec::new());
+            page.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+            Arc::new(bytes.into_inner())
+        };
+        let mut whole = DisplayDecoder::default();
+        whole
+            .decode_window(&png, limits, 16, 0., 0.05, DISPLAY_WINDOW_BYTES)
+            .unwrap();
+        assert_eq!(
+            whole
+                .read_ahead(&png, limits, ahead(plan, false, 1024, 1 << 30))
+                .unwrap(),
+            ReadAheadStep::Unavailable
+        );
+        assert_eq!(whole.band_stats(), BandStats::default());
+    }
+    #[test]
+    fn resident_bands_stay_within_the_retention_budget_farthest_evicted_first() {
+        // Nine bands of 8 MiB: the render needs one or two at a time, and
+        // only 32 MiB of what it has seen may stay.
+        let page = image::RgbaImage::from_fn(4096, 4608, |x, y| {
+            image::Rgba([x as u8, y as u8, (y / 512) as u8, 255])
+        });
+        let strips = Strips::new(&page, 512);
+        let source = dyn_source(&strips);
+        let limits = DecodeLimits::default();
+        let mut decoder = DisplayDecoder::default();
+        decoder
+            .presentation(&source, limits, DisplayOptions::default())
+            .unwrap();
+        for band in 1..9 {
+            let banded = decoder.banded.as_mut().unwrap();
+            banded.load(band..band + 1, BAND_CACHE_BYTES).unwrap();
+            assert!(banded.bytes <= BAND_RETAIN_BYTES, "after band {band}");
+        }
+        let mut resident = decoder
+            .banded
+            .as_ref()
+            .unwrap()
+            .bands
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        resident.sort();
+        assert_eq!(
+            resident,
+            [5, 6, 7, 8],
+            "the bands nearest the last render stay"
+        );
+        // A two-band seam rectangle exceeds nothing it needs, then trims.
+        let banded = decoder.banded.as_mut().unwrap();
+        banded.load(1..3, BAND_CACHE_BYTES).unwrap();
+        assert!(banded.bytes <= BAND_RETAIN_BYTES);
+        assert!(banded.bands.contains_key(&1) && banded.bands.contains_key(&2));
     }
 
     #[test]
