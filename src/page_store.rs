@@ -5,6 +5,22 @@
 //! `page_store/strips.rs`; callers see only a page with dimensions that decodes
 //! rows, so counters, anchors, ratios, captures and thumbnails behave exactly
 //! as they do for a whole image.
+//!
+//! The container is unreachable from outside this module (the compiler, not a
+//! convention, keeps it so; `tests/page_store_boundary.rs` also watches the
+//! sources):
+//!
+//! ```compile_fail,E0603
+//! use nova_reader::page_store::strips::Container;
+//! ```
+//!
+//! A page, by contrast, is the supported way in:
+//!
+//! ```
+//! use nova_reader::page_store::PageImage;
+//! let page = PageImage::from_encoded(vec![1, 2, 3]);
+//! assert_eq!(page.encoded_len(), 3);
+//! ```
 mod strips;
 
 use crate::{
@@ -219,6 +235,13 @@ pub fn validate_stored(bytes: &[u8]) -> std::result::Result<(), String> {
             .map(drop)
             .map_err(|error| error.to_string())
     }
+}
+
+/// A file that claims to be a stored page but is not one, for tests of the
+/// stores' handling of corrupt entries.
+#[cfg(test)]
+pub(crate) fn forged_stored_page() -> Vec<u8> {
+    [strips::MAGIC.as_slice(), &[0u8; 64]].concat()
 }
 
 /// Reject a fetched response that claims to be a stored container. Sources

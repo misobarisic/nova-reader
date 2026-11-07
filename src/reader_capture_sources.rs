@@ -480,6 +480,58 @@ mod tests {
         );
     }
     #[test]
+    fn a_chapter_capture_of_a_split_page_matches_the_page_stored_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let (width, height) = (160u32, 3000u32);
+        let page = image::RgbaImage::from_fn(width, height, |x, y| {
+            let n = x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503) ^ (y / 7);
+            image::Rgba([n as u8, (n >> 8) as u8, (y / 3) as u8, 255])
+        });
+        let whole = dir.path().join("whole.png");
+        page.save(&whole).unwrap();
+        let split = dir.path().join("split.page");
+        std::fs::write(
+            &split,
+            crate::page_store::split_form(
+                &std::fs::read(&whole).unwrap(),
+                crate::image_storage::ImageCompression {
+                    lossless_inputs: true,
+                    ..Default::default()
+                },
+                Some(crate::page_store::SplitPlan {
+                    threshold_rows: 1024,
+                    strip_rows: 256,
+                }),
+                reader_engine::current_limits(),
+                32 << 20,
+                &|| true,
+            )
+            .unwrap()
+            .expect("tall page splits"),
+        )
+        .unwrap();
+        let cancel = CancelToken::default();
+        for scale in [None, Some(1.), Some(0.5)] {
+            let mut rendered = Vec::new();
+            for path in [&whole, &split] {
+                let mut capture = capture(
+                    PageInput::Local {
+                        path: path.clone(),
+                        id: "page".into(),
+                    },
+                    None,
+                    f64::from(width),
+                    f64::from(height),
+                );
+                capture.output_scale = scale;
+                let (image, naming) =
+                    reader_capture_editor::render_capture(&capture, &cancel, None).unwrap();
+                rendered.push((image.width, image.height, image.pixels, naming.source_y));
+            }
+            assert!(rendered[0] == rendered[1], "scale {scale:?}");
+        }
+    }
+    #[test]
     fn repeated_editor_refreshes_reuse_the_decoded_original() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("long.png");

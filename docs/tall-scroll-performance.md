@@ -169,6 +169,46 @@ over the scroll rather than paid up front, and the page is never held as a
 cache format (WebP by default), whose per-strip decode cost is measured in the
 app (see "Split storage in the app" below).
 
+## Split storage in the app
+
+The cache stores a page taller than 4,096 rows as 2,048-row strips in the
+cache's format and quality (WebP 85 by default; see `page_store`). A page taller
+than 16,383 rows could never be a single WebP, so such pages stayed in their
+source encoding. `tests/split_decode_cost.rs` (ignored; it prints timings)
+measures the same 720x25,000 line-art page as the cache would hold it, with the
+engine's `tall_scroll` windows. Same host, mean of three runs, release-like
+dependencies (`--config 'profile.dev.package.nova-reader.opt-level=2'`):
+
+| Output width | Cache entry | First window | Mean later window | Jump to 78% (fresh) | One-strip shift |
+| --- | --- | --- | --- | --- | --- |
+| 720 px | whole source PNG (what a page over 8 MP stored before) | 220 ms | 5.3 ms | 230 ms | 0.7 ms |
+| 720 px | 13 WebP 85 strips | 103 ms | 52 ms | 163 ms | 27 ms |
+| 512 px | whole source PNG | 236 ms | 26 ms | 250 ms | 6.2 ms |
+| 512 px | 13 WebP 85 strips | 183 ms | 67 ms | 251 ms | 39 ms |
+
+What the numbers say, without rounding in the strips' favour:
+
+- Opening a page, or resuming deep inside it, costs the strips shown instead of
+  the whole page: about 2.1x less at native width, about 1.3x less at 512 px,
+  and nothing gained for a jump at 512 px on this fixture.
+- Scrolling gets dearer per window. The whole-page path decodes once and then
+  serves windows from a retained 72 MB original (0.7-6 ms per strip); strips
+  decode each strip as it enters (27-39 ms), off the UI thread and ahead of the
+  viewport by the usual 2,048-row prefetch. The 72 MB original is gone: the
+  decoded footprint is at most the 64 MiB band cache and in practice a few
+  bands.
+- This fixture is the cheap case for the baseline: line art makes a tiny PNG
+  (1.8 MB) that decodes fast, while the same pixels as WebP 85 are 4.2 MB. A
+  photographic or JPEG source is the other way round (WebP is smaller than the
+  source), and decoding a JPEG or lossy WebP whole is far slower than PNG.
+- Writing the strips takes 2.7 s here (decode once, encode 13 strips), on the
+  cache writer thread at prefetch priority behind the viewer.
+- Lossy WebP strips are decoded with libwebp, which is linked already for
+  encoding. The pure-Rust decoder behind `decode_image` made the same strips
+  about three times slower (first window about 300 ms, one-strip shift about
+  77 ms at 720 px) and would have turned the first column of the table into a
+  loss.
+
 ## Reproduce the CPU profile
 
 ```sh

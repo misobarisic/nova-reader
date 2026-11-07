@@ -1325,7 +1325,7 @@ mod tests {
         let request = prepare(&cache, &source, "c", "tall");
         // A file that claims to be a container but is not one. The kit checks
         // its own checksum, so only the page boundary can reject this.
-        let forged = [b"NRSTRIP\0".as_slice(), &[0u8; 64]].concat();
+        let forged = page_store::forged_stored_page();
         assert!(
             cache
                 .cache

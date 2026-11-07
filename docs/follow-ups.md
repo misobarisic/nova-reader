@@ -11,20 +11,22 @@ DCT-domain crop in nova-kit. The current dependency tree has none:
 `zune-jpeg` only decodes.
 
 **Context:**
-- Tall pages in the chapter cache, and optionally in downloads, can be stored
-  as 2,048-row strips, so that scrolling decodes only the rows it needs.
-- With compression off, strips must be pixel-exact.
-- PNG and lossless WebP split losslessly.
-- JPEG currently stays whole, because it cannot be cut without re-encoding.
+- Tall pages in the chapter cache, and optionally in downloads, are stored as
+  independently encoded 2,048-row strips (`page_store`). Strips exist only when
+  that store's compression is on, and each is encoded in the store's format and
+  quality, so a JPEG source is re-encoded like any other page.
+- There is no pixel-exact mode: with compression off a page is stored as
+  fetched, whole.
 - Reversible JPEG XL (`transcode_jpeg_to_jxl`) only works on a whole JPEG, so
-  it cannot produce per-strip files.
+  it cannot produce per-strip files; a JPEG transcoded that way stays whole.
 
 **What it would do:** crop a JPEG at 16-row MCU boundaries (2,048 is a
 multiple of 16) without re-encoding, giving JPEG strips that are bit-exact
 slices of the original's coefficient data.
 
 **What it would unlock:**
-- exact strips for JPEG webtoons, the most common source format;
+- exact strips for JPEG webtoons, the most common source format (an opt-in
+  exact mode, which does not exist today);
 - per-strip reversible JPEG XL when "Losslessly transcode JPEG" is on;
 - exporting a split JPEG page as its original bytes rather than a rebuilt PNG.
 

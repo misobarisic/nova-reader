@@ -39,6 +39,38 @@ fn fnv1a(parts: &[&[u8]]) -> u64 {
     hash
 }
 
+/// Strips are scrolled through, so decode speed is what they are for. Lossy
+/// WebP is the cache's default codec, and libwebp (already linked for encoding)
+/// decodes it several times faster than the pure-Rust decoder behind
+/// `reader_engine::decode_image`. Anything libwebp declines (animation, a
+/// stream it cannot read, dimensions outside the limits) takes the engine path,
+/// which reports the error.
+fn decode_webp(bytes: &[u8], limits: DecodeLimits) -> Option<image::RgbaImage> {
+    if bytes.len() > limits.max_encoded_bytes
+        || !(bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP"))
+    {
+        return None;
+    }
+    let features = webp::BitstreamFeatures::new(bytes)?;
+    if features.has_animation() {
+        return None;
+    }
+    let (width, height) = (features.width(), features.height());
+    reader_engine::admit_dimensions(PageDimensions { width, height }, limits).ok()?;
+    let decoded = webp::Decoder::new(bytes).decode()?;
+    let pixels = if decoded.is_alpha() {
+        decoded.to_vec()
+    } else {
+        decoded
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .flat_map(|rgb| [rgb[0], rgb[1], rgb[2], 255])
+            .collect()
+    };
+    image::RgbaImage::from_raw(width, height, pixels)
+}
+
 struct Strip {
     rows: u32,
     bytes: Range<usize>,
@@ -182,7 +214,11 @@ impl Container {
 
     fn decode_strip(&self, index: usize, limits: DecodeLimits) -> Result<image::RgbaImage> {
         let strip = &self.strips[index];
-        let image = reader_engine::decode_image(&self.bytes[strip.bytes.clone()], limits)?;
+        let bytes = &self.bytes[strip.bytes.clone()];
+        let image = match decode_webp(bytes, limits) {
+            Some(image) => image,
+            None => reader_engine::decode_image(bytes, limits)?,
+        };
         // A strip that does not match its table entry is corruption, never a
         // reason to composite misaligned rows.
         if image.width() != self.width || image.height() != strip.rows {
@@ -252,5 +288,79 @@ impl Container {
     }
     pub(super) fn strip_bytes(&self, index: usize) -> &[u8] {
         &self.bytes[self.strip_range(index)]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn picture(width: u32, height: u32, alpha: bool) -> image::RgbaImage {
+        image::RgbaImage::from_fn(width, height, |x, y| {
+            let n = x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503);
+            image::Rgba([
+                (x * 255 / width) as u8,
+                (y * 255 / height) as u8,
+                (n >> 9) as u8 / 4 + 100,
+                if alpha { 255 - (x % 7) as u8 * 30 } else { 255 },
+            ])
+        })
+    }
+
+    #[test]
+    fn libwebp_strips_decode_like_the_engine_and_odd_streams_defer_to_it() {
+        let limits = DecodeLimits::default();
+        for (lossless, alpha) in [(false, false), (false, true), (true, false), (true, true)] {
+            let image = picture(61, 130, alpha);
+            let bytes = webp::Encoder::from_rgba(image.as_raw(), 61, 130)
+                .encode_simple(lossless, 85.)
+                .unwrap()
+                .to_vec();
+            let fast = decode_webp(&bytes, limits).expect("libwebp reads its own output");
+            let engine = reader_engine::decode_image(&bytes, limits).unwrap();
+            assert_eq!(fast.dimensions(), engine.dimensions());
+            if lossless {
+                assert_eq!(fast, image, "lossless stays exact");
+                assert_eq!(fast, engine);
+            } else {
+                // Two correct VP8 decoders may round chroma differently.
+                let worst = fast
+                    .as_raw()
+                    .iter()
+                    .zip(engine.as_raw())
+                    .map(|(a, b)| a.abs_diff(*b))
+                    .max()
+                    .unwrap();
+                assert!(worst <= 8, "alpha {alpha}: decoders differ by {worst}");
+            }
+        }
+        // Not WebP, truncated, or over the limits: the engine decides.
+        let image = picture(40, 40, false);
+        let webp = webp::Encoder::from_rgba(image.as_raw(), 40, 40)
+            .encode_simple(false, 85.)
+            .unwrap()
+            .to_vec();
+        assert!(decode_webp(b"\x89PNG\r\n", limits).is_none());
+        assert!(decode_webp(&webp[..webp.len() / 2], limits).is_none());
+        assert!(
+            decode_webp(
+                &webp,
+                DecodeLimits {
+                    max_width: 39,
+                    ..limits
+                }
+            )
+            .is_none()
+        );
+        assert!(
+            decode_webp(
+                &webp,
+                DecodeLimits {
+                    max_encoded_bytes: 10,
+                    ..limits
+                }
+            )
+            .is_none()
+        );
     }
 }
