@@ -3016,6 +3016,11 @@ impl Controller {
             offset = (reader.page_position(index) + remaining) * width;
             ui.set_scroll_y(-offset);
         }
+        // A viewport top inside the 96px chapter gap anchors at the preceding
+        // image's end (ResumeAnchor cannot encode a gap). Remember how far into
+        // the gap the canvas really is so a chapter-change rebase does not snap
+        // it to the image edge and shove the content below by the whole gap.
+        let into_gap = (remaining - reader.ratios[index]).max(0.);
         let fraction = (remaining / reader.ratios[index]).clamp(0.0, 1.0);
         let settlement_progress = origin != PositionOrigin::OverviewSettlement
             && (origin != PositionOrigin::ZoomSettlement
@@ -3078,6 +3083,9 @@ impl Controller {
             ui.set_zoom(1.);
             ui.set_scroll_x(0.);
             self.restore_position(ui);
+            if into_gap > 0. {
+                ui.set_scroll_y(ui.get_scroll_y() - into_gap * ui.get_reader_width());
+            }
         }
         ui.set_current_page(index as i32);
         self.publish_reader_controls(ui);

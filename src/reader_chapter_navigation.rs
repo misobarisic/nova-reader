@@ -1062,6 +1062,67 @@ mod tests {
     }
 
     #[test]
+    fn reverse_scroll_through_the_chapter_gap_moves_by_exactly_the_scroll_delta() {
+        const CHILD: &str = "READER_REVERSE_GAP_CONTINUITY_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "app::reader_chapter_navigation::tests::reverse_scroll_through_the_chapter_gap_moves_by_exactly_the_scroll_delta", "--nocapture"])
+                .env(CHILD, "1").output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let (app, ui, _directory, _receiver) = zoom_fixture();
+        const STEP: f32 = 8.;
+        for (backwards, label) in [(true, "reverse"), (false, "forward")] {
+            mount_zoom_fixture(&app, &ui);
+            let width = ui.get_reader_width();
+            let (previous_end, next_start) = {
+                let view = app.view();
+                let reader = view.reader.as_ref().unwrap();
+                let target = if backwards { 1 } else { 0 };
+                (
+                    (reader.page_position(target) + reader.ratios[target]) * width,
+                    reader.page_position(target + 1) * width,
+                )
+            };
+            assert!((next_start - previous_end - 96.).abs() < 0.01);
+            let (from, to) = if backwards {
+                (next_start, previous_end - 200.)
+            } else {
+                (previous_end - 200., next_start + 200.)
+            };
+            ui.set_scroll_y(-from);
+            app.position(&ui, from, width, ui.get_reader_viewport_height());
+            let mut expected = ui.get_scroll_y();
+            let mut y = from;
+            let mut steps = 0;
+            while if backwards { y > to } else { y < to } {
+                y += if backwards { -STEP } else { STEP };
+                expected += if backwards { STEP } else { -STEP };
+                // The Flickable moves by the gesture delta, then notifies Rust.
+                ui.set_scroll_y(expected);
+                app.position(
+                    &ui,
+                    -ui.get_scroll_y(),
+                    width,
+                    ui.get_reader_viewport_height(),
+                );
+                steps += 1;
+                assert!(
+                    (ui.get_scroll_y() - expected).abs() < 0.01,
+                    "{label}: scroll jumped {} px at step {steps} (viewport top {y}, previous page bottom {previous_end}, next page top {next_start})",
+                    ui.get_scroll_y() - expected
+                );
+            }
+        }
+    }
+
+    #[test]
     fn pages_cancel_drops_pending_chapter_intent_and_snapshots_settled_zoom() {
         const CHILD: &str = "READER_PAGES_CANCEL_PENDING_CHAPTER_CHILD";
         if std::env::var_os(CHILD).is_none() {
