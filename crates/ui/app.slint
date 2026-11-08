@@ -262,6 +262,7 @@ export component AppWindow inherits Window {
     in property <int> detail-unread-count;
     in property <int> detail-downloaded-count;
     in property <int> detail-bookmarked-count;
+    in property <int> detail-new-count;
     in property <string> detail-series-key;
     in-out property <bool> detail-gallery-single;
     in-out property <length> detail-scroll-y: 0px;
@@ -962,11 +963,16 @@ export component AppWindow inherits Window {
                                         spacing: 10px;
                                         chapter-count := Text { text: @tr("{n} chapter" | "{n} chapters" % root.items.length); font-size: 20px; font-weight: 600; color: Theme.current.text_bright; vertical-alignment: center; }
                                         if root.detail-unread-count > 0: chapter-unread := Text {
-                                            horizontal-stretch: 1; min-width: 0px; overflow: elide;
+                                            min-width: 0px; overflow: elide;
                                             text: @tr("{} unread", root.detail-unread-count);
                                             color: Theme.current.text_secondary; font-size: 13px; vertical-alignment: center;
                                         }
-                                        if root.detail-unread-count == 0: Rectangle { horizontal-stretch: 1; min-width: 0px; }
+                                        if root.detail-new-count > 0: chapter-new := Text {
+                                            min-width: 0px; overflow: elide;
+                                            text: (root.detail-unread-count > 0 ? "· " : "") + @tr("{} new", root.detail-new-count);
+                                            color: Theme.current.accent_vivid; font-size: 13px; vertical-alignment: center;
+                                        }
+                                        Rectangle { horizontal-stretch: 1; min-width: 0px; }
                                         IconAction {
                                             width: 44px;
                                             text: root.chapters-descending ? @tr("Chapter order: descending") : @tr("Chapter order: ascending");

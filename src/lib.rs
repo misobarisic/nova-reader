@@ -18,6 +18,7 @@ pub mod categories;
 pub mod chapter_cache;
 mod chapter_capture;
 mod chapter_list;
+mod chapter_news;
 mod cli;
 pub mod content_presentation;
 mod decode_admission;

@@ -9,7 +9,9 @@ export struct ItemRow {
     number: string, short-title: string, status: string, status-danger: bool, read-fraction: float,
     // The reading part of the status ("Page X"), kept so download polling can
     // rebuild `status` when a transfer starts or ends.
-    reading-status: string
+    reading-status: string,
+    // New since the title was last opened (stays for the whole visit).
+    is-new: bool
 }
 
 export struct SettingRow { key: string, name: string, kind: string, value: string, checked: bool, options: [string], selected: int }

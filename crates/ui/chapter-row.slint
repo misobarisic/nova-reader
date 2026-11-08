@@ -15,7 +15,7 @@ export component ChapterRow inherits Rectangle {
     background: touch.feedback-active ? Theme.current.control_hover : transparent;
     border-radius: 14px;
     accessible-role: button; accessible-label: root.chapter.title;
-    accessible-description: (root.chapter.read ? @tr("Read") : @tr("Unread"))
+    accessible-description: (root.chapter.is-new ? @tr("New") + " · " : "") + (root.chapter.read ? @tr("Read") : @tr("Unread"))
         + (root.chapter.status != "" ? " · " + root.chapter.status : "")
         + (root.chapter.chapter-meta != "" ? " · " + root.chapter.chapter-meta : "");
     accessible-action-default => { root.picked(); }
@@ -26,6 +26,11 @@ export component ChapterRow inherits Rectangle {
         color: root.chapter.read ? Theme.current.text_hint : Theme.current.text_bright;
         font-size: 15px; font-weight: root.chapter.read ? 400 : 700;
         horizontal-alignment: center; vertical-alignment: center; overflow: elide;
+    }
+    // New since the last visit: a dot under the number.
+    if root.chapter.is-new: new-dot := Rectangle {
+        x: 16.5px; y: root.height / 2 + 12px; width: 5px; height: 5px; border-radius: 2.5px;
+        background: Theme.current.accent_vivid;
     }
     VerticalLayout {
         x: 46px; y: 0px; width: max(1px, root.width - 46px - root.trailing - 4px); height: 100%;

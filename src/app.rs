@@ -1347,6 +1347,7 @@ pub(crate) fn publish_chapter_filter_counts(ui: &AppWindow) {
     ui.set_detail_unread_count(rows.iter().filter(|row| !row.read).count() as i32);
     ui.set_detail_downloaded_count(rows.iter().filter(|row| row.downloaded).count() as i32);
     ui.set_detail_bookmarked_count(rows.iter().filter(|row| row.bookmarked).count() as i32);
+    ui.set_detail_new_count(rows.iter().filter(|row| row.is_new).count() as i32);
 }
 fn has_saved_reading_position(progress: &ReadingProgress) -> bool {
     !progress.completed && !progress.anchor.is_cleared() && !progress.anchor.page_id.is_empty()
@@ -1448,6 +1449,9 @@ struct CatalogueState {
 #[derive(Default)]
 struct View {
     section: i32,
+    /// The current visit to a title's detail screen, kept through the reader
+    /// and page overview so its "new" chapters stay marked until it is left.
+    chapter_news: Option<crate::chapter_news::Visit>,
     rows: Vec<Row>,
     downloads: downloads::DownloadView,
     download_states: BTreeMap<ChapterId, reader_downloads::JobStatus>,
@@ -2109,6 +2113,31 @@ impl Controller {
         if view.section == 5 && ui.get_chapters_descending() {
             view.rows.reverse();
         }
+        if view.section == 5 {
+            let series = view.series.as_ref().map(|s| s.id.clone());
+            if let Some(series) = series {
+                if view
+                    .chapter_news
+                    .as_ref()
+                    .is_none_or(|visit| visit.series() != &series)
+                {
+                    view.chapter_news = Some(crate::chapter_news::Visit::open(series));
+                }
+                let shown: Vec<String> = view
+                    .rows
+                    .iter()
+                    .filter_map(|row| match row {
+                        Row::Chapter(c) => Some(c.id.local_id.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                if let Some(visit) = view.chapter_news.as_mut() {
+                    visit.record(shown.iter().map(String::as_str));
+                }
+            }
+        } else if !matches!(view.section, 6 | 23) {
+            view.chapter_news = None;
+        }
         let clock = crate::timeline::TimelineClock::now();
         view.artwork_rows = view
             .rows
@@ -2306,6 +2335,11 @@ impl Controller {
                         }
                         .into(),
                         read_fraction: crate::chapter_list::read_fraction(page, page_total),
+                        is_new: view.section == 5
+                            && view
+                                .chapter_news
+                                .as_ref()
+                                .is_some_and(|visit| visit.is_new(&c.id.local_id)),
                         has_download: download.is_some(),
                         local_import,
                         chapter_meta: meta.join(" · ").into(),
