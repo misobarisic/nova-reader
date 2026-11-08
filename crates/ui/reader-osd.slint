@@ -191,14 +191,16 @@ export component ReaderOsd inherits Rectangle {
                 OsdAction { label: root.rtl ? @tr("Previous page") : @tr("Next page"); glyph: "next-page"; show-label: false; enabled: root.rtl ? root.previous-page-enabled : root.next-page-enabled; clicked => { root.action(root.rtl ? "previous-page" : "next-page"); } }
                 OsdAction { label: root.rtl ? @tr("Previous chapter") : @tr("Next chapter"); glyph: "next-chapter"; show-label: false; enabled: root.rtl ? root.previous-chapter-enabled : root.next-chapter-enabled; clicked => { root.action(root.rtl ? "previous-chapter" : "next-chapter"); } }
             }
+            // Only the spacer takes spare width: the labelled actions keep their
+            // 76px slots and stay grouped at the trailing edge on wide windows.
             Rectangle { min-width: 0px; horizontal-stretch: 1; }
-            OsdAction { label: @tr("Fit width"); glyph: "fit-width"; active: root.fit-width; clicked => { root.action("fit-width"); } }
-            OsdAction { label: root.zoom-percent + "%"; glyph: "zoom"; clicked => { root.action("zoom"); } }
-            OsdAction { label: @tr("Screencap"); glyph: "screencap"; clicked => { root.action("screencap"); } }
-            OsdAction { label: root.collection ? @tr("Images") : @tr("Pages"); glyph: "pages"; clicked => { root.action("pages"); } }
-            if !root.collection || root.group-count > 1: OsdAction { label: root.collection ? @tr("Groups") : @tr("Chapters"); glyph: "chapters"; clicked => { root.action("chapters"); } }
-            OsdAction { label: @tr("Settings"); glyph: "settings"; clicked => { root.action("settings"); } }
-            OsdAction { label: @tr("Fullscreen"); glyph: root.fullscreen ? "fullscreen-exit" : "fullscreen"; clicked => { root.action("fullscreen"); } }
+            OsdAction { horizontal-stretch: 0; label: @tr("Fit width"); glyph: "fit-width"; active: root.fit-width; clicked => { root.action("fit-width"); } }
+            OsdAction { horizontal-stretch: 0; label: root.zoom-percent + "%"; glyph: "zoom"; clicked => { root.action("zoom"); } }
+            OsdAction { horizontal-stretch: 0; label: @tr("Screencap"); glyph: "screencap"; clicked => { root.action("screencap"); } }
+            OsdAction { horizontal-stretch: 0; label: root.collection ? @tr("Images") : @tr("Pages"); glyph: "pages"; clicked => { root.action("pages"); } }
+            if !root.collection || root.group-count > 1: OsdAction { horizontal-stretch: 0; label: root.collection ? @tr("Groups") : @tr("Chapters"); glyph: "chapters"; clicked => { root.action("chapters"); } }
+            OsdAction { horizontal-stretch: 0; label: @tr("Settings"); glyph: "settings"; clicked => { root.action("settings"); } }
+            OsdAction { horizontal-stretch: 0; label: @tr("Fullscreen"); glyph: root.fullscreen ? "fullscreen-exit" : "fullscreen"; clicked => { root.action("fullscreen"); } }
         }
     }
 }
