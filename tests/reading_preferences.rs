@@ -9,6 +9,14 @@ fn toggle_adult(ui: &AppWindow) {
     for _ in 0..32 {
         i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
     }
+    // The switch lives in Browse's ⋯ menu.
+    i_slint_backend_testing::ElementHandle::find_by_accessible_label(ui, "Browse options")
+        .next()
+        .unwrap()
+        .invoke_accessible_default_action();
+    for _ in 0..32 {
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
+    }
     i_slint_backend_testing::ElementHandle::find_by_accessible_label(ui, "Show adult sources")
         .find(|element| element.accessible_checkable() == Some(true))
         .unwrap()

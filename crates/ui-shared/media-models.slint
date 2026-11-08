@@ -21,5 +21,12 @@ export struct ItemRow {
 }
 
 export struct SettingRow { key: string, name: string, kind: string, value: string, checked: bool, options: [string], selected: int }
-export struct SourceRow { id:string, name:string, language:string, group:string, pinned:bool, enabled:bool, latest:bool, index:int, icon:image }
-export struct ExtensionRow { id:string, name:string, version:string, language:string, enabled:bool, icon:image }
+// `code` is the short language tag (EN, JA, ALL), `extension` the providing
+// addon's name and `adult` its adult marking.
+export struct SourceRow { id:string, name:string, language:string, group:string, pinned:bool, enabled:bool, latest:bool, index:int, icon:image, code:string, extension:string, adult:bool }
+// `sources` counts the visible sources the extension provides.
+export struct ExtensionRow { id:string, name:string, version:string, language:string, enabled:bool, icon:image, sources:int }
+
+// A ⋯ menu entry. Kinds: 0 section label, 1 check item, 2 action,
+// 3 destructive action, 4 switch.
+export struct PageMenuItem { label: string, kind: int, checked: bool, id: string }

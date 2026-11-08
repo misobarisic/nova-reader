@@ -239,7 +239,12 @@ fn templates() -> BTreeMap<String, Value> {
 }
 fn portable(storage: &str, pointer: &str) -> bool {
     match storage {
-        "reader:appearance" | "reader:show-adult" => true,
+        // How Updates and History are laid out is a choice per device.
+        "reader:appearance" => !matches!(
+            pointer,
+            "/updates_grouping" | "/history_view" | "/history_shelf_hidden"
+        ),
+        "reader:show-adult" => true,
         "reader:captures" => !matches!(
             pointer,
             "/resolution" | "/conflict" | "/save_source" | "/convert_saves"
@@ -993,6 +998,8 @@ mod tests {
             "reader:reader-settings/keep_awake",
             "source:token",
             "reader:appearance/path",
+            "reader:appearance/history_view",
+            "reader:appearance/updates_grouping",
         ] {
             assert!(!supported(key, &Value::from(1)), "{key}");
         }

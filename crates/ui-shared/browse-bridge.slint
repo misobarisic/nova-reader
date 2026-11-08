@@ -1,0 +1,132 @@
+import { ItemRow, SettingRow, SourceRow, ExtensionRow, PageMenuItem } from "media-models.slint";
+
+// One source option in the filter sheet: a pill that includes (1) or, for
+// tri-state filters, excludes (2). `key` is the row key `source_filters.rs`
+// already accepts.
+export struct FilterPill { label: string, key: string, state: int, tristate: bool }
+
+// A filter group in the sheet: pills, or the select/text/switch kinds the
+// inline panel showed before.
+export struct FilterGroup {
+    name: string,
+    // "pills", "select", "text" or "bool".
+    kind: string,
+    key: string,
+    value: string,
+    checked: bool,
+    selected: int,
+    options: [string],
+    pills: [FilterPill],
+}
+
+// Search across sources: one section per source.
+export struct SearchSection {
+    name: string,
+    icon: image,
+    // 0 loading, 1 results, 2 failed.
+    status: int,
+    count: int,
+    error: string,
+    items: [ItemRow],
+}
+
+// Browse's contract. The window's existing Browse properties alias these
+// (see `app.slint`), so Rust keeps its setters; the separately compiled
+// page reads and writes the same values.
+export global BrowseBridge {
+    in-out property <component-factory> factory;
+    in-out property <length> viewport-width;
+    in-out property <length> viewport-height;
+    // Window state, bound by `BrowseHost`.
+    in-out property <bool> active;
+    in-out property <bool> narrow;
+    in-out property <bool> touch-menus;
+    in-out property <length> bottom-padding;
+    in-out property <string> status;
+    in-out property <bool> busy;
+    // Existing window properties (aliased).
+    in-out property <int> browse-tab;
+    in-out property <bool> show-adult;
+    in-out property <bool> sync-enabled;
+    in-out property <[string]> sources;
+    in-out property <[SourceRow]> source-rows;
+    in-out property <[ExtensionRow]> extensions;
+    in-out property <int> source-index: -1;
+    in-out property <bool> source-catalog-open;
+    in-out property <string> source-title;
+    in-out property <bool> source-has-filters;
+    in-out property <[SettingRow]> source-filters;
+    in-out property <string> source-filter-notice;
+    in-out property <bool> source-filters-open;
+    in-out property <string> source-catalogue-kind: "popular";
+    in-out property <length> catalogue-scroll-y;
+    in-out property <bool> catalogue-restore-pending;
+    in-out property <string> source-query;
+    in-out property <string> catalogue-page-error;
+    in-out property <bool> has-more;
+    in-out property <[ItemRow]> items;
+    in-out property <bool> addon-zip-import-busy;
+    // Refresh layout, published by Rust.
+    in-out property <bool> has-last-used;
+    in-out property <SourceRow> last-used;
+    in-out property <string> last-used-detail;
+    in-out property <[SourceRow]> pinned;
+    in-out property <[string]> languages;
+    in-out property <[int]> language-counts;
+    in-out property <int> language-index;
+    in-out property <int> source-total;
+    // Extensions needing attention: disabled ones (nothing checks for addon
+    // updates yet; see the browse refresh plan).
+    in-out property <int> attention-count;
+    // The open catalogue's source.
+    in-out property <image> catalog-icon;
+    in-out property <string> catalog-language;
+    in-out property <bool> catalog-adult;
+    in-out property <bool> catalog-pinned;
+    in-out property <bool> catalog-latest;
+    // Change source: every source by name, `id` its index.
+    in-out property <[PageMenuItem]> change-items;
+    in-out property <[FilterGroup]> filter-groups;
+    in-out property <int> filter-count;
+    // Search across sources.
+    in-out property <string> global-query;
+    // 0 pinned sources, 1 every enabled source.
+    in-out property <int> global-scope;
+    in-out property <int> pinned-count;
+    in-out property <[SearchSection]> global-sections;
+    // A short confirmation ("Unpinned MangaDex").
+    in-out property <string> notice;
+    in-out property <int> notice-serial;
+    // Relayed to the window's callbacks in Rust.
+    callback source-selected(int);
+    callback source-latest-selected(int);
+    callback source-pin-picked(string);
+    callback adult-visibility-changed(bool);
+    callback extension-action(string, string);
+    callback extension-remove(string);
+    callback install-addon();
+    callback browse(string);
+    callback search(string);
+    callback load-more();
+    callback source-filters-requested();
+    callback source-filter-changed(string, string);
+    callback source-filter-selected(string, int);
+    callback source-filters-applied();
+    callback source-action(string);
+    callback source-remove();
+    callback picked(int);
+    callback request-artwork(int, int);
+    callback back();
+    // A closed menu hands keyboard focus back to the window (Back, keys).
+    callback restore-focus();
+    // Handled by Rust directly.
+    callback language-picked(int);
+    callback filters-reset();
+    callback global-search(string);
+    callback global-scope-picked(int);
+    callback global-retry(int);
+    callback global-more(int);
+    callback global-picked(int, int);
+    callback global-artwork(int);
+    callback unpin(string);
+}

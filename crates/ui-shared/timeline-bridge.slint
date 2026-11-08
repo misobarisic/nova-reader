@@ -1,0 +1,97 @@
+// Updates and History: one flattened, positioned line per visible row. Rust
+// groups by day and series (`src/timeline_groups.rs`) and computes each
+// line's `y` and `height`, so the page creates only the lines near its
+// viewport and an expanding group simply moves the lines below it.
+export struct TimelineEntry {
+    // 0 day, 1 group header, 2 chapter, 3 show more, 4 group actions,
+    // 5 single row, 6 timeline item.
+    kind: int,
+    // Position in `entries`; the sticky day heading acts through it.
+    index: int,
+    y: length,
+    height: length,
+    // Day heading: the height of its whole section, for the sticky heading.
+    span: length,
+    title: string,
+    // Accent part of the summary ("14 new", "6 chapters", "Read 6").
+    emphasis: string,
+    subtitle: string,
+    time: string,
+    // Primary action label ("Read 41", "Resume Ch. 87", "Next: Ch. 88").
+    action: string,
+    // Unread chapters (group header badge); `count` is the group size.
+    unread: int,
+    count: int,
+    read: bool,
+    download-state: int,
+    download-progress: float,
+    expanded: bool,
+    // Reading progress of an unfinished chapter; negative when none.
+    progress: float,
+    // Day heading: offers "Mark read".
+    has-unread: bool,
+    // Closes a card: bottom corners.
+    last: bool,
+    poster: image,
+    artwork-key: string,
+}
+
+// "Pick up where you left off".
+export struct ShelfEntry {
+    title: string,
+    // "Ch. 87" / "Next: Ch. 88" and "Page 18 of 30" / "Ready".
+    headline: string,
+    detail: string,
+    progress: float,
+    // Caught up: no next chapter, no play badge.
+    caught-up: bool,
+    poster: image,
+    artwork-key: string,
+}
+
+export global TimelineBridge {
+    in-out property <component-factory> factory;
+    in-out property <length> viewport-width;
+    in-out property <length> viewport-height;
+    // Window state, bound by `TimelineHost`.
+    in-out property <bool> history;
+    in-out property <bool> active;
+    in-out property <bool> narrow;
+    in-out property <length> bottom-padding;
+    // Errors and notices from the window (`root.status`).
+    in-out property <string> status;
+    // Published by Rust.
+    in-out property <[TimelineEntry]> entries;
+    // The day headings again, few enough to scan for the sticky one.
+    in-out property <[TimelineEntry]> days;
+    // Where the list starts below the History shelf (0 without it).
+    in-out property <length> list-top;
+    in-out property <length> content-height;
+    in-out property <[ShelfEntry]> shelf;
+    // Updates header: "18 new" and "Checked Today 14:02 · 46 titles".
+    in-out property <string> count-label;
+    in-out property <string> status-line;
+    // A library refresh is running (with `busy` from the window): titles
+    // checked so far of the total, 0 of 0 until the total is known.
+    in-out property <bool> refreshing;
+    in-out property <bool> busy;
+    in-out property <int> refresh-done;
+    in-out property <int> refresh-total;
+    in-out property <int> filter;
+    in-out property <[int]> filter-counts: [0, 0, 0];
+    // Updates grouping (By day and series / By day only) and History view
+    // (0 session cards, 1 timeline) live in `Appearance`.
+    in-out property <bool> search-open;
+    in-out property <string> query;
+    // Bumped when a different list is shown; the page scrolls to its top.
+    in-out property <int> reset-serial;
+    callback entry-picked(int);
+    callback series-picked(int);
+    callback entry-action(int, string);
+    callback filter-picked(int);
+    callback refresh();
+    callback menu-action(string);
+    callback search(string);
+    callback shelf-picked(int);
+    callback request-artwork(int, int);
+}

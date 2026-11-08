@@ -28,10 +28,17 @@ mod chapter_selection;
 #[path = "downloads.rs"]
 mod downloads;
 
+#[path = "browse_page.rs"]
+mod browse_page;
 #[path = "library_navigation.rs"]
 mod library_navigation;
 #[path = "library_view.rs"]
 mod library_view;
+pub(crate) use browse_page::set_global_posters;
+#[path = "timeline_groups.rs"]
+mod timeline_groups;
+#[path = "timeline_page.rs"]
+mod timeline_page;
 
 static LIFECYCLE: OnceLock<Weak<Controller>> = OnceLock::new();
 #[path = "backup_actions.rs"]
@@ -81,7 +88,7 @@ pub fn flush_lifecycle() {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct Choice {
     package: String,
     id: String,
@@ -90,6 +97,10 @@ struct Choice {
     filters: bool,
     language: String,
     latest: bool,
+    /// The package is marked adult.
+    adult: bool,
+    /// The package's display name ("MangaDex"), for source rows.
+    extension: String,
 }
 fn catalogue_rows((choices, disabled): (Vec<Choice>, BTreeSet<String>)) -> Vec<SettingRow> {
     choices
@@ -1195,6 +1206,8 @@ fn package_choices(
             filters: false,
             language: package_language.into(),
             latest: false,
+            adult: false,
+            extension: package_name.into(),
         }]);
     }
     let mut choices = Vec::new();
@@ -1220,6 +1233,8 @@ fn package_choices(
             language: language.to_owned(),
             latest: operations.is_some_and(|v| v.iter().any(|op| op.as_str() == Some("browse"))),
             filters: operations.is_some_and(|v| v.iter().any(|op| op.as_str() == Some("filters"))),
+            adult: false,
+            extension: package_name.into(),
         });
     }
     Ok(choices)
@@ -1494,6 +1509,10 @@ struct View {
     artwork_rows: Vec<Option<Series>>,
     artwork_seen: BTreeMap<usize, std::time::Instant>,
     artwork_pruned: Option<std::time::Instant>,
+    /// Updates and History: grouping state and the published lines.
+    timeline: timeline_page::State,
+    /// Browse: search across sources.
+    global_search: browse_page::GlobalSearch,
 }
 fn reader_series_title(view: &View) -> Option<&str> {
     let reader = view.reader.as_ref()?;
@@ -1822,7 +1841,10 @@ impl Controller {
                 package.enabled,
                 &variants,
             ) {
-                Ok(found) => choices.extend(found),
+                Ok(found) => choices.extend(found.into_iter().map(|choice| Choice {
+                    adult: package.nsfw,
+                    ..choice
+                })),
                 Err(reason) => eprintln!(
                     "Nova Reader: skipping source package {}: {reason}",
                     package.id
@@ -1982,10 +2004,17 @@ impl Controller {
                     .filter(|p| p.completed)
                     .map(|p| &p.chapter)
                     .collect();
+                // Unread chapters, plus recent read ones so the All and
+                // Unread chips differ and read rows show muted.
+                let recent = now() - timeline_page::RECENT_READ_SECONDS;
                 view.rows = snapshot
                     .chapters
                     .iter()
-                    .filter(|c| in_library.contains(&c.id.series) && !completed.contains(&c.id))
+                    .filter(|c| {
+                        in_library.contains(&c.id.series)
+                            && (!completed.contains(&c.id)
+                                || c.uploaded_at.is_some_and(|at| at >= recent))
+                    })
                     .rev()
                     .cloned()
                     .map(Row::Chapter)
@@ -2253,6 +2282,8 @@ impl Controller {
                         },
                         detail: if view.section == 0 && !gallery {
                             library_view::grid_detail(total - unread, total, s.publication_status).0
+                        } else if view.section == 3 {
+                            browse_page::catalogue_detail(s.publication_status, total)
                         } else {
                             String::new()
                         }
@@ -2267,6 +2298,8 @@ impl Controller {
                             .1,
                         list_detail: if view.section == 0 {
                             library_view::list_detail(&status_label, &s.id.source_id, downloaded)
+                        } else if view.section == 3 {
+                            browse_page::catalogue_detail(s.publication_status, total)
                         } else {
                             String::new()
                         }
@@ -2441,6 +2474,9 @@ impl Controller {
                 }
             })
             .collect();
+        if matches!(view.section, 1 | 2) {
+            timeline_page::publish(&mut view, &snapshot, ui, &items);
+        }
         if view.section != 7 {
             ui.set_items(ModelRc::new(VecModel::from(items)));
             publish_chapter_filter_counts(ui);
@@ -2467,30 +2503,7 @@ impl Controller {
                 .map(|c| c.name.clone().into())
                 .collect::<Vec<_>>(),
         )));
-        let source_choices = view
-            .choices
-            .iter()
-            .enumerate()
-            .map(|(i, c)| crate::source_browser::SourceChoice {
-                id: c.id.clone(),
-                name: c
-                    .name
-                    .strip_suffix(&format!(" · {}", c.language))
-                    .unwrap_or(&c.name)
-                    .to_owned(),
-                language: c.language.clone(),
-                enabled: c.enabled,
-                latest: c.latest,
-                index: i as i32,
-            })
-            .collect::<Vec<_>>();
-        let mut source_rows = view.source_browser.rows(&source_choices);
-        for row in &mut source_rows {
-            if let Some(choice) = view.choices.get(row.index.max(0) as usize) {
-                row.icon = crate::addon_icons::image(&choice.package);
-            }
-        }
-        ui.set_source_rows(ModelRc::new(VecModel::from(source_rows)));
+        browse_page::publish_sources(&view, ui);
         ui.set_source_index(if view.choices.is_empty() {
             -1
         } else {
@@ -2573,6 +2586,10 @@ impl Controller {
         }
     }
     fn select_source(self: &Arc<Self>, ui: &AppWindow, index: i32, kind: &str) {
+        self.select_source_with(ui, index, kind, String::new());
+    }
+    /// Open a source's catalogue; a non-empty `query` opens it searching.
+    fn select_source_with(self: &Arc<Self>, ui: &AppWindow, index: i32, kind: &str, query: String) {
         // Cancel before an unavailable/disabled choice can return early.
         self.flush();
         self.invalidate();
@@ -2609,7 +2626,8 @@ impl Controller {
         ui.set_has_more(false);
         ui.set_source_catalog_open(true);
         ui.set_source_filters_open(false);
-        self.browse(ui, kind, Some(String::new()), false);
+        ui.set_source_query(query.clone().into());
+        self.browse(ui, kind, Some(query), false);
     }
     fn request_artwork(&self, ui: &AppWindow, first: i32, last: i32) {
         // Viewport changes can arrive while render publishes a new model.
@@ -5032,12 +5050,17 @@ impl Controller {
     }
     fn publish_sources(&self, ui: &AppWindow, sources: BrowseSources) {
         crate::addon_icons::publish(sources.icons);
+        browse_page::publish_attention(
+            ui,
+            sources.extensions.iter().filter(|e| !e.enabled).count(),
+        );
         ui.set_extensions(ModelRc::new(VecModel::from(
             sources
                 .extensions
                 .into_iter()
                 .map(|e| ExtensionRow {
                     icon: crate::addon_icons::image(&e.id),
+                    sources: sources.choices.iter().filter(|c| c.package == e.id).count() as i32,
                     id: e.id.into(),
                     name: e.name.into(),
                     version: e.version.into(),
@@ -6549,6 +6572,8 @@ pub fn run(services: Services) -> Result<()> {
         });
     }));
     wire_reader_context(&app, &ui);
+    timeline_page::wire(&app, &ui);
+    browse_page::wire(&app, &ui);
     profile_actions::wire(&app, &ui);
     backup_actions::wire(&app, &ui);
     reader_controls::wire(&app, &ui);
@@ -6676,6 +6701,7 @@ pub fn run(services: Services) -> Result<()> {
             ui.set_source_filters(ModelRc::new(VecModel::from(
                 app.view().source_filters.rows(),
             )));
+            browse_page::publish_filters(&app.view(), &ui);
             ui.set_source_filters_open(true);
             return;
         }
@@ -6723,6 +6749,7 @@ pub fn run(services: Services) -> Result<()> {
                             ui.set_source_filters(ModelRc::new(VecModel::from(filters.rows())));
                             view.source_filters = filters;
                             view.source_filters_loaded = true;
+                            browse_page::publish_filters(&view, &ui);
                             drop(view);
                             ui.set_source_filters_open(true);
                         }
@@ -6741,15 +6768,21 @@ pub fn run(services: Services) -> Result<()> {
         // Keep the native editor mounted while typing. Reopening the panel
         // publishes its validated draft from the provider-value model.
         view.source_filters.change(&key, &value);
+        // Pills and switches redraw at once; text keeps its editor.
+        if key.starts_with(' ') || value == "true" || value == "false" {
+            browse_page::publish_filters(&view, &ui);
+        }
     });
     wire!(on_source_filter_selected, |app, ui, key, index| {
         let _ = ui;
         let mut view = app.view();
         view.source_filters.select(&key, index);
+        browse_page::publish_filters(&view, &ui);
     });
     wire!(on_source_filters_applied, |app, ui| {
         ui.set_source_filters_open(false);
         apply_source_filters(&mut app.view());
+        browse_page::publish_filters(&app.view(), &ui);
         app.browse(&ui, "filtered", Some(String::new()), false);
     });
     wire!(on_search, |app, ui, query| {
@@ -6769,9 +6802,12 @@ pub fn run(services: Services) -> Result<()> {
     wire!(on_browse, |app, ui, kind| {
         let section = app.view().section;
         if kind == "refresh" {
+            app.view().timeline.refresh = Some((0, 0));
+            timeline_page::publish_refresh(&app.view().timeline, &ui);
+            let progress = ui.as_weak();
             app.task(
                 &ui,
-                |app, cancel| {
+                move |app, cancel| {
                     let state = app.services.domain.snapshot().map_err(error)?;
                     let disabled = app
                         .services
@@ -6783,15 +6819,27 @@ pub fn run(services: Services) -> Result<()> {
                         .map(|package| package.id)
                         .collect::<Vec<_>>();
                     let mut failed = 0;
-                    for series in refreshable_series(&state, &disabled) {
+                    let series = refreshable_series(&state, &disabled);
+                    // "Checking N titles… done / N" in the Updates header.
+                    let report = |done: usize| {
+                        app.view().timeline.refresh = Some((done, series.len()));
+                        let app = app.clone();
+                        let _ = progress.upgrade_in_event_loop(move |ui| {
+                            timeline_page::publish_refresh(&app.view().timeline, &ui);
+                        });
+                    };
+                    report(0);
+                    for (done, series) in series.iter().enumerate() {
                         cancel.check().map_err(error)?;
-                        if app.services.details(&series, cancel).is_err() {
+                        if app.services.details(series, cancel).is_err() {
                             failed += 1;
                         }
+                        report(done + 1);
                     }
                     Ok(failed)
                 },
                 |app, ui, failed| {
+                    app.view().timeline.refresh = None;
                     reader_domain::profile::kv::set_str("reader:last-update", &now().to_string());
                     app.render(ui);
                     if failed > 0 {
@@ -7044,6 +7092,13 @@ pub fn run(services: Services) -> Result<()> {
             let view = app.view();
             view.choices.get(view.selected).cloned()
         };
+        // Pin / Unpin from the catalogue's ⋯ menu.
+        if action == "pin" {
+            if let Some(choice) = choice {
+                app.unpin(&ui, &choice.id);
+            }
+            return;
+        }
         if let Some(choice) = choice {
             app.extension_action(&ui, &choice.package, &action);
         }
@@ -9200,6 +9255,7 @@ mod tests {
             filters: false,
             language: "en".into(),
             latest: false,
+            ..Default::default()
         }
     }
     #[test]
@@ -9846,6 +9902,7 @@ mod tests {
                     filters: false,
                     language: "en".into(),
                     latest: true,
+                    ..Default::default()
                 })
                 .collect();
             view.saved_catalogue = Some(CatalogueState {

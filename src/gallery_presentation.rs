@@ -779,6 +779,7 @@ mod tests {
             filters: false,
             language: "en".into(),
             latest: false,
+            ..Default::default()
         }];
         app.view().saved_catalogue = Some(CatalogueState {
             source_id: "gallery-fixture".into(),

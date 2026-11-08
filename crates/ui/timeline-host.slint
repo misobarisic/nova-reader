@@ -1,0 +1,17 @@
+import { TimelineBridge } from "@NovaUiShared";
+
+// Mounts the separately compiled Updates/History page. Window state is bound
+// here; Rust publishes the lists and handles the bridge's callbacks.
+export component TimelineHost inherits Rectangle {
+    preferred-width: 100%; preferred-height: 100%;
+    in-out property <bool> history <=> TimelineBridge.history;
+    in-out property <bool> active <=> TimelineBridge.active;
+    in-out property <bool> narrow <=> TimelineBridge.narrow;
+    in-out property <length> bottom-padding <=> TimelineBridge.bottom-padding;
+    in-out property <string> status <=> TimelineBridge.status;
+    in-out property <bool> busy <=> TimelineBridge.busy;
+    in-out property <length> viewport-width <=> TimelineBridge.viewport-width;
+    in-out property <length> viewport-height <=> TimelineBridge.viewport-height;
+    // Explicit positioning keeps the page's layout out of the host's.
+    ComponentContainer { x: 0px; y: 0px; width: 100%; height: 100%; component-factory: TimelineBridge.factory; }
+}

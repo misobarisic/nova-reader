@@ -1,0 +1,8 @@
+import { BrowsePage } from "../ui/browse-page.slint";
+import { BrowseBridge } from "@NovaUiShared";
+
+export component BrowseModule inherits Window {
+    background: transparent;
+    width: BrowseBridge.viewport-width; height: BrowseBridge.viewport-height;
+    BrowsePage { width: 100%; height: 100%; }
+}

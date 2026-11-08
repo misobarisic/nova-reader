@@ -47,7 +47,7 @@ fn source_pages_follow_viewport_demand_without_concurrency_or_scroll_reset() {
         ui.show().unwrap();
         settle();
         assert_eq!(requests.get(), 0, "long grids wait for the viewport");
-        let scroll = ElementHandle::find_by_element_id(&ui, "AppWindow::page-scroll")
+        let scroll = ElementHandle::find_by_element_id(&ui, "BrowsePage::catalog-scroll")
             .next()
             .unwrap();
         scroll.scroll(0., -100_000.);

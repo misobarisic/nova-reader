@@ -69,6 +69,7 @@ macro_rules! forward_globals {
 forward_globals!(
     Anim,
     Appearance,
+    BrowseBridge,
     BackupBridge,
     CaptureSettings,
     DownloadCleanupSettings,
@@ -81,4 +82,5 @@ forward_globals!(
     ReaderSyncSettings,
     SourceCompressionSettings,
     Theme,
+    TimelineBridge,
 );

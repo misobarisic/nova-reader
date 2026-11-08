@@ -42,16 +42,24 @@ fn removing_an_addon_waits_for_confirmation() {
     ui.show().unwrap();
     ui.window().set_size(LogicalSize::new(390., 844.));
     settle();
-    button(&ui, "Extensions (1)").invoke_accessible_default_action();
+    ElementHandle::find_by_accessible_label(&ui, "Extensions")
+        .find(|e| e.accessible_role() == Some(AccessibleRole::Tab))
+        .expect("Extensions tab")
+        .invoke_accessible_default_action();
     settle();
-    button(&ui, "Remove").invoke_accessible_default_action();
-    settle();
+    // Remove lives in the extension's ⋯ menu and still asks first.
+    let remove = |ui: &AppWindow| {
+        button(ui, "Sample extension options").invoke_accessible_default_action();
+        settle();
+        button(ui, "Remove").invoke_accessible_default_action();
+        settle();
+    };
+    remove(&ui);
     assert!(calls.borrow().is_empty(), "Remove asks first");
     button(&ui, "Cancel").invoke_accessible_default_action();
     settle();
     assert!(calls.borrow().is_empty(), "Cancel keeps the addon");
-    button(&ui, "Remove").invoke_accessible_default_action();
-    settle();
+    remove(&ui);
     button(&ui, "Remove addon").invoke_accessible_default_action();
     settle();
     assert_eq!(*calls.borrow(), ["sample-package:remove"]);
@@ -85,13 +93,20 @@ fn refresh_library_is_disabled_while_it_runs() {
         button(&ui, "Refresh library").accessible_enabled(),
         Some(true)
     );
+    // The Updates header shows the refresh's progress while it runs.
+    let bridge = ui.global::<nova_reader::TimelineBridge>();
+    bridge.set_refreshing(true);
     ui.set_busy(true);
     settle();
     assert_eq!(
         button(&ui, "Refresh library").accessible_enabled(),
         Some(false)
     );
-    assert!(has_label(&ui, "Refreshing library…"));
+    assert!(has_label(&ui, "Checking library…"));
+    bridge.set_refresh_total(46);
+    bridge.set_refresh_done(18);
+    settle();
+    assert!(has_label(&ui, "Checking 46 titles… 18 / 46"));
 }
 
 #[test]

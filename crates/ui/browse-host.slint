@@ -1,0 +1,20 @@
+import { BrowseBridge, ItemRow } from "@NovaUiShared";
+
+// Mounts the separately compiled Browse page. Window state is bound here;
+// the window's Browse properties alias `BrowseBridge` where they are
+// declared, and Rust relays the bridge's callbacks to the window.
+export component BrowseHost inherits Rectangle {
+    preferred-width: 100%; preferred-height: 100%;
+    in-out property <bool> active <=> BrowseBridge.active;
+    in-out property <[ItemRow]> items <=> BrowseBridge.items;
+    in-out property <bool> narrow <=> BrowseBridge.narrow;
+    in-out property <bool> touch-menus <=> BrowseBridge.touch-menus;
+    in-out property <length> bottom-padding <=> BrowseBridge.bottom-padding;
+    in-out property <string> status <=> BrowseBridge.status;
+    in-out property <bool> busy <=> BrowseBridge.busy;
+    in-out property <bool> sync-enabled <=> BrowseBridge.sync-enabled;
+    in-out property <length> viewport-width <=> BrowseBridge.viewport-width;
+    in-out property <length> viewport-height <=> BrowseBridge.viewport-height;
+    // Explicit positioning keeps the page's layout out of the host's.
+    ComponentContainer { x: 0px; y: 0px; width: 100%; height: 100%; component-factory: BrowseBridge.factory; }
+}

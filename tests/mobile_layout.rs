@@ -189,8 +189,10 @@ fn nova_navigation_more_and_responsive_controls() {
             ui.get_bottom_navigation_height(),
             if narrow { 68. } else { 0. }
         );
+        // The page title reads "History" too; the tab is the selectable one.
         assert_eq!(
-            action(&ui, "History").accessible_item_selected(),
+            ElementHandle::find_by_accessible_label(&ui, "History")
+                .find_map(|e| e.accessible_item_selected()),
             Some(true)
         );
         back(&ui);
@@ -296,15 +298,29 @@ fn nova_navigation_more_and_responsive_controls() {
             .collect::<Vec<_>>(),
     )));
     ui.set_source_index(0);
+    // Change source lists every source; Rust publishes it with the catalogue.
+    ui.global::<nova_reader::BrowseBridge>()
+        .set_change_items(ModelRc::new(VecModel::from(
+            (0..20)
+                .map(|i| nova_reader::PageMenuItem {
+                    label: format!("Source {}", i + 1).into(),
+                    kind: 1,
+                    checked: i == 0,
+                    id: i.to_string().into(),
+                })
+                .collect::<Vec<_>>(),
+        )));
     settle();
-    tap(&ui, "Source 1");
-    tap(&ui, "Source options");
-    let selector = ElementHandle::find_by_element_type_name(&ui, "ReaderSelect")
-        .next()
-        .unwrap();
-    selector.invoke_accessible_default_action();
-    settle();
-    for _ in 0..9 {
+    tap(&ui, "Source 1, English");
+    assert!(ui.get_source_catalog_open());
+    let change_source = |ui: &AppWindow| {
+        tap(ui, "Source options");
+        tap(ui, "Change source");
+        settle();
+    };
+    change_source(&ui);
+    // The keyboard walks the long list and Enter picks.
+    for _ in 0..10 {
         ui.window().dispatch_event(WindowEvent::KeyPressed {
             text: slint::platform::Key::DownArrow.into(),
         });
@@ -314,29 +330,18 @@ fn nova_navigation_more_and_responsive_controls() {
     });
     settle();
     assert_eq!(ui.get_source_index(), 9);
-    // Popup selection restores closed-box focus, so Enter opens it again.
-    ui.window().dispatch_event(WindowEvent::KeyPressed {
-        text: slint::platform::Key::Return.into(),
-    });
-    settle();
-    action(&ui, "Source 10").invoke_accessible_default_action();
-    settle();
-    assert_eq!(ui.get_source_index(), 9);
-    ui.window().dispatch_event(WindowEvent::KeyPressed {
-        text: slint::platform::Key::Return.into(),
-    });
-    settle();
+    // Back closes the menu, not the source page.
+    change_source(&ui);
     back(&ui);
-
     assert_eq!(
         ui.get_section(),
         3,
         "popup Back must not leave the source page"
     );
-
-    selector.invoke_accessible_default_action();
-    settle();
-    let popup_scroll = ElementHandle::find_by_element_id(&ui, "Dropdown::popup_scroll")
+    assert!(ui.get_source_catalog_open());
+    // Long menus scroll by touch.
+    change_source(&ui);
+    let popup_scroll = ElementHandle::find_by_element_id(&ui, "PageMenu::menu-scroll")
         .next()
         .unwrap();
     for _ in 0..5 {
@@ -350,11 +355,7 @@ fn nova_navigation_more_and_responsive_controls() {
     }
     action(&ui, "Source 20").invoke_accessible_default_action();
     settle();
-    assert_eq!(
-        ui.get_source_index(),
-        19,
-        "long dropdowns must scroll by touch"
-    );
+    assert_eq!(ui.get_source_index(), 19, "long menus must scroll by touch");
     back(&ui);
 
     // A retained More scroller restores its landing position on child return.
@@ -504,34 +505,33 @@ fn nova_navigation_more_and_responsive_controls() {
     }
     ui.global::<Theme>().set_transparent_navbar(true);
 
-    // Browse still uses the ordinary page scroller: page switches reset it,
-    // while loading more rows preserves it. Library has its own retained view.
+    // Browse's catalogue scrolls on its own: loading more rows keeps the
+    // position, and a different catalogue starts at the top.
     ui.window().set_size(LogicalSize::new(390., 720.));
     ui.set_section(3);
     ui.set_catalogue_scroll_y(0.);
     ui.set_source_catalog_open(true);
     ui.set_items(ModelRc::new(VecModel::from(vec![ItemRow::default(); 30])));
     settle();
-    let scroll = ElementHandle::find_by_element_id(&ui, "AppWindow::page-scroll")
-        .next()
-        .unwrap();
-    let heading = ElementHandle::find_by_element_id(&ui, "AppWindow::page-heading")
+    let scroll = ElementHandle::find_by_element_id(&ui, "BrowsePage::catalog-scroll")
         .next()
         .unwrap();
     scroll.scroll(0., -1000.);
     settle();
-    assert!(heading.absolute_position().y < 0.);
+    let scrolled = ui.get_catalogue_scroll_y();
+    assert!(scrolled < 0.);
     ui.set_items(ModelRc::new(VecModel::from(vec![ItemRow::default(); 40])));
     settle();
     assert!(
-        heading.absolute_position().y < 0.,
+        (ui.get_catalogue_scroll_y() - scrolled).abs() < 1.,
         "same-page loading must preserve scroll"
     );
-    ui.set_section(2);
+    ui.set_source_catalogue_kind("latest".into());
     settle();
-    assert!(
-        heading.absolute_position().y >= 0.,
-        "new section must start at its header"
+    assert_eq!(
+        ui.get_catalogue_scroll_y(),
+        0.,
+        "a new catalogue must start at its top"
     );
     ui.set_source_catalog_open(false);
 

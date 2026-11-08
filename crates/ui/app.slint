@@ -5,24 +5,19 @@ import { ControlTouchArea } from "@NovaUiBase/control-input.slint";
 import { Spinner } from "std-widgets.slint";
 import { Theme, Anim, SettingsStyle, ControlInput, SliderGesture } from "@NovaUiShared";
 import { ScrollView } from "@NovaUiBase/scrollview.slint";
-import { ReaderField as LineEdit, ReaderSelect as ComboBox, ReaderToggle as CheckBox } from "controls.slint";
 import { PageHeader } from "page-header.slint";
 import { SourceRow, ExtensionRow } from "@NovaUiShared";
 export { SourceRow, ExtensionRow } from "@NovaUiShared";
-import { SourceList } from "source-list.slint";
-import { ExtensionList } from "extensions.slint";
-import { Segmented } from "@NovaUiBase/settings-controls.slint";
 import { ItemRow } from "@NovaUiShared";
 export { ItemRow } from "@NovaUiShared";
-import { Appearance, LibraryBridge } from "@NovaUiShared";
-import { SeriesGrid, LibraryViewSwitch } from "library-cards.slint";
+import { Appearance, LibraryBridge, BrowseBridge } from "@NovaUiShared";
 import { DetailHero } from "detail-hero.slint";
 import { DownloadsPanel, DownloadEntry } from "downloads.slint";
 export { DownloadEntry } from "downloads.slint";
 import { ChapterRow } from "chapter-row.slint";
 import { SettingsCard } from "@NovaUiBase/settings-controls.slint";
-import { SourceFilterPanel } from "source-filters.slint";
-import { TimelineList } from "timeline.slint";
+import { TimelineHost } from "timeline-host.slint";
+import { BrowseHost } from "browse-host.slint";
 import { ReaderContextMenu, ReaderImageInteraction } from "reader-context-menu.slint";
 import { ReaderPagerMotion } from "reader-pager.slint";
 import { ReaderZoomGesture } from "reader-zoom.slint";
@@ -144,7 +139,8 @@ export component AppWindow inherits Window {
     private property <string> action-confirm-a;
     private property <string> action-confirm-b;
     private property <int> action-confirm-index;
-    function ask-confirm(kind: string, a: string, b: string, index: int, prompt: string, label: string) {
+    // Public so the separately compiled Browse page can ask too.
+    public function ask-confirm(kind: string, a: string, b: string, index: int, prompt: string, label: string) {
         root.action-confirm-kind = kind; root.action-confirm-a = a; root.action-confirm-b = b;
         root.action-confirm-index = index; root.action-confirm-prompt = prompt;
         root.action-confirm-label = label; root.action-confirm-open = true;
@@ -207,7 +203,7 @@ export component AppWindow inherits Window {
     animate reader-entry-fade { duration: root.reader-entry-revealed ? 160ms : 0ms; easing: ease-out; }
     public function begin-reader-entry() { root.reader-entry-revealed = false; }
     changed reader-initial-content => { if root.reader-initial-content { root.reader-entry-revealed = true; } }
-    in property <bool> addon-zip-import-busy;
+    in-out property <bool> addon-zip-import-busy <=> BrowseBridge.addon-zip-import-busy;
     // Nova detail.slint defers its entrance by 40ms so the initial opacity
     // is painted before the shared transition fade starts.
     private property <bool> detail-motion: Anim.enabled && Anim.transitions;
@@ -234,27 +230,25 @@ export component AppWindow inherits Window {
         triggered => { self.stop(); if root.section == 5 { root.detail-entered = true; } }
     }
     in property <[ItemRow]> items;
-    in property <[string]> sources;
-    in property <[SourceRow]> source-rows;
-    in property <[ExtensionRow]> extensions;
-    in-out property <int> browse-tab: 0;
+    in-out property <[string]> sources <=> BrowseBridge.sources;
+    in-out property <[SourceRow]> source-rows <=> BrowseBridge.source-rows;
+    in-out property <[ExtensionRow]> extensions <=> BrowseBridge.extensions;
+    in-out property <int> browse-tab <=> BrowseBridge.browse-tab;
     callback source-pin-picked(string);
     callback source-latest-selected(int);
     callback extension-action(string,string);
-    in-out property <int> source-index: -1;
-    in-out property <bool> source-catalog-open: false;
-    in property <string> source-title;
-    in property <bool> source-has-filters;
-    in property <[SettingRow]> source-filters;
-    in property <string> source-filter-notice;
-    in-out property <bool> source-filters-open: false;
-    private property <bool> source-options-open: false;
-    private property <bool> source-search-open: false;
-    in-out property <string> source-catalogue-kind: "popular";
-    in-out property <length> catalogue-scroll-y: 0px;
-    in-out property <string> source-query;
-    in property <string> catalogue-page-error;
-    private property <bool> catalogue-restore-pending: false;
+    in-out property <int> source-index <=> BrowseBridge.source-index;
+    in-out property <bool> source-catalog-open <=> BrowseBridge.source-catalog-open;
+    in-out property <string> source-title <=> BrowseBridge.source-title;
+    in-out property <bool> source-has-filters <=> BrowseBridge.source-has-filters;
+    in-out property <[SettingRow]> source-filters <=> BrowseBridge.source-filters;
+    in-out property <string> source-filter-notice <=> BrowseBridge.source-filter-notice;
+    in-out property <bool> source-filters-open <=> BrowseBridge.source-filters-open;
+    in-out property <string> source-catalogue-kind <=> BrowseBridge.source-catalogue-kind;
+    in-out property <length> catalogue-scroll-y <=> BrowseBridge.catalogue-scroll-y;
+    in-out property <string> source-query <=> BrowseBridge.source-query;
+    in-out property <string> catalogue-page-error <=> BrowseBridge.catalogue-page-error;
+    private property <bool> catalogue-restore-pending <=> BrowseBridge.catalogue-restore-pending;
     public function prepare-catalogue-return() { root.catalogue-restore-pending = true; }
     public function reset-catalogue-scroll() { root.catalogue-restore-pending = false; root.catalogue-scroll-y = 0px; }
     callback source-filters-requested;
@@ -300,8 +294,8 @@ export component AppWindow inherits Window {
     in-out property <int> chapter-filter;
     in-out property <bool> chapters-descending: true;
     in property <bool> in-library;
-    in property <bool> has-more;
-    in-out property <bool> show-adult: false;
+    in-out property <bool> has-more <=> BrowseBridge.has-more;
+    in-out property <bool> show-adult <=> BrowseBridge.show-adult;
     in property <[PageRow]> pages;
     in property <float> total-ratio;
     in-out property <length> scroll-y: 0px;
@@ -310,7 +304,8 @@ export component AppWindow inherits Window {
     // Actual renderer modes stay 0–3; index 4 is a persisted Automatic choice.
     in-out property <int> reader-mode-choice: 6;
     in-out property <int> reader-rotation-choice: -1;
-    private property <bool> clear-history-confirm-open: false;
+    // History's ⋯ menu opens this from Rust; the sheet below confirms.
+    in-out property <bool> clear-history-confirm-open: false;
     in-out property <string> reader-mode-label: @tr("Webtoon");
     in-out property <string> reader-chapter-title;
     in-out property <bool> reader-bookmarked: false;
@@ -634,6 +629,8 @@ export component AppWindow inherits Window {
     in-out property <int> library-restore-serial: 0;
     callback library-viewport-changed(string,float,float);
     callback library-checkpoint();
+    // Pages compiled apart hand keyboard focus back to the window's handler.
+    public function focus-window() { keyboard.focus(); }
     // The library page's Enter hands focus back to the window's key handler.
     public function library-search-submitted() { if !root.mobile-ui { keyboard.focus(); } }
     public function remember-library-position() {
@@ -735,7 +732,10 @@ export component AppWindow inherits Window {
         if root.reader-context-visible { root.close-reader-context(); return; }
         if root.section == 0 && root.library-search-open { root.close-library-search(); return; }
         if ((root.section == 5 && root.detail-origin == 3) || root.section == 8) && root.source-catalog-open { root.return-to-catalogue(); return; }
+        if root.section == 3 && root.source-catalog-open && root.source-filters-open { root.source-filters-open = false; return; }
         if root.section == 3 && root.source-catalog-open { root.source-catalog-open = false; root.navigate(3); return; }
+        // Back from results across sources returns to the source list.
+        if root.section == 3 && BrowseBridge.global-query != "" { BrowseBridge.global-search(""); return; }
         root.navigate(root.section == 6 ? (root.reader-opening || root.reader-collection ? root.reader-return-section : 5) : root.section == 8 ? 3 : root.section == 11 || root.section == 12 || root.section == 14 || root.section == 15 || root.section == 16 || root.section == 17 || root.section == 18 || root.section == 19 || root.section == 20 || root.section == 21 || root.section == 22 ? 10 : root.section >= 9 || root.section == 7 ? 4 : root.section == 5 ? root.detail-origin : 0);
     }
 
@@ -817,7 +817,27 @@ export component AppWindow inherits Window {
                             restore-index: root.library-restore-index; restore-fraction: root.library-restore-fraction;
                             restore-serial: root.library-restore-serial;
                         }
-                        if root.section != 0 && root.section != 6 && root.section != 4 && root.section != 7 && root.section != 8 && root.section < 9: page-scroll := ScrollView {
+                        browse-host := BrowseHost {
+                            width: parent.width; height: parent.height;
+                            viewport-width: self.width; viewport-height: self.height;
+                            visible: root.section == 3;
+                            active: root.section == 3;
+                            items: root.section == 3 ? root.items : [];
+                            narrow: root.mobile-ui; touch-menus: root.touch-menus;
+                            bottom-padding: Theme.transparent_navbar ? root.bottom-navigation-height : 0px;
+                            status: root.status; busy: root.busy; sync-enabled: SettingsSync.enabled;
+                        }
+                        timeline-host := TimelineHost {
+                            width: parent.width; height: parent.height;
+                            viewport-width: self.width; viewport-height: self.height;
+                            visible: root.section == 1 || root.section == 2;
+                            active: root.section == 1 || root.section == 2;
+                            history: root.section == 2;
+                            narrow: root.mobile-ui;
+                            bottom-padding: Theme.transparent_navbar ? root.bottom-navigation-height : 0px;
+                            status: root.status; busy: root.busy;
+                        }
+                        if root.section != 0 && root.section != 1 && root.section != 2 && root.section != 3 && root.section != 6 && root.section != 4 && root.section != 7 && root.section != 8 && root.section < 9: page-scroll := ScrollView {
                             private property <int> control-focus-request: SettingsStyle.focus-request;
                             changed control-focus-request => {
                                 if SettingsStyle.keyboard-mode {
@@ -831,32 +851,12 @@ export component AppWindow inherits Window {
                             in property <int> destination: root.section;
                             changed destination => {
                                 if root.section == 5 { root.detail-restore-pending = true; }
-                                else if root.section == 3 && root.source-catalog-open { root.catalogue-restore-pending = true; }
                                 else { self.content-y = 0px; }
                             }
                             changed content-y => {
-                                if root.section == 3 && root.source-catalog-open && !root.catalogue-restore-pending { root.catalogue-scroll-y = self.content-y; }
                                 if root.section == 5 && !root.detail-restore-pending && !root.busy { root.detail-scroll-y = self.content-y; }
                             }
-                            in property <length> catalogue-position: root.catalogue-scroll-y;
-                            changed catalogue-position => { if root.section == 3 && root.source-catalog-open && !root.catalogue-restore-pending && Math.abs(self.content-y - root.catalogue-scroll-y) > 0.5px { self.content-y = root.catalogue-scroll-y; } }
-                            Timer { interval: 16ms; running: root.catalogue-restore-pending && root.section == 3 && root.source-catalog-open; triggered => { page-scroll.content-y = root.catalogue-scroll-y; root.catalogue-restore-pending = false; } }
-                            Timer {
-                                interval: 100ms;
-                                running: root.section == 3 && root.source-catalog-open;
-                                triggered => {
-                                    // Also fill a short first page; only request when the
-                                    // source can advance and the previous page succeeded.
-                                    if !root.catalogue-restore-pending && root.has-more && !root.busy && root.catalogue-page-error == "" && page-scroll.visible-height > 0px && page-scroll.content-height + page-scroll.content-y <= page-scroll.visible-height * 2 {
-                                        root.load-more();
-                                    }
-                                }
-                            }
                             Timer { interval: 16ms; running: root.detail-restore-pending && root.section == 5; triggered => { page-scroll.content-y = root.detail-scroll-y; root.detail-restore-pending = false; } }
-                            in property <bool> catalog-open: root.source-catalog-open;
-                            changed catalog-open => { if root.section == 3 { self.content-y = 0px; } }
-                            in property <string> catalogue: root.source-catalogue-kind;
-                            changed catalogue => { if root.section == 3 && !root.catalogue-restore-pending { self.content-y = 0px; root.catalogue-scroll-y = 0px; } }
                             min-width: 0px;
                             mouse-drag-pan-enabled: true;
                             content-width: self.visible-width;
@@ -867,8 +867,8 @@ export component AppWindow inherits Window {
                                 padding-bottom: root.section == 5 ? 16px : 18px + (Theme.transparent_navbar ? root.bottom-navigation-height : 0px);
                                 spacing: 16px; alignment: start;
                                 if root.section != 5: page-heading := PageHeader {
-                                    title: root.section == 3 && root.source-catalog-open ? root.source-title : root.heading; subtitle: root.section == 3 && root.source-catalog-open ? "" : root.caption; narrow: root.mobile-ui;
-                                    show-back: (root.section == 3 && root.source-catalog-open) || root.section == 5 || root.section == 7 || root.section == 8;
+                                    title: root.heading; subtitle: root.caption; narrow: root.mobile-ui;
+                                    show-back: root.section == 5 || root.section == 7 || root.section == 8;
                                     back => { root.go-back(); }
                                 }
                                 if root.status != "" && root.section != 5: Rectangle {
@@ -879,96 +879,9 @@ export component AppWindow inherits Window {
                                         x: 12px; y: 12px; width: max(0px, parent.width - 24px);
                                     }
                                 }
-                                if root.busy && root.section != 1 && root.section != 2 && root.section != 5 && (root.section != 3 || root.source-catalog-open): HorizontalLayout {
+                                if root.busy && root.section != 5 && (root.section != 3 || root.source-catalog-open): HorizontalLayout {
                                     Spinner { width: 24px; height: 24px; }
                                     Text { min-width: 0px; text: @tr("Loading…"); color: Theme.current.text_secondary; }
-                                }
-                                if root.section == 3 && !root.source-catalog-open: VerticalLayout {
-                                    spacing: 12px;
-                                    Segmented { labels: [@tr("Sources"),@tr("Extensions ({})",root.extensions.length)]; current-index: root.browse-tab; picked(i) => { root.browse-tab = i; } }
-                                    if root.browse-tab == 0: VerticalLayout {
-                                        spacing: 12px;
-                                        HorizontalLayout {
-                                            spacing: 8px;
-                                            CheckBox { horizontal-stretch: 1; min-width: 0px; text: @tr("Show adult sources"); checked <=> root.show-adult; toggled => { root.adult-visibility-changed(self.checked); } }
-                                            if SettingsSync.enabled: SettingSyncBadge { setting_key: "reader:show-adult"; setting_title: @tr("Show adult sources"); }
-                                        }
-                                        SourceList {
-                                            items: root.source-rows;
-                                            picked(i) => { root.source-index = i; root.source-catalog-open = true; root.source-catalogue-kind = "popular"; root.source-selected(i); }
-                                            latest-picked(i) => { root.source-index = i; root.source-catalog-open = true; root.source-catalogue-kind = "latest"; root.source-latest-selected(i); }
-                                            pin-picked(id) => { root.source-pin-picked(id); }
-                                        }
-                                        if root.source-rows.length == 0: Text { text: root.extensions.length == 0 ? @tr("Install an extension to add a source.") : @tr("No sources visible. Check extension settings and adult-source visibility."); color: Theme.current.text_secondary; wrap: word-wrap; min-width: 0px; }
-                                    }
-                                    if root.browse-tab == 1: VerticalLayout {
-                                        spacing: 12px;
-                                        ActionButton { text: @tr("Install addon"); enabled: !root.addon-zip-import-busy; clicked => { root.install-addon(); } }
-                                        ExtensionList { items: root.extensions; action(id,action) => { if action == "remove" { root.ask-confirm("extension", id, action, 0, @tr("Remove this addon? Its sources will no longer be available."), @tr("Remove addon")); } else { root.extension-action(id,action); } } }
-                                    }
-                                }
-                                if root.section == 3 && root.source-catalog-open: VerticalLayout {
-                                    spacing: 12px;
-                                    HorizontalLayout {
-                                        spacing: 8px;
-                                        IconAction { width: 44px; text: @tr("Search source"); icon: @image-url("../../assets/icons/navigation/search.svg"); clicked => { root.source-search-open = !root.source-search-open; } }
-                                        LibraryViewSwitch { list-view: Appearance.library-list-view; picked(list) => { Appearance.setting-changed("library_list_view", list ? 1 : 0); } }
-                                        Rectangle { horizontal-stretch: 1; min-width: 0px; }
-                                        IconAction { width: 44px; text: @tr("Source options"); icon: @image-url("../../assets/icons/navigation/more.svg"); clicked => { root.source-options-open = !root.source-options-open; } }
-                                    }
-                                    HorizontalLayout {
-                                        spacing: 8px;
-                                        LibraryFilterChip { touch_feedback: root.touch-menus; label: @tr("Popular"); selected: root.source-catalogue-kind == "popular"; keyboard-focusable: true;
-                                            accessible-action-default => { root.source-catalogue-kind = "popular"; root.browse("popular"); }
-                                            picked => { root.source-catalogue-kind = "popular"; root.browse("popular"); } }
-                                        LibraryFilterChip { touch_feedback: root.touch-menus; label: @tr("Latest"); selected: root.source-catalogue-kind == "latest"; keyboard-focusable: true;
-                                            accessible-action-default => { root.source-catalogue-kind = "latest"; root.browse("latest"); }
-                                            picked => { root.source-catalogue-kind = "latest"; root.browse("latest"); } }
-                                        if root.source-has-filters: LibraryFilterChip { touch_feedback: root.touch-menus; label: @tr("Filter"); selected: root.source-filters-open; keyboard-focusable: true;
-                                            accessible-action-default => { root.source-filters-requested(); }
-                                            picked => { root.source-filters-requested(); } }
-                                    }
-                                    if root.source-search-open: HorizontalLayout {
-                                        spacing: 8px;
-                                        query := LineEdit { min-width: 0px; text <=> root.source-query; placeholder-text: @tr("Search this source…"); accepted => { root.source-catalogue-kind = "search"; root.search(self.text); } }
-                                        ActionButton { width: 80px; text: @tr("Search"); clicked => { root.source-catalogue-kind = "search"; root.search(query.text); } }
-                                    }
-                                    if root.source-filters-open: SourceFilterPanel {
-                                        settings: root.source-filters; notice: root.source-filter-notice;
-                                        changed(key,value) => { root.source-filter-changed(key,value); }
-                                        selection-changed(key,index) => { root.source-filter-selected(key,index); }
-                                        apply => { root.source-catalogue-kind = "filtered"; root.source-filters-applied(); }
-                                    }
-                                    if root.source-options-open: ComboBox {
-                                        model: root.sources; current-index <=> root.source-index;
-                                        placeholder-text: @tr("Change source");
-                                        selected(_) => { root.source-selected(self.current-index); }
-                                    }
-                                    if root.source-options-open: HorizontalLayout {
-                                        spacing: 8px;
-                                        ActionButton { text: @tr("Enable / disable"); clicked => { root.source-action("toggle"); } }
-                                        ActionButton { text: @tr("Remove"); clicked => { root.ask-confirm("source", "remove", "", 0, @tr("Remove this addon? Its sources will no longer be available."), @tr("Remove addon")); } }
-                                        ActionButton { text: @tr("Settings"); clicked => { root.source-action("settings"); } }
-                                    }
-                                }
-                                if root.section == 1: HorizontalLayout {
-                                    spacing: 12px;
-                                    // The shared busy row is hidden on Updates, so progress shows here.
-                                    ActionButton { text: @tr("Refresh library"); enabled: !root.busy; clicked => { root.browse("refresh"); } }
-                                    if root.busy: Spinner { width: 24px; height: 24px; }
-                                    if root.busy: Text { min-width: 0px; text: @tr("Refreshing library…"); color: Theme.current.text_secondary; vertical-alignment: center; }
-                                }
-                                if root.section == 2: HorizontalLayout {
-                                    spacing: 8px;
-                                    history-query := LineEdit { placeholder-text: @tr("Search history…"); accepted => { root.search(self.text); } }
-                                    ActionButton { width: 80px; text: @tr("Search"); clicked => { root.search(history-query.text); } }
-                                    IconAction { width: 44px; text: @tr("Clear history"); icon: @image-url("../../assets/icons/navigation/delete.svg"); clicked => { root.clear-history-confirm-open = true; } }
-                                }
-                                if root.section == 1 || root.section == 2: TimelineList {
-                                    items: root.items; history: root.section == 2;
-                                    viewport-top: page-scroll.absolute-position.y; viewport-height: page-scroll.visible-height;
-                                    picked(i) => { root.open-item(i); } series-picked(i) => { root.open-series(i); } action(i,action) => { root.item-action(i,action); }
-                                    request-artwork(first,last) => { root.request-artwork(first,last); }
                                 }
                                 if root.section == 5: DetailHero {
                                     viewport-width: root.width;
@@ -982,16 +895,6 @@ export component AppWindow inherits Window {
                                     expanded <=> root.detail-synopsis-expanded;
                                     resume => { root.detail-scroll-y = page-scroll.content-y; root.chapter-step(0); } toggle-library => { if root.in-library { root.ask-confirm("library", "", "", 0, @tr("Remove this title from your library?"), @tr("Remove from library")); } else { root.toggle-library(); } }
                                     request-artwork => { root.request-artwork(-1,-1); }
-                                }
-                                if root.section == 3 && root.source-catalog-open && root.items.length > 0: SeriesGrid {
-                                    items: root.items; list-view: Appearance.library-list-view;
-                                    min-cols: root.section == 3 ? Appearance.browse-min-cols : Appearance.library-min-cols;
-                                    overlay-caption: root.section == 3;
-                                    context-enabled: root.section == 0;
-                                    viewport-top: page-scroll.absolute-position.y; viewport-height: page-scroll.visible-height;
-                                    picked(i) => { root.open-item(i); }
-                                    context-requested(key,title,in-library,x,y) => { root.open-entry-menu(key,title,in-library,x,y); }
-                                    request-artwork(first,last) => { root.request-artwork(first,last); }
                                 }
                                 if root.section == 5 && !root.detail-gallery-single: VerticalLayout {
                                     padding-left: root.safe-area-insets.left + (root.mobile-ui ? 20px : 64px);
@@ -1157,11 +1060,6 @@ export component AppWindow inherits Window {
                                             Text { min-width: 0px; text: root.section == 0 ? @tr("Your next story starts here") : @tr("Nothing here yet"); color: Theme.current.text_bright; font-size: 19px; wrap: word-wrap; horizontal-alignment: center; }
                                             Text { min-width: 0px; text: root.section == 0 ? @tr("Install a source in Browse, or import a local chapter in More.") : @tr("Try refreshing or choosing another source."); color: Theme.current.text_secondary; wrap: word-wrap; horizontal-alignment: center; }
                                         }
-                                    }
-                                    if root.section == 3 && root.source-catalog-open && root.catalogue-page-error != "": VerticalLayout {
-                                        spacing: 8px;
-                                        Text { text: root.catalogue-page-error; color: Theme.current.text_secondary; wrap: word-wrap; }
-                                        ActionButton { text: @tr("Retry"); enabled: !root.busy; clicked => { root.load-more(); } }
                                     }
                                 }
 

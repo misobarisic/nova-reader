@@ -660,6 +660,33 @@ fn admit(ui: &AppWindow, id: u64, shared: &Shared, key: &str, loaded: Loaded) {
     trim_ui(ui, id, shared);
 }
 
+/// Updates/History lines and the History shelf also carry covers: set the
+/// image on every entry whose key `matches` (and whose cover differs).
+fn set_timeline_posters(ui: &AppWindow, matches: impl Fn(&str) -> bool, image: &Image) {
+    use slint::ComponentHandle;
+    let bridge = ui.global::<crate::TimelineBridge>();
+    let entries = bridge.get_entries();
+    for index in 0..entries.row_count() {
+        if let Some(mut row) = entries.row_data(index)
+            && matches(row.artwork_key.as_str())
+            && row.poster != *image
+        {
+            row.poster = image.clone();
+            entries.set_row_data(index, row);
+        }
+    }
+    let shelf = bridge.get_shelf();
+    for index in 0..shelf.row_count() {
+        if let Some(mut row) = shelf.row_data(index)
+            && matches(row.artwork_key.as_str())
+            && row.poster != *image
+        {
+            row.poster = image.clone();
+            shelf.set_row_data(index, row);
+        }
+    }
+}
+
 fn publish(ui: &AppWindow, key: &str, image: Image) {
     let model = ui.get_items();
     for index in 0..model.row_count() {
@@ -682,6 +709,8 @@ fn publish(ui: &AppWindow, key: &str, image: Image) {
             }
         }
     }
+    set_timeline_posters(ui, |row| row == key, &image);
+    crate::app::set_global_posters(ui, |row| row == key, &image);
     if ui.get_series_artwork_key().as_str() == key {
         ui.set_series_poster(image);
     }
@@ -717,6 +746,8 @@ fn forget_images(ui: &AppWindow, id: u64, keys: &BTreeSet<String>) {
             }
         }
     }
+    set_timeline_posters(ui, |row| keys.contains(row), &Image::default());
+    crate::app::set_global_posters(ui, |row| keys.contains(row), &Image::default());
     if keys.contains(ui.get_series_artwork_key().as_str()) {
         ui.set_series_poster(Image::default());
     }

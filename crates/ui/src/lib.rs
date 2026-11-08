@@ -8,8 +8,9 @@ pub use generated::*;
 // Slint 1.18 does not re-export imported library types; keep their existing
 // paths while sharing the compiled library's exact types.
 pub use nova_reader_ui_shared::{
-    Appearance, ExtensionRow, ItemRow, LibraryBridge, SettingRow, SettingSyncInfo, SheetItem,
-    SourceRow, ThemePalette,
+    Appearance, BrowseBridge, ExtensionRow, FilterGroup, FilterPill, ItemRow, LibraryBridge,
+    PageMenuItem, SearchSection, SettingRow, SettingSyncInfo, SheetItem, ShelfEntry, SourceRow,
+    ThemePalette, TimelineBridge, TimelineEntry,
 };
 // One sync-badge global for the window and every page; Rust keeps the name
 // Reader used before the split. (Renaming a library global inside `.slint`

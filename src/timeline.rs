@@ -70,6 +70,13 @@ impl TimelineClock {
             .unwrap_or_default()
     }
 
+    /// The local calendar day of a moment (a Julian day number, so days
+    /// compare across months and years) and its short label ("Sat 8 Nov").
+    pub fn day(&self, unix: Option<i64>) -> Option<(i32, String)> {
+        let date = self.local(unix)?.date();
+        Some((date.to_julian_day(), short_date(date)))
+    }
+
     fn local(&self, unix: Option<i64>) -> Option<OffsetDateTime> {
         let utc = OffsetDateTime::from_unix_timestamp(unix?).ok()?;
         // Query the event's offset as well, so older entries observe DST.
@@ -107,6 +114,17 @@ fn stamp_at(local: OffsetDateTime, today: Date) -> TimelineStamp {
         group,
         timestamp: format!("{:02}:{:02}", local.hour(), local.minute()),
     }
+}
+
+fn short_date(date: Date) -> String {
+    let weekday = date.weekday().to_string();
+    let month = date.month().to_string();
+    format!(
+        "{} {} {}",
+        &weekday[..weekday.len().min(3)],
+        date.day(),
+        &month[..month.len().min(3)]
+    )
 }
 
 fn date_label(date: Date) -> String {

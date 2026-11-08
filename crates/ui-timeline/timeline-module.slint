@@ -1,0 +1,8 @@
+import { TimelinePage } from "../ui/timeline-page.slint";
+import { TimelineBridge } from "@NovaUiShared";
+
+export component TimelineModule inherits Window {
+    background: transparent;
+    width: TimelineBridge.viewport-width; height: TimelineBridge.viewport-height;
+    TimelinePage { width: 100%; height: 100%; }
+}

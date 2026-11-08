@@ -1,0 +1,20 @@
+[package]
+name = "nova-reader-ui-browse"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+links = "novareaderuibrowse"
+
+[lib]
+# UI coverage lives in the root integration suites.
+test = false
+
+[dependencies]
+slint = { workspace = true }
+nova-ui-base = { workspace = true }
+i-slint-core = { version = "=1.18.0", default-features = false, features = ["image-decoders", "svg"] }
+nova-reader-ui-shared = { path = "../ui-shared" }
+
+[build-dependencies]
+slint-build = { workspace = true, features = ["experimental-module-builds"] }
+nova-ui-base = { workspace = true }

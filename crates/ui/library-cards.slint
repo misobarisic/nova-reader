@@ -56,12 +56,25 @@ export component LibraryViewSwitch inherits Rectangle {
     }
 }
 
+component InLibraryPill inherits Rectangle {
+    height: 22px; width: in-library-text.preferred-width + 24px;
+    border-radius: min(Theme.button_corner_radius, self.height / 2); background: Theme.current.accent;
+    accessible-role: text; accessible-label: @tr("In library");
+    Path {
+        x: 7px; y: 5px; width: 11px; height: 11px; viewbox-width: 24; viewbox-height: 24;
+        fill: transparent; stroke: Theme.current.on_accent; stroke-width: 3px; commands: "M5 12l5 5 9-10";
+    }
+    in-library-text := Text { x: 20px; height: 100%; text: @tr("In library"); font-size: 10px; font-weight: 700; color: Theme.current.on_accent; vertical-alignment: center; }
+}
+
 export component LibraryCard inherits Rectangle {
     in property <ItemRow> card;
     in property <bool> list-view;
     // The library's own look (no card frame, cover badges, detail line);
     // Browse and other grids keep the framed card.
     in property <bool> library-style;
+    // Browse's catalogue: an "In library" pill replaces the unread badge.
+    in property <bool> in-library-badge;
     in property <bool> context-enabled;
     in property <bool> overlay-caption;
     callback picked;
@@ -89,7 +102,8 @@ export component LibraryCard inherits Rectangle {
                 width: 36px; height: 36px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
                 colorize: Theme.current.text_muted;
             }
-            CountBadge { x: 6px; y: 6px; card: root.card; }
+            if !root.in-library-badge: CountBadge { x: 6px; y: 6px; card: root.card; }
+            if root.in-library-badge && root.card.bookmarked: InLibraryPill { x: 6px; y: 6px; }
             if root.card.downloaded-count > 0: Rectangle {
                 x: parent.width - self.width - 6px; y: 6px; width: 22px; height: 22px;
                 border-radius: min(Theme.button_corner_radius, self.height / 2);
@@ -155,7 +169,8 @@ export component LibraryCard inherits Rectangle {
                 color: root.card.detail-success ? Theme.current.scope_synced_text : Theme.current.text_muted;
             }
         }
-        list-badge := CountBadge { x: parent.width - self.width - 12px; y: (parent.height - self.height) / 2; card: root.card; }
+        list-badge := CountBadge { x: parent.width - self.width - 12px; y: (parent.height - self.height) / 2; card: root.card; visible: !root.in-library-badge; }
+        if root.in-library-badge && root.card.bookmarked: InLibraryPill { x: parent.width - self.width - 12px; y: (parent.height - self.height) / 2; }
     }
     // ------------------------------------------------ framed card elsewhere
     if !root.library-style: lift := Rectangle {
@@ -234,6 +249,7 @@ export component SeriesGrid inherits Rectangle {
     in property <bool> overlay-caption;
     // The library's own card and row look; see LibraryCard.
     in property <bool> library-style;
+    in property <bool> in-library-badge;
     in property <length> viewport-top;
     in property <length> viewport-height;
     callback picked(int);
@@ -277,7 +293,7 @@ export component SeriesGrid inherits Rectangle {
         width: root.item-width; height: root.card-height;
         if Math.floor(i / root.columns) >= root.first-row && Math.floor(i / root.columns) <= root.last-row: LibraryCard {
             card: item; list-view: root.list-view; overlay-caption: root.overlay-caption; context-enabled: root.context-enabled;
-            library-style: root.library-style;
+            library-style: root.library-style; in-library-badge: root.in-library-badge;
             picked => { root.picked(i); }
             context-requested(x,y) => { root.context-requested(item.series-key,item.title,item.bookmarked,x,y); }
         }

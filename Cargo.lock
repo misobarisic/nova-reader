@@ -5007,7 +5007,20 @@ name = "nova-reader-ui"
 version = "0.1.0"
 dependencies = [
  "i-slint-core",
+ "nova-reader-ui-browse",
  "nova-reader-ui-library",
+ "nova-reader-ui-shared",
+ "nova-reader-ui-timeline",
+ "nova-ui-base",
+ "slint",
+ "slint-build",
+]
+
+[[package]]
+name = "nova-reader-ui-browse"
+version = "0.1.0"
+dependencies = [
+ "i-slint-core",
  "nova-reader-ui-shared",
  "nova-ui-base",
  "slint",
@@ -5030,6 +5043,17 @@ name = "nova-reader-ui-shared"
 version = "0.1.0"
 dependencies = [
  "i-slint-core",
+ "nova-ui-base",
+ "slint",
+ "slint-build",
+]
+
+[[package]]
+name = "nova-reader-ui-timeline"
+version = "0.1.0"
+dependencies = [
+ "i-slint-core",
+ "nova-reader-ui-shared",
  "nova-ui-base",
  "slint",
  "slint-build",

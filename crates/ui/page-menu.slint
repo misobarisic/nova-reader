@@ -1,0 +1,188 @@
+// The ⋯ menu shared by the Updates, History and Browse headers: grows from
+// its button like the library's sort menu. Picking closes it; Escape, Back or
+// a tap outside close it unchanged.
+import { Theme, SettingsStyle, Anim, PageMenuItem } from "@NovaUiShared";
+import { ControlTouchArea } from "@NovaUiBase/control-input.slint";
+
+
+component PageMenuRow inherits Rectangle {
+    in property <PageMenuItem> item;
+    in property <bool> focused;
+    in property <bool> live: true;
+    callback activated;
+    height: root.item.kind == 0 ? 28px : 44px;
+    border-radius: min(Theme.button_corner_radius, 10px);
+    background: root.item.kind != 0 && (touch.has-hover || root.focused) && root.live ? Theme.current.control_hover : transparent;
+    border-width: root.focused && SettingsStyle.keyboard-mode ? 2px : 0px; border-color: Theme.current.focus_ring;
+    // Roles are constant per element: each kind carries its own.
+    if root.item.kind == 0: Rectangle { accessible-role: text; accessible-label: root.item.label; }
+    if root.item.kind == 1: Rectangle {
+        accessible-role: radio-button; accessible-label: root.item.label;
+        accessible-checkable: true; accessible-checked: root.item.checked; accessible-enabled: root.live;
+        accessible-action-default => { if root.live { root.activated(); } }
+    }
+    if root.item.kind == 4: Rectangle {
+        accessible-role: switch; accessible-label: root.item.label;
+        accessible-checkable: true; accessible-checked: root.item.checked; accessible-enabled: root.live;
+        accessible-action-default => { if root.live { root.activated(); } }
+    }
+    if root.item.kind == 2 || root.item.kind == 3: Rectangle {
+        accessible-role: button; accessible-label: root.item.label; accessible-enabled: root.live;
+        accessible-action-default => { if root.live { root.activated(); } }
+    }
+    Text {
+        x: root.item.kind == 1 ? 36px : 12px;
+        width: parent.width - self.x - (root.item.kind == 4 ? 60px : 12px); height: 100%;
+        text: root.item.label; overflow: elide; vertical-alignment: center;
+        font-size: root.item.kind == 0 ? 11px : 14px; font-weight: root.item.kind == 0 ? 600 : 400;
+        color: root.item.kind == 0 ? Theme.current.text_hint
+            : root.item.kind == 3 ? Theme.current.text_destructive
+            : root.item.kind == 1 && root.item.checked ? Theme.current.text_selected
+            : Theme.current.text_bright;
+    }
+    if root.item.kind == 1 && root.item.checked: Path {
+        x: 10px; y: 12px; width: 20px; height: 20px;
+        viewbox-width: 24; viewbox-height: 24; fill: transparent; stroke-width: 2px;
+        stroke: Theme.current.accent_soft; commands: "M5 12.5l4.5 4.5L19 7.5";
+    }
+    if root.item.kind == 4: Rectangle {
+        x: parent.width - 52px; y: 12px; width: 40px; height: 20px; border-radius: 10px;
+        background: root.item.checked ? Theme.current.accent : Theme.current.slider_track;
+        Rectangle {
+            x: root.item.checked ? parent.width - 18px : 2px; y: 2px; width: 16px; height: 16px; border-radius: 8px;
+            background: root.item.checked ? Theme.current.toggle_knob_active : Theme.current.toggle_knob;
+            animate x { duration: Anim.enabled ? Anim.player_fast : 0ms; easing: ease-out; }
+        }
+    }
+    touch := ControlTouchArea { enabled: root.live && root.item.kind != 0; mouse-cursor: pointer; clicked => { root.activated(); } }
+}
+
+export component PageMenu inherits Rectangle {
+    in property <[PageMenuItem]> items;
+    in property <string> label;
+    // The button's lower-right corner, in this component's coordinates.
+    in property <length> anchor-right;
+    in property <length> anchor-y;
+    callback picked(string);
+    callback closed;
+    private property <bool> shown: false;
+    private property <bool> motion: Anim.enabled && Anim.player;
+    private property <float> scale-progress: 0;
+    private property <float> fade-progress: 0;
+    animate scale-progress { duration: root.motion ? (root.shown ? Anim.player_slide : Anim.player_fast) : 0ms; easing: ease-out; }
+    animate fade-progress { duration: root.motion ? Anim.player_fast : 0ms; easing: ease-out; }
+    private property <int> focus-index: -1;
+    init => { reveal.start(); }
+    reveal := Timer {
+        interval: 1ms; running: false;
+        triggered => { self.stop(); root.shown = true; root.scale-progress = 1; root.fade-progress = 1; key.focus(); }
+    }
+    function dismiss() {
+        if !root.shown { return; }
+        root.shown = false; root.scale-progress = 0; root.fade-progress = 0;
+        finish.start();
+    }
+    finish := Timer {
+        interval: root.motion ? max(1ms, Anim.player_fast) : 1ms; running: false;
+        triggered => { self.stop(); root.closed(); }
+    }
+    function activate(index: int) {
+        if index < 0 || index >= root.items.length || root.items[index].kind == 0 { return; }
+        root.picked(root.items[index].id);
+        root.dismiss();
+    }
+    function step(delta: int) {
+        let n = root.items.length;
+        if n == 0 { return; }
+        // Section labels are skipped.
+        root.focus-index = Math.mod(root.focus-index + delta + n, n);
+        if root.items[root.focus-index].kind == 0 { root.focus-index = Math.mod(root.focus-index + delta + n, n); }
+    }
+    key := FocusScope {
+        key-pressed(e) => {
+            if !root.shown { return reject; }
+            if e.text == Key.Escape || e.text == Key.Back { root.dismiss(); return accept; }
+            if e.text == Key.DownArrow || e.text == Key.UpArrow {
+                SettingsStyle.keyboard-mode = true;
+                root.step(e.text == Key.UpArrow ? -1 : 1);
+                return accept;
+            }
+            if (e.text == Key.Return || e.text == " ") && !e.repeat { root.activate(root.focus-index); return accept; }
+            return accept;
+        }
+        TouchArea { enabled: root.shown; clicked => { root.dismiss(); } }
+        panel := Rectangle {
+            width: min(250px, max(1px, root.width - 16px));
+            // Long lists (Change source) scroll inside the panel.
+            height: min(content.preferred-height, max(1px, root.height - 16px));
+            x: Math.clamp(root.anchor-right - self.width, 8px, max(8px, root.width - self.width - 8px));
+            y: Math.clamp(root.anchor-y, 8px, max(8px, root.height - self.height - 8px));
+            background: Theme.current.popup;
+            border-radius: Theme.card_corner_radius;
+            border-width: 1px; border-color: Theme.current.border_overlay;
+            drop-shadow-offset-y: 8px; drop-shadow-blur: 24px; drop-shadow-color: Theme.current.scrim_shadow;
+            clip: true;
+            opacity: root.fade-progress;
+            transform-scale: 0.86 + 0.14 * root.scale-progress;
+            transform-origin: { x: self.width, y: 0px };
+            accessible-role: groupbox; accessible-label: root.label;
+            TouchArea { enabled: root.shown; }
+            menu-scroll := Flickable {
+                width: 100%; height: 100%;
+                content-height: content.preferred-height;
+                content := VerticalLayout {
+                    padding: 6px; spacing: 0px;
+                    for item[i] in root.items: PageMenuRow {
+                        item: item; live: root.shown;
+                        focused: root.focus-index == i && key.has-focus;
+                        activated => { root.activate(i); }
+                        // Keep the keyboard's row in view.
+                        changed focused => {
+                            if self.focused {
+                                if self.y + menu-scroll.content-y < 0px { menu-scroll.content-y = -self.y; }
+                                else if self.y + self.height + menu-scroll.content-y > menu-scroll.height {
+                                    menu-scroll.content-y = menu-scroll.height - self.y - self.height;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// A round 44px icon button for page headers.
+export component HeaderIcon inherits Rectangle {
+    in property <image> icon;
+    in property <string> label;
+    in property <bool> enabled: true;
+    in property <bool> active: false;
+    callback clicked;
+    width: 44px; height: 44px; border-radius: 22px;
+    background: (touch.has-hover || scope.has-focus) && root.enabled ? Theme.current.control_hover : transparent;
+    border-width: scope.has-focus && SettingsStyle.keyboard-mode ? 2px : 0px; border-color: Theme.current.focus_ring;
+    opacity: root.enabled ? 1 : 0.45;
+    accessible-role: button; accessible-label: root.label; accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    Image {
+        source: root.icon; width: 22px; height: 22px;
+        x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+        colorize: root.active ? Theme.current.accent_vivid : Theme.current.text_secondary; image-fit: contain;
+    }
+    scope := FocusScope {
+        enabled: root.enabled;
+        key-pressed(e) => { if (e.text == Key.Return || e.text == " ") && !e.repeat { root.clicked(); return accept; } return reject; }
+    }
+    touch := ControlTouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+// The pinned page title: shrinks from the page size to 20px after scrolling.
+export component PageTitle inherits Text {
+    in property <bool> stuck;
+    in property <length> full-size: 28px;
+    font-size: root.stuck ? 20px : root.full-size;
+    animate font-size { duration: Anim.enabled ? Anim.player_slide : 0ms; easing: ease-out; }
+    font-weight: 700; color: Theme.current.text_bright;
+    vertical-alignment: center; accessible-role: text;
+}

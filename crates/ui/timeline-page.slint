@@ -1,0 +1,646 @@
+// Updates "Grouped" and History "Combined": a pinned header whose title
+// shrinks once the list scrolls, sticky day headings directly below it, and
+// a virtualised list of positioned lines published by Rust
+// (`src/timeline_groups.rs`). History adds the "Pick up" shelf and a view
+// toggle between session cards and a timeline.
+import { Theme, SettingsStyle, Anim, Appearance, TimelineBridge, TimelineEntry, ShelfEntry, PageMenuItem } from "@NovaUiShared";
+import { ControlTouchArea } from "@NovaUiBase/control-input.slint";
+import { LibraryScroll } from "@NovaUiBase/library-scroll.slint";
+import { LibraryFilterChip } from "@NovaUiBase/filter-chip.slint";
+import { SearchField } from "@NovaUiBase/searchfield.slint";
+import { Spinner } from "std-widgets.slint";
+import { DownloadRing } from "download-controls.slint";
+import { PageMenu, HeaderIcon, PageTitle } from "page-menu.slint";
+
+// History's "Pick up" shelf, and the section title under it. Rust starts the
+// list at `SHELF_TOP` in `src/timeline_page.rs`; keep the two in step.
+global TimelineMetrics {
+    out property <length> shelf-height: 268px;
+    out property <length> section-height: 44px;
+    // Content column on wide screens.
+    out property <length> column: 760px;
+}
+
+component Cover inherits Rectangle {
+    in property <image> poster;
+    border-radius: min(Theme.card_corner_radius, 8px);
+    background: Theme.current.home_artwork_placeholder;
+    clip: true;
+    if root.poster.width > 0: Image { width: 100%; height: 100%; source: root.poster; image-fit: cover; }
+    if root.poster.width == 0: Image {
+        width: min(24px, parent.width * 0.5); height: self.width;
+        x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+        source: @image-url("../../assets/icons/navigation/library.svg");
+        image-fit: contain; colorize: Theme.current.text_muted;
+    }
+}
+
+// A focusable tap target with keyboard activation and a focus ring.
+component Tap inherits Rectangle {
+    in property <string> label;
+    in property <bool> enabled: true;
+    in property <length> radius: 0px;
+    in property <bool> hover-wash: true;
+    callback activated;
+    out property <bool> pressed: touch.pressed;
+    border-radius: root.radius;
+    background: root.hover-wash && (touch.has-hover || touch.pressed) && root.enabled ? Theme.current.hover_subtle : transparent;
+    border-width: scope.has-focus && SettingsStyle.keyboard-mode ? 2px : 0px; border-color: Theme.current.focus_ring;
+    accessible-role: button; accessible-label: root.label; accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.activated(); } }
+    scope := FocusScope {
+        enabled: root.enabled;
+        changed has-focus => { if self.has-focus { SettingsStyle.reveal_control(root.absolute-position.y, root.height, false); } }
+        key-pressed(e) => { if (e.text == Key.Return || e.text == " ") && !e.repeat { root.activated(); return accept; } return reject; }
+    }
+    touch := ControlTouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { root.activated(); } }
+    @children
+}
+
+component Pill inherits Tap {
+    in property <string> text;
+    in property <image> icon;
+    in property <bool> primary;
+    in property <bool> has-icon: true;
+    hover-wash: false;
+    height: 32px; width: row.preferred-width;
+    radius: Theme.button_corner_radius;
+    background: root.primary ? (self.pressed ? Theme.current.accent_pressed : Theme.current.accent) : Theme.current.hover_subtle;
+    label: root.text;
+    row := HorizontalLayout {
+        padding-left: 12px; padding-right: 12px; spacing: 6px;
+        if root.has-icon: Image {
+            y: (parent.height - self.height) / 2; width: 15px; height: 15px;
+            source: root.icon; image-fit: contain;
+            colorize: root.primary ? Theme.current.on_accent : Theme.current.text_secondary;
+        }
+        Text {
+            text: root.text; font-size: 12px; vertical-alignment: center;
+            font-weight: root.primary ? 600 : 400;
+            color: root.primary ? Theme.current.on_accent : Theme.current.text_secondary;
+        }
+    }
+}
+
+component ProgressBar inherits Rectangle {
+    in property <float> value;
+    height: 3px; border-radius: 2px; clip: true;
+    background: Theme.current.progress_track_overlay;
+    Rectangle {
+        x: 0px; height: 100%; width: parent.width * Math.clamp(root.value, 0, 1);
+        background: @linear-gradient(90deg, Theme.current.accent_vivid 0%, Theme.current.accent 100%);
+    }
+}
+
+// One positioned line. Card lines share the card surface; the header rounds
+// the top corners and the line marked `last` the bottom ones.
+component TimelineLine inherits Rectangle {
+    in property <TimelineEntry> entry;
+    in property <bool> history;
+    in property <bool> timeline;
+    callback picked;
+    callback series-picked;
+    callback action(string);
+    private property <bool> card: root.entry.kind >= 1 && root.entry.kind <= 5;
+    private property <bool> top-line: root.entry.kind == 1 || root.entry.kind == 5;
+    private property <bool> bottom-line: root.entry.last || root.entry.kind == 5;
+    private property <length> corner: Theme.card_corner_radius + 4px;
+    background: root.card ? Theme.current.card : transparent;
+    border-top-left-radius: root.top-line ? root.corner : 0px;
+    border-top-right-radius: root.top-line ? root.corner : 0px;
+    border-bottom-left-radius: root.bottom-line ? root.corner : 0px;
+    border-bottom-right-radius: root.bottom-line ? root.corner : 0px;
+    clip: root.card;
+    // Inner hairlines between the lines of a card.
+    if root.card && !root.top-line: Rectangle { y: 0px; height: 1px; background: Theme.current.border_soft; }
+
+    // Day heading.
+    if root.entry.kind == 0 && !root.timeline: HorizontalLayout {
+        x: 4px; y: 0px; width: parent.width - 4px - (root.history ? 0px : 84px); height: 100%; padding-top: 14px; padding-bottom: 8px; spacing: 8px;
+        Text { text: root.entry.title; font-size: 15px; font-weight: 700; color: Theme.current.text_bright; vertical-alignment: bottom; }
+        Text { text: root.entry.subtitle; font-size: 12px; color: Theme.current.text_muted; vertical-alignment: bottom; horizontal-stretch: 1; overflow: elide; min-width: 0px; }
+    }
+    if root.entry.kind == 0 && !root.timeline && !root.history && root.entry.has-unread: Tap {
+        x: parent.width - 84px; y: 0px; width: 84px; height: 44px; radius: Theme.button_corner_radius;
+        label: @tr("Mark {} read", root.entry.title);
+        activated => { root.action("mark-day-read"); }
+        // On the heading's baseline.
+        Text { text: @tr("Mark read"); font-size: 12px; color: Theme.current.accent_soft; horizontal-alignment: right; vertical-alignment: bottom; x: 0px; y: 0px; width: parent.width - 4px; height: parent.height - 9px; }
+    }
+    if root.entry.kind == 0 && root.timeline: HorizontalLayout {
+        x: 4px; y: 0px; width: parent.width - 8px; height: 100%; padding-top: 12px;
+        Text { text: root.entry.title; font-size: 13px; font-weight: 700; color: Theme.current.text_secondary; horizontal-stretch: 1; }
+        Text { text: root.entry.subtitle; font-size: 13px; color: Theme.current.text_muted; }
+    }
+
+    // Group / session header.
+    if root.entry.kind == 1: Tap {
+        width: 100%; height: 100%;
+        label: root.entry.title + ", " + root.entry.emphasis + " " + root.entry.subtitle
+            + (root.entry.expanded ? ", " + @tr("expanded") : ", " + @tr("collapsed"));
+        activated => { root.action("toggle"); }
+        accessible-expandable: true; accessible-expanded: root.entry.expanded;
+        Tap {
+            x: 10px; y: 10px; width: 44px; height: 64px; hover-wash: false;
+            radius: min(Theme.card_corner_radius, 7px);
+            label: @tr("Open series details: {}", root.entry.title);
+            activated => { root.series-picked(); }
+            Cover { width: 100%; height: 100%; poster: root.entry.poster; }
+        }
+        VerticalLayout {
+            x: 66px; width: parent.width - self.x - (root.history ? 44px : 86px);
+            alignment: center; spacing: 3px;
+            Text { text: root.entry.title; font-size: 15px; font-weight: 600; color: Theme.current.text_home_title; overflow: elide; }
+            HorizontalLayout {
+                spacing: 0px;
+                Text { text: root.entry.emphasis; font-size: 12px; font-weight: 600; color: Theme.current.accent_vivid; }
+                if root.entry.subtitle != "": Text { text: " · " + root.entry.subtitle; font-size: 12px; color: Theme.current.text_muted; overflow: elide; horizontal-stretch: 1; min-width: 0px; }
+                if root.entry.subtitle == "": Rectangle { horizontal-stretch: 1; }
+            }
+            if root.history && root.entry.progress >= 0: ProgressBar { width: parent.width * 0.7; value: root.entry.progress; }
+        }
+        if !root.history: Rectangle {
+            x: parent.width - 80px; y: (parent.height - self.height) / 2;
+            width: max(26px, badge-text.preferred-width + 16px); height: 24px; border-radius: 12px;
+            background: root.entry.unread > 0 ? Theme.current.accent : Theme.current.hover_overlay;
+            badge-text := Text {
+                text: root.entry.unread > 0 ? root.entry.unread : root.entry.count;
+                font-size: 12px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center;
+                color: root.entry.unread > 0 ? Theme.current.on_accent : Theme.current.text_secondary;
+            }
+        }
+        Image {
+            x: parent.width - 38px; y: (parent.height - 20px) / 2; width: 20px; height: 20px;
+            source: @image-url("../../assets/icons/navigation/chevron-down.svg"); colorize: Theme.current.text_muted;
+            transform-rotation: root.entry.expanded ? 180deg : 0deg;
+            animate transform-rotation { duration: Anim.enabled ? Anim.player_slide : 0ms; easing: ease-out; }
+        }
+    }
+
+    // A chapter inside a group or session.
+    if root.entry.kind == 2: Tap {
+        width: 100%; height: 100%;
+        label: root.entry.title + (root.entry.time != "" ? ", " + root.entry.time : "")
+            + (!root.history && !root.entry.read ? ", " + @tr("unread") : "");
+        activated => { root.picked(); }
+        if !root.history: Rectangle {
+            x: 50px; y: (parent.height - 6px) / 2; width: 6px; height: 6px; border-radius: 3px;
+            background: Theme.current.accent_vivid; visible: !root.entry.read;
+        }
+        HorizontalLayout {
+            x: 66px; width: parent.width - self.x - 48px; spacing: 6px;
+            Text {
+                text: root.entry.subtitle; font-size: 14px; overflow: elide; vertical-alignment: center; min-width: 0px;
+                color: root.entry.read && !root.history ? Theme.current.text_muted : Theme.current.text_primary;
+            }
+            if root.entry.time != "": Text { text: root.entry.time; font-size: 12px; color: Theme.current.text_muted; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; min-width: 0px; }
+        }
+        if !root.history: DownloadRing {
+            x: parent.width - 46px; y: 2px;
+            state: root.entry.download-state; progress: root.entry.download-progress;
+            activated(action) => { if action != "menu" { root.action(action); } }
+        }
+        if root.history: Tap {
+            x: parent.width - 46px; y: 2px; width: 44px; height: 44px; radius: 22px;
+            label: @tr("Remove from history");
+            activated => { root.action("remove-history"); }
+            Image { x: 13px; y: 13px; width: 18px; height: 18px; source: @image-url("../../assets/icons/navigation/close.svg"); colorize: Theme.current.text_hint; }
+        }
+    }
+
+    if root.entry.kind == 3: Tap {
+        width: 100%; height: 100%;
+        label: @tr("Show {} more", root.entry.count);
+        activated => { root.action("more"); }
+        Text {
+            width: 100%; height: 100%; horizontal-alignment: center; vertical-alignment: center;
+            text: @tr("Show {} more", root.entry.count); font-size: 13px; font-weight: 600; color: Theme.current.accent_soft;
+        }
+    }
+
+    // Narrow cards drop the pill icons so the three actions still fit.
+    private property <bool> compact-actions: root.width < 380px;
+    if root.entry.kind == 4: HorizontalLayout {
+        x: 66px; y: 0px; width: parent.width - 76px; height: 100%; padding-top: 8px; padding-bottom: 10px; spacing: 6px; alignment: start;
+        if root.entry.action != "": Pill {
+            has-icon: !root.compact-actions || root.history; primary: true; text: root.entry.action;
+            icon: @image-url("../../assets/icons/navigation/play.svg");
+            activated => { root.action(root.history ? "resume" : "read-first"); }
+        }
+        if !root.history: Pill {
+            has-icon: !root.compact-actions || root.history; text: @tr("Download all"); icon: @image-url("../../assets/icons/navigation/downloads.svg");
+            activated => { root.action("download-all"); }
+        }
+        if !root.history: Pill {
+            has-icon: !root.compact-actions || root.history; text: @tr("Mark read"); icon: @image-url("../../assets/icons/navigation/eye.svg");
+            activated => { root.action("mark-read"); }
+        }
+        if root.history: Pill {
+            has-icon: !root.compact-actions || root.history; text: @tr("Remove session"); icon: @image-url("../../assets/icons/navigation/delete.svg");
+            activated => { root.action("remove-session"); }
+        }
+    }
+
+    // A series with one chapter that day.
+    if root.entry.kind == 5: Tap {
+        width: 100%; height: 100%;
+        label: root.entry.title + ", " + root.entry.subtitle + (!root.history && !root.entry.read ? ", " + @tr("unread") : "");
+        activated => { root.picked(); }
+        Tap {
+            x: 10px; y: 10px; width: 44px; height: 64px; hover-wash: false;
+            radius: min(Theme.card_corner_radius, 7px);
+            label: @tr("Open series details: {}", root.entry.title);
+            activated => { root.series-picked(); }
+            Cover { width: 100%; height: 100%; poster: root.entry.poster; }
+        }
+        VerticalLayout {
+            x: 66px; width: parent.width - self.x - 52px; alignment: center; spacing: 3px;
+            Text { text: root.entry.title; font-size: 15px; font-weight: 600; color: Theme.current.text_home_title; overflow: elide; }
+            HorizontalLayout {
+                spacing: 6px;
+                if !root.history && !root.entry.read: Rectangle {
+                    width: 6px;
+                    Rectangle { y: (parent.height - 6px) / 2; width: 6px; height: 6px; border-radius: 3px; background: Theme.current.accent_vivid; }
+                }
+                Text {
+                    text: root.entry.subtitle + (root.entry.time != "" ? " · " + root.entry.time : "");
+                    font-size: 12px; overflow: elide; min-width: 0px; horizontal-stretch: 1;
+                    color: root.entry.read && !root.history ? Theme.current.text_muted : Theme.current.text_secondary;
+                }
+            }
+            if root.history && root.entry.progress >= 0: ProgressBar { width: parent.width * 0.7; value: root.entry.progress; }
+        }
+        if !root.history: DownloadRing {
+            x: parent.width - 48px; y: (parent.height - self.height) / 2;
+            state: root.entry.download-state; progress: root.entry.download-progress;
+            activated(action) => { if action != "menu" { root.action(action); } }
+        }
+        if root.history: Tap {
+            x: parent.width - 48px; y: (parent.height - 44px) / 2; width: 44px; height: 44px; radius: 22px;
+            label: @tr("Remove from history");
+            activated => { root.action("remove-history"); }
+            Image { x: 13px; y: 13px; width: 18px; height: 18px; source: @image-url("../../assets/icons/navigation/close.svg"); colorize: Theme.current.text_hint; }
+        }
+    }
+
+    // Timeline item: one per session, on a vertical line through the day.
+    if root.entry.kind == 6: Tap {
+        width: 100%; height: 100%; radius: 10px;
+        label: root.entry.title + ", " + root.entry.emphasis + " " + root.entry.subtitle + ", " + root.entry.time;
+        activated => { root.picked(); }
+        Rectangle { x: 7px; y: 0px; width: 2px; height: parent.height; background: Theme.current.border_soft; }
+        Rectangle {
+            x: 3px; y: (parent.height - 10px) / 2; width: 10px; height: 10px; border-radius: 5px;
+            background: Theme.current.artwork_canvas; border-width: 2px; border-color: Theme.current.accent_soft;
+        }
+        Text { x: 22px; width: 44px; height: 100%; text: root.entry.time; font-size: 11px; color: Theme.current.text_muted; vertical-alignment: center; }
+        Tap {
+            x: 66px; y: 8px; width: 34px; height: 48px; hover-wash: false; radius: 5px;
+            label: @tr("Open series details: {}", root.entry.title);
+            activated => { root.series-picked(); }
+            Cover { width: 100%; height: 100%; poster: root.entry.poster; }
+        }
+        VerticalLayout {
+            x: 110px; width: parent.width - self.x - 44px; alignment: center; spacing: 2px;
+            Text { text: root.entry.title; font-size: 14px; font-weight: 600; color: Theme.current.text_home_title; overflow: elide; }
+            HorizontalLayout {
+                if root.entry.emphasis != "": Text { text: root.entry.emphasis + (root.entry.subtitle != "" ? " · " : ""); font-size: 12px; color: Theme.current.accent_soft; }
+                Text { text: root.entry.subtitle; font-size: 12px; color: Theme.current.text_muted; overflow: elide; horizontal-stretch: 1; min-width: 0px; }
+            }
+        }
+        Tap {
+            x: parent.width - 42px; y: (parent.height - 44px) / 2; width: 40px; height: 44px; radius: 18px;
+            label: @tr("Remove session from history");
+            activated => { root.action("remove-session"); }
+            Image { x: 12px; y: 14px; width: 16px; height: 16px; source: @image-url("../../assets/icons/navigation/close.svg"); colorize: Theme.current.text_hint; }
+        }
+    }
+}
+
+component ShelfCard inherits Tap {
+    in property <ShelfEntry> item;
+    width: 138px; height: 222px; hover-wash: false;
+    radius: Theme.card_corner_radius;
+    label: root.item.title + ", " + root.item.headline + ", " + root.item.detail;
+    enabled: !root.item.caught-up;
+    cover := Rectangle {
+        x: 0px; y: 0px; width: 138px; height: 190px;
+        border-radius: Theme.card_corner_radius + 2px; clip: true;
+        drop-shadow-offset-y: 6px; drop-shadow-blur: 18px; drop-shadow-color: Theme.current.scrim_shadow;
+        Cover { width: 100%; height: 100%; poster: root.item.poster; border-radius: parent.border-radius; }
+        Rectangle {
+            y: parent.height - 64px; height: 64px;
+            background: @linear-gradient(180deg, Theme.current.scrim_artwork.transparentize(1) 0%, Theme.current.scrim_artwork 100%);
+        }
+        VerticalLayout {
+            x: 10px; y: parent.height - 50px; width: parent.width - 20px; height: 40px;
+            Text { text: root.item.headline; font-size: 13px; font-weight: 700; color: Theme.current.text_bright; overflow: elide; }
+            Text { text: root.item.detail; font-size: 12px; color: Theme.current.text_bright; overflow: elide; }
+        }
+        if root.item.progress > 0: ProgressBar {
+            y: parent.height - 3px; width: parent.width; border-radius: 0px; value: root.item.progress;
+        }
+        if !root.item.caught-up: Rectangle {
+            x: parent.width - 38px; y: 8px; width: 30px; height: 30px; border-radius: 15px;
+            background: Theme.current.scrim_artwork;
+            Image { x: 9px; y: 9px; width: 12px; height: 12px; source: @image-url("../../assets/icons/navigation/play.svg"); colorize: Theme.current.text_bright; }
+        }
+    }
+    Text {
+        y: 197px; width: 100%; text: root.item.title; font-size: 13px; font-weight: 600;
+        color: Theme.current.text_home_title; overflow: elide;
+    }
+}
+
+export component TimelinePage inherits Rectangle {
+    background: Theme.current.artwork_canvas;
+    clip: true;
+    private property <bool> history: TimelineBridge.history;
+    private property <bool> timeline: root.history && Appearance.history-view == 1;
+    private property <bool> checking: TimelineBridge.refreshing && TimelineBridge.busy;
+    private property <length> column-width: min(root.width, TimelineMetrics.column);
+    private property <length> column-x: (root.width - root.column-width) / 2;
+    // The title shrinks and the hairline appears a few pixels into the list.
+    private property <bool> stuck: -list.content-y > 8px;
+    private property <length> head-height: root.stuck ? 52px : 64px;
+    animate head-height { duration: Anim.enabled ? Anim.player_slide : 0ms; easing: ease-out; }
+    private property <length> sub-height: !root.history && !root.stuck ? 20px : 0px;
+    animate sub-height { duration: Anim.enabled ? Anim.player_slide : 0ms; easing: ease-out; }
+    private property <length> chips-height: root.history ? 0px : 52px;
+    private property <length> search-height: root.history && TimelineBridge.search-open ? 54px : 0px;
+    animate search-height { duration: Anim.enabled ? Anim.transition_slide : 0ms; easing: ease-out; }
+    private property <length> header-height: root.head-height + root.sub-height + root.chips-height + root.search-height + 6px;
+    private property <length> top: -list.content-y;
+    private property <length> margin: 240px;
+    private property <bool> menu-open;
+    private property <length> menu-right;
+    private property <length> menu-y;
+    // The list fades in a little lower when the History view switches.
+    private property <float> swap: 1;
+    animate swap { duration: Anim.enabled ? Anim.player_fade : 0ms; easing: ease-out; }
+    private property <int> view: Appearance.history-view;
+    changed view => { root.swap = 0; swap-timer.start(); }
+    swap-timer := Timer { interval: 1ms; running: false; triggered => { self.stop(); root.swap = 1; } }
+    private property <int> reset: TimelineBridge.reset-serial;
+    changed reset => { list.content-y = 0px; }
+    private property <[PageMenuItem]> updates-menu: [
+        { label: @tr("Group"), kind: 0, id: "" },
+        { label: @tr("By day and series"), kind: 1, checked: Appearance.updates-grouping == 0, id: "group-series" },
+        { label: @tr("By day only"), kind: 1, checked: Appearance.updates-grouping == 1, id: "group-day" },
+        { label: @tr("Mark all read"), kind: 2, id: "mark-all-read" },
+        { label: @tr("Download all unread"), kind: 2, id: "download-all-unread" },
+    ];
+    private property <[PageMenuItem]> history-menu: [
+        { label: Appearance.history-shelf-hidden ? @tr("Show “Pick up” shelf") : @tr("Hide “Pick up” shelf"), kind: 2, id: "toggle-shelf" },
+        { label: @tr("Clear history"), kind: 3, id: "clear-history" },
+    ];
+    function open-menu() {
+        root.menu-right = more-button.absolute-position.x - root.absolute-position.x + more-button.width;
+        root.menu-y = more-button.absolute-position.y - root.absolute-position.y + more-button.height + 4px;
+        root.menu-open = true;
+    }
+    private property <int> control-focus-request: SettingsStyle.focus-request;
+    changed control-focus-request => {
+        if SettingsStyle.keyboard-mode {
+            let y = SettingsStyle.focus-y - list.absolute-position.y;
+            // Keep focus below the sticky day heading and above the bottom.
+            if y < 44px { list.content-y += 44px - y; }
+            else if y + SettingsStyle.focus-height > list.height {
+                list.content-y -= y + SettingsStyle.focus-height - list.height;
+            }
+            list.content-y = Math.clamp(list.content-y, min(0px, list.height - list.content-height), 0px);
+        }
+    }
+
+    list := LibraryScroll {
+        x: root.column-x; y: root.header-height;
+        width: root.column-width; height: max(0px, root.height - root.header-height);
+        content-height: TimelineBridge.content-height + 18px + TimelineBridge.bottom-padding;
+        // Shelf and its section title.
+        if root.history && TimelineBridge.shelf.length > 0: Rectangle {
+            y: 0px; width: 100%; height: TimelineMetrics.shelf-height + TimelineMetrics.section-height;
+            HorizontalLayout {
+                x: 16px; y: 0px; width: parent.width - 32px; height: TimelineMetrics.section-height;
+                Text { text: @tr("Pick up where you left off"); font-size: 17px; font-weight: 700; color: Theme.current.text_bright; vertical-alignment: center; horizontal-stretch: 1; }
+            }
+            shelf-rail := Flickable {
+                y: TimelineMetrics.section-height; height: 230px; width: 100%;
+                content-width: shelf-row.preferred-width; content-height: self.height;
+                content-y: 0px;
+                changed content-y => { if self.content-y != 0px { self.content-y = 0px; } }
+                shelf-row := HorizontalLayout {
+                    padding-left: 16px; padding-right: 16px; spacing: 10px; alignment: start;
+                    for item[i] in TimelineBridge.shelf: ShelfCard {
+                        y: 4px; item: item;
+                        activated => { TimelineBridge.shelf-picked(i); }
+                    }
+                }
+            }
+            Text {
+                x: 16px; y: TimelineMetrics.shelf-height; height: TimelineMetrics.section-height;
+                text: root.timeline ? @tr("Timeline") : @tr("Recent sessions");
+                font-size: 17px; font-weight: 700; color: Theme.current.text_bright; vertical-alignment: center;
+            }
+        }
+        lines := Rectangle {
+            y: (1 - root.swap) * 6px; width: 100%; height: TimelineBridge.content-height;
+            opacity: root.swap;
+            for entry[i] in TimelineBridge.entries: slot := Rectangle {
+                private property <bool> near: TimelineBridge.active
+                    && entry.y + entry.height >= root.top - root.margin
+                    && entry.y <= root.top + list.height + root.margin;
+                changed near => { if self.near && entry.kind != 0 { TimelineBridge.request-artwork(i, i + 1); } }
+                x: entry.kind == 0 ? 12px : (root.timeline ? 16px : 12px);
+                y: entry.y; width: parent.width - 24px - (root.timeline && entry.kind == 6 ? 4px : 0px);
+                height: entry.height;
+                animate y { duration: Anim.enabled && Anim.transitions ? Anim.transition_slide : 0ms; easing: ease-in-out; }
+                if slot.near: TimelineLine {
+                    width: 100%; height: 100%;
+                    entry: entry; history: root.history; timeline: root.timeline;
+                    init => { if entry.kind != 0 && entry.poster.width == 0 { TimelineBridge.request-artwork(i, i + 1); } }
+                    picked => { TimelineBridge.entry-picked(i); }
+                    series-picked => { TimelineBridge.series-picked(i); }
+                    action(name) => { TimelineBridge.entry-action(i, name); }
+                    // A busy, bounded artwork queue may decline a request; retry
+                    // while the cover is still empty.
+                    Timer {
+                        interval: 150ms; running: entry.kind != 0 && entry.kind != 3 && entry.kind != 4 && entry.poster.width == 0;
+                        triggered => { TimelineBridge.request-artwork(i, i + 1); }
+                    }
+                }
+            }
+        }
+        if TimelineBridge.entries.length == 0: VerticalLayout {
+            y: TimelineBridge.list-top + 40px; width: parent.width; alignment: start; spacing: 10px;
+            Image {
+                height: 48px; image-fit: contain; colorize: Theme.current.text_muted;
+                source: root.history ? @image-url("../../assets/icons/navigation/history.svg") : @image-url("../../assets/icons/navigation/updates.svg");
+            }
+            Text {
+                horizontal-alignment: center; wrap: word-wrap; font-size: 17px; color: Theme.current.text_bright;
+                text: root.history ? (TimelineBridge.query != "" ? @tr("No matches") : @tr("Nothing read yet"))
+                    : TimelineBridge.filter == 0 ? @tr("No updates yet") : @tr("Nothing here");
+            }
+            Text {
+                horizontal-alignment: center; wrap: word-wrap; color: Theme.current.text_secondary;
+                text: root.history ? (TimelineBridge.query != "" ? @tr("Try a different search.") : @tr("Chapters you read appear here."))
+                    : @tr("Refresh your library to check for new chapters.");
+            }
+        }
+    }
+
+    // Sticky day heading: the day whose section holds the list's top line,
+    // pushed up by the next day's heading. Never under the pinned header.
+    Rectangle {
+        x: root.column-x; y: root.header-height; width: root.column-width;
+        height: max(0px, root.height - root.header-height); clip: true;
+        for day in TimelineBridge.days: Rectangle {
+            visible: day.y < root.top && day.y + day.span > root.top;
+            x: 12px; width: parent.width - 24px; height: day.height;
+            y: min(0px, day.y + day.span - root.top - day.height);
+            background: Theme.current.artwork_canvas;
+            if parent.visible: TimelineLine {
+                width: 100%; height: 100%; entry: day; history: root.history; timeline: root.timeline;
+                action(name) => { TimelineBridge.entry-action(day.index, name); }
+            }
+        }
+    }
+
+    // Errors and notices (failed refresh, could not save), under the header.
+    if TimelineBridge.status != "": Rectangle {
+        x: root.column-x + 12px; y: root.header-height + 4px;
+        width: root.column-width - 24px; height: status-text.preferred-height + 20px;
+        background: Theme.current.selection_wash; border-radius: Theme.card_corner_radius;
+        status-text := Text {
+            x: 12px; y: 10px; width: parent.width - 24px;
+            text: TimelineBridge.status; color: Theme.current.text_settings; wrap: word-wrap;
+        }
+    }
+
+    // Pinned header.
+    header := Rectangle {
+        x: 0px; y: 0px; width: root.width; height: root.header-height;
+        background: Theme.current.artwork_canvas;
+        drop-shadow-offset-y: root.stuck ? 8px : 0px; drop-shadow-blur: root.stuck ? 18px : 0px;
+        drop-shadow-color: Theme.current.scrim_shadow.transparentize(0.6);
+        TouchArea {}
+        if root.stuck: Rectangle { y: parent.height - 1px; height: 1px; background: Theme.current.border_soft; }
+        Rectangle {
+            x: root.column-x; y: 0px; width: root.column-width; height: parent.height;
+            HorizontalLayout {
+                x: 16px; y: 0px; width: parent.width - 24px; height: root.head-height; spacing: 4px; padding-top: root.stuck ? 2px : 8px;
+                HorizontalLayout {
+                    horizontal-stretch: 1; spacing: 10px; min-width: 0px;
+                    PageTitle { text: root.history ? @tr("History") : @tr("Updates"); stuck: root.stuck; }
+                    if !root.history && TimelineBridge.count-label != "": Text {
+                        text: TimelineBridge.count-label; font-size: 13px; font-weight: 500; color: Theme.current.text_muted;
+                        vertical-alignment: center; overflow: elide; min-width: 0px; horizontal-stretch: 1;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+                if root.history: VerticalLayout {
+                    alignment: center;
+                        view-toggle := Rectangle {
+                        width: 82px; height: 36px; border-radius: Theme.button_corner_radius;
+                        background: Theme.current.hover_subtle; border-width: 1px; border-color: Theme.current.border_subtle;
+                        clip: true;
+                        accessible-role: groupbox; accessible-label: @tr("History view");
+                        for choice[k] in [
+                            { label: @tr("Session cards"), icon: @image-url("../../assets/icons/navigation/cards.svg") },
+                            { label: @tr("Timeline"), icon: @image-url("../../assets/icons/navigation/timeline.svg") },
+                        ]: Tap {
+                            x: k * 40px + 1px; y: 0px; width: 40px; height: 100%;
+                            hover-wash: false;
+                            background: Appearance.history-view == k ? Theme.current.selection_wash : transparent;
+                            animate background { duration: Anim.enabled ? 140ms : 0ms; }
+                            accessible-role: radio-button; accessible-checkable: true; accessible-checked: Appearance.history-view == k;
+                            label: choice.label;
+                            activated => { if Appearance.history-view != k { Appearance.setting-changed("history_view", k); TimelineBridge.menu-action("layout"); } }
+                            Image {
+                                x: 11px; y: 8px; width: 18px; height: 18px; source: choice.icon;
+                                colorize: Appearance.history-view == k ? Theme.current.accent_vivid : Theme.current.text_hint;
+                            }
+                        }
+                    }
+                }
+                if !root.history: HeaderIcon {
+                    y: (parent.height - parent.padding-top - 44px) / 2;
+                    label: @tr("Refresh library"); enabled: !root.checking;
+                    icon: @image-url("../../assets/icons/navigation/refresh.svg");
+                    clicked => { TimelineBridge.refresh(); }
+                }
+                if root.history: HeaderIcon {
+                    y: (parent.height - parent.padding-top - 44px) / 2;
+                    label: TimelineBridge.search-open ? @tr("Close history search") : @tr("Search history");
+                    active: TimelineBridge.search-open;
+                    icon: @image-url("../../assets/icons/navigation/search.svg");
+                    clicked => {
+                        if TimelineBridge.search-open { TimelineBridge.search-open = false; TimelineBridge.query = ""; TimelineBridge.search(""); }
+                        else { TimelineBridge.search-open = true; }
+                    }
+                }
+                more-button := HeaderIcon {
+                    y: (parent.height - parent.padding-top - 44px) / 2;
+                    label: @tr("Options"); icon: @image-url("../../assets/icons/navigation/more.svg");
+                    clicked => { root.open-menu(); }
+                }
+            }
+            if !root.history && root.sub-height > 0px: HorizontalLayout {
+                x: 16px; y: root.head-height; width: parent.width - 32px; height: root.sub-height; spacing: 8px;
+                opacity: root.sub-height / 20px;
+                if root.checking: Spinner { width: 14px; height: 14px; y: 3px; indeterminate: true; }
+                Text {
+                    text: !root.checking ? TimelineBridge.status-line
+                        : TimelineBridge.refresh-total > 0 ? @tr("Checking {0} titles… {1} / {0}", TimelineBridge.refresh-total, TimelineBridge.refresh-done)
+                        : @tr("Checking library…"); font-size: 12px; color: Theme.current.text_muted; vertical-alignment: center; overflow: elide; min-width: 0px; horizontal-stretch: 1; }
+            }
+            if !root.history: chips := Flickable {
+                x: 0px; y: root.head-height + root.sub-height; width: parent.width; height: root.chips-height;
+                content-width: chip-row.preferred-width; content-height: self.height; content-y: 0px;
+                changed content-y => { if self.content-y != 0px { self.content-y = 0px; } }
+                chip-row := HorizontalLayout {
+                    padding-left: 16px; padding-right: 16px; spacing: 6px; alignment: start;
+                    for label[k] in [@tr("All"), @tr("Unread"), @tr("Downloaded")]: LibraryFilterChip {
+                        y: 10px; tonal: true; chip-height: 34px; keyboard-focusable: true;
+                        label: label; selected: TimelineBridge.filter == k;
+                        count: k < TimelineBridge.filter-counts.length ? TimelineBridge.filter-counts[k] : "";
+                        picked => { TimelineBridge.filter-picked(k); }
+                        accessible-action-default => { TimelineBridge.filter-picked(k); }
+                    }
+                }
+            }
+            if root.history && root.search-height > 0px: Rectangle {
+                x: 16px; y: root.head-height + 6px; width: parent.width - 32px; height: max(0px, root.search-height - 10px);
+                clip: true;
+                // Opening the search focuses its field once it has room.
+                init => { search-focus.start(); }
+                history-search := SearchField {
+                    width: 100%; height: 44px; roomy: true; search-icon: true;
+                    text <=> TimelineBridge.query;
+                    placeholder-text: @tr("Search titles");
+                    edited(_) => { TimelineBridge.search(TimelineBridge.query); }
+                    accepted(_) => { TimelineBridge.search(TimelineBridge.query); }
+                }
+                if TimelineBridge.query != "": HeaderIcon {
+                    x: parent.width - 44px; label: @tr("Clear search");
+                    icon: @image-url("../../assets/icons/navigation/close.svg");
+                    clicked => { TimelineBridge.query = ""; TimelineBridge.search(""); history-search.focus(); }
+                }
+                search-focus := Timer { interval: 80ms; running: false; triggered => { self.stop(); history-search.focus(); } }
+            }
+        }
+    }
+    if root.menu-open: PageMenu {
+        width: root.width; height: root.height;
+        label: root.history ? @tr("History options") : @tr("Updates options");
+        items: root.history ? root.history-menu : root.updates-menu;
+        anchor-right: root.menu-right; anchor-y: root.menu-y;
+        picked(id) => {
+            if id == "group-series" { Appearance.setting-changed("updates_grouping", 0); TimelineBridge.menu-action("layout"); }
+            else if id == "group-day" { Appearance.setting-changed("updates_grouping", 1); TimelineBridge.menu-action("layout"); }
+            else if id == "toggle-shelf" { Appearance.setting-changed("history_shelf_hidden", Appearance.history-shelf-hidden ? 0 : 1); TimelineBridge.menu-action("layout"); }
+            else { TimelineBridge.menu-action(id); }
+        }
+        closed => { root.menu-open = false; }
+    }
+}

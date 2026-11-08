@@ -503,7 +503,7 @@ fn poster_layout_timelines_chapters_and_reader_controls() {
         for section in [0, 1, 2, 5] {
             ui.set_section(section);
             settle();
-            for kind in ["LibraryCard", "TimelineRow", "ChapterRow"] {
+            for kind in ["LibraryCard", "TimelineLine", "ChapterRow"] {
                 for row in ElementHandle::find_by_element_type_name(&ui, kind) {
                     let p = row.absolute_position();
                     let s = row.size();
@@ -523,37 +523,62 @@ fn poster_layout_timelines_chapters_and_reader_controls() {
         }
     }
     ui.window().set_size(LogicalSize::new(390., 844.));
+    // History and Updates rows come from `TimelineBridge`; the controller maps
+    // their indices to chapters (tested in `src/timeline_page.rs`).
+    let bridge = ui.global::<nova_reader::TimelineBridge>();
+    let line_log = Rc::new(RefCell::new(Vec::new()));
+    bridge.on_series_picked({
+        let log = line_log.clone();
+        move |i| log.borrow_mut().push((i, "series".to_string()))
+    });
+    bridge.on_entry_picked({
+        let log = line_log.clone();
+        move |i| log.borrow_mut().push((i, "open".to_string()))
+    });
+    bridge.on_entry_action({
+        let log = line_log.clone();
+        move |i, a| log.borrow_mut().push((i, a.to_string()))
+    });
+    let single = |kind: i32, y: f32| nova_reader::TimelineEntry {
+        kind,
+        y,
+        height: if kind == 0 { 44. } else { 84. },
+        title: if kind == 0 { "Today" } else { "Story 0" }.into(),
+        subtitle: "Chapter 0".into(),
+        time: "12:30".into(),
+        progress: -1.,
+        ..Default::default()
+    };
+    bridge.set_entries(ModelRc::new(VecModel::from(vec![
+        single(0, 0.),
+        single(5, 44.),
+    ])));
+    bridge.set_content_height(136.);
     ui.set_section(2);
     settle();
-    let opened_series = Rc::new(Cell::new(-1));
-    ui.on_open_series({
-        let opened_series = opened_series.clone();
-        move |index| opened_series.set(index)
-    });
-    selected.set(-1);
-    let poster = button(&ui, "Open series details: Story 0");
-    poster.mock_single_click(PointerEventButton::Left);
+    button(&ui, "Open series details: Story 0").mock_single_click(PointerEventButton::Left);
     settle();
-    assert_eq!(opened_series.get(), 0);
-    assert_eq!(selected.get(), -1);
-    let history_row = ElementHandle::find_by_element_type_name(&ui, "TimelineRow")
-        .next()
-        .unwrap();
-    history_row.mock_single_click(PointerEventButton::Left);
-    settle();
-    assert_eq!(selected.get(), 0);
-    let remove = button(&ui, "Remove from history");
-    remove.invoke_accessible_default_action();
     assert_eq!(
-        actions.borrow().last().unwrap(),
-        &(0, "remove-history".to_string())
+        line_log.borrow().last().unwrap(),
+        &(1, "series".to_string())
+    );
+    ElementHandle::find_by_element_type_name(&ui, "TimelineLine")
+        .nth(1)
+        .unwrap()
+        .mock_single_click(PointerEventButton::Left);
+    settle();
+    assert_eq!(line_log.borrow().last().unwrap(), &(1, "open".to_string()));
+    button(&ui, "Remove from history").invoke_accessible_default_action();
+    assert_eq!(
+        line_log.borrow().last().unwrap(),
+        &(1, "remove-history".to_string())
     );
     ui.set_section(1);
     settle();
     button(&ui, "Download").invoke_accessible_default_action();
     assert_eq!(
-        actions.borrow().last().unwrap(),
-        &(0, "download".to_string())
+        line_log.borrow().last().unwrap(),
+        &(1, "download".to_string())
     );
     ui.set_series_title("A long story title for the detail header".into());
     ui.set_resume_chapter("106.1".into());
@@ -645,23 +670,29 @@ fn poster_layout_timelines_chapters_and_reader_controls() {
     });
     ui.set_section(3);
     settle();
-    button(&ui, "Pin source").invoke_accessible_default_action();
+    button(&ui, "Pin Sample provider").invoke_accessible_default_action();
     assert_eq!(*pinned.borrow(), "sample-source.en");
     assert!(!ui.get_source_catalog_open());
-    button(&ui, "Latest").invoke_accessible_default_action();
+    button(&ui, "Latest from Sample provider").invoke_accessible_default_action();
     assert_eq!(latest.get(), 7);
     assert!(ui.get_source_catalog_open());
     ui.set_source_catalog_open(false);
     settle();
-    button(&ui, "Extensions (1)").invoke_accessible_default_action();
+    ElementHandle::find_by_accessible_label(&ui, "Extensions")
+        .find(|e| e.accessible_role() == Some(AccessibleRole::Tab))
+        .expect("Extensions tab")
+        .invoke_accessible_default_action();
     settle();
-    button(&ui, "Disable").invoke_accessible_default_action();
+    ElementHandle::find_by_accessible_label(&ui, "Sample extension enabled")
+        .next()
+        .expect("extension switch")
+        .invoke_accessible_default_action();
     assert_eq!(*extension.borrow(), "sample-package:toggle");
     // Returning to a source result retains its scroll as well as its query.
     ui.set_browse_tab(0);
     ui.set_source_catalog_open(true);
     settle();
-    let scroll = ElementHandle::find_by_element_id(&ui, "AppWindow::page-scroll")
+    let scroll = ElementHandle::find_by_element_id(&ui, "BrowsePage::catalog-scroll")
         .next()
         .unwrap();
     scroll.scroll(0., -500.);
@@ -773,11 +804,11 @@ fn browse_root_refreshes_do_not_show_loading_indicators() {
                 .is_none()
         );
     }
-    // Actual source requests retain their existing loading feedback.
+    // A catalogue's first page shows loading placeholders.
     ui.set_source_catalog_open(true);
     settle();
     assert!(
-        ElementHandle::find_by_element_type_name(&ui, "Spinner")
+        ElementHandle::find_by_accessible_label(&ui, "Loading titles")
             .next()
             .is_some()
     );

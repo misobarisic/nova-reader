@@ -14,6 +14,8 @@ const MAX_VALUE: usize = 2048;
 pub struct FilterSet {
     notice: String,
     filters: Vec<Filter>,
+    /// The definitions as parsed, so Reset can restore the source's defaults.
+    definitions: Value,
 }
 
 struct Filter {
@@ -181,7 +183,91 @@ impl FilterSet {
         if rows > 1024 {
             return Err("Source has too many filter options".into());
         }
-        Ok(Self { notice, filters })
+        Ok(Self {
+            notice,
+            filters,
+            definitions: value.clone(),
+        })
+    }
+
+    /// Back to the source's own defaults.
+    pub fn reset(&mut self) {
+        if let Ok(fresh) = Self::parse(self.definitions.clone()) {
+            *self = fresh;
+        }
+    }
+
+    /// Filters differing from the source's defaults: each included or
+    /// excluded option, a switched-on toggle, typed text or a changed select.
+    pub fn active_count(&self) -> usize {
+        let defaults = Self::parse(self.definitions.clone()).unwrap_or_default();
+        self.filters
+            .iter()
+            .map(|filter| {
+                let default = defaults.filters.iter().find(|d| d.id == filter.id);
+                match (&filter.kind, default.map(|d| &d.kind)) {
+                    (Kind::Multiple { states, .. }, Some(Kind::Multiple { states: base, .. })) => {
+                        states.iter().zip(base).filter(|(s, b)| s != b).count()
+                    }
+                    (Kind::Multiple { states, .. }, _) => {
+                        states.iter().filter(|s| **s != 0).count()
+                    }
+                    (Kind::Select { selected, .. }, Some(Kind::Select { selected: base, .. })) => {
+                        usize::from(selected != base)
+                    }
+                    (Kind::Text(text), Some(Kind::Text(base))) => usize::from(text != base),
+                    (Kind::Bool(on), Some(Kind::Bool(base))) => usize::from(on != base),
+                    _ => 0,
+                }
+            })
+            .sum()
+    }
+
+    /// The sheet's groups: option pills for multi-select and tri-state
+    /// filters (keys and values exactly as `rows` sends them), and the
+    /// select, text and switch filters as before.
+    pub fn groups(&self) -> Vec<crate::FilterGroup> {
+        let rows = self.rows();
+        self.filters
+            .iter()
+            .map(|filter| {
+                let mut group = crate::FilterGroup {
+                    name: filter.name.as_str().into(),
+                    key: filter.id.as_str().into(),
+                    ..Default::default()
+                };
+                match &filter.kind {
+                    Kind::Multiple {
+                        options,
+                        states,
+                        tristate,
+                    } => {
+                        group.kind = "pills".into();
+                        let pills: Vec<crate::FilterPill> = options
+                            .iter()
+                            .enumerate()
+                            .map(|(index, option)| crate::FilterPill {
+                                label: option.label.as_str().into(),
+                                key: option_key(&filter.id, index).into(),
+                                state: states[index] as i32,
+                                tristate: *tristate,
+                            })
+                            .collect();
+                        group.pills = ModelRc::new(VecModel::from(pills));
+                    }
+                    _ => {
+                        if let Some(row) = rows.iter().find(|row| row.key.as_str() == filter.id) {
+                            group.kind = row.kind.clone();
+                            group.value = row.value.clone();
+                            group.checked = row.checked;
+                            group.selected = row.selected;
+                            group.options = row.options.clone();
+                        }
+                    }
+                }
+                group
+            })
+            .collect()
     }
 
     pub fn notice(&self) -> &str {
@@ -202,11 +288,7 @@ impl FilterSet {
                         .iter()
                         .enumerate()
                         .map(|(index, option)| crate::SettingRow {
-                            key: format!(
-                                " {}",
-                                serde_json::to_string(&(filter.id.as_str(), index)).unwrap()
-                            )
-                            .into(),
+                            key: option_key(&filter.id, index).into(),
                             name: format!("{} · {}", filter.name, option.label).into(),
                             kind: if *tristate { "select" } else { "bool" }.into(),
                             selected: states[index] as i32,
@@ -362,6 +444,15 @@ impl FilterSet {
     }
 }
 
+/// One option of a multi-select or tri-state filter. The JSON tuple cannot
+/// collide with a provider's filter ID.
+fn option_key(id: &str, index: usize) -> String {
+    format!(
+        " {}",
+        serde_json::to_string(&(id, index)).unwrap_or_default()
+    )
+}
+
 fn bounded_string(value: &Value, max: usize, empty: bool) -> Option<&str> {
     value
         .as_str()
@@ -400,6 +491,52 @@ mod tests {
     use super::*;
     use serde_json::json;
     use slint::Model;
+
+    #[test]
+    fn sheet_groups_count_active_filters_and_reset_to_defaults() {
+        let mut filters = FilterSet::parse(json!({"filters":[
+            {"id":"sources","type":"multiselect","options":[{"label":"Source A","value":"source-a"},{"label":"Source B","value":"source-b"}]},
+            {"id":"genres","type":"tristate","default":{"exclude":["genre-b"]},"options":[{"label":"Adventure","value":"genre-a"},{"label":"Drama","value":"genre-b"}]},
+            {"id":"sort","type":"select","options":[{"label":"Popular","value":"p"},{"label":"Newest","value":"n"}]},
+            {"id":"title","type":"text"},
+            {"id":"complete","type":"bool"}
+        ]})).unwrap();
+        let groups = filters.groups();
+        assert_eq!(
+            groups
+                .iter()
+                .map(|g| g.kind.to_string())
+                .collect::<Vec<_>>(),
+            ["pills", "pills", "select", "text", "bool"]
+        );
+        // Pills carry the keys `rows` sends, and tri-state only where the
+        // source says so.
+        let genres: Vec<_> = groups[1].pills.iter().collect();
+        assert_eq!(genres[0].label, "Adventure");
+        assert!(genres[0].tristate);
+        assert_eq!(genres[1].state, 2, "a default exclusion shows");
+        assert!(!groups[0].pills.row_data(0).unwrap().tristate);
+        // Defaults are not active filters.
+        assert_eq!(filters.active_count(), 0);
+        let source_a = groups[0].pills.row_data(0).unwrap().key;
+        assert!(filters.change(&source_a, "true"));
+        assert!(filters.select(&genres[0].key, 2));
+        assert!(filters.select("sort", 1));
+        assert!(filters.change("title", "moon"));
+        assert!(filters.change("complete", "true"));
+        assert_eq!(filters.active_count(), 5);
+        assert_eq!(
+            filters.values()["genres"],
+            json!({"include":[],"exclude":["genre-a","genre-b"]})
+        );
+        filters.reset();
+        assert_eq!(filters.active_count(), 0);
+        assert_eq!(filters.values()["sources"], json!([]));
+        assert_eq!(
+            filters.values()["genres"],
+            json!({"include":[],"exclude":["genre-b"]})
+        );
+    }
 
     #[test]
     fn multiple_and_tristate_rows_preserve_provider_values_and_separate_selection() {

@@ -16,12 +16,20 @@ pub struct SourceChoice {
     pub enabled: bool,
     pub latest: bool,
     pub index: i32,
+    /// The package is marked adult (shown only with adult sources on).
+    pub adult: bool,
+    /// The extension (package) that provides the source.
+    pub extension: String,
 }
 
 #[derive(Clone, Default)]
 pub struct SourceBrowser {
     pinned: BTreeSet<String>,
     last_used: Option<String>,
+    /// When `last_used` was opened (Unix seconds); unknown for older data.
+    last_used_at: Option<i64>,
+    /// The All sources language chip, by display name; `None` is All.
+    language: Option<String>,
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -29,6 +37,28 @@ pub struct SourceBrowser {
 struct StoredPreferences {
     pinned: Vec<String>,
     last_used: Option<String>,
+    // Optional so preferences saved before these existed still load, and
+    // omitted when unset so those keep their stored form.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_used_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    language: Option<String>,
+}
+
+/// Browse's source list, split into its sections.
+pub struct Sections {
+    /// The last opened source and when, if it is still available.
+    pub last_used: Option<(crate::SourceRow, Option<i64>)>,
+    /// Pinned sources, in stored order.
+    pub pinned: Vec<crate::SourceRow>,
+    /// Every visible source under the selected language chip, by name.
+    pub all: Vec<crate::SourceRow>,
+    /// Language chips after All, most sources first, with their counts.
+    pub languages: Vec<(String, usize)>,
+    /// Sources under All (chip 0).
+    pub total: usize,
+    /// The selected chip: 0 All, then `languages`.
+    pub language_index: usize,
 }
 
 impl SourceBrowser {
@@ -57,6 +87,10 @@ impl SourceBrowser {
         Self {
             pinned: preferences.pinned.into_iter().collect(),
             last_used: preferences.last_used,
+            last_used_at: preferences.last_used_at,
+            language: preferences
+                .language
+                .filter(|name| !name.is_empty() && name.len() <= MAX_ID_BYTES),
         }
     }
 
@@ -83,23 +117,52 @@ impl SourceBrowser {
     }
 
     pub fn used(&mut self, id: &str) -> Result<(), String> {
-        self.used_with(id, persist)
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        self.used_at(id, now, persist)
     }
 
+    #[cfg(test)]
     fn used_with(
         &mut self,
         id: &str,
         write: impl FnOnce(&str) -> Result<(), String>,
     ) -> Result<(), String> {
+        self.used_at(id, 0, write)
+    }
+
+    fn used_at(
+        &mut self,
+        id: &str,
+        at: i64,
+        write: impl FnOnce(&str) -> Result<(), String>,
+    ) -> Result<(), String> {
         if !valid_id(id) {
             return Err(text::tr("Invalid source identity"));
         }
-        if self.last_used.as_deref() == Some(id) {
+        // Opening the same source again refreshes only its time.
+        if self.last_used.as_deref() == Some(id) && (at == 0 || self.last_used_at == Some(at)) {
             return Ok(());
         }
         let mut next = self.clone();
         next.last_used = Some(id.to_owned());
+        next.last_used_at = (at > 0).then_some(at);
         self.commit(next, write)
+    }
+
+    /// Pick the All sources language chip (`None` for All). Device-only.
+    pub fn set_language(&mut self, language: Option<String>) -> Result<(), String> {
+        if self.language == language {
+            return Ok(());
+        }
+        let mut next = self.clone();
+        next.language = language;
+        self.commit(next, persist)
+    }
+
+    pub fn is_pinned(&self, id: &str) -> bool {
+        self.pinned.contains(id)
     }
 
     fn commit(
@@ -110,6 +173,8 @@ impl SourceBrowser {
         let stored = serde_json::to_string(&StoredPreferences {
             pinned: next.pinned.iter().cloned().collect(),
             last_used: next.last_used.clone(),
+            last_used_at: next.last_used_at,
+            language: next.language.clone(),
         })
         .map_err(|error| error.to_string())?;
         write(&stored)?;
@@ -166,9 +231,100 @@ impl SourceBrowser {
                 latest: choice.latest,
                 index: choice.index,
                 icon: Default::default(),
+                code: language_code(&choice.language).into(),
+                extension: choice.extension.as_str().into(),
+                adult: choice.adult,
             })
             .collect()
     }
+
+    /// The Refresh layout: Last used, Pinned and All sources with language
+    /// chips. The flat `rows` grouping stays for older callers.
+    pub fn sections(&self, choices: &[SourceChoice]) -> Sections {
+        let rows = self.rows(choices);
+        let last_used = self.last_used.as_deref().and_then(|id| {
+            rows.iter()
+                .find(|row| row.id.as_str() == id)
+                .map(|row| (row.clone(), self.last_used_at))
+        });
+        // Pinned sources in stored order (identities sort as they are stored).
+        let pinned: Vec<_> = self
+            .pinned
+            .iter()
+            .filter_map(|id| rows.iter().find(|row| row.id.as_str() == id.as_str()))
+            .cloned()
+            .collect();
+        let mut all = rows;
+        all.sort_by_cached_key(|row| (row.name.to_lowercase(), row.id.to_string()));
+        for row in &mut all {
+            row.group = row.language.clone();
+        }
+        // Chips by count; "All languages" sources only appear under All.
+        let any = text::tr("All languages");
+        let mut languages: Vec<(String, usize)> = Vec::new();
+        for row in all.iter().filter(|row| row.language.as_str() != any) {
+            match languages
+                .iter_mut()
+                .find(|(name, _)| name == row.language.as_str())
+            {
+                Some((_, count)) => *count += 1,
+                None => languages.push((row.language.to_string(), 1)),
+            }
+        }
+        languages.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let language_index = self
+            .language
+            .as_ref()
+            .and_then(|name| languages.iter().position(|(l, _)| l == name))
+            .map_or(0, |i| i + 1);
+        let total = all.len();
+        if language_index > 0 {
+            let name = &languages[language_index - 1].0;
+            all.retain(|row| row.language.as_str() == name);
+        }
+        Sections {
+            last_used,
+            pinned,
+            all,
+            languages,
+            total,
+            language_index,
+        }
+    }
+}
+
+/// "EN", "JA", "ALL": the short tag on a source row.
+fn language_code(language: &str) -> String {
+    let normalized = language.trim().to_lowercase().replace('_', "-");
+    match normalized.as_str() {
+        "all" | "any" | "*" | "" => "ALL".into(),
+        "multi" | "multiple" => "MULTI".into(),
+        _ => normalized
+            .split('-')
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .take(3)
+            .collect::<String>()
+            .to_uppercase(),
+    }
+}
+
+/// "opened 2 h ago" for the Last used card.
+pub fn opened_ago(at: i64, now: i64) -> String {
+    let seconds = (now - at).max(0);
+    let (amount, unit) = match seconds {
+        0..60 => return text::tr("opened just now"),
+        60..3600 => (seconds / 60, "min"),
+        3600..86400 => (seconds / 3600, "h"),
+        _ => (seconds / 86400, "d"),
+    };
+    format!(
+        "{} {amount} {} {}",
+        text::tr("opened"),
+        text::tr(unit),
+        text::tr("ago")
+    )
 }
 
 fn persist(stored: &str) -> Result<(), String> {
@@ -192,6 +348,11 @@ fn canonical_key(choice: &SourceChoice) -> (bool, bool, String, &str, &str, i32)
         &choice.language,
         choice.index,
     )
+}
+
+/// The display name of a source language ("English", "All languages").
+pub fn language_label(language: &str) -> String {
+    language_name(language)
 }
 
 fn language_name(language: &str) -> String {
@@ -253,7 +414,62 @@ mod tests {
             enabled: true,
             latest: true,
             index,
+            adult: false,
+            extension: "Example".into(),
         }
+    }
+
+    #[test]
+    fn sections_split_last_used_pins_and_language_chips() {
+        let mut browser = SourceBrowser::default();
+        browser.toggle_pin_with("beta.en", |_| Ok(())).unwrap();
+        browser.used_at("alpha.ko", 100, |_| Ok(())).unwrap();
+        let choices = [
+            choice("zulu.ko", "Zulu", "ko", 0),
+            choice("alpha.ko", "Alpha", "ko", 1),
+            choice("beta.en", "Beta", "en", 2),
+            choice("multi.all", "Every", "all", 3),
+            choice("gamma.ko", "Gamma", "ko", 4),
+        ];
+        let sections = browser.sections(&choices);
+        let (last, at) = sections.last_used.unwrap();
+        assert_eq!(last.id, "alpha.ko");
+        assert_eq!(at, Some(100));
+        assert_eq!(identities(&sections.pinned), ["beta.en"]);
+        // All sources by name; "All languages" has no chip of its own.
+        assert_eq!(
+            identities(&sections.all),
+            ["alpha.ko", "beta.en", "multi.all", "gamma.ko", "zulu.ko"]
+        );
+        assert_eq!(sections.total, 5);
+        assert_eq!(
+            sections.languages,
+            [("Korean".to_string(), 3), ("English".to_string(), 1)]
+        );
+        assert_eq!(sections.all[0].code, "KO");
+        assert_eq!(sections.all[2].code, "ALL");
+        browser.language = Some("Korean".into());
+        let korean = browser.sections(&choices);
+        assert_eq!(korean.language_index, 1);
+        assert_eq!(identities(&korean.all), ["alpha.ko", "gamma.ko", "zulu.ko"]);
+        // A chip whose sources vanished falls back to All.
+        browser.language = Some("French".into());
+        assert_eq!(browser.sections(&choices).language_index, 0);
+    }
+
+    #[test]
+    fn preferences_without_newer_fields_still_load() {
+        let browser = SourceBrowser::from_json(Some(r#"{"pinned":["a.en"],"last_used":"a.en"}"#));
+        assert!(browser.pinned.contains("a.en"));
+        assert_eq!(browser.last_used.as_deref(), Some("a.en"));
+        assert_eq!(browser.last_used_at, None);
+        let browser = SourceBrowser::from_json(Some(
+            r#"{"pinned":[],"last_used":"a.en","last_used_at":1700000000,"language":"English"}"#,
+        ));
+        assert_eq!(browser.last_used_at, Some(1_700_000_000));
+        assert_eq!(browser.language.as_deref(), Some("English"));
+        assert_eq!(opened_ago(1000, 1000 + 2 * 3600), "opened 2 h ago");
+        assert_eq!(opened_ago(1000, 1010), "opened just now");
     }
 
     fn identities(rows: &[crate::SourceRow]) -> Vec<String> {

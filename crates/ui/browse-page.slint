@@ -1,0 +1,917 @@
+// Browse "Refresh": a pinned header (title shrinks once scrolled), "Search
+// all sources", Sources | Extensions, the Last used card, a Pinned grid and
+// All sources with language chips; the catalogue with its own pinned header,
+// search, chips, filter sheet and grid; and results across sources.
+import { Theme, SettingsStyle, Anim, Appearance, BrowseBridge, FilterGroup, FilterPill, SearchSection, ItemRow, SourceRow, ExtensionRow, SettingsSync, PageMenuItem } from "@NovaUiShared";
+import { ControlTouchArea } from "@NovaUiBase/control-input.slint";
+import { LibraryScroll } from "@NovaUiBase/library-scroll.slint";
+import { LibraryFilterChip } from "@NovaUiBase/filter-chip.slint";
+import { SearchField } from "@NovaUiBase/searchfield.slint";
+import { ToggleSwitch } from "@NovaUiBase/settings-controls.slint";
+import { SettingSyncBadge } from "@NovaUiBase/settings-sync.slint";
+import { Spinner } from "std-widgets.slint";
+import { ReaderField, ReaderSelect } from "controls.slint";
+import { SeriesGrid } from "library-cards.slint";
+import { PageMenu, HeaderIcon, PageTitle } from "page-menu.slint";
+
+global BrowseMetrics {
+    // Readable maximum for the source list on wide screens.
+    out property <length> column: 760px;
+}
+
+component SourceIcon inherits Rectangle {
+    in property <image> icon;
+    in property <string> name;
+    border-radius: Theme.card_corner_radius;
+    background: Theme.current.control;
+    clip: true;
+    if root.icon.width > 0: Image { width: 100%; height: 100%; source: root.icon; image-fit: cover; }
+    if root.icon.width == 0: Image {
+        x: parent.width * 0.25; y: parent.height * 0.25; width: parent.width * 0.5; height: parent.height * 0.5;
+        source: @image-url("../../assets/icons/navigation/extension.svg"); image-fit: contain;
+        colorize: Theme.current.text_muted;
+    }
+}
+
+// A focusable tap target with keyboard activation.
+component Tap inherits Rectangle {
+    in property <string> label;
+    in property <bool> enabled: true;
+    in property <length> radius: 0px;
+    in property <bool> hover-wash: true;
+    callback activated;
+    out property <bool> pressed: touch.pressed;
+    out property <bool> focused: scope.has-focus;
+    border-radius: root.radius;
+    background: root.hover-wash && (touch.has-hover || touch.pressed) && root.enabled ? Theme.current.hover_subtle : transparent;
+    border-width: scope.has-focus && SettingsStyle.keyboard-mode ? 2px : 0px; border-color: Theme.current.focus_ring;
+    accessible-role: button; accessible-label: root.label; accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.activated(); } }
+    scope := FocusScope {
+        enabled: root.enabled;
+        changed has-focus => { if self.has-focus { SettingsStyle.reveal_control(root.absolute-position.y, root.height, false); } }
+        key-pressed(e) => { if (e.text == Key.Return || e.text == " ") && !e.repeat { root.activated(); return accept; } return reject; }
+    }
+    touch := ControlTouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { root.activated(); } }
+    @children
+}
+
+component Tag inherits Rectangle {
+    in property <string> text;
+    in property <bool> danger;
+    height: 18px; width: tag-text.preferred-width + 12px;
+    border-radius: min(Theme.button_corner_radius, 5px);
+    background: root.danger ? Theme.current.text_destructive.with-alpha(0.15) : Theme.current.hover_overlay;
+    tag-text := Text {
+        x: 6px; y: 0px; height: 100%; text: root.text; vertical-alignment: center;
+        font-size: 10px; font-weight: 700; letter-spacing: 0.3px;
+        color: root.danger ? Theme.current.text_destructive : Theme.current.text_secondary;
+    }
+}
+
+component SectionTitle inherits HorizontalLayout {
+    in property <string> text;
+    in property <string> trailing;
+    in property <string> action;
+    callback activated;
+    height: 44px; padding-top: 12px; spacing: 8px;
+    Text {
+        text: root.text.to-uppercase(); font-size: 13px; font-weight: 700; letter-spacing: 0.4px;
+        color: Theme.current.text_muted; vertical-alignment: center; horizontal-stretch: 1;
+    }
+    if root.trailing != "": Text { text: root.trailing; font-size: 12px; color: Theme.current.text_muted; vertical-alignment: center; }
+    if root.action != "": Tap {
+        width: 64px; label: root.action; radius: Theme.button_corner_radius;
+        activated => { root.activated(); }
+        Text { width: 100%; height: 100%; text: root.action; font-size: 13px; color: Theme.current.accent_soft; horizontal-alignment: right; vertical-alignment: center; }
+    }
+}
+
+component SourceRowView inherits Tap {
+    in property <SourceRow> source;
+    in property <bool> highlight-pin;
+    callback latest;
+    callback pin;
+    height: 64px; radius: Theme.card_corner_radius;
+    label: root.source.name + (root.source.adult ? ", 18+" : "") + ", " + root.source.language;
+    SourceIcon { x: 8px; y: 10px; width: 44px; height: 44px; icon: root.source.icon; name: root.source.name; }
+    VerticalLayout {
+        x: 64px; width: parent.width - self.x - (root.source.latest ? 92px : 48px); alignment: center; spacing: 3px;
+        HorizontalLayout {
+            spacing: 6px;
+            Text { text: root.source.name; font-size: 15px; font-weight: 600; color: Theme.current.text_bright; overflow: elide; min-width: 0px; }
+            if root.source.adult: VerticalLayout { alignment: center; Tag { text: "18+"; danger: true; } }
+            Rectangle { horizontal-stretch: 1; }
+        }
+        HorizontalLayout {
+            spacing: 6px;
+            VerticalLayout { alignment: center; Tag { text: root.source.code; } }
+            Text { text: root.source.extension; font-size: 12px; color: Theme.current.text_muted; overflow: elide; min-width: 0px; horizontal-stretch: 1; vertical-alignment: center; }
+        }
+    }
+    if root.source.latest: Tap {
+        x: parent.width - 88px; y: 10px; width: 44px; height: 44px; radius: 22px;
+        label: @tr("Latest from {}", root.source.name);
+        activated => { root.latest(); }
+        Image { x: 12px; y: 12px; width: 20px; height: 20px; source: @image-url("../../assets/icons/navigation/clock.svg"); colorize: Theme.current.text_muted; }
+    }
+    Tap {
+        x: parent.width - 44px; y: 10px; width: 44px; height: 44px; radius: 22px;
+        label: root.source.pinned ? @tr("Unpin {}", root.source.name) : @tr("Pin {}", root.source.name);
+        background: root.highlight-pin ? Theme.current.selection_wash : transparent;
+        animate background { duration: Anim.enabled ? 140ms : 0ms; }
+        activated => { root.pin(); }
+        Path {
+            x: 12px; y: 12px; width: 20px; height: 20px;
+            viewbox-width: 24; viewbox-height: 24; stroke-width: 1.8px;
+            stroke: root.source.pinned ? Theme.current.accent_vivid : Theme.current.text_muted;
+            fill: root.source.pinned ? Theme.current.accent_vivid : transparent;
+            commands: "M9 4h6l-1 6 3 3H7l3-3zM12 13v7";
+        }
+    }
+}
+
+// A pinned source: tap opens it; long press or right-click unpins.
+component PinTile inherits Rectangle {
+    in property <SourceRow> source;
+    callback activated;
+    callback unpin;
+    private property <bool> held;
+    height: 92px; border-radius: 12px;
+    background: (touch.has-hover || scope.has-focus) ? Theme.current.hover_subtle : transparent;
+    border-width: scope.has-focus && SettingsStyle.keyboard-mode ? 2px : 0px; border-color: Theme.current.focus_ring;
+    accessible-role: button; accessible-label: root.source.name;
+    accessible-description: @tr("Hold to unpin");
+    accessible-action-default => { root.activated(); }
+    SourceIcon { x: (parent.width - 54px) / 2; y: 8px; width: 54px; height: 54px; icon: root.source.icon; name: root.source.name; border-radius: Theme.card_corner_radius + 6px; }
+    Text {
+        x: 4px; y: 66px; width: parent.width - 8px; height: 18px;
+        text: root.source.name; font-size: 12px; color: Theme.current.text_secondary;
+        horizontal-alignment: center; overflow: elide;
+    }
+    hold := Timer { interval: 550ms; running: false; triggered => { self.stop(); root.held = true; root.unpin(); } }
+    scope := FocusScope {
+        key-pressed(e) => {
+            if (e.text == Key.Return || e.text == " ") && !e.repeat { root.activated(); return accept; }
+            if e.text == Key.Delete { root.unpin(); return accept; }
+            return reject;
+        }
+    }
+    touch := ControlTouchArea {
+        mouse-cursor: pointer;
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.down && e.button == PointerEventButton.right { root.unpin(); }
+            else if e.kind == PointerEventKind.down && e.button == PointerEventButton.left { root.held = false; hold.start(); }
+            else if e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel { hold.stop(); }
+        }
+        moved => { if Math.abs(self.mouse-x - self.pressed-x) > 8px || Math.abs(self.mouse-y - self.pressed-y) > 8px { hold.stop(); } }
+        clicked => { if !root.held { root.activated(); } root.held = false; }
+    }
+}
+
+component WidePill inherits Tap {
+    in property <string> text;
+    in property <image> icon;
+    in property <bool> primary;
+    hover-wash: false;
+    height: 44px; radius: Theme.button_corner_radius;
+    background: root.primary ? (self.pressed ? Theme.current.accent_pressed : Theme.current.accent) : Theme.current.hover_overlay;
+    label: root.text;
+    HorizontalLayout {
+        alignment: center; spacing: 6px;
+        Image { y: (parent.height - 16px) / 2; width: 16px; height: 16px; source: root.icon; colorize: root.primary ? Theme.current.on_accent : Theme.current.text_bright; }
+        Text { text: root.text; font-size: 13px; font-weight: 600; vertical-alignment: center; color: root.primary ? Theme.current.on_accent : Theme.current.text_bright; }
+    }
+}
+
+component Skeleton inherits Rectangle {
+    // A slow pulse, only with animations on.
+    private property <float> phase: Anim.enabled ? (1 + Math.sin(animation-tick() / 1400ms * 360deg)) / 2 : 0.5;
+    border-radius: Theme.card_corner_radius;
+    background: Theme.current.home_artwork_placeholder.mix(Theme.current.control, root.phase);
+}
+
+// A results card in the cross-source rows.
+component RailCard inherits Tap {
+    in property <ItemRow> item;
+    width: 108px; height: 196px; hover-wash: false; radius: Theme.card_corner_radius;
+    label: root.item.title;
+    Rectangle {
+        x: 0px; y: 0px; width: 108px; height: 162px; border-radius: Theme.card_corner_radius; clip: true;
+        background: Theme.current.home_artwork_placeholder;
+        if root.item.poster.width > 0: Image { width: 100%; height: 100%; source: root.item.poster; image-fit: cover; }
+        if root.item.bookmarked: Rectangle {
+            x: 6px; y: 6px; height: 20px; width: lib-text.preferred-width + 14px; border-radius: 10px;
+            background: Theme.current.accent;
+            lib-text := Text { x: 7px; height: 100%; text: @tr("In library"); font-size: 10px; font-weight: 700; color: Theme.current.on_accent; vertical-alignment: center; }
+        }
+    }
+    Text {
+        x: 0px; y: 167px; width: 100%; height: 30px; text: root.item.title; font-size: 12px; font-weight: 600;
+        color: Theme.current.text_home_title; wrap: word-wrap; max-lines: 2; overflow: elide;
+    }
+}
+
+// The filter sheet's option pills, wrapped into equal columns.
+component PillGrid inherits Rectangle {
+    in property <[FilterPill]> pills;
+    callback toggled(int);
+    private property <int> columns: max(1, Math.floor((root.width + 6px) / 116px));
+    private property <length> cell: (root.width - (root.columns - 1) * 6px) / root.columns;
+    height: Math.ceil(root.pills.length / root.columns) * 40px;
+    for pill[i] in root.pills: Tap {
+        x: Math.mod(i, root.columns) * (root.cell + 6px); y: Math.floor(i / root.columns) * 40px;
+        width: root.cell; height: 34px; hover-wash: false; radius: Theme.button_corner_radius;
+        label: pill.label + (pill.state == 1 ? ", " + @tr("included") : pill.state == 2 ? ", " + @tr("excluded") : "");
+        background: pill.state == 1 ? Theme.current.selection_fill : pill.state == 2 ? Theme.current.text_destructive.with-alpha(0.12) : Theme.current.hover_subtle;
+        border-width: 1px;
+        border-color: pill.state == 1 ? Theme.current.accent.with-alpha(0.4) : pill.state == 2 ? Theme.current.text_destructive.with-alpha(0.35) : Theme.current.border_subtle;
+        activated => { root.toggled(i); }
+        Text {
+            x: 8px; width: parent.width - 16px; height: 100%; text: pill.label; font-size: 13px;
+            horizontal-alignment: center; vertical-alignment: center; overflow: elide;
+            color: pill.state == 1 ? Theme.current.text_selected : pill.state == 2 ? Theme.current.text_destructive : Theme.current.text_secondary;
+        }
+        if pill.state == 2: Rectangle { x: 14px; y: parent.height / 2; width: parent.width - 28px; height: 1px; background: Theme.current.text_destructive; }
+    }
+}
+
+component FilterSheet inherits Rectangle {
+    in property <bool> open;
+    in property <length> safe-bottom;
+    callback close;
+    private property <bool> motion: Anim.enabled && Anim.transitions;
+    private property <float> shown: root.open ? 1 : 0;
+    animate shown { duration: root.motion ? Anim.transition_slide : 0ms; easing: ease-out; }
+    visible: self.shown > 0;
+    scrim := TouchArea {
+        clicked => { root.close(); }
+        Rectangle { background: Theme.current.scrim_settings; opacity: root.shown; }
+    }
+    panel := Rectangle {
+        private property <length> full: min(root.height * 0.78, body.preferred-height + 140px);
+        x: max(0px, (root.width - min(root.width, 640px)) / 2); width: min(root.width, 640px);
+        height: self.full; y: root.height - self.full * root.shown;
+        background: Theme.current.popup;
+        border-top-left-radius: 22px; border-top-right-radius: 22px;
+        border-width: 1px; border-color: Theme.current.border_overlay;
+        drop-shadow-offset-y: -14px; drop-shadow-blur: 40px; drop-shadow-color: Theme.current.scrim_shadow;
+        accessible-role: groupbox; accessible-label: @tr("Filters");
+        TouchArea {}
+        FocusScope {
+            key-pressed(e) => { if e.text == Key.Escape || e.text == Key.Back { root.close(); return accept; } return reject; }
+        }
+        Rectangle { x: (parent.width - 40px) / 2; y: 8px; width: 40px; height: 4px; border-radius: 2px; background: Theme.current.text_muted; }
+        HorizontalLayout {
+            x: 16px; y: 16px; width: parent.width - 32px; height: 40px;
+            Text { text: @tr("Filters"); font-size: 17px; font-weight: 700; color: Theme.current.text_bright; vertical-alignment: center; horizontal-stretch: 1; }
+        }
+        Rectangle { y: 60px; height: 1px; background: Theme.current.border_soft; }
+        scroll := Flickable {
+            x: 16px; y: 61px; width: parent.width - 32px; height: parent.height - 61px - 82px;
+            content-height: body.preferred-height;
+            body := VerticalLayout {
+                width: scroll.width; padding-top: 6px; padding-bottom: 10px; spacing: 4px; alignment: start;
+                if BrowseBridge.source-filter-notice != "": Text { text: BrowseBridge.source-filter-notice; color: Theme.current.text_secondary; wrap: word-wrap; font-size: 13px; }
+                for group in BrowseBridge.filter-groups: VerticalLayout {
+                    padding-top: 10px; padding-bottom: 6px; spacing: 8px;
+                    Text { text: group.name; font-size: 13px; font-weight: 600; color: Theme.current.text_muted; }
+                    if group.kind == "pills": PillGrid {
+                        pills: group.pills;
+                        toggled(i) => {
+                            let pill = group.pills[i];
+                            if pill.tristate { BrowseBridge.source-filter-selected(pill.key, Math.mod(pill.state + 1, 3)); }
+                            else { BrowseBridge.source-filter-changed(pill.key, pill.state == 1 ? "false" : "true"); }
+                        }
+                    }
+                    if group.kind == "select": ReaderSelect {
+                        model: group.options; current-index: group.selected; placeholder-text: group.name;
+                        selected(_) => { BrowseBridge.source-filter-selected(group.key, self.current-index); }
+                    }
+                    if group.kind == "text": ReaderField {
+                        text: group.value; placeholder-text: group.name;
+                        edited(value) => { BrowseBridge.source-filter-changed(group.key, value); }
+                    }
+                    if group.kind == "bool": HorizontalLayout {
+                        Rectangle { horizontal-stretch: 1; }
+                        ToggleSwitch {
+                            name: group.name; checked: group.checked;
+                            accessible-action-default => { self.checked = !self.checked; BrowseBridge.source-filter-changed(group.key, self.checked ? "true" : "false"); }
+                            toggled => { BrowseBridge.source-filter-changed(group.key, self.checked ? "true" : "false"); }
+                        }
+                    }
+                }
+                if BrowseBridge.filter-groups.length == 0: Text { text: @tr("This source has no browse filters."); color: Theme.current.text_secondary; wrap: word-wrap; }
+                if BrowseBridge.filter-groups.length > 0: Text { text: @tr("Tap once to include, twice to exclude where a filter allows it."); color: Theme.current.text_hint; font-size: 12px; wrap: word-wrap; }
+            }
+        }
+        Rectangle { y: parent.height - 82px; height: 1px; background: Theme.current.border_soft; }
+        HorizontalLayout {
+            x: 16px; y: parent.height - 72px; width: parent.width - 32px; height: 46px; spacing: 8px;
+            WidePill {
+                horizontal-stretch: 1; text: @tr("Reset"); icon: @image-url("../../assets/icons/navigation/refresh.svg");
+                activated => { BrowseBridge.filters-reset(); }
+            }
+            WidePill {
+                horizontal-stretch: 1; primary: true; text: @tr("Show results"); icon: @image-url("../../assets/icons/navigation/check.svg");
+                activated => { BrowseBridge.source-catalogue-kind = "filtered"; BrowseBridge.source-filters-applied(); }
+            }
+        }
+    }
+}
+
+export component BrowsePage inherits Rectangle {
+    background: Theme.current.artwork_canvas;
+    clip: true;
+    private property <bool> catalog: BrowseBridge.source-catalog-open;
+    private property <bool> searching: !root.catalog && BrowseBridge.global-query != "";
+    private property <length> column-width: min(root.width, BrowseMetrics.column);
+    private property <length> column-x: (root.width - root.column-width) / 2;
+    private property <bool> stuck: root.catalog ? -catalog-scroll.content-y > 6px : -home-scroll.content-y > 6px;
+    private property <bool> menu-open;
+    private property <string> menu-kind;
+    private property <string> menu-target;
+    private property <length> menu-right;
+    private property <length> menu-y;
+    private property <bool> highlight-pins;
+    private property <string> global-draft;
+    private property <string> catalog-draft: BrowseBridge.source-query;
+    function open-menu(kind: string, target: string, x: length, y: length) {
+        root.menu-kind = kind; root.menu-target = target;
+        root.menu-right = x - root.absolute-position.x; root.menu-y = y - root.absolute-position.y + 4px;
+        root.menu-open = true;
+    }
+    function open-source(index: int, kind: string) {
+        BrowseBridge.source-index = index;
+        BrowseBridge.source-catalog-open = true;
+        BrowseBridge.source-catalogue-kind = kind;
+        if kind == "latest" { BrowseBridge.source-latest-selected(index); } else { BrowseBridge.source-selected(index); }
+    }
+    pins-flash := Timer { interval: 1200ms; running: false; triggered => { self.stop(); root.highlight-pins = false; } }
+    // Bumped to scroll to All sources; the section title does the scrolling.
+    private property <int> pins-request;
+    function show-pin-buttons() {
+        // Scroll to All sources and briefly mark the pin buttons.
+        root.pins-request += 1;
+        root.highlight-pins = true; pins-flash.restart();
+    }
+    private property <[PageMenuItem]> browse-menu: [
+        { label: @tr("Show adult sources"), kind: 4, checked: BrowseBridge.show-adult, id: "adult" },
+        { label: @tr("Extension settings"), kind: 2, id: "extensions" },
+    ];
+    private property <[PageMenuItem]> scope-menu: [
+        { label: @tr("Search in"), kind: 0, id: "" },
+        { label: @tr("Pinned sources"), kind: 1, checked: BrowseBridge.global-scope == 0, id: "scope-pinned" },
+        { label: @tr("All enabled sources"), kind: 1, checked: BrowseBridge.global-scope == 1, id: "scope-all" },
+    ];
+    private property <[PageMenuItem]> catalog-menu: [
+        { label: @tr("Change source"), kind: 2, id: "change" },
+        { label: BrowseBridge.catalog-pinned ? @tr("Unpin source") : @tr("Pin source"), kind: 2, id: "pin" },
+        { label: @tr("Source settings"), kind: 2, id: "settings" },
+        { label: @tr("Enable / disable"), kind: 2, id: "toggle" },
+        { label: @tr("Remove addon"), kind: 3, id: "remove" },
+    ];
+    private property <[PageMenuItem]> extension-menu: [
+        { label: @tr("Settings"), kind: 2, id: "settings" },
+        { label: @tr("Remove"), kind: 3, id: "remove" },
+    ];
+    private property <[PageMenuItem]> source-menu: [];
+    function menu-items() -> [PageMenuItem] {
+        return root.menu-kind == "browse" ? root.browse-menu : root.menu-kind == "scope" ? root.scope-menu
+            : root.menu-kind == "catalog" ? root.catalog-menu : root.menu-kind == "extension" ? root.extension-menu
+            : root.source-menu;
+    }
+    function menu-picked(id: string) {
+        if root.menu-kind == "browse" {
+            if id == "adult" { BrowseBridge.show-adult = !BrowseBridge.show-adult; BrowseBridge.adult-visibility-changed(BrowseBridge.show-adult); }
+            if id == "extensions" { BrowseBridge.browse-tab = 1; }
+        } else if root.menu-kind == "scope" {
+            BrowseBridge.global-scope-picked(id == "scope-all" ? 1 : 0);
+        } else if root.menu-kind == "catalog" {
+            if id == "change" { root.menu-kind = "change"; change-timer.start(); }
+            if id == "pin" { BrowseBridge.source-action("pin"); }
+            if id == "settings" { BrowseBridge.source-action("settings"); }
+            if id == "toggle" { BrowseBridge.source-action("toggle"); }
+            if id == "remove" { BrowseBridge.source-remove(); }
+        } else if root.menu-kind == "extension" {
+            if id == "settings" { BrowseBridge.extension-action(root.menu-target, "settings"); }
+            if id == "remove" { BrowseBridge.extension-remove(root.menu-target); }
+        } else if root.menu-kind == "change" {
+            BrowseBridge.source-index = id.to-float();
+            BrowseBridge.source-selected(id.to-float());
+        }
+    }
+    // "Change source" reopens the menu as the source list once it closes.
+    change-timer := Timer { interval: Anim.enabled ? Anim.player_fast + 20ms : 20ms; running: false; triggered => { self.stop(); root.menu-open = true; } }
+    // Toast.
+    private property <int> notice-serial: BrowseBridge.notice-serial;
+    private property <bool> toast-shown;
+    changed notice-serial => { root.toast-shown = BrowseBridge.notice != ""; toast-timer.restart(); }
+    toast-timer := Timer { interval: 2200ms; running: false; triggered => { self.stop(); root.toast-shown = false; } }
+
+    // ------------------------------------------------------------ catalogue
+    // Scroll restore when coming back from a series, and paging.
+    private property <bool> catalog-active: BrowseBridge.active && root.catalog;
+    // Arriving at Browse with a catalogue open restores where it was.
+    private property <bool> page-active: BrowseBridge.active;
+    changed page-active => { if root.page-active && root.catalog { BrowseBridge.catalogue-restore-pending = true; } }
+    private property <string> catalogue-kind: BrowseBridge.source-catalogue-kind;
+    changed catalogue-kind => { if !BrowseBridge.catalogue-restore-pending { catalog-scroll.content-y = 0px; BrowseBridge.catalogue-scroll-y = 0px; } }
+    changed catalog => { if root.catalog && !BrowseBridge.catalogue-restore-pending { catalog-scroll.content-y = 0px; } }
+    private property <length> catalogue-position: BrowseBridge.catalogue-scroll-y;
+    changed catalogue-position => {
+        if root.catalog-active && !BrowseBridge.catalogue-restore-pending && Math.abs(catalog-scroll.content-y - BrowseBridge.catalogue-scroll-y) > 0.5px {
+            catalog-scroll.content-y = BrowseBridge.catalogue-scroll-y;
+        }
+    }
+    Timer {
+        interval: 16ms; running: BrowseBridge.catalogue-restore-pending && root.catalog-active;
+        triggered => { catalog-scroll.content-y = BrowseBridge.catalogue-scroll-y; BrowseBridge.catalogue-restore-pending = false; }
+    }
+    Timer {
+        interval: 100ms; running: root.catalog-active;
+        triggered => {
+            // Also fill a short first page; only while the source can advance
+            // and the previous page succeeded.
+            if !BrowseBridge.catalogue-restore-pending && BrowseBridge.has-more && !BrowseBridge.busy && BrowseBridge.catalogue-page-error == ""
+                && catalog-scroll.height > 0px && catalog-scroll.content-height + catalog-scroll.content-y <= catalog-scroll.height * 2 {
+                BrowseBridge.load-more();
+            }
+        }
+    }
+    private property <length> catalog-header-height: 52px + 50px + 46px + 8px;
+    catalog-view := Rectangle {
+        x: 0px; y: 0px; width: root.width; height: root.height; visible: root.catalog;
+        catalog-scroll := LibraryScroll {
+            x: 0px; y: root.catalog-header-height; width: parent.width; height: max(0px, parent.height - root.catalog-header-height);
+            content-height: catalog-content.preferred-height;
+            // Leaving Browse empties the grid; only a visible catalogue records.
+            changed content-y => { if BrowseBridge.active && !BrowseBridge.catalogue-restore-pending { BrowseBridge.catalogue-scroll-y = self.content-y; } }
+            catalog-content := VerticalLayout {
+                width: catalog-scroll.width; padding: 12px; padding-top: 4px; padding-bottom: 30px + BrowseBridge.bottom-padding; spacing: 14px; alignment: start;
+                if BrowseBridge.status != "": Rectangle {
+                    min-height: catalog-status.preferred-height + 20px; background: Theme.current.selection_wash; border-radius: Theme.card_corner_radius;
+                    catalog-status := Text { x: 12px; y: 10px; width: parent.width - 24px; text: BrowseBridge.status; color: Theme.current.text_settings; wrap: word-wrap; }
+                }
+                // Loading placeholders while the first page loads.
+                if BrowseBridge.busy && BrowseBridge.items.length == 0: Rectangle {
+                    private property <int> columns: max(3, Math.floor((self.width + 10px) / 170px));
+                    private property <length> cell: (self.width - (self.columns - 1) * 10px) / self.columns;
+                    height: 3 * (self.cell * 1.5 + 40px);
+                    accessible-role: progress-indicator; accessible-label: @tr("Loading titles");
+                    for n in self.columns * 3: Rectangle {
+                        x: Math.mod(n, parent.columns) * (parent.cell + 10px);
+                        y: Math.floor(n / parent.columns) * (parent.cell * 1.5 + 40px);
+                        width: parent.cell; height: parent.cell * 1.5 + 30px;
+                        Skeleton { x: 0px; y: 0px; width: 100%; height: parent.width * 1.5; }
+                        Skeleton { x: 0px; y: parent.width * 1.5 + 9px; width: 80%; height: 12px; border-radius: 4px; }
+                    }
+                }
+                if BrowseBridge.items.length > 0: catalog-grid := SeriesGrid {
+                    items: BrowseBridge.items; list-view: Appearance.library-list-view;
+                    min-cols: Appearance.browse-min-cols; library-style: true; in-library-badge: true;
+                    context-enabled: false;
+                    viewport-top: catalog-scroll.absolute-position.y; viewport-height: catalog-scroll.height;
+                    picked(i) => { BrowseBridge.picked(i); }
+                    request-artwork(first, last) => { BrowseBridge.request-artwork(first, last); }
+                }
+                if BrowseBridge.busy && BrowseBridge.items.length > 0: HorizontalLayout {
+                    alignment: center;
+                    Spinner { width: 24px; height: 24px; indeterminate: true; }
+                }
+                if BrowseBridge.items.length == 0 && !BrowseBridge.busy && BrowseBridge.catalogue-page-error == "": VerticalLayout {
+                    padding-top: 50px; spacing: 8px;
+                    Text { text: BrowseBridge.source-query != "" ? @tr("No results on {}", BrowseBridge.source-title) : @tr("Nothing here yet"); color: Theme.current.text_bright; font-size: 17px; horizontal-alignment: center; wrap: word-wrap; }
+                    Text { text: @tr("Try another search, filter or source."); color: Theme.current.text_secondary; horizontal-alignment: center; wrap: word-wrap; }
+                }
+                if BrowseBridge.catalogue-page-error != "": VerticalLayout {
+                    spacing: 8px;
+                    Text { text: BrowseBridge.catalogue-page-error; color: Theme.current.text_secondary; wrap: word-wrap; }
+                    HorizontalLayout {
+                        alignment: start;
+                        WidePill { width: 120px; text: @tr("Retry"); icon: @image-url("../../assets/icons/navigation/refresh.svg"); enabled: !BrowseBridge.busy; activated => { BrowseBridge.load-more(); } }
+                    }
+                }
+            }
+        }
+        // Pinned catalogue header.
+        catalog-header := Rectangle {
+            x: 0px; y: 0px; width: parent.width; height: root.catalog-header-height;
+            background: Theme.current.artwork_canvas;
+            drop-shadow-offset-y: root.stuck ? 8px : 0px; drop-shadow-blur: root.stuck ? 18px : 0px;
+            drop-shadow-color: Theme.current.scrim_shadow.transparentize(0.6);
+            TouchArea {}
+            if root.stuck: Rectangle { y: parent.height - 1px; height: 1px; background: Theme.current.border_soft; }
+            HorizontalLayout {
+                x: 8px; y: 4px; width: parent.width - 16px; height: 52px; spacing: 6px;
+                HeaderIcon {
+                    y: 4px; label: @tr("Back"); icon: @image-url("../../assets/icons/navigation/back.svg");
+                    clicked => { BrowseBridge.back(); }
+                }
+                VerticalLayout { alignment: center; SourceIcon { width: 34px; height: 34px; icon: BrowseBridge.catalog-icon; name: BrowseBridge.source-title; } }
+                VerticalLayout {
+                    horizontal-stretch: 1; alignment: center; spacing: 1px; min-width: 0px;
+                    PageTitle { text: BrowseBridge.source-title; full-size: 17px; stuck: false; overflow: elide; }
+                    Text { text: BrowseBridge.catalog-language + (BrowseBridge.catalog-adult ? " · 18+" : ""); font-size: 12px; color: Theme.current.text_muted; overflow: elide; }
+                }
+                catalog-more := HeaderIcon {
+                    y: 4px; label: @tr("Source options"); icon: @image-url("../../assets/icons/navigation/more.svg");
+                    clicked => { root.open-menu("catalog", "", self.absolute-position.x + self.width, self.absolute-position.y + self.height); }
+                }
+            }
+            Rectangle {
+                x: 16px; y: 60px; width: parent.width - 32px; height: 44px;
+                catalog-search := SearchField {
+                    x: 0px; y: 0px; width: 100%; height: 44px; roomy: true; search-icon: true;
+                    text <=> root.catalog-draft;
+                    placeholder-text: @tr("Search {}", BrowseBridge.source-title);
+                    accepted(_) => {
+                        BrowseBridge.source-query = root.catalog-draft;
+                        BrowseBridge.source-catalogue-kind = root.catalog-draft == "" ? "popular" : "search";
+                        BrowseBridge.search(root.catalog-draft);
+                    }
+                }
+                if root.catalog-draft != "": HeaderIcon {
+                    x: parent.width - 44px; y: 0px; label: @tr("Clear search"); icon: @image-url("../../assets/icons/navigation/close.svg");
+                    clicked => {
+                        root.catalog-draft = "";
+                        // Clearing returns to the previous mode.
+                        if BrowseBridge.source-query != "" {
+                            BrowseBridge.source-query = "";
+                            BrowseBridge.source-catalogue-kind = "popular";
+                            BrowseBridge.search("");
+                        }
+                        catalog-search.focus();
+                    }
+                }
+            }
+            HorizontalLayout {
+                x: 16px; y: 108px; width: parent.width - 32px; height: 44px; spacing: 6px;
+                Flickable {
+                    horizontal-stretch: 1; height: 44px;
+                    content-width: catalog-chips.preferred-width; content-height: self.height; content-y: 0px;
+                    changed content-y => { if self.content-y != 0px { self.content-y = 0px; } }
+                    catalog-chips := HorizontalLayout {
+                        spacing: 6px; alignment: start;
+                        if BrowseBridge.source-query != "": LibraryFilterChip {
+                            y: 5px; tonal: true; chip-height: 34px; selected: true; keyboard-focusable: true;
+                            label: @tr("Results"); count: BrowseBridge.items.length;
+                        }
+                        if BrowseBridge.source-query == "": LibraryFilterChip {
+                            y: 5px; tonal: true; chip-height: 34px; keyboard-focusable: true;
+                            label: @tr("Popular"); selected: BrowseBridge.source-catalogue-kind == "popular";
+                            picked => { BrowseBridge.source-catalogue-kind = "popular"; BrowseBridge.browse("popular"); }
+                            accessible-action-default => { BrowseBridge.source-catalogue-kind = "popular"; BrowseBridge.browse("popular"); }
+                        }
+                        if BrowseBridge.source-query == "" && BrowseBridge.catalog-latest: LibraryFilterChip {
+                            y: 5px; tonal: true; chip-height: 34px; keyboard-focusable: true;
+                            label: @tr("Latest"); selected: BrowseBridge.source-catalogue-kind == "latest";
+                            picked => { BrowseBridge.source-catalogue-kind = "latest"; BrowseBridge.browse("latest"); }
+                            accessible-action-default => { BrowseBridge.source-catalogue-kind = "latest"; BrowseBridge.browse("latest"); }
+                        }
+                        if BrowseBridge.source-has-filters: LibraryFilterChip {
+                            y: 5px; tonal: true; chip-height: 34px; keyboard-focusable: true;
+                            label: @tr("Filters"); count: BrowseBridge.filter-count > 0 ? BrowseBridge.filter-count : "";
+                            selected: BrowseBridge.filter-count > 0 || BrowseBridge.source-catalogue-kind == "filtered";
+                            picked => { BrowseBridge.source-filters-requested(); }
+                            accessible-action-default => { BrowseBridge.source-filters-requested(); }
+                        }
+                    }
+                }
+                // Grid / list.
+                Rectangle {
+                    y: 5px; width: 78px; height: 34px; border-radius: Theme.button_corner_radius;
+                    background: Theme.current.hover_subtle; border-width: 1px; border-color: Theme.current.border_subtle; clip: true;
+                    accessible-role: groupbox; accessible-label: @tr("Catalogue layout");
+                    for choice[k] in [
+                        { label: @tr("Grid"), icon: @image-url("../../assets/icons/navigation/grid.svg") },
+                        { label: @tr("List"), icon: @image-url("../../assets/icons/navigation/list.svg") },
+                    ]: Tap {
+                        x: k * 38px + 1px; y: 0px; width: 38px; height: 100%; hover-wash: false;
+                        background: (k == 1) == Appearance.library-list-view ? Theme.current.selection_wash : transparent;
+                        accessible-role: radio-button; accessible-checkable: true; accessible-checked: (k == 1) == Appearance.library-list-view;
+                        label: choice.label;
+                        activated => { Appearance.setting-changed("library_list_view", k); }
+                        Image {
+                            x: 10px; y: 8px; width: 18px; height: 18px; source: choice.icon;
+                            colorize: (k == 1) == Appearance.library-list-view ? Theme.current.accent_vivid : Theme.current.text_hint;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ----------------------------------------------------------- home
+    private property <length> home-header-height: 8px + 52px + 52px + (root.searching ? 0px : 52px) + 6px;
+    home := Rectangle {
+        x: 0px; y: 0px; width: root.width; height: root.height; visible: !root.catalog;
+        home-scroll := LibraryScroll {
+            x: root.column-x; y: root.home-header-height; width: root.column-width;
+            height: max(0px, parent.height - root.home-header-height);
+            content-height: home-content.preferred-height;
+            home-content := VerticalLayout {
+                width: home-scroll.width; padding-left: 16px; padding-right: 16px; padding-bottom: 24px + BrowseBridge.bottom-padding;
+                spacing: 0px; alignment: start;
+                if BrowseBridge.status != "": Rectangle {
+                    min-height: home-status.preferred-height + 20px; background: Theme.current.selection_wash; border-radius: Theme.card_corner_radius;
+                    home-status := Text { x: 12px; y: 10px; width: parent.width - 24px; text: BrowseBridge.status; color: Theme.current.text_settings; wrap: word-wrap; }
+                }
+                // Search across sources.
+                if root.searching: VerticalLayout {
+                    spacing: 0px;
+                    for section[s] in BrowseBridge.global-sections: VerticalLayout {
+                        spacing: 0px;
+                        HorizontalLayout {
+                            height: 50px; padding-top: 10px; spacing: 8px;
+                            VerticalLayout { alignment: center; SourceIcon { width: 26px; height: 26px; icon: section.icon; name: section.name; } }
+                            Text { text: section.name; font-size: 15px; font-weight: 700; color: Theme.current.text_bright; vertical-alignment: center; overflow: elide; min-width: 0px; }
+                            if section.status == 0: VerticalLayout { alignment: center; Spinner { width: 14px; height: 14px; indeterminate: true; } }
+                            if section.status == 1: Text { text: section.count == 1 ? @tr("1 result") : @tr("{} results", section.count); font-size: 12px; color: Theme.current.text_muted; vertical-alignment: center; }
+                            Rectangle { horizontal-stretch: 1; }
+                            if section.status == 1 && section.count > 0: HeaderIcon {
+                                label: @tr("Open {} with this search", section.name);
+                                icon: @image-url("../../assets/icons/navigation/next.svg");
+                                clicked => { BrowseBridge.global-more(s); }
+                            }
+                        }
+                        if section.status == 2: HorizontalLayout {
+                            spacing: 8px; height: 44px;
+                            Text { text: @tr("Couldn't reach {}", section.name) + (section.error != "" ? " · " + section.error : ""); font-size: 13px; color: Theme.current.text_hint; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; min-width: 0px; }
+                            Tap {
+                                width: 64px; label: @tr("Retry {}", section.name); radius: Theme.button_corner_radius;
+                                activated => { BrowseBridge.global-retry(s); }
+                                Text { width: 100%; height: 100%; text: @tr("Retry"); color: Theme.current.accent_soft; font-size: 13px; horizontal-alignment: center; vertical-alignment: center; }
+                            }
+                        }
+                        if section.status == 1 && section.count == 0: Text { height: 30px; text: @tr("No matches"); font-size: 13px; color: Theme.current.text_hint; vertical-alignment: center; }
+                        if section.status == 0 || section.count > 0: Flickable {
+                            height: 206px; content-width: rail.preferred-width; content-height: self.height; content-y: 0px;
+                            changed content-y => { if self.content-y != 0px { self.content-y = 0px; } }
+                            init => { BrowseBridge.global-artwork(s); }
+                            rail := HorizontalLayout {
+                                spacing: 10px; alignment: start;
+                                if section.status == 0: HorizontalLayout {
+                                    spacing: 10px;
+                                    for n in 4: Rectangle {
+                                        width: 108px;
+                                        Skeleton { x: 0px; y: 4px; width: 108px; height: 162px; }
+                                        Skeleton { x: 0px; y: 175px; width: 80px; height: 12px; border-radius: 4px; }
+                                    }
+                                }
+                                for item[i] in section.items: RailCard {
+                                    y: 4px; item: item;
+                                    activated => { BrowseBridge.global-picked(s, i); }
+                                }
+                            }
+                        }
+                    }
+                    if BrowseBridge.global-sections.length == 0: Text {
+                        height: 120px; text: BrowseBridge.global-scope == 0 ? @tr("Pin sources to search them here, or search all enabled sources.") : @tr("No enabled sources to search.");
+                        color: Theme.current.text_secondary; wrap: word-wrap; horizontal-alignment: center; vertical-alignment: center;
+                    }
+                }
+                // Sources.
+                if !root.searching && BrowseBridge.browse-tab == 0: VerticalLayout {
+                    spacing: 0px;
+                    if BrowseBridge.has-last-used: VerticalLayout {
+                        SectionTitle { text: @tr("Last used"); }
+                        Tap {
+                            height: 140px; radius: Theme.card_corner_radius + 4px;
+                            label: @tr("Last used: {}", BrowseBridge.last-used.name);
+                            background: @linear-gradient(135deg, Theme.current.selection_fill 0%, Theme.current.card 100%);
+                            border-width: 1px; border-color: Theme.current.border_subtle;
+                            activated => { root.open-source(BrowseBridge.last-used.index, "popular"); }
+                            SourceIcon { x: 14px; y: 14px; width: 52px; height: 52px; icon: BrowseBridge.last-used.icon; name: BrowseBridge.last-used.name; }
+                            VerticalLayout {
+                                x: 78px; y: 14px; width: parent.width - 92px; height: 52px; alignment: center; spacing: 2px;
+                                Text { text: BrowseBridge.last-used.name; font-size: 17px; font-weight: 700; color: Theme.current.text_bright; overflow: elide; }
+                                Text { text: BrowseBridge.last-used-detail; font-size: 12px; color: Theme.current.text_secondary; overflow: elide; }
+                            }
+                            HorizontalLayout {
+                                x: 14px; y: 80px; width: parent.width - 28px; height: 44px; spacing: 8px;
+                                WidePill {
+                                    horizontal-stretch: 1; primary: true; text: @tr("Popular"); icon: @image-url("../../assets/icons/navigation/flame.svg");
+                                    activated => { root.open-source(BrowseBridge.last-used.index, "popular"); }
+                                }
+                                if BrowseBridge.last-used.latest: WidePill {
+                                    horizontal-stretch: 1; text: @tr("Latest"); icon: @image-url("../../assets/icons/navigation/clock.svg");
+                                    activated => { root.open-source(BrowseBridge.last-used.index, "latest"); }
+                                }
+                            }
+                        }
+                    }
+                    if BrowseBridge.pinned.length > 0: VerticalLayout {
+                        SectionTitle { text: @tr("Pinned"); action: @tr("Edit"); activated => { root.show-pin-buttons(); } }
+                        Rectangle {
+                            private property <length> cell: (self.width - 3 * 10px) / 4;
+                            height: Math.ceil((BrowseBridge.pinned.length + 1) / 4) * 102px;
+                            for pin[i] in BrowseBridge.pinned: PinTile {
+                                x: Math.mod(i, 4) * (parent.cell + 10px); y: Math.floor(i / 4) * 102px; width: parent.cell;
+                                source: pin;
+                                activated => { root.open-source(pin.index, "popular"); }
+                                unpin => { BrowseBridge.unpin(pin.id); }
+                            }
+                            Tap {
+                                x: Math.mod(BrowseBridge.pinned.length, 4) * (parent.cell + 10px);
+                                y: Math.floor(BrowseBridge.pinned.length / 4) * 102px;
+                                width: parent.cell; height: 92px; radius: 12px; label: @tr("Add pinned source");
+                                activated => { root.show-pin-buttons(); }
+                                Rectangle {
+                                    x: (parent.width - 54px) / 2; y: 8px; width: 54px; height: 54px; border-radius: Theme.card_corner_radius + 6px;
+                                    background: Theme.current.hover_subtle; border-width: 1px; border-color: Theme.current.border_strong;
+                                    Image { x: 17px; y: 17px; width: 20px; height: 20px; source: @image-url("../../assets/icons/navigation/plus.svg"); colorize: Theme.current.text_muted; }
+                                }
+                                Text { x: 0px; y: 66px; width: 100%; height: 18px; text: @tr("Add"); font-size: 12px; color: Theme.current.text_secondary; horizontal-alignment: center; }
+                            }
+                        }
+                    }
+                    SectionTitle {
+                        text: @tr("All sources"); trailing: BrowseBridge.source-rows.length;
+                        property <int> request: root.pins-request;
+                        changed request => {
+                            let top = self.absolute-position.y - home-content.absolute-position.y;
+                            home-scroll.content-y = Math.clamp(8px - top, Math.min(0px, home-scroll.height - home-scroll.content-height), 0px);
+                        }
+                    }
+                    if BrowseBridge.languages.length > 1: Flickable {
+                        height: 48px; content-width: language-chips.preferred-width; content-height: self.height; content-y: 0px;
+                        changed content-y => { if self.content-y != 0px { self.content-y = 0px; } }
+                        language-chips := HorizontalLayout {
+                            spacing: 6px; alignment: start;
+                            for language[k] in BrowseBridge.languages: LibraryFilterChip {
+                                y: 4px; tonal: true; chip-height: 34px; keyboard-focusable: true;
+                                touch_feedback: BrowseBridge.touch-menus;
+                                label: language; selected: BrowseBridge.language-index == k;
+                                count: k < BrowseBridge.language-counts.length ? BrowseBridge.language-counts[k] : "";
+                                picked => { BrowseBridge.language-picked(k); }
+                                accessible-action-default => { BrowseBridge.language-picked(k); }
+                            }
+                        }
+                    }
+                    for source[i] in BrowseBridge.source-rows: SourceRowView {
+                        source: source; highlight-pin: root.highlight-pins;
+                        activated => { root.open-source(source.index, "popular"); }
+                        latest => { root.open-source(source.index, "latest"); }
+                        pin => { BrowseBridge.source-pin-picked(source.id); }
+                    }
+                    if BrowseBridge.source-rows.length == 0: Text {
+                        height: 80px; vertical-alignment: center; wrap: word-wrap; color: Theme.current.text_secondary;
+                        text: BrowseBridge.extensions.length == 0 ? @tr("Install an extension to add a source.") : @tr("No sources visible. Check extension settings and adult-source visibility.");
+                    }
+                }
+                // Extensions. Updates are not built: addons install from zip
+                // files and nothing checks for addon updates yet (see the
+                // browse refresh plan).
+                if !root.searching && BrowseBridge.browse-tab == 1: VerticalLayout {
+                    SectionTitle { text: @tr("Installed"); trailing: BrowseBridge.extensions.length; }
+                    for extension[i] in BrowseBridge.extensions: Rectangle {
+                        height: 64px;
+                        opacity: extension.enabled ? 1 : 0.55;
+                        SourceIcon { x: 8px; y: 10px; width: 44px; height: 44px; icon: extension.icon; name: extension.name; }
+                        VerticalLayout {
+                            x: 64px; width: parent.width - self.x - 104px; alignment: center; spacing: 2px;
+                            Text { text: extension.name; font-size: 15px; font-weight: 600; color: Theme.current.text_bright; overflow: elide; }
+                            Text {
+                                text: extension.version + " · " + extension.language + " · " + (extension.sources == 1 ? @tr("1 source") : @tr("{} sources", extension.sources));
+                                font-size: 12px; color: Theme.current.text_muted; overflow: elide;
+                            }
+                        }
+                        ToggleSwitch {
+                            x: parent.width - 96px; y: (parent.height - self.height) / 2;
+                            name: @tr("{} enabled", extension.name); checked: extension.enabled;
+                            accessible-action-default => { BrowseBridge.extension-action(extension.id, "toggle"); }
+                            toggled => { BrowseBridge.extension-action(extension.id, "toggle"); }
+                        }
+                        HeaderIcon {
+                            x: parent.width - 44px; y: 10px; label: @tr("{} options", extension.name);
+                            icon: @image-url("../../assets/icons/navigation/more.svg");
+                            clicked => { root.open-menu("extension", extension.id, self.absolute-position.x + self.width, self.absolute-position.y + self.height); }
+                        }
+                    }
+                    Tap {
+                        height: 48px; radius: Theme.button_corner_radius;
+                        enabled: !BrowseBridge.addon-zip-import-busy;
+                        label: @tr("Install addon from file");
+                        border-width: 1px; border-color: Theme.current.border_strong;
+                        activated => { BrowseBridge.install-addon(); }
+                        HorizontalLayout {
+                            alignment: center; spacing: 8px;
+                            if BrowseBridge.addon-zip-import-busy: VerticalLayout { alignment: center; Spinner { width: 16px; height: 16px; indeterminate: true; } }
+                            if !BrowseBridge.addon-zip-import-busy: Image { y: 14px; width: 20px; height: 20px; source: @image-url("../../assets/icons/navigation/plus.svg"); colorize: Theme.current.text_secondary; }
+                            Text { text: @tr("Install addon from file"); font-size: 14px; color: Theme.current.text_secondary; vertical-alignment: center; }
+                        }
+                    }
+                }
+            }
+        }
+        // Pinned home header.
+        Rectangle {
+            x: 0px; y: 0px; width: parent.width; height: root.home-header-height;
+            background: Theme.current.artwork_canvas;
+            drop-shadow-offset-y: root.stuck ? 8px : 0px; drop-shadow-blur: root.stuck ? 18px : 0px;
+            drop-shadow-color: Theme.current.scrim_shadow.transparentize(0.6);
+            TouchArea {}
+            if root.stuck: Rectangle { y: parent.height - 1px; height: 1px; background: Theme.current.border_soft; }
+            Rectangle {
+                x: root.column-x + 16px; y: 8px; width: root.column-width - 32px; height: parent.height - 8px;
+                HorizontalLayout {
+                    x: 0px; y: 0px; width: parent.width; height: 52px; spacing: 4px;
+                    if root.searching: HeaderIcon {
+                        y: 4px; label: @tr("Back to sources"); icon: @image-url("../../assets/icons/navigation/back.svg");
+                        clicked => { root.global-draft = ""; BrowseBridge.global-search(""); }
+                    }
+                    VerticalLayout {
+                        alignment: center; horizontal-stretch: 1;
+                        PageTitle { text: @tr("Browse"); stuck: root.stuck; }
+                    }
+                    if BrowseBridge.sync-enabled: VerticalLayout { alignment: center; SettingSyncBadge { setting_key: "reader:show-adult"; setting_title: @tr("Show adult sources"); } }
+                    browse-more := HeaderIcon {
+                        y: 4px; label: @tr("Browse options"); icon: @image-url("../../assets/icons/navigation/more.svg");
+                        clicked => { root.open-menu("browse", "", self.absolute-position.x + self.width, self.absolute-position.y + self.height); }
+                    }
+                }
+                Rectangle {
+                    x: 0px; y: 56px; width: parent.width; height: 46px;
+                    border-radius: Theme.button_corner_radius;
+                    global-search := SearchField {
+                        x: 0px; y: 0px; width: parent.width - 98px; height: 46px; roomy: true; search-icon: true;
+                        text <=> root.global-draft;
+                        placeholder-text: @tr("Search all sources");
+                        accepted(_) => { BrowseBridge.global-search(root.global-draft); }
+                    }
+                    if root.global-draft != "": HeaderIcon {
+                        x: parent.width - 142px; y: 1px; label: @tr("Clear search"); icon: @image-url("../../assets/icons/navigation/close.svg");
+                        clicked => { root.global-draft = ""; BrowseBridge.global-search(""); global-search.focus(); }
+                    }
+                    scope-button := Tap {
+                        x: parent.width - 90px; y: 0px; width: 90px; height: 46px; radius: Theme.button_corner_radius;
+                        background: Theme.current.hover_overlay;
+                        label: @tr("Search scope: {}", BrowseBridge.global-scope == 0 ? @tr("Pinned") : @tr("All enabled"));
+                        activated => { root.open-menu("scope", "", self.absolute-position.x + self.width, self.absolute-position.y + self.height); }
+                        HorizontalLayout {
+                            alignment: center; spacing: 4px;
+                            Text {
+                                text: BrowseBridge.global-scope == 0 ? @tr("{} pinned", BrowseBridge.pinned-count) : @tr("All");
+                                font-size: 12px; color: Theme.current.text_secondary; vertical-alignment: center;
+                            }
+                            Image { y: 15px; width: 14px; height: 14px; source: @image-url("../../assets/icons/navigation/chevron-down.svg"); colorize: Theme.current.text_muted; }
+                        }
+                    }
+                }
+                // Sources | Extensions.
+                if !root.searching: Rectangle {
+                    x: 0px; y: 112px; width: parent.width; height: 42px;
+                    border-radius: Theme.button_corner_radius + 3px; background: Theme.current.hover_subtle;
+                    accessible-role: tab-list; accessible-label: @tr("Browse");
+                    for tab-label[k] in [@tr("Sources"), @tr("Extensions")]: Tap {
+                        x: 3px + k * (parent.width - 6px) / 2; y: 3px; width: (parent.width - 6px) / 2; height: 36px;
+                        hover-wash: false; radius: Theme.button_corner_radius;
+                        background: BrowseBridge.browse-tab == k ? Theme.current.selection_fill : transparent;
+                        animate background { duration: Anim.enabled ? 140ms : 0ms; }
+                        accessible-role: tab; accessible-item-selected: BrowseBridge.browse-tab == k;
+                        label: k == 1 && BrowseBridge.attention-count > 0 ? @tr("{0}, {1} disabled", tab-label, BrowseBridge.attention-count) : tab-label;
+                        activated => { BrowseBridge.browse-tab = k; }
+                        HorizontalLayout {
+                            alignment: center; spacing: 6px;
+                            Text {
+                                text: tab-label; font-size: 13px; font-weight: 600; vertical-alignment: center;
+                                color: BrowseBridge.browse-tab == k ? Theme.current.text_selected : Theme.current.text_muted;
+                            }
+                            if k == 1 && BrowseBridge.attention-count > 0: VerticalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    height: 16px; width: badge.preferred-width + 12px; border-radius: 8px; background: Theme.current.accent;
+                                    badge := Text { x: 6px; height: 100%; text: BrowseBridge.attention-count; font-size: 11px; font-weight: 700; color: Theme.current.on_accent; vertical-alignment: center; }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    FilterSheet {
+        width: root.width; height: root.height; open: root.catalog && BrowseBridge.source-filters-open;
+        close => { BrowseBridge.source-filters-open = false; }
+    }
+
+    if root.menu-open: PageMenu {
+        width: root.width; height: root.height;
+        label: root.menu-kind == "browse" ? @tr("Browse options") : root.menu-kind == "scope" ? @tr("Search scope")
+            : root.menu-kind == "extension" ? @tr("Extension options") : root.menu-kind == "change" ? @tr("Change source") : @tr("Source options");
+        items: root.menu-kind == "change" ? BrowseBridge.change-items : root.menu-items();
+        anchor-right: root.menu-right; anchor-y: root.menu-y;
+        picked(id) => { root.menu-picked(id); }
+        closed => { root.menu-open = false; if !change-timer.running { BrowseBridge.restore-focus(); } }
+    }
+
+    if root.toast-shown: Rectangle {
+        x: (root.width - self.width) / 2; y: root.height - BrowseBridge.bottom-padding - 72px;
+        width: min(root.width - 32px, toast-text.preferred-width + 32px); height: 40px;
+        border-radius: 12px; background: Theme.current.popup; border-width: 1px; border-color: Theme.current.border_overlay;
+        accessible-role: text; accessible-label: BrowseBridge.notice;
+        toast-text := Text { x: 16px; width: parent.width - 32px; height: 100%; text: BrowseBridge.notice; color: Theme.current.text_primary; font-size: 13px; vertical-alignment: center; overflow: elide; }
+    }
+}

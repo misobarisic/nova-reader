@@ -26,6 +26,12 @@ pub(crate) struct Preferences {
     /// Reverses the chosen sort's natural order (newest, A→Z or most first),
     /// so every sort keeps its existing order by default.
     library_sort_reversed: bool,
+    /// Updates: 0 by day and series, 1 by day only. Device-only, like the
+    /// two History choices below (see `sync_settings::portable`).
+    updates_grouping: i32,
+    /// History: 0 session cards, 1 timeline.
+    history_view: i32,
+    history_shelf_hidden: bool,
 }
 
 impl Default for Preferences {
@@ -46,6 +52,9 @@ impl Default for Preferences {
             browse_min_cols: 3,
             library_sort: 0,
             library_sort_reversed: false,
+            updates_grouping: 0,
+            history_view: 0,
+            history_shelf_hidden: false,
         }
     }
 }
@@ -84,6 +93,9 @@ impl Preferences {
         appearance.set_browse_min_cols(self.browse_min_cols.clamp(2, 6));
         appearance.set_library_sort(self.library_sort.clamp(0, 4));
         appearance.set_library_sort_reversed(self.library_sort_reversed);
+        appearance.set_updates_grouping(self.updates_grouping.clamp(0, 1));
+        appearance.set_history_view(self.history_view.clamp(0, 1));
+        appearance.set_history_shelf_hidden(self.history_shelf_hidden);
         let anim = ui.global::<Anim>();
         anim.set_enabled(self.animations);
         anim.set_transitions(self.transitions);
@@ -114,6 +126,11 @@ impl Preferences {
             "library_sort" if (0..=4).contains(&value) => self.library_sort = value,
             "library_sort_reversed" if value == 0 || value == 1 => {
                 self.library_sort_reversed = value == 1
+            }
+            "updates_grouping" if value == 0 || value == 1 => self.updates_grouping = value,
+            "history_view" if value == 0 || value == 1 => self.history_view = value,
+            "history_shelf_hidden" if value == 0 || value == 1 => {
+                self.history_shelf_hidden = value == 1
             }
             _ => return false,
         }
@@ -216,6 +233,9 @@ pub fn init(ui: &AppWindow) -> Result<(), String> {
                 browse_min_cols: current.browse_min_cols,
                 library_sort: current.library_sort,
                 library_sort_reversed: current.library_sort_reversed,
+                updates_grouping: current.updates_grouping,
+                history_view: current.history_view,
+                history_shelf_hidden: current.history_shelf_hidden,
                 ..Preferences::default()
             };
             drop(current);

@@ -12,7 +12,7 @@ test = false
 [dependencies]
 slint = { workspace = true }
 nova-ui-base = { workspace = true }
-i-slint-core = { version = "=1.18.0", default-features = false }
+i-slint-core = { version = "=1.18.0", default-features = false, features = ["image-decoders", "svg"] }
 nova-reader-ui-shared = { path = "../ui-shared" }
 
 [build-dependencies]

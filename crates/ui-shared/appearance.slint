@@ -17,6 +17,11 @@ export global Appearance {
     // Reverses the sort's natural order (0 Recently added, 1 Title, 2 Unread,
     // 3 Last read, 4 Latest chapter).
     in-out property <bool> library-sort-reversed: false;
+    // Updates: 0 by day and series, 1 by day only.
+    in-out property <int> updates-grouping: 0;
+    // History: 0 session cards, 1 timeline.
+    in-out property <int> history-view: 0;
+    in-out property <bool> history-shelf-hidden: false;
     callback setting-changed(string, int);
     callback restore-theme;
 }
