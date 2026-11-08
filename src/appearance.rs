@@ -23,6 +23,9 @@ pub(crate) struct Preferences {
     library_min_cols: i32,
     browse_min_cols: i32,
     library_sort: i32,
+    /// Reverses the chosen sort's natural order (newest, A→Z or most first),
+    /// so every sort keeps its existing order by default.
+    library_sort_reversed: bool,
 }
 
 impl Default for Preferences {
@@ -42,6 +45,7 @@ impl Default for Preferences {
             library_min_cols: 2,
             browse_min_cols: 3,
             library_sort: 0,
+            library_sort_reversed: false,
         }
     }
 }
@@ -78,7 +82,8 @@ impl Preferences {
         appearance.set_library_list_view(self.library_list_view);
         appearance.set_library_min_cols(self.library_min_cols.clamp(2, 6));
         appearance.set_browse_min_cols(self.browse_min_cols.clamp(2, 6));
-        appearance.set_library_sort(self.library_sort.clamp(0, 2));
+        appearance.set_library_sort(self.library_sort.clamp(0, 4));
+        appearance.set_library_sort_reversed(self.library_sort_reversed);
         let anim = ui.global::<Anim>();
         anim.set_enabled(self.animations);
         anim.set_transitions(self.transitions);
@@ -106,7 +111,10 @@ impl Preferences {
             "library_list_view" if value == 0 || value == 1 => self.library_list_view = value == 1,
             "library_min_cols" if (2..=6).contains(&value) => self.library_min_cols = value,
             "browse_min_cols" if (2..=6).contains(&value) => self.browse_min_cols = value,
-            "library_sort" if (0..=2).contains(&value) => self.library_sort = value,
+            "library_sort" if (0..=4).contains(&value) => self.library_sort = value,
+            "library_sort_reversed" if value == 0 || value == 1 => {
+                self.library_sort_reversed = value == 1
+            }
             _ => return false,
         }
         true
@@ -207,6 +215,7 @@ pub fn init(ui: &AppWindow) -> Result<(), String> {
                 library_min_cols: current.library_min_cols,
                 browse_min_cols: current.browse_min_cols,
                 library_sort: current.library_sort,
+                library_sort_reversed: current.library_sort_reversed,
                 ..Preferences::default()
             };
             drop(current);

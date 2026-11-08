@@ -14,6 +14,9 @@ export global Appearance {
     in-out property <int> library-min-cols: 2;
     in-out property <int> browse-min-cols: 3;
     in-out property <int> library-sort: 0;
+    // Reverses the sort's natural order (0 Recently added, 1 Title, 2 Unread,
+    // 3 Last read, 4 Latest chapter).
+    in-out property <bool> library-sort-reversed: false;
     callback setting-changed(string, int);
     callback restore-theme;
 }

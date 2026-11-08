@@ -481,7 +481,9 @@ fn poster_layout_timelines_chapters_and_reader_controls() {
     );
     assert!((cards[0].absolute_position().y - cards[1].absolute_position().y).abs() < 1.);
     assert!(cards[1].absolute_position().x > cards[0].absolute_position().x);
-    assert!(cards[2].absolute_position().y > cards[0].absolute_position().y);
+    // Library grids use three columns on a phone; the fourth card starts row two.
+    assert!((cards[2].absolute_position().y - cards[0].absolute_position().y).abs() < 1.);
+    assert!(cards[3].absolute_position().y > cards[0].absolute_position().y);
     cards[1].invoke_accessible_default_action();
     assert_eq!(selected.get(), 1);
     button(&ui, "List view").invoke_accessible_default_action();
@@ -856,7 +858,9 @@ fn android_scrolls_do_not_lift_cards_or_open_titles_while_desktop_hover_remains(
             ui.window()
                 .dispatch_event(WindowEvent::PointerMoved { position: start });
             settle();
-            let lift = ElementHandle::find_by_element_id(&ui, "LibraryCard::lift")
+            // The library card lifts its frameless body; Browse its framed card.
+            let lift = ElementHandle::find_by_element_id(&ui, "LibraryCard::library-lift")
+                .chain(ElementHandle::find_by_element_id(&ui, "LibraryCard::lift"))
                 .next()
                 .unwrap();
             assert!(

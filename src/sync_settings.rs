@@ -775,7 +775,13 @@ fn setting_value(key: &str, value: &Value) -> String {
         return nova_reader_ui::backend_text::tr(if list { "List" } else { "Grid" });
     }
     let choices: &[&str] = match key {
-        "reader:appearance/library_sort" => &["Recently added", "Title", "Unread chapters"],
+        "reader:appearance/library_sort" => &[
+            "Recently added",
+            "Title",
+            "Unread chapters",
+            "Last read",
+            "Latest chapter",
+        ],
         "reader:appearance/accent_color" => &[
             "Purple", "Orange", "Blue", "Teal", "Rose", "Cyan", "Amber", "Lime",
         ],

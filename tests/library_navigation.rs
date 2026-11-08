@@ -18,6 +18,12 @@ fn button(ui: &AppWindow, label: &str) -> ElementHandle {
         .find(|element| element.accessible_role() == Some(AccessibleRole::Button))
         .unwrap_or_else(|| panic!("missing {label}"))
 }
+/// The sort pill; its label names the current sort and direction.
+fn sort_button(ui: &AppWindow) -> ElementHandle {
+    ElementHandle::find_by_element_id(ui, "LibraryPage::sort-button")
+        .next()
+        .expect("sort pill")
+}
 fn element(ui: &AppWindow, id: &str) -> ElementHandle {
     ElementHandle::find_by_element_id(ui, id)
         .next()
@@ -159,6 +165,8 @@ fn library_search_reveals_focuses_filters_and_closes_like_nova() {
     ui.show().unwrap();
     for (width, height) in [(390., 844.), (1120., 780.), (640., 240.), (320., 640.)] {
         ui.window().set_size(LogicalSize::new(width, height));
+        // Start at the top: search lives in the header, which scrolls away.
+        ui.set_library_scroll_y(0.);
         settle();
         assert!(
             ElementHandle::find_by_element_id(&ui, "LibraryPage::library-search")
@@ -171,17 +179,14 @@ fn library_search_reveals_focuses_filters_and_closes_like_nova() {
             "closed field cannot receive typing"
         );
         let category = button(&ui, "All");
-        let sort = ElementHandle::find_by_accessible_label(&ui, "Sort library")
-            .next()
-            .unwrap();
+        let sort = sort_button(&ui);
         assert!(
             category.absolute_position().y + category.size().height <= sort.absolute_position().y,
-            "categories sit above sort and toolbar icons at {width}px"
+            "categories sit above the sort pill at {width}px"
         );
+        // Search is the header's one action, above the categories.
         assert!(
-            (sort.absolute_position().y - button(&ui, "Search library").absolute_position().y)
-                .abs()
-                < 1.
+            button(&ui, "Search library").absolute_position().y < category.absolute_position().y
         );
         button(&ui, "Search library").mock_single_click(PointerEventButton::Left);
         settle();
@@ -196,12 +201,8 @@ fn library_search_reveals_focuses_filters_and_closes_like_nova() {
             field.absolute_position().y + field.size().height
                 <= viewport.absolute_position().y + viewport.size().height + 0.5
         );
-        if width >= 700. {
-            assert!(
-                field.absolute_position().y
-                    < button(&ui, "Close library search").absolute_position().y
-            );
-        } else if height > 300. {
+        // The header's search button stays above the revealed field.
+        if height > 300. {
             assert!(
                 field.absolute_position().y
                     > button(&ui, "Close library search").absolute_position().y
@@ -521,8 +522,9 @@ fn restore_library(ui: &AppWindow, anchor: &(String, f32, f32)) {
 fn assert_library_anchor(ui: &AppWindow, anchor: &(String, f32, f32)) {
     let index = anchor.0.strip_prefix("entry-").unwrap();
     let card = button(ui, &format!("Chapter {index}"));
-    let controls = button(ui, "Search library");
-    let uncovered_top = controls.absolute_position().y + controls.size().height;
+    // The pinned toolbar ends where the grid is uncovered.
+    let header = element(ui, "LibraryPage::library-header");
+    let uncovered_top = header.absolute_position().y + header.size().height;
     let stride = card.size().height + ui.global::<nova_reader::Theme>().get_card_spacing();
     let fraction = (uncovered_top - card.absolute_position().y) / stride;
     assert!(

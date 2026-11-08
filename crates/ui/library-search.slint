@@ -1,6 +1,7 @@
 // Nova library.slint: retained 58px reveal, shared field and deferred focus.
 import { Anim } from "@NovaUiShared";
 import { SearchField } from "@NovaUiBase/searchfield.slint";
+import { IconAction } from "controls.slint";
 
 export component LibrarySearchReveal inherits Rectangle {
     in property <bool> open;
@@ -49,6 +50,13 @@ export component LibrarySearchReveal inherits Rectangle {
             placeholder-text: @tr("Search library");
             edited(_) => { root.search(root.query); }
             accepted(_) => { root.search(root.query); root.submitted(); }
+        }
+        // Clear the text without closing the search.
+        if root.query != "": IconAction {
+            x: parent.width - 46px; y: 0px; width: 44px; height: 44px;
+            text: @tr("Clear search");
+            icon: @image-url("../../assets/icons/navigation/close.svg");
+            clicked => { root.query = ""; root.search(""); search-line.focus(); }
         }
     }
 }

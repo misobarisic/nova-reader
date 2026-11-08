@@ -402,6 +402,10 @@ export component AppWindow inherits Window {
     in-out property <string> path-text;
     in-out property <string> category-text;
     in property <[string]> categories;
+    // Titles per category chip (All, statuses, user categories), ignoring search.
+    in property <[int]> category-counts;
+    // "N titles" beside the Library heading.
+    in property <string> library-count-label;
     in-out property <int> category-index: 0;
     in-out property <bool> entry-menu-visible: false;
     in-out property <int> entry-menu-presentation;
@@ -799,6 +803,7 @@ export component AppWindow inherits Window {
                         library-page := LibraryPage {
                             visible: root.section == 0;
                             items: root.section == 0 ? root.items : []; categories: root.categories; category-index: root.category-index;
+                            category-counts: root.category-counts; count-label: root.library-count-label;
                             heading: root.heading; caption: root.caption; status: root.status; busy: root.busy;
                             narrow: root.mobile-ui; touch-menus: root.touch-menus;
                             list-view: Appearance.library-list-view; min-cols: Appearance.library-min-cols;

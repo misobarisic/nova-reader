@@ -1,19 +1,159 @@
 // Header overlay, horizontal category rail and native scroll adapted directly
 // from Nova crates/ui/library.slint; Reader owns its models and native controls.
-import { Theme, SettingsStyle } from "@NovaUiShared";
+import { Theme, SettingsStyle, Anim, InterfaceStyle } from "@NovaUiShared";
+import { ControlTouchArea } from "@NovaUiBase/control-input.slint";
 import { LibraryScroll } from "@NovaUiBase/library-scroll.slint";
 import { LibraryFilterChip } from "@NovaUiBase/filter-chip.slint";
 import { Spinner } from "std-widgets.slint";
 import { ItemRow } from "media-models.slint";
 import { PageHeader } from "page-header.slint";
-import { ReaderSelect as ComboBox, IconAction } from "controls.slint";
+import { IconAction } from "controls.slint";
 import { Appearance } from "appearance.slint";
 import { SeriesGrid, LibraryViewSwitch } from "library-cards.slint";
 import { LibrarySearchReveal } from "library-search.slint";
 
+struct SortChoice { label: string, code: int }
+
+// One sort icon; ascending flips it vertically.
+component SortGlyph inherits Path {
+    in property <bool> descending: true;
+    viewbox-width: 24; viewbox-height: 24; fill: transparent; stroke-width: 1.8px;
+    commands: root.descending ? "M4 6h10M4 12h7M4 18h4M18 5v14M15 16l3 3 3-3" : "M4 18h10M4 12h7M4 6h4M18 19V5M15 8l3-3 3 3";
+}
+
+component SortMenuItem inherits Rectangle {
+    in property <string> label;
+    in property <bool> checked;
+    in property <bool> focused;
+    in property <bool> live: true;
+    callback activated;
+    height: 44px;
+    border-radius: min(Theme.button_corner_radius, 10px);
+    background: (touch.has-hover || root.focused) && root.live ? Theme.current.control_hover : transparent;
+    border-width: root.focused && SettingsStyle.keyboard-mode ? 2px : 0px; border-color: Theme.current.focus_ring;
+    accessible-role: radio-button; accessible-label: root.label;
+    accessible-checkable: true; accessible-checked: root.checked; accessible-enabled: root.live;
+    accessible-action-default => { if root.live { root.activated(); } }
+    Text {
+        x: 12px; width: parent.width - 48px; height: 100%; text: root.label; overflow: elide;
+        font-size: 14px; vertical-alignment: center;
+        color: root.checked ? Theme.current.text_selected : Theme.current.text_bright;
+    }
+    if root.checked: Path {
+        x: parent.width - 32px; y: 12px; width: 20px; height: 20px;
+        viewbox-width: 24; viewbox-height: 24; fill: transparent; stroke-width: 2px;
+        stroke: Theme.current.accent_soft; commands: "M5 12.5l4.5 4.5L19 7.5";
+    }
+    touch := ControlTouchArea { enabled: root.live; mouse-cursor: pointer; clicked => { root.activated(); } }
+}
+
+// The sort menu: grows from its button like the reader's other menus.
+// Picking applies and closes; Escape, Back or a tap outside close unchanged.
+component LibrarySortMenu inherits Rectangle {
+    in property <int> sort;
+    in property <bool> descending;
+    in property <length> anchor-x;
+    in property <length> anchor-y;
+    callback picked-sort(int);
+    callback picked-direction(bool);
+    callback closed;
+    private property <[SortChoice]> choices: [
+        { label: @tr("Last read"), code: 3 },
+        { label: @tr("Recently added"), code: 0 },
+        { label: @tr("Title"), code: 1 },
+        { label: @tr("Unread chapters"), code: 2 },
+        { label: @tr("Latest chapter"), code: 4 },
+    ];
+    private property <bool> shown: false;
+    private property <bool> motion: Anim.enabled && Anim.player;
+    private property <float> scale-progress: 0;
+    private property <float> fade-progress: 0;
+    animate scale-progress { duration: root.motion ? (root.shown ? Anim.player_slide : Anim.player_fast) : 0ms; easing: ease-out; }
+    animate fade-progress { duration: root.motion ? Anim.player_fast : 0ms; easing: ease-out; }
+    changed motion => { root.scale-progress = root.shown ? 1 : 0; root.fade-progress = root.shown ? 1 : 0; }
+    // Keyboard selection over the five sorts and two directions.
+    private property <int> focus-index: 0;
+    init => { reveal.start(); }
+    reveal := Timer {
+        interval: 1ms; running: false;
+        triggered => { self.stop(); root.shown = true; root.scale-progress = 1; root.fade-progress = 1; key.focus(); }
+    }
+    function dismiss() {
+        if !root.shown { return; }
+        root.shown = false; root.scale-progress = 0; root.fade-progress = 0;
+        finish.start();
+    }
+    finish := Timer {
+        interval: root.motion ? max(1ms, Anim.player_fast) : 1ms; running: false;
+        triggered => { self.stop(); root.closed(); }
+    }
+    function activate(index: int) {
+        if index < 5 { root.picked-sort(root.choices[index].code); }
+        else { root.picked-direction(index == 5); }
+        root.dismiss();
+    }
+    key := FocusScope {
+        key-pressed(e) => {
+            if !root.shown { return reject; }
+            if e.text == Key.Escape || e.text == Key.Back { root.dismiss(); return accept; }
+            if e.text == Key.DownArrow || e.text == Key.UpArrow {
+                SettingsStyle.keyboard-mode = true;
+                root.focus-index = Math.mod(root.focus-index + (e.text == Key.UpArrow ? 6 : 1), 7);
+                return accept;
+            }
+            if (e.text == Key.Return || e.text == " ") && !e.repeat { root.activate(root.focus-index); return accept; }
+            return accept;
+        }
+        TouchArea { enabled: root.shown; clicked => { root.dismiss(); } }
+        panel := Rectangle {
+            width: min(240px, max(1px, root.width - 16px));
+            height: content.preferred-height;
+            x: Math.clamp(root.anchor-x, 8px, max(8px, root.width - self.width - 8px));
+            y: Math.clamp(root.anchor-y, 8px, max(8px, root.height - self.height - 8px));
+            background: Theme.current.popup;
+            border-radius: Theme.card_corner_radius;
+            border-width: 1px; border-color: Theme.current.border_medium;
+            drop-shadow-offset-y: 8px; drop-shadow-blur: 24px; drop-shadow-color: Theme.current.scrim_shadow;
+            clip: true;
+            opacity: root.fade-progress;
+            transform-scale: 0.86 + 0.14 * root.scale-progress;
+            transform-origin: { x: 0px, y: 0px };
+            accessible-role: groupbox; accessible-label: @tr("Sort library");
+            TouchArea { enabled: root.shown; }
+            content := VerticalLayout {
+                padding: 6px; spacing: 0px;
+                Text {
+                    text: @tr("Sort by"); color: Theme.current.text_muted; font-size: 12px; font-weight: 600;
+                    height: 28px; vertical-alignment: center;
+                }
+                for choice[i] in root.choices: SortMenuItem {
+                    label: choice.label; checked: root.sort == choice.code;
+                    focused: root.focus-index == i && key.has-focus; live: root.shown;
+                    activated => { root.activate(i); }
+                }
+                Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.current.border_medium; } }
+                SortMenuItem {
+                    label: @tr("Descending"); checked: root.descending;
+                    focused: root.focus-index == 5 && key.has-focus; live: root.shown;
+                    activated => { root.activate(5); }
+                }
+                SortMenuItem {
+                    label: @tr("Ascending"); checked: !root.descending;
+                    focused: root.focus-index == 6 && key.has-focus; live: root.shown;
+                    activated => { root.activate(6); }
+                }
+            }
+        }
+    }
+}
+
 export component LibraryPage inherits Rectangle {
     in property <[ItemRow]> items;
     in property <[string]> categories;
+    // Titles per category, parallel to `categories`.
+    in property <[int]> category-counts;
+    // "N titles" beside the heading.
+    in property <string> count-label;
     in property <int> category-index;
     in property <string> heading;
     in property <string> caption;
@@ -45,6 +185,32 @@ export component LibraryPage inherits Rectangle {
 
     background: Theme.current.artwork_canvas;
     clip: true;
+    // Sort: each code has a natural direction (Title A→Z, the rest newest or
+    // most first); the stored flag reverses it.
+    private property <int> sort: Appearance.library-sort;
+    private property <bool> descending: root.sort == 1 ? Appearance.library-sort-reversed : !Appearance.library-sort-reversed;
+    private property <string> sort-name: root.sort == 3 ? @tr("Last read") : root.sort == 1 ? @tr("Title")
+        : root.sort == 2 ? @tr("Unread chapters") : root.sort == 4 ? @tr("Latest chapter") : @tr("Recently added");
+    private property <bool> sort-menu-open;
+    private property <length> sort-menu-x;
+    private property <length> sort-menu-y;
+    function pick-sort(code: int) {
+        root.remember-position();
+        Appearance.setting-changed("library_sort", code);
+        root.sort-changed();
+    }
+    function pick-direction(descending: bool) {
+        root.remember-position();
+        let reversed = root.sort == 1 ? descending : !descending;
+        Appearance.setting-changed("library_sort_reversed", reversed ? 1 : 0);
+        root.sort-changed();
+    }
+    function open-sort-menu() {
+        // The menu grows from the button's lower-left corner.
+        root.sort-menu-x = sort-button.absolute-position.x - root.absolute-position.x;
+        root.sort-menu-y = sort-button.absolute-position.y - root.absolute-position.y + sort-button.height + 4px;
+        root.sort-menu-open = true;
+    }
     // Nova scrolls only the hero away. The live controls are a sibling overlay,
     // so dragging or overscrolling the grid never pans the category strip.
     private property <length> header-shift: max(-library-hero.height - 14px, min(0px, root.scroll-y));
@@ -147,7 +313,7 @@ export component LibraryPage inherits Rectangle {
                 padding-top: root.grid-top;
                 padding-bottom: 18px + root.bottom-padding;
                 library-grid := SeriesGrid {
-                    items: root.items; list-view: root.list-view;
+                    items: root.items; list-view: root.list-view; library-style: true;
                     min-cols: root.min-cols; context-enabled: true;
                     viewport-top: lib-scroll.absolute-position.y + root.header-cover;
                     viewport-height: max(0px, lib-scroll.visible-height - root.header-cover);
@@ -159,7 +325,7 @@ export component LibraryPage inherits Rectangle {
                 }
                 if root.status != "": Rectangle {
                     min-height: status-text.preferred-height + 24px;
-                    background: Theme.current.selection_wash; border-radius: 8px;
+                    background: Theme.current.selection_wash; border-radius: Theme.card_corner_radius;
                     status-text := Text { text: root.status; color: Theme.current.text_settings; wrap: word-wrap; x: 12px; y: 12px; width: max(0px, parent.width - 24px); }
                 }
                 if root.busy: HorizontalLayout {
@@ -190,7 +356,27 @@ export component LibraryPage inherits Rectangle {
                 width: 100%; spacing: 14px;
                 library-hero := VerticalLayout {
                     vertical-stretch: 0; spacing: 14px;
-                    PageHeader { title: root.heading; subtitle: root.caption; narrow: root.narrow; show-back: false; }
+                    // "Library  N titles" on one baseline, search at the end.
+                    HorizontalLayout {
+                        spacing: 10px; height: 52px;
+                        library-heading := Text {
+                            text: root.heading; color: Theme.current.text_bright;
+                            font-size: InterfaceStyle.tv ? 42px : (root.narrow ? 28px : 32px); font-weight: 700;
+                            vertical-alignment: center; accessible-role: text;
+                        }
+                        if root.count-label != "": Text {
+                            horizontal-stretch: 1; min-width: 0px; overflow: elide;
+                            text: root.count-label; color: Theme.current.text_muted; font-size: 14px;
+                            vertical-alignment: center; y: 5px;
+                        }
+                        if root.count-label == "": Rectangle { horizontal-stretch: 1; }
+                        IconAction {
+                            width: 44px; height: 44px; y: 4px;
+                            text: root.search-open ? @tr("Close library search") : @tr("Search library");
+                            icon: root.search-open ? @image-url("../../assets/icons/navigation/close.svg") : @image-url("../../assets/icons/navigation/search.svg");
+                            clicked => { root.toggle-search(); }
+                        }
+                    }
                 }
                 library-controls := Rectangle {
                     height: library-search.height + library-filter-and-sort.height;
@@ -223,7 +409,10 @@ export component LibraryPage inherits Rectangle {
                             filter-chips := HorizontalLayout {
                                 spacing: 8px; alignment: start;
                                 for category[i] in root.categories: LibraryFilterChip {
+                                    y: 4px;
                                     touch_feedback: root.touch-menus; keyboard-focusable: true;
+                                    tonal: true; chip-height: 36px;
+                                    count: i < root.category-counts.length ? root.category-counts[i] : "";
                                     label: category; selected: i == root.category-index;
                                     picked => { root.pick-category(i); }
                                     accessible-action-default => { root.pick-category(i); }
@@ -231,26 +420,47 @@ export component LibraryPage inherits Rectangle {
                                 }
                             }
                         }
+                        // Sort on the left, view switch on the right.
                         HorizontalLayout {
                             height: 44px; vertical-stretch: 0; spacing: 10px;
-                            ComboBox {
-                                model: [@tr("Recently added"), @tr("Title"), @tr("Unread chapters")];
-                                current-index: Appearance.library-sort; min-width: 0px; max-width: 190px;
-                                placeholder-text: @tr("Sort library");
-                                selected(_) => { root.remember-position(); Appearance.setting-changed("library_sort", self.current-index); root.sort-changed(); }
+                            sort-button := Rectangle {
+                                width: min(sort-label.preferred-width + 48px, 220px); height: 34px; y: 5px;
+                                border-radius: min(Theme.button_corner_radius, self.height / 2);
+                                border-width: sort-key.has-focus ? 2px : 1px;
+                                border-color: sort-key.has-focus ? Theme.current.focus_ring : Theme.current.border_subtle;
+                                background: sort-touch.has-hover ? Theme.current.control_hover : Theme.current.hover_subtle;
+                                accessible-role: button;
+                                accessible-label: @tr("Sort: {0}, {1}", root.sort-name, root.descending ? @tr("descending") : @tr("ascending"));
+                                accessible-action-default => { root.open-sort-menu(); }
+                                sort-icon := SortGlyph {
+                                    x: 12px; y: 8px; width: 18px; height: 18px;
+                                    descending: root.descending; stroke: Theme.current.text_secondary;
+                                }
+                                sort-label := Text {
+                                    x: 36px; width: parent.width - 48px; height: 100%;
+                                    text: root.sort-name; color: Theme.current.text_secondary; font-size: 13px;
+                                    vertical-alignment: center; overflow: elide;
+                                }
+                                sort-key := FocusScope {
+                                    y: -5px; height: 44px;
+                                    key-pressed(e) => { if (e.text == Key.Return || e.text == " ") && !e.repeat { root.open-sort-menu(); return accept; } return reject; }
+                                }
+                                sort-touch := TouchArea { y: -5px; height: 44px; mouse-cursor: pointer; clicked => { root.open-sort-menu(); } }
                             }
                             Rectangle { min-width: 0px; horizontal-stretch: 1; }
-                            LibraryViewSwitch { list-view: root.list-view; picked(list) => { root.remember-position(); Appearance.setting-changed("library_list_view", list ? 1 : 0); } }
-                            IconAction {
-                                width: 44px;
-                                text: root.search-open ? @tr("Close library search") : @tr("Search library");
-                                icon: root.search-open ? @image-url("../../assets/icons/navigation/close.svg") : @image-url("../../assets/icons/navigation/search.svg");
-                                clicked => { root.toggle-search(); }
-                            }
+                            LibraryViewSwitch { y: 5px; list-view: root.list-view; picked(list) => { root.remember-position(); Appearance.setting-changed("library_list_view", list ? 1 : 0); } }
                         }
                     }
                 }
             }
         }
+    }
+    if root.sort-menu-open: LibrarySortMenu {
+        width: root.width; height: root.height;
+        sort: root.sort; descending: root.descending;
+        anchor-x: root.sort-menu-x; anchor-y: root.sort-menu-y;
+        picked-sort(code) => { root.pick-sort(code); }
+        picked-direction(descending) => { root.pick-direction(descending); }
+        closed => { root.sort-menu-open = false; sort-key.focus(); }
     }
 }

@@ -30,6 +30,8 @@ mod downloads;
 
 #[path = "library_navigation.rs"]
 mod library_navigation;
+#[path = "library_view.rs"]
+mod library_view;
 
 static LIFECYCLE: OnceLock<Weak<Controller>> = OnceLock::new();
 #[path = "backup_actions.rs"]
@@ -1896,9 +1898,22 @@ impl Controller {
                 )
                 .collect::<Vec<_>>(),
         )));
+        ui.set_category_counts(ModelRc::new(VecModel::from(library_view::category_counts(
+            &snapshot,
+        ))));
+        ui.set_library_count_label(
+            text::titles_label(
+                snapshot
+                    .library
+                    .iter()
+                    .filter(|entry| snapshot.series.iter().any(|s| s.id == entry.series))
+                    .count(),
+            )
+            .into(),
+        );
         let counts = series_chapter_counts(&snapshot.chapters, &snapshot.progress);
         let (heading, caption) = match view.section {
-            0 => ("My Library", ""),
+            0 => ("Library", ""),
             1 => ("Updates", ""),
             2 => ("History", ""),
             3 => ("Browse", ""),
@@ -1949,22 +1964,13 @@ impl Controller {
                     .filter(|s| s.title.to_lowercase().contains(&query))
                     .cloned()
                     .collect();
-                match ui.global::<Appearance>().get_library_sort() {
-                    0 => series.sort_by_cached_key(|s| {
-                        std::cmp::Reverse(
-                            snapshot
-                                .library
-                                .iter()
-                                .find(|l| l.series == s.id)
-                                .map(|l| l.added_at)
-                                .unwrap_or(0),
-                        )
-                    }),
-                    2 => series.sort_by_cached_key(|s| {
-                        std::cmp::Reverse(counts.get(&s.id).map_or(0, |(_, unread)| *unread))
-                    }),
-                    _ => series.sort_by_cached_key(|s| s.title.to_lowercase()),
-                }
+                library_view::sort(
+                    &mut series,
+                    ui.global::<Appearance>().get_library_sort(),
+                    ui.global::<Appearance>().get_library_sort_reversed(),
+                    &snapshot,
+                    &counts,
+                );
                 view.rows = series.into_iter().map(Row::Series).collect();
             }
             1 => {
@@ -2178,6 +2184,30 @@ impl Controller {
                         == crate::content_presentation::Presentation::Gallery;
                     let (total, unread) = counts.get(&s.id).copied().unwrap_or_default();
                     let key = crate::artwork::key(s);
+                    let downloaded = view
+                        .download_states
+                        .iter()
+                        .filter(|(chapter, status)| {
+                            chapter.series == s.id
+                                && **status == reader_downloads::JobStatus::Complete
+                        })
+                        .count();
+                    let status_label = snapshot
+                        .library
+                        .iter()
+                        .find(|entry| entry.series == s.id)
+                        .map(|entry| {
+                            text::tr(
+                                reader_domain::library_bucket(
+                                    entry,
+                                    &snapshot.chapters,
+                                    &snapshot.progress,
+                                    s.publication_status,
+                                )
+                                .label(),
+                            )
+                        })
+                        .unwrap_or_default();
                     ItemRow {
                         series_key: serde_json::to_string(&s.id).unwrap_or_default().into(),
                         title: s.title.clone().into(),
@@ -2204,6 +2234,43 @@ impl Controller {
                             .into(),
                         badge: s.id.source_id.clone().into(),
                         bookmarked: snapshot.library.iter().any(|l| l.series == s.id),
+                        new_count: if view.section == 0 {
+                            crate::chapter_news::unseen_count(
+                                &s.id,
+                                snapshot
+                                    .chapters
+                                    .iter()
+                                    .filter(|c| c.id.series == s.id)
+                                    .map(|c| c.id.local_id.as_str()),
+                            ) as i32
+                        } else {
+                            0
+                        },
+                        downloaded_count: if view.section == 0 {
+                            downloaded as i32
+                        } else {
+                            0
+                        },
+                        detail: if view.section == 0 && !gallery {
+                            library_view::grid_detail(total - unread, total, s.publication_status).0
+                        } else {
+                            String::new()
+                        }
+                        .into(),
+                        detail_success: view.section == 0
+                            && !gallery
+                            && library_view::grid_detail(
+                                total - unread,
+                                total,
+                                s.publication_status,
+                            )
+                            .1,
+                        list_detail: if view.section == 0 {
+                            library_view::list_detail(&status_label, &s.id.source_id, downloaded)
+                        } else {
+                            String::new()
+                        }
+                        .into(),
                         poster: self.artwork.cached_image(s).unwrap_or_default(),
                         artwork_key: key.into(),
                         // A last-viewed gallery image does not imply that all

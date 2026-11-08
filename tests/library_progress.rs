@@ -26,34 +26,42 @@ fn library_progress_starts_at_left_in_grid_and_list() {
                     ..Default::default()
                 }])));
                 settle();
-                if completed == 0 {
+                let (track_id, fill_id) = if list_view {
+                    (
+                        "LibraryCard::row_progress_track",
+                        "LibraryCard::row_progress_fill",
+                    )
+                } else {
+                    (
+                        "LibraryCard::cover_progress_track",
+                        "LibraryCard::cover_progress_fill",
+                    )
+                };
+                // Only a partly read title draws a bar.
+                if completed == 0 || completed >= 50 {
                     assert!(
-                        ElementHandle::find_by_element_id(
-                            &ui,
-                            "LibraryCard::library_progress_track"
-                        )
-                        .next()
-                        .is_none(),
-                        "unread titles have no empty progress rail"
+                        ElementHandle::find_by_element_id(&ui, track_id)
+                            .next()
+                            .is_none(),
+                        "{completed}/50 has no progress bar"
                     );
                     continue;
                 }
-                let track =
-                    ElementHandle::find_by_element_id(&ui, "LibraryCard::library_progress_track")
-                        .next()
-                        .expect("visible progress track");
-                let fill =
-                    ElementHandle::find_by_element_id(&ui, "LibraryCard::library_progress_fill")
-                        .next()
-                        .expect("progress fill");
+                let track = ElementHandle::find_by_element_id(&ui, track_id)
+                    .next()
+                    .expect("visible progress track");
+                let fill = ElementHandle::find_by_element_id(&ui, fill_id)
+                    .next()
+                    .expect("progress fill");
                 let origin = track.absolute_position();
                 let start = fill.absolute_position();
                 assert!(track.size().width > 0.);
+                assert_eq!(track.size().height, 3.);
                 assert!(
                     (start.x - origin.x).abs() < 0.01 && (start.y - origin.y).abs() < 0.01,
                     "{width}px list={list_view}, {completed}/50 starts at {start:?}, track {origin:?}"
                 );
-                let fraction = (completed as f32 / 50.).min(1.);
+                let fraction = completed as f32 / 50.;
                 assert!((fill.size().width - track.size().width * fraction).abs() < 0.01);
                 assert_eq!(fill.size().height, track.size().height);
             }

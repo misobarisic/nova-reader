@@ -3,15 +3,39 @@ import { Theme, Anim, SettingsStyle, ControlInput } from "@NovaUiShared";
 import { FeedbackProgress } from "@NovaUiBase/feedback-motion.slint";
 import { ItemRow } from "media-models.slint";
 import { ReaderImageInteraction } from "reader-context-menu.slint";
+import { DownloadGlyph } from "download-controls.slint";
+
+// The unread count, or "+N" in accent for chapters new since the last visit.
+component CountBadge inherits Rectangle {
+    in property <ItemRow> card;
+    private property <int> unread: max(0, root.card.total - root.card.completed);
+    private property <bool> fresh: root.card.new-count > 0;
+    visible: root.fresh || root.unread > 0;
+    width: badge-text.preferred-width + 14px; height: 20px;
+    border-radius: min(Theme.button_corner_radius, self.height / 2);
+    background: root.fresh ? Theme.current.accent : Theme.current.hero_control;
+    border-width: root.fresh ? 0px : 1px; border-color: Theme.current.border_overlay;
+    accessible-role: text;
+    accessible-label: root.fresh ? @tr("{} new chapters", root.card.new-count) : @tr("{} unread", root.unread);
+    badge-text := Text {
+        text: root.fresh ? "+" + root.card.new-count : root.unread;
+        color: root.fresh ? Theme.current.on_accent : Theme.current.text_bright;
+        font-size: 11px; font-weight: 700;
+        horizontal-alignment: center; vertical-alignment: center;
+    }
+}
 
 export component LibraryViewSwitch inherits Rectangle {
     in property <bool> list-view;
     callback picked(bool);
-    width: 88px; height: 44px; border-radius: 22px;
-    border-width: 1px; border-color: Theme.current.border_medium;
-    background: Theme.current.hero_control; clip: true;
+    // 34px visible; each segment's touch and focus area spans 44px.
+    width: 80px; height: 34px;
+    border-radius: min(Theme.button_corner_radius, self.height / 2);
+    border-width: 1px; border-color: Theme.current.border_subtle;
+    background: Theme.current.hover_subtle;
     for mode in [false, true]: Rectangle {
-        x: mode ? 44px : 0px; width: 44px; height: 44px;
+        x: mode ? 40px : 0px; width: 40px; height: 34px;
+        border-radius: root.border-radius;
         feedback := FeedbackProgress { active: root.list-view == mode; }
         background: Theme.current.selection_wash.mix(transparent, feedback.value);
         border-width: scope.has-focus ? 2px : 0px; border-color: Theme.current.focus_ring;
@@ -19,19 +43,25 @@ export component LibraryViewSwitch inherits Rectangle {
         accessible-checkable: true; accessible-checked: root.list-view == mode;
         accessible-action-default => { root.picked(mode); }
         Path {
-            x: 12px; y: 12px; width: 20px; height: 20px;
+            x: 11px; y: 8px; width: 18px; height: 18px;
             viewbox-width: 24; viewbox-height: 24;
             commands: mode ? "M3 4h3v3H3zm5 0h13v3H8zM3 10h3v3H3zm5 0h13v3H8zM3 16h3v3H3zm5 0h13v3H8z" : "M3 3h7v7H3zm11 0h7v7h-7zM3 14h7v7H3zm11 0h7v7h-7z";
             fill: Theme.current.accent_vivid.mix(Theme.current.text_hint, feedback.value);
         }
-        scope := FocusScope { key-pressed(e) => { if e.text == Key.Return || e.text == " " { if !e.repeat { root.picked(mode); } return accept; } return reject; } }
-        TouchArea { mouse-cursor: pointer; clicked => { root.picked(mode); } }
+        scope := FocusScope {
+            y: -5px; height: 44px;
+            key-pressed(e) => { if e.text == Key.Return || e.text == " " { if !e.repeat { root.picked(mode); } return accept; } return reject; }
+        }
+        TouchArea { y: -5px; height: 44px; mouse-cursor: pointer; clicked => { root.picked(mode); } }
     }
 }
 
 export component LibraryCard inherits Rectangle {
     in property <ItemRow> card;
     in property <bool> list-view;
+    // The library's own look (no card frame, cover badges, detail line);
+    // Browse and other grids keep the framed card.
+    in property <bool> library-style;
     in property <bool> context-enabled;
     in property <bool> overlay-caption;
     callback picked;
@@ -40,7 +70,95 @@ export component LibraryCard inherits Rectangle {
     accessible-action-default => { root.picked(); }
     private property <length> poster-height: root.list-view ? root.height - 2px : root.width * 3 / 2;
     background: transparent;
-    lift := Rectangle {
+    private property <bool> lifted: hover.has-hover && !hover.pressed && !ControlInput.touch-feedback && Anim.enabled && Anim.hover;
+    private property <bool> partly-read: root.card.completed > 0 && root.card.completed < root.card.total;
+    // ----------------------------------------------------- library grid card
+    if root.library-style && !root.list-view: library-lift := Rectangle {
+        width: 100%; height: 100%;
+        y: root.lifted ? -4px : 0px;
+        animate y { duration: Anim.hover_fast; easing: ease-out; }
+        cover-art := Rectangle {
+            width: 100%; height: root.width * 3 / 2;
+            border-radius: Theme.card_corner_radius; clip: true;
+            background: Theme.current.home_artwork_placeholder;
+            border-width: scope.has-focus ? 2px : 0px; border-color: Theme.current.focus_ring;
+            drop-shadow-offset-y: 4px; drop-shadow-blur: 12px; drop-shadow-color: Theme.current.scrim_shadow;
+            if root.card.poster.width > 0: Image { source: root.card.poster; image-fit: cover; width: 100%; height: 100%; }
+            if root.card.poster.width == 0: Image {
+                source: @image-url("../../assets/icons/navigation/library.svg"); image-fit: contain;
+                width: 36px; height: 36px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                colorize: Theme.current.text_muted;
+            }
+            CountBadge { x: 6px; y: 6px; card: root.card; }
+            if root.card.downloaded-count > 0: Rectangle {
+                x: parent.width - self.width - 6px; y: 6px; width: 22px; height: 22px;
+                border-radius: min(Theme.button_corner_radius, self.height / 2);
+                background: Theme.current.hero_control;
+                accessible-role: text; accessible-label: @tr("Downloaded");
+                DownloadGlyph {
+                    x: 4px; y: 4px; width: 14px; height: 14px; glyph: "download";
+                    stroke: Theme.current.accent_soft; stroke-width: 2px;
+                }
+            }
+            if root.partly-read: cover_progress_track := Rectangle {
+                y: parent.height - 3px; height: 3px; width: 100%;
+                background: Theme.current.progress_track_overlay;
+                accessible-role: progress-indicator; accessible-label: @tr("Reading progress");
+                accessible-value: Math.round(root.card.completed * 100 / root.card.total) + "%";
+                cover_progress_fill := Rectangle {
+                    x: 0px; y: 0px; height: 100%; background: Theme.current.progress_fill;
+                    width: parent.width * root.card.completed / root.card.total;
+                }
+            }
+        }
+        VerticalLayout {
+            y: cover-art.height + 6px; width: 100%; height: parent.height - self.y;
+            spacing: 2px; alignment: start;
+            Text {
+                text: root.card.title; color: Theme.current.text_home_title;
+                font-size: 13px; font-weight: 600; wrap: word-wrap; max-lines: 2; overflow: elide; min-width: 0px;
+            }
+            if root.card.detail != "": Text {
+                text: root.card.detail; font-size: 11px; overflow: elide; min-width: 0px;
+                color: root.card.detail-success ? Theme.current.scope_synced_text : Theme.current.text_muted;
+            }
+        }
+    }
+    // ------------------------------------------------------ library list row
+    if root.library-style && root.list-view: Rectangle {
+        width: 100%; height: 100%;
+        border-radius: Theme.card_corner_radius;
+        background: hover.has-hover || scope.has-focus ? Theme.current.control_hover : transparent;
+        border-width: scope.has-focus ? 2px : 0px; border-color: Theme.current.focus_ring;
+        Rectangle {
+            x: 8px; y: (parent.height - self.height) / 2; width: 52px; height: 78px;
+            border-radius: Theme.card_corner_radius; clip: true;
+            background: Theme.current.home_artwork_placeholder;
+            if root.card.poster.width > 0: Image { source: root.card.poster; image-fit: cover; width: 100%; height: 100%; }
+        }
+        VerticalLayout {
+            x: 72px; width: max(1px, parent.width - self.x - 12px - (list-badge.visible ? list-badge.width + 10px : 0px));
+            alignment: center; spacing: 4px;
+            Text { text: root.card.title; color: Theme.current.text_home_title; font-size: 15px; font-weight: 600; overflow: elide; min-width: 0px; }
+            if root.card.list-detail != "": Text { text: root.card.list-detail; color: Theme.current.text_muted; font-size: 12px; overflow: elide; min-width: 0px; }
+            if root.partly-read: Rectangle {
+                height: 7px;
+                row_progress_track := Rectangle {
+                    y: 4px; height: 3px; background: Theme.current.progress_track_overlay;
+                    accessible-role: progress-indicator; accessible-label: @tr("Reading progress");
+                    accessible-value: Math.round(root.card.completed * 100 / root.card.total) + "%";
+                    row_progress_fill := Rectangle { x: 0px; y: 0px; height: 100%; background: Theme.current.progress_fill; width: parent.width * root.card.completed / root.card.total; }
+                }
+            }
+            if !root.partly-read && root.card.detail != "": Text {
+                text: root.card.detail; font-size: 12px; overflow: elide; min-width: 0px;
+                color: root.card.detail-success ? Theme.current.scope_synced_text : Theme.current.text_muted;
+            }
+        }
+        list-badge := CountBadge { x: parent.width - self.width - 12px; y: (parent.height - self.height) / 2; card: root.card; }
+    }
+    // ------------------------------------------------ framed card elsewhere
+    if !root.library-style: lift := Rectangle {
         width: 100%; height: 100%;
         background: Theme.current.card; border-radius: Theme.card_corner_radius;
         border-width: scope.has-focus ? 2px : 1px;
@@ -69,14 +187,14 @@ export component LibraryCard inherits Rectangle {
             Rectangle {
                 horizontal-stretch: 1; min-width: 1px; height: 100%;
                 library_progress_track := Rectangle {
-                    y: (parent.height - self.height) / 2; width: 100%; height: 6px; border-radius: 3px;
+                    y: (parent.height - self.height) / 2; width: 100%; height: 6px; border-radius: self.height / 2;
                     background: Theme.current.progress_track_overlay;
                     // Nova library.slint: anchor the fill explicitly. A smaller
                     // unpositioned child is centered by Slint's default layout.
                     library_progress_fill := Rectangle {
                         x: 0px; y: 0px;
                         width: parent.width * Math.min(1, root.card.completed * 1.0 / root.card.total);
-                        height: 100%; border-radius: 3px;
+                        height: 100%; border-radius: self.height / 2;
                         background: Theme.current.progress_fill;
                     }
                 }
@@ -114,15 +232,23 @@ export component SeriesGrid inherits Rectangle {
     in property <int> min-cols: 2;
     in property <bool> context-enabled;
     in property <bool> overlay-caption;
+    // The library's own card and row look; see LibraryCard.
+    in property <bool> library-style;
     in property <length> viewport-top;
     in property <length> viewport-height;
     callback picked(int);
     callback context-requested(string,string,bool,length,length);
     callback request-artwork(int,int);
-    out property <int> columns: root.list-view ? 1 : max(root.min-cols, Math.floor((root.width + Theme.card_spacing) / (160px + Theme.card_spacing)));
+    // Library grids use three columns on phone widths.
+    out property <int> columns: root.list-view ? 1
+        : max(root.library-style && root.width < 600px ? 3 : root.min-cols, Math.floor((root.width + Theme.card_spacing) / (160px + Theme.card_spacing)));
     private property <length> item-width: max(1px, min(root.list-view ? root.width : 230px, (root.width - (root.columns - 1) * Theme.card_spacing) / root.columns));
-    private property <length> card-height: root.list-view ? 138px : root.item-width * 3 / 2 + (root.overlay-caption ? 0px : 76px);
-    private property <length> stride: root.card-height + Theme.card_spacing;
+    // Library cards: cover, then two title lines and one detail line.
+    private property <length> card-height: root.library-style
+        ? (root.list-view ? 94px : root.item-width * 3 / 2 + 54px)
+        : root.list-view ? 138px : root.item-width * 3 / 2 + (root.overlay-caption ? 0px : 76px);
+    // A little more room between grid rows for two-line titles.
+    private property <length> stride: root.card-height + Theme.card_spacing + (root.library-style && !root.list-view ? 6px : 0px);
     out property <length> row-stride: root.stride;
     private property <int> first-row: max(0, Math.floor((root.viewport-top - root.absolute-position.y) / root.stride) - 2);
     private property <int> last-row: max(0, Math.ceil((root.viewport-top + root.viewport-height - root.absolute-position.y) / root.stride) + 2);
@@ -151,6 +277,7 @@ export component SeriesGrid inherits Rectangle {
         width: root.item-width; height: root.card-height;
         if Math.floor(i / root.columns) >= root.first-row && Math.floor(i / root.columns) <= root.last-row: LibraryCard {
             card: item; list-view: root.list-view; overlay-caption: root.overlay-caption; context-enabled: root.context-enabled;
+            library-style: root.library-style;
             picked => { root.picked(i); }
             context-requested(x,y) => { root.context-requested(item.series-key,item.title,item.bookmarked,x,y); }
         }

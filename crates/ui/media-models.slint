@@ -13,7 +13,11 @@ export struct ItemRow {
     // New since the title was last opened (stays for the whole visit).
     is-new: bool,
     // Part of the detail screen's multi-chapter selection.
-    selected: bool
+    selected: bool,
+    // Library: chapters new since the title was last opened, chapters on
+    // disk, the line under a grid title (success-coloured for "Completed")
+    // and a list row's "status · source · N downloaded" line.
+    new-count: int, downloaded-count: int, detail: string, detail-success: bool, list-detail: string
 }
 
 export struct SettingRow { key: string, name: string, kind: string, value: string, checked: bool, options: [string], selected: int }

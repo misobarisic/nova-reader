@@ -28,6 +28,17 @@ fn load(series: &SeriesId) -> Option<BTreeSet<String>> {
         .and_then(|raw| serde_json::from_str(&raw).ok())
 }
 
+/// How many of `chapters` arrived since the title was last opened; 0 for a
+/// title never opened here. Used by the library's "+N" badge.
+pub fn unseen_count<'a>(series: &SeriesId, chapters: impl IntoIterator<Item = &'a str>) -> usize {
+    load(series).map_or(0, |seen| {
+        chapters
+            .into_iter()
+            .filter(|chapter| !seen.contains(*chapter))
+            .count()
+    })
+}
+
 /// One visit to a title's detail screen.
 pub struct Visit {
     series: SeriesId,
