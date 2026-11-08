@@ -6456,9 +6456,12 @@ fn publish_title_menu(
         .iter()
         .find(|entry| &entry.series == series)
     {
+        // The open detail title, or (from Library) the stored series.
         let status = view
             .series
             .as_ref()
+            .filter(|s| &s.id == series)
+            .or_else(|| snapshot.series.iter().find(|s| &s.id == series))
             .map(|s| s.publication_status)
             .unwrap_or_default();
         parts.push(text::tr(
@@ -6477,6 +6480,25 @@ fn publish_title_menu(
     };
     ui.set_detail_unread_to_download(count(chapter_batch::Pick::Unread));
     ui.set_detail_all_to_download(count(chapter_batch::Pick::All));
+}
+
+/// The title's layout choice (0 default, 1 reader, 2 gallery) for the title
+/// menu's Layout page and the entry menu.
+fn publish_presentation_choice(ui: &AppWindow, key: &str) {
+    let settings = serde_json::from_str::<reader_domain::SeriesId>(key)
+        .map_err(error)
+        .and_then(|id| crate::content_presentation::Settings::load(&id));
+    match settings {
+        Ok(settings) => ui.set_entry_menu_presentation(match settings.user {
+            crate::content_presentation::UserPreference::Default => 0,
+            crate::content_presentation::UserPreference::Reader => 1,
+            crate::content_presentation::UserPreference::Gallery => 2,
+        }),
+        Err(error) => {
+            ui.set_entry_menu_presentation(0);
+            ui.set_status(error.into());
+        }
+    }
 }
 
 /// Names compare case-insensitively after trimming, like the visible label.
@@ -7016,20 +7038,30 @@ pub fn run(services: Services) -> Result<()> {
         .remember_library_position(&ui, key.to_string(), fraction, y));
     wire!(on_library_checkpoint, |app, _ui| app.checkpoint_library());
     wire!(on_entry_menu_requested, |_app, ui, key| {
-        let settings = serde_json::from_str::<reader_domain::SeriesId>(&key)
-            .map_err(error)
-            .and_then(|id| crate::content_presentation::Settings::load(&id));
-        match settings {
-            Ok(settings) => ui.set_entry_menu_presentation(match settings.user {
-                crate::content_presentation::UserPreference::Default => 0,
-                crate::content_presentation::UserPreference::Reader => 1,
-                crate::content_presentation::UserPreference::Gallery => 2,
-            }),
-            Err(error) => {
-                ui.set_entry_menu_presentation(0);
-                ui.set_status(error.into());
-            }
+        publish_presentation_choice(&ui, &key)
+    });
+    wire!(on_title_menu_requested, |app, ui, key| {
+        let Ok(series) = serde_json::from_str::<reader_domain::SeriesId>(&key) else {
+            return;
+        };
+        if let Ok(snapshot) = app.services.domain.snapshot() {
+            publish_title_menu(&app.view(), &snapshot, &series, &ui);
+            // The Status, Categories and Layout pages' current choices.
+            let entry = snapshot.library.iter().find(|entry| entry.series == series);
+            ui.set_title_menu_status(entry.map_or(-1, |entry| entry.reading_status.action()));
+            ui.set_entry_categories(ModelRc::new(VecModel::from(
+                snapshot
+                    .categories
+                    .iter()
+                    .map(|category| EntryCategoryRow {
+                        id: category.id.clone().into(),
+                        label: category.name.clone().into(),
+                        checked: entry.is_some_and(|entry| entry.categories.contains(&category.id)),
+                    })
+                    .collect::<Vec<_>>(),
+            )));
         }
+        publish_presentation_choice(&ui, &key);
     });
     wire!(on_entry_action, |app, ui, key, action| app
         .entry_action(&ui, &key, &action));

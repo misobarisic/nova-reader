@@ -1,8 +1,9 @@
-// The detail screen's title ⋯ menu: anchored under its button and grown from
-// it like the chapter menu, with a main page and a Download sub-page. Switching
-// pages fades the content and eases the panel's height. Status, Categories and
-// Layout hand over to the existing pickers.
-import { Theme, SettingsStyle, Anim } from "@NovaUiShared";
+// The title menu (the detail screen's ⋯, a hold or right-click on a Library
+// title): anchored at its button or the pointer and grown from it like the
+// chapter menu, with a main page and Download, Status, Categories and Layout
+// sub-pages. Switching pages fades the content and eases the panel's height.
+import { Theme, SettingsStyle, Anim, EntryCategoryRow } from "@NovaUiShared";
+import { ScrollView } from "@NovaUiBase/scrollview.slint";
 import { ControlTouchArea } from "@NovaUiBase/control-input.slint";
 import { MenuItem } from "chapter-menu.slint";
 
@@ -50,11 +51,20 @@ export component TitleMenu inherits Rectangle {
     in property <bool> in-library;
     in property <int> unread-to-download;
     in property <int> all-to-download;
+    // The reading status action code (0 automatic, 6 reading, 5 plan to
+    // read, 7 completed, 1 on hold, 2 dropped), the layout choice (0
+    // default, 1 reader, 2 gallery) and the categories with this title's
+    // ticked, from the backend.
+    in property <int> status;
+    in property <int> presentation;
+    in property <[EntryCategoryRow]> categories;
     // Window coordinates of the ⋯ button's bottom-right corner.
     in property <length> anchor-right;
     in property <length> anchor-bottom;
     in property <length> safe-bottom;
     callback picked(string);
+    // Category ticks keep the menu open for more.
+    callback category-toggled(string);
     callback closed;
     private property <int> page: 0;
     private property <bool> shown: false;
@@ -97,8 +107,8 @@ export component TitleMenu inherits Rectangle {
     scope := FocusScope {
         key-pressed(e) => {
             if (e.text == Key.Escape || e.text == Key.Back) && root.shown {
-                // The sub-page goes back to the main page first.
-                if root.page == 1 { root.go(0); } else { root.dismiss(""); }
+                // A sub-page goes back to the main page first.
+                if root.page != 0 { root.go(0); } else { root.dismiss(""); }
                 return accept;
             }
             return reject;
@@ -136,15 +146,15 @@ export component TitleMenu inherits Rectangle {
                     }
                     if root.in-library: IconTile {
                         live: root.shown; label: @tr("Status"); icon: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM8 12l3 3 5-6";
-                        activated => { root.dismiss("change-status"); }
+                        activated => { root.go(2); }
                     }
                     if root.in-library: IconTile {
                         live: root.shown; label: @tr("Categories"); icon: "M4 6h7v5H4zM13 6h7v5h-7zM4 13h7v5H4zM13 13h7v5h-7z";
-                        activated => { root.dismiss("categories"); }
+                        activated => { root.go(3); }
                     }
                     IconTile {
                         live: root.shown; label: @tr("Layout"); icon: "M4 4h7v16H4zM13 4h7v16h-7z";
-                        activated => { root.dismiss("presentation"); }
+                        activated => { root.go(4); }
                     }
                 }
                 if root.page == 0: MenuItem {
@@ -206,6 +216,84 @@ export component TitleMenu inherits Rectangle {
                     live: root.shown; label: @tr("Everything"); trailing: root.all-to-download;
                     icon: "M4 4h16v16H4zM12 8v6M9 11l3 3 3-3";
                     activated => { root.dismiss("download-all"); }
+                }
+                // Status: the manual statuses, then back to automatic.
+                if root.page == 2: MenuItem {
+                    live: root.shown; label: @tr("Status"); icon: "M15 18l-6-6 6-6";
+                    activated => { root.go(0); }
+                }
+                for choice in [
+                    { label: @tr("Reading"), code: 6 },
+                    { label: @tr("Plan to read"), code: 5 },
+                    { label: @tr("Completed"), code: 7 },
+                    { label: @tr("On hold"), code: 1 },
+                    { label: @tr("Dropped"), code: 2 },
+                    { label: @tr("Automatic"), code: 0 },
+                ]: MenuItem {
+                    visible: root.page == 2; height: root.page == 2 ? 44px : 0px;
+                    live: root.shown && root.page == 2; label: choice.label;
+                    trailing: root.status == choice.code ? "✓" : "";
+                    icon: choice.code == 0 ? "M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"
+                        : root.status == choice.code ? "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM8 12l3 3 5-6" : "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18";
+                    activated => { root.dismiss("status:" + choice.code); }
+                }
+                // Categories: tick as many as wanted; the menu stays open.
+                if root.page == 3: MenuItem {
+                    live: root.shown; label: @tr("Categories"); icon: "M15 18l-6-6 6-6";
+                    activated => { root.go(0); }
+                }
+                if root.page == 3 && root.categories.length == 0: Text {
+                    height: 52px; text: @tr("Create categories in More → Categories.");
+                    color: Theme.current.text_muted; font-size: 13px; wrap: word-wrap;
+                    vertical-alignment: center; horizontal-alignment: center;
+                }
+                if root.page == 3 && root.categories.length > 0: ScrollView {
+                    height: min(root.categories.length * 44px, 264px);
+                    content-height: root.categories.length * 44px;
+                    for category[index] in root.categories: Rectangle {
+                        y: index * 44px; width: parent.width; height: 44px; border-radius: 10px;
+                        background: category-touch.has-hover || category-key.has-focus ? Theme.current.control_hover : transparent;
+                        border-width: category-key.has-focus && SettingsStyle.keyboard-mode ? 2px : 0px;
+                        border-color: Theme.current.focus_ring;
+                        accessible-role: checkbox; accessible-label: category.label;
+                        accessible-checkable: true; accessible-checked: category.checked;
+                        accessible-action-default => { root.category-toggled(category.id); }
+                        Rectangle {
+                            x: 12px; y: 12px; width: 20px; height: 20px; border-radius: 5px;
+                            border-width: 2px; border-color: category.checked ? Theme.current.accent : Theme.current.border_strong;
+                            background: category.checked ? Theme.current.accent : transparent;
+                            if category.checked: Path {
+                                x: 3px; y: 3px; width: 14px; height: 14px; viewbox-width: 24; viewbox-height: 24;
+                                fill: transparent; stroke: Theme.current.on_accent; stroke-width: 3px; commands: "M5 12l5 5 9-10";
+                            }
+                        }
+                        Text { x: 44px; width: parent.width - 56px; height: 100%; text: category.label; color: Theme.current.text_bright; font-size: 14px; vertical-alignment: center; overflow: elide; }
+                        // Tab moves between rows; Return or Space ticks one.
+                        category-key := FocusScope {
+                            enabled: root.shown;
+                            key-pressed(e) => {
+                                if (e.text == Key.Return || e.text == " ") && !e.repeat { root.category-toggled(category.id); return accept; }
+                                return reject;
+                            }
+                        }
+                        category-touch := ControlTouchArea { enabled: root.shown; mouse-cursor: pointer; clicked => { root.category-toggled(category.id); } }
+                    }
+                }
+                // Layout: how this title opens.
+                if root.page == 4: MenuItem {
+                    live: root.shown; label: @tr("Layout"); icon: "M15 18l-6-6 6-6";
+                    activated => { root.go(0); }
+                }
+                for choice[index] in [
+                    { label: @tr("Default"), action: "presentation-default", icon: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18M12 8v4l3 2" },
+                    { label: @tr("Reader"), action: "presentation-reader", icon: "M12 6.5C10.5 5 8 4.5 3 4.5v14c5 0 7.5.5 9 2 1.5-1.5 4-2 9-2v-14c-5 0-7.5.5-9 2zM12 6.5v14" },
+                    { label: @tr("Gallery"), action: "presentation-gallery", icon: "M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z" },
+                ]: MenuItem {
+                    visible: root.page == 4; height: root.page == 4 ? 44px : 0px;
+                    live: root.shown && root.page == 4; label: choice.label;
+                    trailing: root.presentation == index ? "✓" : "";
+                    icon: choice.icon;
+                    activated => { root.dismiss(choice.action); }
                 }
             }
         }

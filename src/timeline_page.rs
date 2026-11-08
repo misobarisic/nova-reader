@@ -40,6 +40,12 @@ pub(super) struct State {
     shelf: Vec<(usize, Option<Resume>)>,
     /// The last list shown: a different one scrolls back to the top.
     shown: Option<(i32, String, i32, i32)>,
+    /// Each line's identity (`identity`), parallel to `lines`.
+    ids: Vec<String>,
+    /// The identities in `TimelineBridge.shown`, the window the page renders.
+    window_ids: Vec<String>,
+    /// The list's scroll offset and height, as the page last reported them.
+    viewport: Option<(f32, f32)>,
     /// A running library refresh: (done, total).
     pub(super) refresh: Option<(usize, usize)>,
 }
@@ -296,24 +302,9 @@ pub(super) fn publish(view: &mut View, snapshot: &ReaderState, ui: &AppWindow, i
         bridge.set_reset_serial(bridge.get_reset_serial().wrapping_add(1));
         view.timeline.shown = Some(shown);
     }
-    let model = bridge.get_entries();
-    match model.as_any().downcast_ref::<VecModel<TimelineEntry>>() {
-        // The same list again (a group expanded, a chapter read): keep each
-        // line on its row so it slides to its new place, and insert or
-        // remove only the lines that changed, which fade in.
-        Some(existing) if same_list => {
-            let old: Vec<String> = view
-                .timeline
-                .lines
-                .iter()
-                .map(|line| identity(&view.timeline.facts, line))
-                .collect();
-            let new: Vec<String> = lines.iter().map(|line| identity(&facts, line)).collect();
-            patch(existing, &old, &new, entries);
-        }
-        Some(existing) => existing.set_vec(entries),
-        None => bridge.set_entries(ModelRc::new(VecModel::from(entries))),
-    }
+    // The whole list stays in `entries` (not rendered); the page renders
+    // the window `publish_window` cuts from it.
+    bridge.set_entries(ModelRc::new(VecModel::from(entries)));
     bridge.set_days(ModelRc::new(VecModel::from(days)));
     bridge.set_list_top(top);
     bridge.set_content_height(end);
@@ -334,10 +325,64 @@ pub(super) fn publish(view: &mut View, snapshot: &ReaderState, ui: &AppWindow, i
         bridge.set_search_open(false);
     }
     publish_refresh(&view.timeline, ui);
+    view.timeline.ids = lines.iter().map(|line| identity(&facts, line)).collect();
     view.timeline.all = all;
     view.timeline.facts = facts;
     view.timeline.lines = lines;
     view.timeline.shelf = shelf;
+    // The same list again (a group expanded, a chapter read): lines keep
+    // their rows and slide, inserted lines fade in. A different list starts
+    // over (the page fades the whole list in).
+    publish_window(&mut view.timeline, ui, same_list);
+}
+
+/// How far beyond the viewport the window reaches, above and below. The
+/// page reports its position every 400px, so at least 400px stays ready.
+const WINDOW_MARGIN: f32 = 800.;
+
+/// The lines near the viewport: their identities and entries.
+fn window(state: &State, ui: &AppWindow) -> (Vec<String>, Vec<TimelineEntry>) {
+    // Before the page reports, assume a tall window at the top.
+    let (top, height) = state.viewport.unwrap_or((0., 2000.));
+    let (from, to) = (top - WINDOW_MARGIN, top + height + WINDOW_MARGIN);
+    let all = ui.global::<TimelineBridge>().get_entries();
+    state
+        .lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.y + line.height >= from && line.y <= to)
+        .filter_map(|(i, _)| Some((state.ids.get(i)?.clone(), all.row_data(i)?)))
+        .unzip()
+}
+
+/// Cut the lines near the viewport out of `entries` into `shown`. `keep`:
+/// patch the rendered window so kept lines slide and inserted ones fade in.
+fn publish_window(state: &mut State, ui: &AppWindow, keep: bool) {
+    let bridge = ui.global::<TimelineBridge>();
+    let (ids, entries) = window(state, ui);
+    let model = bridge.get_shown();
+    bridge.set_fade_new(keep);
+    match model.as_any().downcast_ref::<VecModel<TimelineEntry>>() {
+        Some(existing) if keep => patch(existing, &state.window_ids, &ids, entries),
+        Some(existing) => existing.set_vec(entries),
+        None => bridge.set_shown(ModelRc::new(VecModel::from(entries))),
+    }
+    state.window_ids = ids;
+}
+
+/// The page scrolled past a 400px step or changed size: move the window.
+/// Lines scrolling in appear as they are; kept lines keep their rows.
+pub(super) fn window_changed(state: &mut State, ui: &AppWindow, top: f32, height: f32) {
+    state.viewport = Some((top, height));
+    let bridge = ui.global::<TimelineBridge>();
+    let (ids, entries) = window(state, ui);
+    bridge.set_fade_new(false);
+    let model = bridge.get_shown();
+    match model.as_any().downcast_ref::<VecModel<TimelineEntry>>() {
+        Some(existing) => patch(existing, &state.window_ids, &ids, entries),
+        None => bridge.set_shown(ModelRc::new(VecModel::from(entries))),
+    }
+    state.window_ids = ids;
 }
 
 /// What a line shows, stable across renders: its kind and group, and the
@@ -364,6 +409,31 @@ fn patch(
 ) {
     if model.row_count() != old.len() {
         model.set_vec(entries);
+        return;
+    }
+    // A scrolled window: the new rows continue the old ones from some row
+    // on. Drop the rows that left at the top, then trim or extend the end.
+    if let Some(start) = new
+        .first()
+        .and_then(|first| old.iter().position(|id| id == first))
+        && old[start..].iter().zip(new).all(|(a, b)| a == b)
+    {
+        for _ in 0..start {
+            model.remove(0);
+        }
+        let kept = old.len() - start;
+        if kept > new.len() {
+            for _ in new.len()..kept {
+                model.remove(new.len());
+            }
+        }
+        for (row, entry) in entries.into_iter().enumerate() {
+            if row >= kept {
+                model.push(entry);
+            } else if model.row_data(row).as_ref() != Some(&entry) {
+                model.set_row_data(row, entry);
+            }
+        }
         return;
     }
     let head = old.iter().zip(new).take_while(|(a, b)| a == b).count();
@@ -796,6 +866,12 @@ pub(super) fn wire(app: &Arc<Controller>, ui: &AppWindow) {
     });
     // Crossing the two-column width lays the lines out again.
     on!(on_columns_changed, |app, ui| app.render(&ui));
+    on!(on_window_changed, |app, ui, top, height| window_changed(
+        &mut app.view().timeline,
+        &ui,
+        top,
+        height
+    ));
     on!(on_shelf_picked, |app, ui, index| app
         .timeline_shelf_picked(&ui, index as usize));
     on!(on_request_artwork, |app, ui, first, last| app

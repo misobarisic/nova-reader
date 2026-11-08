@@ -84,7 +84,15 @@ fn lines(
 fn publish(ui: &AppWindow, days: usize, groups: usize, chapters: usize) {
     let (entries, day_lines, end) = lines(days, groups, chapters);
     let bridge = ui.global::<TimelineBridge>();
+    // Rust publishes the whole list and the window the page renders: the
+    // lines within 800px of a viewport at the top (`publish_window`).
+    let window: Vec<_> = entries
+        .iter()
+        .filter(|line| line.y <= 844. + 800.)
+        .cloned()
+        .collect();
     bridge.set_entries(ModelRc::new(VecModel::from(entries)));
+    bridge.set_shown(ModelRc::new(VecModel::from(window)));
     bridge.set_days(ModelRc::new(VecModel::from(day_lines)));
     bridge.set_content_height(end);
     bridge.set_filter_counts(ModelRc::new(VecModel::from(vec![18, 9, 2])));

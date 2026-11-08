@@ -549,10 +549,19 @@ fn poster_layout_timelines_chapters_and_reader_controls() {
         progress: -1.,
         ..Default::default()
     };
-    bridge.set_entries(ModelRc::new(VecModel::from(vec![
-        single(0, 0.),
-        single(5, 44.),
-    ])));
+    // Rust publishes the whole list and the window the page renders.
+    let lines = vec![
+        nova_reader::TimelineEntry {
+            index: 0,
+            ..single(0, 0.)
+        },
+        nova_reader::TimelineEntry {
+            index: 1,
+            ..single(5, 44.)
+        },
+    ];
+    bridge.set_entries(ModelRc::new(VecModel::from(lines.clone())));
+    bridge.set_shown(ModelRc::new(VecModel::from(lines)));
     bridge.set_content_height(136.);
     ui.set_section(2);
     settle();

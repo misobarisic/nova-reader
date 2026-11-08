@@ -340,6 +340,9 @@ export component BrowsePage inherits Rectangle {
     // Wide screens keep buttons and the tab switch at a fixed size instead
     // of stretching them across the page.
     private property <bool> wide: !BrowseBridge.narrow && root.width >= 700px;
+    // The Extensions tab's attention counter is hidden for now; flip this
+    // to bring it back (Rust still publishes `attention-count`).
+    private property <bool> show-attention: false;
     private property <bool> stuck: root.catalog ? -catalog-scroll.content-y > 6px : -home-scroll.content-y > 6px;
     private property <bool> menu-open;
     private property <string> menu-kind;
@@ -915,7 +918,7 @@ export component BrowsePage inherits Rectangle {
                         x: 3px + k * (parent.width - 6px) / 2; y: 3px; width: (parent.width - 6px) / 2; height: 36px;
                         hover-wash: false; radius: Theme.button_corner_radius;
                         accessible-role: tab; accessible-item-selected: BrowseBridge.browse-tab == k;
-                        label: k == 1 && BrowseBridge.attention-count > 0 ? @tr("{0}, {1} disabled", tab-label, BrowseBridge.attention-count) : tab-label;
+                        label: k == 1 && root.show-attention && BrowseBridge.attention-count > 0 ? @tr("{0}, {1} disabled", tab-label, BrowseBridge.attention-count) : tab-label;
                         activated => { BrowseBridge.browse-tab = k; }
                         HorizontalLayout {
                             alignment: center; spacing: 6px;
@@ -923,7 +926,7 @@ export component BrowsePage inherits Rectangle {
                                 text: tab-label; font-size: 13px; font-weight: 600; vertical-alignment: center;
                                 color: BrowseBridge.browse-tab == k ? Theme.current.text_selected : Theme.current.text_muted;
                             }
-                            if k == 1 && BrowseBridge.attention-count > 0: VerticalLayout {
+                            if k == 1 && root.show-attention && BrowseBridge.attention-count > 0: VerticalLayout {
                                 alignment: center;
                                 Rectangle {
                                     height: 16px; width: badge.preferred-width + 12px; border-radius: 8px; background: Theme.current.accent;

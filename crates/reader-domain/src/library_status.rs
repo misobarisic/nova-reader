@@ -66,6 +66,17 @@ impl ReadingStatus {
     pub fn is_auto(&self) -> bool {
         *self == Self::Auto
     }
+    /// The status's action code, the inverse of `from_action`.
+    pub fn action(self) -> i32 {
+        match self {
+            Self::Auto => 0,
+            Self::OnHold => 1,
+            Self::Dropped => 2,
+            Self::PlanToRead => 5,
+            Self::Reading => 6,
+            Self::Completed => 7,
+        }
+    }
     // Nova's exact status action codes; video-only New episodes is omitted.
     pub fn from_action(status: i32) -> Option<Self> {
         match status {
@@ -113,6 +124,20 @@ pub fn library_bucket(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn status_action_codes_round_trip() {
+        for status in [
+            ReadingStatus::Auto,
+            ReadingStatus::OnHold,
+            ReadingStatus::Dropped,
+            ReadingStatus::PlanToRead,
+            ReadingStatus::Reading,
+            ReadingStatus::Completed,
+        ] {
+            assert_eq!(ReadingStatus::from_action(status.action()), Some(status));
+        }
+    }
+
     use super::*;
     use crate::{ChapterId, ReadingMode, ResumeAnchor, SeriesId};
     #[test]

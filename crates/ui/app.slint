@@ -421,21 +421,33 @@ export component AppWindow inherits Window {
     private property <bool> entry-menu-status-editing;
     private property <length> entry-menu-x;
     private property <bool> entry-menu-presentation-start;
-    // The detail screen's title ⋯ menu and what its pages show.
+    // The title menu: the detail screen's ⋯ and a hold or right-click on a
+    // Library title. Rust publishes the summary and download counts for
+    // `title-menu-key` (`title-menu-requested`).
     in-out property <bool> title-menu-open;
+    in-out property <string> title-menu-key;
+    private property <string> title-menu-title;
+    private property <bool> title-menu-library;
+    // The title's reading status action code (-1 when not in the library).
+    in property <int> title-menu-status;
     private property <length> title-menu-right;
     private property <length> title-menu-bottom;
+    callback title-menu-requested(string);
+    public function open-title-menu(key: string, title: string, in-library: bool, right: length, bottom: length) {
+        if key == "" { return; }
+        root.title-menu-key = key; root.title-menu-title = title; root.title-menu-library = in-library;
+        root.title-menu-right = right; root.title-menu-bottom = bottom;
+        root.title-menu-requested(key);
+        root.title-menu-open = true;
+    }
     in property <string> detail-menu-summary;
     in property <int> detail-unread-to-download;
     in property <int> detail-all-to-download;
     function title-menu-picked(action: string) {
-        let key = root.detail-series-key;
-        if action == "change-status" || action == "categories" || action == "presentation" {
-            // The existing pickers handle these, opened at the same spot.
-            root.entry-menu-presentation-start = action == "presentation";
-            root.open-entry-menu(key, root.series-title, root.in-library, root.title-menu-right - 44px, root.title-menu-bottom);
-            if action != "presentation" { root.entry-menu-picked(action); }
-        } else if action == "remove" || action == "mark-all-read" || action == "mark-all-unread" || action == "clear-all-positions" {
+        let key = root.title-menu-key;
+        // Status, layout and category choices come from the menu's own
+        // pages and go straight to the backend, like Download's.
+        if action == "remove" || action == "mark-all-read" || action == "mark-all-unread" || action == "clear-all-positions" {
             root.confirm-entry-action(key, action);
         } else if action == "delete-read-downloads" {
             root.ask-confirm("entry", key, action, 0, @tr("Delete the downloads of read chapters from this device? Bookmarked chapters keep theirs."), @tr("Delete read downloads"));
@@ -1364,9 +1376,7 @@ export component AppWindow inherits Window {
                                 Rectangle { horizontal-stretch: 1; }
                                 IconAction { width: 44px; text: @tr("Title options"); icon: @image-url("../../assets/icons/navigation/more.svg"); clicked => {
                                     if root.section == 5 {
-                                        root.title-menu-right = self.absolute-position.x + self.width;
-                                        root.title-menu-bottom = self.absolute-position.y + self.height;
-                                        root.title-menu-open = true;
+                                        root.open-title-menu(root.detail-series-key, root.series-title, root.in-library, self.absolute-position.x + self.width, self.absolute-position.y + self.height);
                                     } else { root.open-entry-menu(root.detail-series-key,root.series-title,root.in-library,self.absolute-position.x,self.absolute-position.y + self.height); }
                                 } }
                             }
@@ -1538,15 +1548,18 @@ export component AppWindow inherits Window {
         selection-changed(crop) => { root.capture-editor-selection-changed(crop); }
         action(action) => { root.capture-editor-action(action); }
     }
-    if root.section == 5 && root.title-menu-open: TitleMenu {
+    if root.title-menu-open: TitleMenu {
         width: root.width; height: root.height;
-        title: root.series-title; summary: root.detail-menu-summary; in-library: root.in-library;
+        title: root.title-menu-title; summary: root.detail-menu-summary; in-library: root.title-menu-library;
         unread-to-download: root.detail-unread-to-download; all-to-download: root.detail-all-to-download;
         anchor-right: root.title-menu-right; anchor-bottom: root.title-menu-bottom;
         safe-bottom: root.safe-area-insets.bottom;
+        status: root.title-menu-status; presentation: root.entry-menu-presentation;
+        categories: root.entry-categories;
         picked(action) => { root.title-menu-picked(action); }
-        // A picker opened from the menu owns focus; only give it back to the
-        // page when nothing took over.
+        category-toggled(id) => { root.entry-action(root.title-menu-key, "category:" + id); }
+        // A sheet opened from the menu (a confirmation) owns focus; only
+        // give it back to the page when nothing took over.
         closed => { root.title-menu-open = false; if !root.entry-menu-visible { keyboard.focus(); } }
     }
     if root.entry-menu-visible: EntryMenu {

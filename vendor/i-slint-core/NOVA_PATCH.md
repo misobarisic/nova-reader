@@ -1,7 +1,7 @@
 # Nova Reader patch to i-slint-core 1.18.0
 
 This directory is the exact crates.io `i-slint-core` 1.18.0 package, with the
-three input corrections below and this provenance note added. Its original `LICENSES/`, package
+four input corrections below and this provenance note added. Its original `LICENSES/`, package
 metadata and upstream source attribution are retained.
 
 - Upstream: <https://github.com/slint-ui/slint>, version 1.18.0.
@@ -45,3 +45,17 @@ of physical event timestamps: queued delivery spanning 8 ms or more can still
 produce an inaccurate estimate. Platform backends, renderer behavior and
 deceleration are unchanged. Remove these patches when the pinned upstream
 version includes the corresponding input corrections.
+
+`items/flickable.rs` makes a Flickable that pans along one axis only refuse
+a drag that leans clearly towards the other axis
+(`should_capture_mouse_direction`): horizontal needs the horizontal distance
+past the threshold and at least the vertical one, vertical the reverse. An
+exactly diagonal drag, and Flickables that pan both ways (a zoomed reader
+page), keep upstream behaviour. Upstream claims on either axis passing the 8 px
+threshold, so a sideways flick on a horizontal rail inside a vertical list
+(History's "Pick up where you left off", Browse rails and chip rows) was taken
+over by the list once the finger drifted 8 px vertically: the page moved and
+the rail stopped or skipped. `tests/nested_flick.rs` drags a rail diagonally
+inside a list and checks only the rail moves, and that a vertical drag still
+scrolls the list.
+

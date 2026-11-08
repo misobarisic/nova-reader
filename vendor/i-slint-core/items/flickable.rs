@@ -815,10 +815,19 @@ impl FlickableData {
 
         // We should capture the mouse movement, if the flickable can move in this
         // axis, and the mouse has moved more than the threshold in this axis.
-        ((content_width > flickable_width || flick.content_x() != zero)
-            && abs(mouse_delta.x_length()) > DISTANCE_THRESHOLD)
-            || ((content_height > flickable_height || flick.content_y() != zero)
-                && abs(mouse_delta.y_length()) > DISTANCE_THRESHOLD)
+        // Nova Reader patch: a Flickable that pans along one axis only does
+        // not claim a drag that leans clearly towards the other axis. A
+        // mostly sideways drag on a horizontal rail inside a vertical list
+        // otherwise hands the gesture to the list as soon as it drifts the
+        // threshold vertically, so the rail stops and the page moves. An
+        // exactly diagonal drag, and Flickables that pan both ways (a zoomed
+        // image), keep upstream behaviour.
+        let (dx, dy) = (abs(mouse_delta.x_length()), abs(mouse_delta.y_length()));
+        let horizontal = content_width > flickable_width || flick.content_x() != zero;
+        let vertical = content_height > flickable_height || flick.content_y() != zero;
+        let both = horizontal && vertical;
+        (horizontal && dx > DISTANCE_THRESHOLD && (both || dx >= dy))
+            || (vertical && dy > DISTANCE_THRESHOLD && (both || dy >= dx))
     }
 
     /// Whether the flickable has any content to pan in either direction, regardless of mouse movement.

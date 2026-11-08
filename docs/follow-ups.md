@@ -68,3 +68,42 @@ fails since the nova-kit bump to `01de53b` (`df98627`).
   process ends.
 - Update the test for batched writes: wait for the worker's clean flush on
   drop, or seed the index through Kit rather than reading the file directly.
+
+## History as a reading diary: one visit per chapter per day
+
+**Status:** deferred, direction agreed (option B below). Retention and the
+cross-device delete behaviour still need deciding.
+
+**Today:** `reader_domain::HistoryEntry { chapter, read_at }` keeps one entry
+per chapter. `ReaderState::set_progress` replaces it on every progress update,
+so re-reading a chapter moves it to today and its earlier read disappears:
+reading chapters 80–87 on Monday and chapter 85 again on Wednesday leaves
+Monday's session showing 80–84 and 86–87 only. Sync stores one `history`
+record per chapter. Resume, read state and Updates come from progress, not
+history.
+
+**Options considered:**
+- A. Keep the last read only (today).
+- B. One visit per (chapter, local day) holding the first and last time that
+  day: past days stay intact, re-reads appear on their own day, and session
+  time ranges stay true. Chosen.
+- C. Every open as an event: complete but noisy, large and heavy to sync.
+- D. One entry with `first_read_at`, `last_read_at` and a read count: cheap,
+  but History still only shows the latest day. B can carry these numbers.
+
+**What B involves:**
+- Domain: visits keyed by chapter and local day; reading again the same day
+  updates that day's last time only. A schema version bump migrates each
+  existing entry to one visit on its day. `validate` keeps rejecting visits to
+  unknown chapters.
+- Retention: a cap (12 months or a fixed number of visits), to decide.
+- Sync: `history` records keyed by chapter and day, so devices' visits merge.
+  Older builds do not understand them: either write both forms for a release
+  or require updated peers. The checkpoint rule that stops an old checkpoint
+  undoing a clear (`src/sync.rs`) moves to per-visit identities.
+- Removal: "Remove session" deletes that day's visits for the series;
+  removing a chapter from history and Clear history delete all its visits.
+  Whether removal propagates to other devices as it does today is open.
+- Pages: `src/timeline_page.rs` builds History facts from visits rather than
+  from the chapter's single `read_at`; the detail screen can show "first read
+  3 Nov · read 3×".

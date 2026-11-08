@@ -96,6 +96,14 @@ export global TimelineBridge {
     callback search(string);
     callback shelf-picked(int);
     callback request-artwork(int, int);
+    // The lines near the viewport, which the page renders (Rust keeps it in
+    // step with `entries` and `window-changed`).
+    in-out property <[TimelineEntry]> shown;
+    // Lines entering `shown` fade in (a render inserted them) rather than
+    // appear (they scrolled into the window).
+    in-out property <bool> fade-new;
+    // The list's scroll offset and height, reported in 400px steps.
+    callback window-changed(length, length);
     // 2 on wide screens; Rust lays the lines out in two columns.
     in-out property <int> columns: 1;
     callback columns-changed();

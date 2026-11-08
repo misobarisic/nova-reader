@@ -14,11 +14,19 @@ pub(crate) fn install(app: &crate::generated::AppWindow) {
         on_toggle_search => invoke_toggle_library_search(),
         on_submitted => invoke_library_search_submitted(),
         on_picked => invoke_open_item(index),
-        on_context_requested => invoke_open_entry_menu(key, title, in_library, x, y),
         on_request_artwork => invoke_request_artwork(first, last),
         on_viewport_changed => invoke_library_viewport_changed(key, fraction, y),
         on_checkpoint => invoke_library_checkpoint(),
     );
+    // A hold or right-click opens the same title menu as the detail
+    // screen's ⋯, its corner at the pointer (the menu is 288px wide and
+    // kept on screen).
+    let weak = app.as_weak();
+    bridge.on_context_requested(move |key, title, in_library, x, y| {
+        if let Some(app) = weak.upgrade() {
+            app.invoke_open_title_menu(key, title, in_library, x + 288., y);
+        }
+    });
     let weak = app.as_weak();
     bridge.set_factory(slint::ComponentFactory::new(move |context| {
         let app = weak.upgrade()?;

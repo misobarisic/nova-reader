@@ -122,7 +122,8 @@ impl Lines {
         let days: Vec<_> = ends.iter().map(|&i| self.out[i].clone()).collect();
         bridge.set_content_height(self.y);
         bridge.set_days(ModelRc::new(VecModel::from(days)));
-        bridge.set_entries(ModelRc::new(VecModel::from(self.out)));
+        bridge.set_entries(ModelRc::new(VecModel::from(self.out.clone())));
+        bridge.set_shown(ModelRc::new(VecModel::from(self.out)));
     }
 }
 

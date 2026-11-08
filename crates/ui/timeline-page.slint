@@ -381,7 +381,14 @@ export component TimelinePage inherits Rectangle {
     animate search-height { duration: Anim.enabled ? Anim.transition_slide : 0ms; easing: ease-out; }
     private property <length> header-height: root.head-height + root.sub-height + root.chips-height + root.search-height + 6px;
     private property <length> top: -list.content-y;
-    private property <length> margin: 240px;
+    // Rust gives the page only the lines near the viewport
+    // (`TimelineBridge.shown`); it is told where the list is each time the
+    // view crosses a 400px step, or changes size.
+    private property <int> window-step: Math.floor(root.top / 400px);
+    private property <length> window-height: list.height;
+    changed window-step => { TimelineBridge.window-changed(root.top, list.height); }
+    changed window-height => { TimelineBridge.window-changed(root.top, list.height); }
+    init => { TimelineBridge.window-changed(root.top, list.height); }
     private property <bool> menu-open;
     private property <length> menu-right;
     private property <length> menu-y;
@@ -456,11 +463,9 @@ export component TimelinePage inherits Rectangle {
         lines := Rectangle {
             y: (1 - root.swap) * 6px; width: 100%; height: TimelineBridge.content-height;
             opacity: root.swap;
-            for entry[i] in TimelineBridge.entries: slot := Rectangle {
-                private property <bool> near: TimelineBridge.active
-                    && entry.y + entry.height >= root.top - root.margin
-                    && entry.y <= root.top + list.height + root.margin;
-                changed near => { if self.near && entry.kind != 0 { TimelineBridge.request-artwork(i, i + 1); } }
+            // Only the lines near the viewport exist; `entry.index` is the
+            // line's place in the whole list, which the callbacks use.
+            for entry in TimelineBridge.shown: Rectangle {
                 // Wide screens: cards sit in one of two columns 12px apart;
                 // day headings keep the full width.
                 // Cards line up with the header title (18px); a day heading's
@@ -470,24 +475,25 @@ export component TimelinePage inherits Rectangle {
                 width: (entry.column == 0 ? parent.width - 2 * PageMetrics.side : root.half) + (entry.kind == 0 ? 8px : 0px) - (root.timeline && entry.kind == 6 ? 4px : 0px);
                 height: entry.height;
                 animate y { duration: Anim.enabled && Anim.transitions ? Anim.transition_slide : 0ms; easing: ease-in-out; }
-                // Lines inserted into a shown list (an expanding group) fade
-                // in while the lines below slide down to make room.
-                private property <float> arrive: 0;
+                // Lines a render inserts (an expanding group) fade in while
+                // the lines below slide down; lines that only scroll into
+                // the window appear as they are.
+                private property <float> arrive: TimelineBridge.fade-new ? 0 : 1;
                 opacity: self.arrive;
                 animate arrive { duration: Anim.enabled && Anim.transitions ? Anim.transition_slide : 0ms; easing: ease-out; }
                 init => { self.arrive = 1; }
-                if slot.near: TimelineLine {
+                TimelineLine {
                     width: 100%; height: 100%;
                     entry: entry; history: root.history; timeline: root.timeline;
-                    init => { if entry.kind != 0 && entry.poster.width == 0 { TimelineBridge.request-artwork(i, i + 1); } }
-                    picked => { TimelineBridge.entry-picked(i); }
-                    series-picked => { TimelineBridge.series-picked(i); }
-                    action(name) => { TimelineBridge.entry-action(i, name); }
+                    init => { if entry.kind != 0 && entry.poster.width == 0 { TimelineBridge.request-artwork(entry.index, entry.index + 1); } }
+                    picked => { TimelineBridge.entry-picked(entry.index); }
+                    series-picked => { TimelineBridge.series-picked(entry.index); }
+                    action(name) => { TimelineBridge.entry-action(entry.index, name); }
                     // A busy, bounded artwork queue may decline a request; retry
                     // while the cover is still empty.
                     Timer {
                         interval: 150ms; running: entry.kind != 0 && entry.kind != 3 && entry.kind != 4 && entry.poster.width == 0;
-                        triggered => { TimelineBridge.request-artwork(i, i + 1); }
+                        triggered => { TimelineBridge.request-artwork(entry.index, entry.index + 1); }
                     }
                 }
             }
