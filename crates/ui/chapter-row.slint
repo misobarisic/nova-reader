@@ -10,17 +10,72 @@ export component ChapterRow inherits Rectangle {
     private property <string> transfer-label: root.transfer-action == "pause" ? @tr("Pause download") : root.transfer-action == "retry" ? @tr("Retry download") : root.transfer-action == "resume" ? @tr("Resume download") : @tr("Download");
     callback picked;
     callback action(string);
-    height: 80px; min-width: 0px;
+    // Read state shows only in the text colour; the number column and the
+    // title stay aligned whether or not a row has a status or progress.
+    height: 68px; min-width: 0px;
     background: touch.feedback-active ? Theme.current.control_hover : transparent;
-    border-radius: Theme.card_corner_radius;
+    border-radius: 14px;
     accessible-role: button; accessible-label: root.chapter.title;
+    accessible-description: (root.chapter.read ? @tr("Read") : @tr("Unread"))
+        + (root.chapter.status != "" ? " · " + root.chapter.status : "")
+        + (root.chapter.chapter-meta != "" ? " · " + root.chapter.chapter-meta : "");
     accessible-action-default => { root.picked(); }
-    Rectangle { x: 4px; y: 25px; width: 7px; height: 7px; border-radius: 4px; background: root.chapter.read ? transparent : Theme.current.accent_soft; }
+    private property <length> trailing: root.chapter.local-import ? 44px : 96px;
+    chapter-number := Text {
+        x: 0px; y: 0px; width: 38px; height: 100%;
+        text: root.chapter.number;
+        color: root.chapter.read ? Theme.current.text_hint : Theme.current.text_bright;
+        font-size: 15px; font-weight: root.chapter.read ? 400 : 700;
+        horizontal-alignment: center; vertical-alignment: center; overflow: elide;
+    }
     VerticalLayout {
-        x: 20px; y: 16px; width: max(1px, root.width - 144px); height: 48px;
-        spacing: 6px; alignment: start;
-        chapter-title := Text { text: root.chapter.title; color: root.chapter.read ? Theme.current.text_muted : Theme.current.text_bright; font-size: 16px; min-width: 0px; overflow: elide; }
-        chapter-metadata := Text { text: root.chapter.chapter-meta; color: Theme.current.text_secondary; font-size: 12px; min-width: 0px; overflow: elide; }
+        x: 46px; y: 0px; width: max(1px, root.width - 46px - root.trailing - 4px); height: 100%;
+        spacing: 3px; alignment: center;
+        HorizontalLayout {
+            spacing: 6px;
+            if root.chapter.bookmarked: Path {
+                width: 14px; height: 14px; y: 2px;
+                viewbox-width: 24; viewbox-height: 24;
+                fill: Theme.current.accent_vivid; stroke: transparent;
+                commands: "M6 3h12v19l-6-4-6 4z";
+                accessible-role: none;
+            }
+            chapter-title := Text {
+                horizontal-stretch: 1; min-width: 0px;
+                text: root.chapter.short-title != "" ? root.chapter.short-title : root.chapter.title;
+                color: root.chapter.read ? Theme.current.text_muted : Theme.current.text_bright;
+                font-size: 15px; overflow: elide;
+            }
+        }
+        HorizontalLayout {
+            spacing: 0px;
+            if root.chapter.status != "": Text {
+                text: root.chapter.status;
+                color: root.chapter.status-danger ? Theme.current.text_destructive : Theme.current.accent_soft;
+                font-size: 12px;
+            }
+            if root.chapter.status != "" && root.chapter.chapter-meta != "": Text {
+                text: " · "; color: Theme.current.text_muted; font-size: 12px;
+            }
+            chapter-metadata := Text {
+                horizontal-stretch: 1; min-width: 0px;
+                text: root.chapter.chapter-meta; color: Theme.current.text_muted;
+                font-size: 12px; overflow: elide;
+            }
+        }
+        if root.chapter.read-fraction > 0: Rectangle {
+            height: 7px;
+            reading-progress := Rectangle {
+                x: 0px; y: 4px; width: parent.width * 0.7; height: 3px; border-radius: 1.5px;
+                background: Theme.current.progress_track_overlay;
+                accessible-role: progress-indicator; accessible-label: @tr("Reading progress");
+                accessible-value: Math.round(root.chapter.read-fraction * 100) + "%";
+                Rectangle {
+                    x: 0px; width: parent.width * Math.clamp(root.chapter.read-fraction, 0, 1); height: 100%;
+                    border-radius: 1.5px; background: Theme.current.accent_soft;
+                }
+            }
+        }
     }
     scope := FocusScope {
         changed has-focus => { if self.has-focus { SettingsStyle.reveal_control(root.absolute-position.y, root.height, false); } }
@@ -61,15 +116,15 @@ export component ChapterRow inherits Rectangle {
     }
     hold := Timer { interval: 600ms; running: false; triggered => { self.stop(); touch.held = true; actions.show(); } }
     if !root.chapter.local-import: DownloadIconButton {
-        x: root.width - 112px; y: 16px;
+        x: root.width - 96px; y: (root.height - self.height) / 2; width: 44px; height: 48px;
         label: root.chapter.downloaded ? @tr("Downloaded chapter options") : root.transfer-label;
         glyph: root.chapter.downloaded ? "check" : root.chapter.download-state == 1 ? "clock" : root.chapter.download-state == 2 ? "pause" : root.chapter.download-state == 4 ? "retry" : root.chapter.has-download ? "play" : "download";
         accent: root.chapter.has-download;
         clicked => { if root.chapter.downloaded { actions.show(); } else { root.action(root.transfer-action); } }
     }
     if root.chapter.download-state == 2: Rectangle {
-        x: root.width - 106px; y: 64px; width: 36px; height: 2px; background: Theme.current.control_border;
+        x: root.width - 90px; y: root.height - 9px; width: 32px; height: 2px; background: Theme.current.control_border;
         Rectangle { x: 0px; y: 0px; width: parent.width * max(0,min(1,root.chapter.download-progress)); height: 2px; background: Theme.current.accent_soft; }
     }
-    IconAction { x: root.width - 56px; y: 16px; width: 48px; height: 48px; text: @tr("Chapter options"); icon: @image-url("../../assets/icons/navigation/more.svg"); clicked => { actions.show(); } }
+    IconAction { x: root.width - 44px; y: (root.height - self.height) / 2; width: 40px; height: 48px; text: @tr("Chapter options"); icon: @image-url("../../assets/icons/navigation/more.svg"); clicked => { actions.show(); } }
 }

@@ -1344,6 +1344,7 @@ pub(crate) fn publish_chapter_filter_counts(ui: &AppWindow) {
     let rows = model.iter().collect::<Vec<_>>();
     ui.set_detail_unread_count(rows.iter().filter(|row| !row.read).count() as i32);
     ui.set_detail_downloaded_count(rows.iter().filter(|row| row.downloaded).count() as i32);
+    ui.set_detail_bookmarked_count(rows.iter().filter(|row| row.bookmarked).count() as i32);
 }
 fn has_saved_reading_position(progress: &ReadingProgress) -> bool {
     !progress.completed && !progress.anchor.is_cleared() && !progress.anchor.page_id.is_empty()
@@ -2194,11 +2195,42 @@ impl Controller {
                     } else {
                         clock.release(c.uploaded_at)
                     };
+                    let job = view.downloads.jobs.iter().find(|j| j.chapter == c.id);
+                    let download_progress = job
+                        .filter(|j| !j.pages.is_empty())
+                        .map(|j| j.completed_pages() as f32 / j.pages.len() as f32)
+                        .unwrap_or(0.);
+                    let download_state = download
+                        .map(|s| match s {
+                            reader_downloads::JobStatus::Complete => 5,
+                            reader_downloads::JobStatus::Queued => 1,
+                            reader_downloads::JobStatus::Running => 2,
+                            reader_downloads::JobStatus::Paused => 3,
+                            reader_downloads::JobStatus::Failed => 4,
+                            reader_downloads::JobStatus::Cancelled => 6,
+                        })
+                        .unwrap_or(0);
+                    // The page reached in a partly read chapter. Its length
+                    // is known only from a download's page list.
+                    let page = progress
+                        .filter(|p| !p.completed && !p.anchor.is_cleared())
+                        .map(|p| p.anchor.page_index);
+                    let page_total = job.map(|j| j.pages.len()).filter(|n| *n > 0);
+                    let status = if view.section == 5 {
+                        crate::chapter_list::status(
+                            download_state,
+                            download_progress,
+                            page,
+                            gallery,
+                        )
+                    } else {
+                        None
+                    };
                     let mut meta = Vec::new();
                     if c.uploaded_at.is_some() {
                         meta.push(clock.release_date(c.uploaded_at));
                     }
-                    if view.section == 5
+                    if view.section != 5
                         && let Some(progress) = progress
                         && let Some(label) = chapter_progress_label(progress, gallery)
                     {
@@ -2212,6 +2244,14 @@ impl Controller {
                     }
                     if downloaded && view.section != 5 {
                         meta.push(text::tr("Downloaded"));
+                    }
+                    // Size on disk, from the download manifest already loaded.
+                    if downloaded
+                        && view.section == 5
+                        && let Some(job) = job
+                        && job.downloaded_bytes() > 0
+                    {
+                        meta.push(text::file_size(job.downloaded_bytes() as usize));
                     }
                     ItemRow {
                         title: if view.section == 1 || view.section == 2 {
@@ -2245,24 +2285,17 @@ impl Controller {
                         badge: text::tr(if read { "Read" } else { "Unread" }).into(),
                         read,
                         downloaded,
-                        download_state: download
-                            .map(|s| match s {
-                                reader_downloads::JobStatus::Complete => 5,
-                                reader_downloads::JobStatus::Queued => 1,
-                                reader_downloads::JobStatus::Running => 2,
-                                reader_downloads::JobStatus::Paused => 3,
-                                reader_downloads::JobStatus::Failed => 4,
-                                reader_downloads::JobStatus::Cancelled => 6,
-                            })
-                            .unwrap_or(0),
-                        download_progress: view
-                            .downloads
-                            .jobs
-                            .iter()
-                            .find(|j| j.chapter == c.id)
-                            .filter(|j| !j.pages.is_empty())
-                            .map(|j| j.completed_pages() as f32 / j.pages.len() as f32)
-                            .unwrap_or(0.),
+                        download_state,
+                        download_progress,
+                        number: c.number.clone().unwrap_or_default().into(),
+                        short_title: crate::chapter_list::short_title(
+                            &c.title,
+                            c.number.as_deref(),
+                        )
+                        .into(),
+                        status_danger: status.as_ref().is_some_and(|(_, danger)| *danger),
+                        status: status.map(|(status, _)| status).unwrap_or_default().into(),
+                        read_fraction: crate::chapter_list::read_fraction(page, page_total),
                         has_download: download.is_some(),
                         local_import,
                         chapter_meta: meta.join(" · ").into(),

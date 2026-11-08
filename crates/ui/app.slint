@@ -261,6 +261,7 @@ export component AppWindow inherits Window {
     // Counts for the chapter filter empty state; Rust refreshes them with the rows.
     in property <int> detail-unread-count;
     in property <int> detail-downloaded-count;
+    in property <int> detail-bookmarked-count;
     in property <string> detail-series-key;
     in-out property <bool> detail-gallery-single;
     in-out property <length> detail-scroll-y: 0px;
@@ -955,8 +956,17 @@ export component AppWindow inherits Window {
                                     padding-right: root.safe-area-insets.right + (root.mobile-ui ? 20px : 64px);
                                     spacing: 4px;
                                     if root.status != "": Text { text: root.status; color: Theme.current.text_settings; wrap: word-wrap; min-width: 0px; }
+                                    // The header scrolls with the list: the page is one Flickable
+                                    // whose content includes the hero, so it is not pinned.
                                     HorizontalLayout {
-                                        Text { text: @tr("{n} chapter" | "{n} chapters" % root.items.length); font-size: 20px; font-weight: 600; color: Theme.current.text_bright; vertical-alignment: center; min-width: 0px; }
+                                        spacing: 10px;
+                                        chapter-count := Text { text: @tr("{n} chapter" | "{n} chapters" % root.items.length); font-size: 20px; font-weight: 600; color: Theme.current.text_bright; vertical-alignment: center; }
+                                        if root.detail-unread-count > 0: chapter-unread := Text {
+                                            horizontal-stretch: 1; min-width: 0px; overflow: elide;
+                                            text: @tr("{} unread", root.detail-unread-count);
+                                            color: Theme.current.text_secondary; font-size: 13px; vertical-alignment: center;
+                                        }
+                                        if root.detail-unread-count == 0: Rectangle { horizontal-stretch: 1; min-width: 0px; }
                                         IconAction {
                                             width: 44px;
                                             text: root.chapters-descending ? @tr("Chapter order: descending") : @tr("Chapter order: ascending");
@@ -964,15 +974,22 @@ export component AppWindow inherits Window {
                                             clicked => { root.chapter-order-changed(!root.chapters-descending); }
                                         }
                                     }
-                                    HorizontalLayout {
-                                        spacing: 8px;
-                                        LibraryFilterChip { label: @tr("All"); selected: root.chapter-filter == 0; keyboard-focusable: true; picked => {root.chapter-filter=0;} accessible-action-default => {root.chapter-filter=0;} }
-                                        LibraryFilterChip { label: @tr("Unread"); selected: root.chapter-filter == 1; keyboard-focusable: true; picked => {root.chapter-filter=1;} accessible-action-default => {root.chapter-filter=1;} }
-                                        LibraryFilterChip { label: @tr("Downloaded"); selected: root.chapter-filter == 2; keyboard-focusable: true; picked => {root.chapter-filter=2;} accessible-action-default => {root.chapter-filter=2;} }
+                                    // Each chip carries its count; the row scrolls sideways when narrow.
+                                    chapter-chips := Flickable {
+                                        height: 40px; min-width: 0px;
+                                        content-width: chip-row.preferred-width; content-height: self.height;
+                                        interactive: self.content-width > self.width;
+                                        chip-row := HorizontalLayout {
+                                            spacing: 8px; height: parent.height;
+                                            LibraryFilterChip { label: @tr("All") + " " + root.items.length; selected: root.chapter-filter == 0; keyboard-focusable: true; picked => {root.chapter-filter=0;} accessible-action-default => {root.chapter-filter=0;} }
+                                            LibraryFilterChip { label: @tr("Unread") + " " + root.detail-unread-count; selected: root.chapter-filter == 1; keyboard-focusable: true; picked => {root.chapter-filter=1;} accessible-action-default => {root.chapter-filter=1;} }
+                                            LibraryFilterChip { label: @tr("Downloaded") + " " + root.detail-downloaded-count; selected: root.chapter-filter == 2; keyboard-focusable: true; picked => {root.chapter-filter=2;} accessible-action-default => {root.chapter-filter=2;} }
+                                            LibraryFilterChip { label: @tr("Bookmarked") + " " + root.detail-bookmarked-count; selected: root.chapter-filter == 3; keyboard-focusable: true; picked => {root.chapter-filter=3;} accessible-action-default => {root.chapter-filter=3;} }
+                                        }
                                     }
-                                    if root.items.length > 0 && ((root.chapter-filter == 1 && root.detail-unread-count == 0) || (root.chapter-filter == 2 && root.detail-downloaded-count == 0)): Text {
+                                    if root.items.length > 0 && ((root.chapter-filter == 1 && root.detail-unread-count == 0) || (root.chapter-filter == 2 && root.detail-downloaded-count == 0) || (root.chapter-filter == 3 && root.detail-bookmarked-count == 0)): Text {
                                         min-width: 0px;
-                                        text: root.chapter-filter == 1 ? @tr("No unread chapters") : @tr("No downloaded chapters");
+                                        text: root.chapter-filter == 1 ? @tr("No unread chapters") : root.chapter-filter == 2 ? @tr("No downloaded chapters") : @tr("No bookmarked chapters");
                                         color: Theme.current.text_secondary; wrap: word-wrap;
                                     }
                                     // A filtered-out row collapses to height 0 inside a layout without
@@ -980,10 +997,10 @@ export component AppWindow inherits Window {
                                     VerticalLayout {
                                         spacing: 0px;
                                         for chapter[i] in root.items: Rectangle {
-                                            private property <bool> shown: root.chapter-filter == 0 || (root.chapter-filter == 1 && !chapter.read) || (root.chapter-filter == 2 && chapter.downloaded);
-                                            height: self.shown ? 84px : 0px; clip: true;
+                                            private property <bool> shown: root.chapter-filter == 0 || (root.chapter-filter == 1 && !chapter.read) || (root.chapter-filter == 2 && chapter.downloaded) || (root.chapter-filter == 3 && chapter.bookmarked);
+                                            height: self.shown ? 70px : 0px; clip: true;
                                             ChapterRow {
-                                                y: 0px; width: parent.width; height: 80px; visible: parent.shown;
+                                                y: 0px; width: parent.width; height: 68px; visible: parent.shown;
                                                 chapter: chapter; picked => { root.detail-scroll-y = page-scroll.content-y; root.open-item(i); }
                                                 action(action) => {
                                                     if action == "delete-download" { root.ask-confirm("chapter", action, "", i, @tr("Delete this downloaded chapter from this device?"), @tr("Delete download")); }

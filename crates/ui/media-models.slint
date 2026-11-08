@@ -2,7 +2,11 @@ export struct ItemRow {
     title: string, subtitle: string, badge: string, bookmarked: bool,
     artwork-key: string, series-key: string, poster: image, completed: int, total: int, read: bool,
     downloaded: bool, download-state: int, download-progress: float, has-download: bool, local-import: bool,
-    chapter-meta: string, group: string, timestamp: string
+    chapter-meta: string, group: string, timestamp: string,
+    // Chapter rows on the detail screen: the number column, the title without
+    // a repeated "Chapter N" prefix (`title` stays whole for accessibility),
+    // the status leading the details line and partly read progress.
+    number: string, short-title: string, status: string, status-danger: bool, read-fraction: float
 }
 
 export struct SettingRow { key: string, name: string, kind: string, value: string, checked: bool, options: [string], selected: int }

@@ -582,12 +582,16 @@ fn poster_layout_timelines_chapters_and_reader_controls() {
         .collect::<Vec<_>>();
     assert_eq!(continue_actions.len(), 1);
     assert!(continue_actions.iter().all(|e| e.size().width > 100.));
-    assert!(
-        ElementHandle::find_by_element_type_name(&ui, "ChapterRow")
-            .all(|row| row.size().height <= 80.)
-    );
+    let rows: Vec<_> = ElementHandle::find_by_element_type_name(&ui, "ChapterRow").collect();
+    assert!(rows.iter().all(|row| (row.size().height - 68.).abs() < 0.5));
+    // A 44px download button and a 40px options button sit against the row's
+    // trailing edge, far enough apart that one is not tapped for the other.
     let download = button(&ui, "Download");
     let options = button(&ui, "Chapter options");
+    assert!((download.size().width - 44.).abs() < 0.5);
+    assert!((options.size().width - 40.).abs() < 0.5);
+    let row_end = rows[0].absolute_position().x + rows[0].size().width;
+    assert!((options.absolute_position().x + options.size().width - (row_end - 4.)).abs() < 0.5);
     assert!(
         options.absolute_position().x - (download.absolute_position().x + download.size().width)
             >= 8.,

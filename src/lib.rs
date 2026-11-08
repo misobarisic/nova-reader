@@ -17,6 +17,7 @@ pub mod capture_settings;
 pub mod categories;
 pub mod chapter_cache;
 mod chapter_capture;
+mod chapter_list;
 mod cli;
 pub mod content_presentation;
 mod decode_admission;
