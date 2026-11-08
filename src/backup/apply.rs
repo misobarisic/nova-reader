@@ -9,6 +9,7 @@
 use super::{
     archive::{Archive, DEVICE, Manifest, Payload, Profile},
     components::{self, Rows},
+    files,
     plan::{self, Choice, Opened, Preview, TargetPlan},
     profile_rows, revision,
 };
@@ -68,6 +69,35 @@ pub fn apply(services: &Services, preview: &Preview) -> Result<Applied, String> 
     let dev = nova_sync::local_device().map_err(|e| e.to_string())?;
     let handle = nova_sync::local_store().map_err(|e| e.to_string())?;
     let selected_profile = reader_domain::profile::selected();
+
+    // Chapter files are copied first, each whole or not at all. Check the
+    // preview is current before spending the time and disk on them; the commit
+    // checks again under its locks.
+    let mut files = files::Outcome::default();
+    if let Some(plan) = preview
+        .device
+        .as_ref()
+        .filter(|plan| !plan.files.add.is_empty())
+    {
+        let ids: Vec<String> = preview
+            .choices
+            .iter()
+            .filter(|choice| choice.source != DEVICE && !choice.create)
+            .map(|choice| choice.target.clone())
+            .collect();
+        let snapshot = super::Snapshot::take(services, &ids)?;
+        let stale = ids
+            .iter()
+            .any(|id| preview.revisions.get(id) != snapshot.revisions.get(id))
+            || preview.device_revision.as_ref()
+                != Some(&super::device_revision(services, &snapshot.device_rows)?);
+        if stale {
+            return Err(text::tr(
+                "The data changed while the preview was open. Rebuild the preview before importing.",
+            ));
+        }
+        files = files::import(services, &preview.opened.path, &plan.files)?;
+    }
 
     services
         .domain
@@ -194,11 +224,21 @@ pub fn apply(services: &Services, preview: &Preview) -> Result<Applied, String> 
                     .map_err(invalid)?;
                 }
                 for (name, before) in &plan.before {
+                    let mut after = plan.after[name].clone();
+                    if components::is_files(name) && name != "packages" {
+                        // Only the chapters that were actually copied in are
+                        // something an undo may take back.
+                        let added = files.added.get(name);
+                        after.records.retain(|record, _| {
+                            before.records.contains_key(record)
+                                || added.is_some_and(|added| added.contains(record))
+                        });
+                    }
                     receipt_components.push(RecoveryComponent {
                         target: DEVICE.into(),
                         name: name.clone(),
                         before: before.clone(),
-                        after: plan.after[name].clone(),
+                        after,
                     });
                 }
             }
@@ -246,6 +286,7 @@ pub fn apply(services: &Services, preview: &Preview) -> Result<Applied, String> 
             .collect(),
         warnings: Vec::new(),
     };
+    applied.warnings.extend(files.failures);
     after_commit(services, preview, &mut applied);
     Ok(applied)
 }
@@ -326,6 +367,9 @@ fn after_commit(services: &Services, preview: &Preview, applied: &mut Applied) {
                     error,
                 );
             }
+        }
+        for failure in files::remove(services, &plan.files) {
+            warn(&text::tr("Could not remove a chapter"), failure);
         }
         if plan.kv.contains_key("reader:image-limits") {
             crate::image_limits::install();
@@ -507,6 +551,8 @@ pub fn undo_preview(services: &Services) -> Result<Preview, String> {
     };
     let opened = Opened {
         archive,
+        path: std::path::PathBuf::new(),
+        temporary: false,
         legacy: false,
     };
     // Undo always gets a fresh exact preview, bound to the revisions of now.

@@ -1196,3 +1196,180 @@ fn undo_reverts_the_import_keeps_later_edits_and_three_receipts() {
         },
     );
 }
+
+fn png(width: u32) -> Vec<u8> {
+    let mut data = Cursor::new(Vec::new());
+    image::DynamicImage::new_rgba8(width, 2)
+        .write_to(&mut data, image::ImageFormat::Png)
+        .unwrap();
+    data.into_inner()
+}
+/// A finished download (with a signed URL and a credential in its request) and
+/// a finished local import, as the download store holds them.
+fn add_chapter_files(services: &Services) -> (ChapterId, ChapterId, Vec<Vec<u8>>, Vec<Vec<u8>>) {
+    let remote = ChapterId::new(SeriesId::new("fixture", "one"), "1");
+    let local = ChapterId::new(SeriesId::new("local", "folder"), "only");
+    let remote_pages: Vec<Vec<u8>> = (2..5).map(png).collect();
+    let local_pages: Vec<Vec<u8>> = (6..8).map(png).collect();
+    for (chapter, pages) in [(&remote, &remote_pages), (&local, &local_pages)] {
+        services
+            .downloads
+            .enqueue(
+                chapter.clone(),
+                (0..pages.len())
+                    .map(|i| reader_downloads::PageResource {
+                        id: format!("page-{i}"),
+                        url: "https://secret.example/signed?token=abc123".into(),
+                        headers: BTreeMap::from([(
+                            "Authorization".into(),
+                            "Bearer hunter2".into(),
+                        )]),
+                    })
+                    .collect(),
+            )
+            .unwrap();
+        let mut index = 0;
+        services
+            .downloads
+            .run(chapter, |_| {
+                index += 1;
+                Ok(pages[index - 1].clone())
+            })
+            .unwrap();
+    }
+    (remote, local, remote_pages, local_pages)
+}
+
+#[test]
+fn downloads_and_local_imports_travel_stored_and_are_added_never_replaced() {
+    phased(
+        "backup::tests::downloads_and_local_imports_travel_stored_and_are_added_never_replaced",
+        &["export", "import"],
+        |phase, directory| {
+            let file = directory.join("with-files.nova-reader-backup");
+            if phase == "export" {
+                let services = Services::open(&directory.join("data-a")).unwrap();
+                fill(&services);
+                add_chapter_files(&services);
+                let profiles = crate::profiles::list().unwrap();
+                let files = Files {
+                    downloads: true,
+                    local: true,
+                };
+                export(&services, &Selection::everything(&profiles, files), &file).unwrap();
+                // Without the opt-in, no file is carried.
+                let plain = directory.join("plain.nova-reader-backup");
+                export_everything(&services, &plain);
+                let plain = archive::decode_file(&plain).unwrap();
+                assert!(plain.payloads.keys().all(|(_, name)| name != "downloads"));
+                // Pages are stored verbatim, outside the compressed components.
+                let mut zip = zip::ZipArchive::new(std::fs::File::open(&file).unwrap()).unwrap();
+                let mut blobs = 0;
+                for index in 0..zip.len() {
+                    let entry = zip.by_index(index).unwrap();
+                    if entry.name().starts_with("blobs/") {
+                        blobs += 1;
+                        assert_eq!(entry.compression(), zip::CompressionMethod::Stored);
+                    }
+                }
+                assert_eq!(blobs, 5);
+                // Neither the page URL nor its credential is in the archive.
+                let decoded = archive::decode_file(&file).unwrap();
+                let text =
+                    serde_json::to_string(&decoded.payloads.values().collect::<Vec<_>>()).unwrap();
+                assert!(!text.contains("secret.example") && !text.contains("hunter2"));
+                assert_eq!(
+                    decoded.payloads[&(archive::DEVICE.to_owned(), "downloads".to_owned())]
+                        .records
+                        .len(),
+                    1
+                );
+                assert_eq!(
+                    decoded.payloads[&(archive::DEVICE.to_owned(), "local_imports".to_owned())]
+                        .records
+                        .len(),
+                    1
+                );
+                return;
+            }
+
+            // The pages as the first device stored them.
+            let (remote, local, remote_pages, local_pages) = (
+                ChapterId::new(SeriesId::new("fixture", "one"), "1"),
+                ChapterId::new(SeriesId::new("local", "folder"), "only"),
+                (2..5).map(png).collect::<Vec<_>>(),
+                (6..8).map(png).collect::<Vec<_>>(),
+            );
+            let services = Services::open(&directory.join("data-b")).unwrap();
+            // Off by default on import: the archive has them, the choices do not.
+            let opened = plan::open(&file).unwrap();
+            let choices = plan::default_choices(&opened).unwrap();
+            let device = choices
+                .iter()
+                .find(|c| c.source == archive::DEVICE)
+                .unwrap();
+            assert!(!device.components.contains("downloads"));
+            assert!(!device.components.contains("local_imports"));
+            let chosen = |choices: &mut Vec<plan::Choice>| {
+                for choice in choices.iter_mut() {
+                    choice.included = choice.source == archive::DEVICE;
+                    if choice.included {
+                        choice.components = ["downloads", "local_imports"].map(String::from).into();
+                    }
+                }
+            };
+
+            // A damaged page in the archive: that chapter is refused whole, the
+            // other arrives, and the failure is reported rather than fatal.
+            let page_entry = format!(
+                "blobs/downloads/{}/{}",
+                reader_downloads::chapter_key(&remote),
+                reader_downloads::page_name(1, "page-1")
+            );
+            let damaged = {
+                let mut bytes = remote_pages[1].clone();
+                bytes[12] ^= 0xFF;
+                let tampered = directory.join("damaged.nova-reader-backup");
+                std::fs::write(
+                    &tampered,
+                    rewrite_entry(&std::fs::read(&file).unwrap(), &page_entry, &bytes),
+                )
+                .unwrap();
+                tampered
+            };
+            let (_, applied) = restore(&services, &damaged, chosen).unwrap();
+            assert_eq!(applied.warnings.len(), 1, "{:?}", applied.warnings);
+            assert!(services.downloads.job(&remote).is_err());
+            assert_eq!(services.downloads.offline(&local).unwrap().pages.len(), 2);
+
+            // The intact archive adds the missing chapter and leaves the other.
+            let local_file = services.downloads.offline(&local).unwrap().pages[0].clone();
+            let before = std::fs::read(&local_file).unwrap();
+            let (preview, applied) = restore(&services, &file, chosen).unwrap();
+            assert!(applied.warnings.is_empty(), "{:?}", applied.warnings);
+            assert_eq!(rows_of(&preview, "downloads").counts.added, 1);
+            let offline = services.downloads.offline(&remote).unwrap();
+            for (path, page) in offline.pages.iter().zip(&remote_pages) {
+                assert_eq!(&std::fs::read(path).unwrap(), page);
+            }
+            assert_eq!(std::fs::read(&local_file).unwrap(), before);
+            assert_eq!(
+                services.downloads.offline(&local).unwrap().pages.len(),
+                local_pages.len()
+            );
+            // Restored finished chapters carry no source URL or credential.
+            let job = services.downloads.job(&remote).unwrap();
+            assert!(
+                job.pages
+                    .iter()
+                    .all(|p| p.resource.url.is_empty() && p.resource.headers.is_empty())
+            );
+
+            // Undo takes back only what that import copied in.
+            let preview = apply::undo_preview(&services).unwrap();
+            apply::apply(&services, &preview).unwrap();
+            assert!(services.downloads.job(&remote).is_err());
+            assert_eq!(services.downloads.offline(&local).unwrap().pages.len(), 2);
+        },
+    );
+}

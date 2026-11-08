@@ -24,17 +24,28 @@ fn read(path: &Path, limit: u64) -> Result<Vec<u8>> {
 /// Restore an archive, or a legacy metadata JSON backup, without a review step.
 /// Archives merge by default and legacy backups replace, as they always did.
 fn restore(services: &Services, path: &Path, flags: &[String]) -> Result<()> {
-    let (mut replace, mut use_backup) = (false, false);
+    let (mut replace, mut use_backup, mut files) = (false, false, Vec::new());
     for flag in flags {
         match flag.as_str() {
             "--replace" => replace = true,
             "--use-backup" => use_backup = true,
+            "--with-downloads" => files.push("downloads"),
+            "--with-local-imports" => files.push("local_imports"),
             _ => return Err("Unknown option. Run nova-reader --help.".into()),
         }
     }
     let opened = crate::backup::plan::open(path)?;
     let mut choices = crate::backup::plan::default_choices(&opened)?;
     for choice in &mut choices {
+        // Large file sets restore only when asked for, as they export.
+        if choice.source == crate::backup::archive::DEVICE {
+            choice
+                .components
+                .extend(files.iter().map(|name| (*name).to_owned()));
+            choice.components.retain(|name| {
+                crate::backup::plan::present(&opened, &choice.source).contains(name)
+            });
+        }
         choice.replace |= replace;
         if use_backup {
             choice.use_backup = choice.components.clone();
@@ -59,7 +70,7 @@ pub fn run() -> Result<bool> {
     let command = command.to_str().ok_or("Invalid command")?;
     if command == "--help" || command == "-h" {
         println!(
-            "Nova Reader {}\n\nRun without arguments to open the reader.\n\n  install-addon FILE.zip\n  list-sources\n  import FILE.cbz\n  import-folder DIRECTORY\n  backup FILE.nova-reader-backup\n  verify-backup FILE.nova-reader-backup\n  restore FILE [--replace] [--use-backup]\n  undo-restore\n  catalogue-keiyoushi [HTTPS_INDEX_URL]\n\nSet NOVA_READER_DATA_DIR to use an independent application directory.\nSources are executable JavaScript packages; APK/JAR catalogues are discovery only.",
+            "Nova Reader {}\n\nRun without arguments to open the reader.\n\n  install-addon FILE.zip\n  list-sources\n  import FILE.cbz\n  import-folder DIRECTORY\n  backup FILE.nova-reader-backup [--with-downloads] [--with-local-imports]\n  verify-backup FILE.nova-reader-backup\n  restore FILE [--replace] [--use-backup] [--with-downloads] [--with-local-imports]\n  undo-restore\n  catalogue-keiyoushi [HTTPS_INDEX_URL]\n\nSet NOVA_READER_DATA_DIR to use an independent application directory.\nSources are executable JavaScript packages; APK/JAR catalogues are discovery only.",
             env!("CARGO_PKG_VERSION")
         );
         return Ok(true);
@@ -108,7 +119,7 @@ pub fn run() -> Result<bool> {
     let flags: Vec<String> = args
         .map(|flag| flag.to_string_lossy().into_owned())
         .collect();
-    if !flags.is_empty() && command != "restore" {
+    if !flags.is_empty() && !matches!(command, "restore" | "backup") {
         return Err("Unexpected extra arguments".into());
     }
     match command {
@@ -122,7 +133,15 @@ pub fn run() -> Result<bool> {
         }
         "backup" => {
             let profiles = crate::profiles::list()?;
-            let selection = crate::backup::Selection::everything(&profiles, Default::default());
+            let mut files = crate::backup::Files::default();
+            for flag in &flags {
+                match flag.as_str() {
+                    "--with-downloads" => files.downloads = true,
+                    "--with-local-imports" => files.local = true,
+                    _ => return Err("Unknown option. Run nova-reader --help.".into()),
+                }
+            }
+            let selection = crate::backup::Selection::everything(&profiles, files);
             let exported = crate::backup::export(&services, &selection, &path)?;
             println!(
                 "Saved {} profile(s), {} bytes. The archive includes addon credentials in plaintext.",

@@ -435,11 +435,15 @@ fn start_open(app: &Arc<Controller>, ui: &AppWindow, state: &Arc<Mutex<State>>, 
         ui,
         state,
         move |_| {
-            let opened = plan::open(&path);
-            // A copy made for this import (Android) is not needed once read.
+            let mut opened = plan::open(&path)?;
+            // A copy made for this import (Android) lives as long as the
+            // import: chapter files stream from it when the import is applied.
             #[cfg(target_os = "android")]
-            let _ = std::fs::remove_file(&path);
-            let opened = opened?;
+            {
+                opened.temporary = true;
+            }
+            #[cfg(not(target_os = "android"))]
+            let _ = &mut opened;
             let choices = plan::default_choices(&opened)?;
             Ok((opened, choices))
         },

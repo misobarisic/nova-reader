@@ -134,6 +134,20 @@ pub(crate) const COMPONENTS: &[Def] = &[
         Scope::Device,
         true,
     ),
+    def(
+        "downloads",
+        "Downloaded chapters",
+        "Finished downloads, copied as they are. This can make the backup very large.",
+        Scope::Device,
+        false,
+    ),
+    def(
+        "local_imports",
+        "Local imports",
+        "Chapters you imported from files and folders. Their library entries are in Library.",
+        Scope::Device,
+        false,
+    ),
 ];
 pub(crate) fn definition(name: &str) -> Option<&'static Def> {
     COMPONENTS.iter().find(|def| def.id == name)
@@ -765,6 +779,7 @@ pub(crate) fn capture_profile(name: &str, cx: &ProfileCapture) -> Result<Payload
 pub(crate) struct DeviceCapture<'a> {
     pub rows: &'a Rows,
     pub registry: &'a reader_sources::SourceRegistry,
+    pub downloads: &'a reader_downloads::DownloadStore,
 }
 pub(crate) fn capture_device(name: &str, cx: &DeviceCapture) -> Result<Payload, String> {
     let mut payload = empty();
@@ -807,6 +822,7 @@ pub(crate) fn capture_device(name: &str, cx: &DeviceCapture) -> Result<Payload, 
                 );
             }
         }
+        "downloads" | "local_imports" => return super::files::capture(cx.downloads, name),
         _ => return Err("Unknown device component".into()),
     }
     Ok(payload)
@@ -952,6 +968,7 @@ pub(crate) fn validate(name: &str, payload: &Payload) -> Result<(), String> {
                 && value["sha256"].as_str().is_some_and(|h| valid_hex(h, 64))
                 && value["enabled"].is_boolean()
         }),
+        "downloads" | "local_imports" => super::files::validate(name, payload),
         _ => Err("Unknown component".into()),
     }
 }

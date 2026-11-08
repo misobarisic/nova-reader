@@ -6,7 +6,7 @@ use super::components;
 #[cfg(test)]
 pub(super) use nova_backup::archive::encode_with_packages;
 pub(super) use nova_backup::archive::{
-    Archive, Component, Manifest, Package, Payload, Profile, Writer, digest,
+    Archive, BLOB_PREFIX, Component, Manifest, Package, Payload, Profile, Writer, digest,
 };
 use nova_backup::archive::{PackageIdentity, Schema};
 use std::{fs::File, io::BufReader, path::Path};

@@ -29,6 +29,8 @@ pub(super) fn open(path: &Path) -> Result<Opened, String> {
     let archive = from_json(&bytes)?;
     Ok(Opened {
         archive,
+        path: path.to_owned(),
+        temporary: false,
         legacy: true,
     })
 }

@@ -18,6 +18,7 @@ use std::{
 pub(crate) mod apply;
 pub(crate) mod archive;
 pub(crate) mod components;
+pub(crate) mod files;
 pub(crate) mod legacy;
 pub(crate) mod merge;
 pub(crate) mod plan;
@@ -282,6 +283,7 @@ pub fn export(
         let cx = components::DeviceCapture {
             rows: &snapshot.device_rows,
             registry: &services.sources,
+            downloads: &services.downloads,
         };
         for name in &selection.device {
             match components::definition(name) {
@@ -329,6 +331,12 @@ pub fn export(
     let out = BufWriter::new(staged.reopen().map_err(|e| e.to_string())?);
     let mut writer = archive::Writer::new(out);
     let manifest = writer.write(manifest, &payloads, &packages)?;
+    // Downloaded and imported pages follow the components that describe them.
+    for name in ["downloads", "local_imports"] {
+        if let Some(payload) = payloads.get(&(archive::DEVICE.to_owned(), name.to_owned())) {
+            files::write_blobs(&mut writer, &services.downloads, name, payload)?;
+        }
+    }
     let mut out = writer.finish(&manifest)?;
     out.flush().map_err(|e| e.to_string())?;
     let file = out.into_inner().map_err(|e| e.to_string())?;

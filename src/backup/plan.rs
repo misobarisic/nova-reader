@@ -21,8 +21,21 @@ use std::{
 /// An archive that has been read and validated.
 pub struct Opened {
     pub archive: Archive,
+    /// The file the archive was read from, which restored chapter files stream
+    /// from. Empty for an undo.
+    pub path: std::path::PathBuf,
+    /// Delete the file when this is dropped: a copy made for this import.
+    pub temporary: bool,
     /// A metadata backup from before archives existed, wrapped as one profile.
     pub legacy: bool,
+}
+
+impl Drop for Opened {
+    fn drop(&mut self) {
+        if self.temporary {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
 }
 
 /// Open a backup file of either format. Nothing is applied.
@@ -30,6 +43,8 @@ pub fn open(path: &std::path::Path) -> Result<Opened, String> {
     if archive::is_zip(path)? {
         Ok(Opened {
             archive: archive::decode_file(path)?,
+            path: path.to_owned(),
+            temporary: false,
             legacy: false,
         })
     } else {
@@ -147,6 +162,7 @@ pub(crate) struct DevicePlan {
     pub packages: Vec<(String, String)>,
     /// Documents of the selected profile's synced settings that change.
     pub synced_documents: BTreeSet<String>,
+    pub files: super::files::Plan,
 }
 
 pub struct Preview {
@@ -537,6 +553,7 @@ fn plan_device(
     let capture = components::DeviceCapture {
         rows: &snapshot.device_rows,
         registry: &services.sources,
+        downloads: &services.downloads,
     };
     let mut plan = DevicePlan::default();
     for name in &choice.components {
@@ -612,6 +629,9 @@ fn plan_device(
                 // The portable subset of these documents is also part of the
                 // selected profile's synced settings.
                 plan.synced_documents = documents;
+            }
+            "downloads" | "local_imports" => {
+                super::files::plan(name, &local, &after, &mut plan.files, &mut row_notes)
             }
             _ => {}
         }
