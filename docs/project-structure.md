@@ -34,7 +34,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `src/progress_checkpoint.rs` | One background checkpoint writer, latest offsets coalesced per chapter, failure retry and ordered durable navigation/lifecycle barriers; the 600 ms UI timer only queues progress |
 | `src/reader_export.rs` | Original-image validation, screencap encoding, bounded platform delivery and persistent desktop clipboard ownership; reader/selection guards extend through actual Android clipboard dispatch. Save/Copy image keeps a whole page's original bytes; a page stored as strips is reassembled and encoded with the screenshot format and quality (PNG, with a status notice, when that format cannot hold it; the desktop clipboard gets RGBA). The one pixel-to-storage encoder (`reencode_storage_pixels`) serves whole pages and strips |
 | `src/export_names.rs` | Portable UTF-8 series folders and bounded title/chapter/page/vertical-position filenames, including duplicate numbering |
-| `crates/ui/action-confirm-sheet.slint` | The one confirmation sheet (MenuSheet pattern) for clear history, backup restore (`restore-confirm-open`), download deletes (`download-confirm-open`), remove addon, remove from library, mark all read/unread, clear positions and chapter-row delete; `app.slint` captures the pending call in `ask-confirm` and dispatches it from `resolve-action-confirm` only on confirm |
+| `crates/ui/action-confirm-sheet.slint` | The one confirmation sheet (MenuSheet pattern) for clear history, backup import and recovery deletion (`BackupBridge.confirm_open`), download deletes (`download-confirm-open`), remove addon, remove from library, mark all read/unread, clear positions and chapter-row delete; `app.slint` captures the pending call in `ask-confirm` and dispatches it from `resolve-action-confirm` only on confirm |
 | `crates/ui/save-conflict-sheet.slint` | Retained modal Overwrite/Add number/Cancel sheet; `app.slint` owns name/open/choice properties and callbacks |
 | `crates/reader-capture`, `src/chapter_capture.rs` | Leaf bounded source compositor and source-coordinate selection/revision tickets, generic over any engine `PageSource` (a whole encoded response or a `PageImage`); a page stored in bands that is painted without crop/split/rotation is decoded only for the bands under the capture (`DecodedRows`, `band_aligned`); app re-export supports Chapter or frozen Device scale |
 | `src/reader_capture_editor.rs`, `crates/ui/capture-editor.slint` | Source-anchored draggable crop borders/handles, dimmed initial context, continuous outward extension, bounded worker previews, Preview/Adjust/Save/Copy, stale-result guards and selected-position naming |
@@ -46,6 +46,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `crates/ui/source-settings.slint` | Addon settings page with slider-owned Flickable gestures, keyboard focus reveal and existing catalogue/custom-field callbacks |
 | `src/source_compression.rs`, `crates/ui/source-compression-settings.slint`, `tests/source_compression.rs` | Host-owned per-addon global/explicit cache and download compression, worker snapshots and addon sync projection; budgets remain device-wide |
 | `src/source_catalogs.rs` | Host-owned per-addon catalogue switches under `reader:disabled-catalogs:<JSON package ID>`; filters Browse while preserving direct/history/offline access |
+| `src/backup/`, `src/backup_actions.rs`, `crates/ui/backup.slint`, `tests/backup_page.rs` | Full-device export/import ([backups](backups.md)): `.nova-reader-backup` ZIP on Kit `nova-backup` (`archive.rs` binds the schema; `components.rs` captures, validates and materializes records; `merge.rs` Merge/Replace/undo; `plan.rs` mapping, preview and revisions; `apply.rs` one staged transaction, recovery receipts and undo; `files.rs` stored download/local-import pages; `legacy.rs` metadata JSON), the Data page (section 12) and its `BackupBridge`, CLI `backup`/`verify-backup`/`restore`/`undo-restore` |
 | `src/profiles.rs`, `src/profile_actions.rs`, `crates/reader-domain/src/profile.rs`, `crates/ui/profiles.slint`, `tests/profiles.rs`, `tests/profiles_ui.rs` | Per-user profiles ([profiles](profiles.md)): directory, record validation, listing, creation, atomic retirement and cleanup of retired profiles in the `profiles`/`profile_deletions` sync domains are Kit `nova_sync::profiles::directory` (`profiles.rs` supplies its `Host`: the source registry's per-profile settings, and keeps ordering, the selection and the deletion preconditions), device-local selection, the personal-key whitelist and active pointer, legacy migration, switching/deletion on the UI thread and the Profiles page (section 24) |
 | `src/content_presentation.rs`, `tests/content_presentation.rs`, `tests/presentation_sync.rs` | Versioned `reader:content-presentation:<JSON SeriesId>` records, synced per entry through the `reader_presentation` domain; explicit Default/Reader/Gallery choice and last addon hint, captured before domain conversion and retained for offline use |
 | `src/reading_preferences.rs` | Fallible Nova KV persistence for adult-source visibility and chapter order keyed by full source-local series identity |
@@ -84,7 +85,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `assets/fonts` | Nova’s bundled Roboto faces and Apache notices; More/settings artwork comes directly from Kit |
 | `assets/open_source_*.hbs`, `assets/open_source_project_sources.tsv`, `assets/open_source_vendors.txt` | Nova catalogue templates and Reader-specific source/vendor attribution; full local notices are appended by `build.rs` |
 | `assets/icons/navigation` | Embedded SVG navigation and reader controls, independent of system font glyph coverage |
-| `crates/reader-domain` | Source-local identities, schema-1 state, library/categories, publication/reading status in `src/library_status.rs`, progress/history/bookmarks, backup/restore and serialized atomic persistence hook |
+| `crates/reader-domain` | Source-local identities, schema-1 state, library/categories, publication/reading status in `src/library_status.rs`, progress/history/bookmarks, legacy metadata `backup_json`/`restore_json` (restore keeps the device's installed-source list), `exclusive` reads under the serial lock and the serialized atomic persistence hook |
 | `src/sync.rs` | Reader per-identity adapter on Kit `nova-sync`: default `reader` namespace, metadata, library, category memberships, resume, manual reading actions, history and bookmarks, plus the per-entry `reader_presentation` domain owned by `content_presentation.rs`; atomic `reader:state`/record/baseline persistence and remote echo guard |
 | `crates/reader-sources` | Reader v2 registry, profile settings, QuickJS and checked HTTP; exact-origin/name cookie permissions, isolated session generations/cache scopes, verified peer archives and parse-only native validation. Package ZIPs are opened through Kit `nova_storage::zip` (raw central-directory count, duplicate/unsafe-path/symlink rejection, size limits), registry files are written with `nova_storage::fs::atomic_write`, and the public-address filter and Android TLS configuration come from Kit `nova-net` |
 | `crates/reader-engine` | Dimension probing, bounded PNG/JPEG/WebP decode and shared Kit AVIF delegation, display geometry, resume anchors and decoded cache utility |
@@ -134,7 +135,7 @@ profile-scoped by the whitelist in `reader_domain::profile`, see
 [profiles](profiles.md)) through `nova-storage` in the Reader application directory. The internal database filename remains
 `nova.redb`; the application directory isolates it from Nova. One directory is
 supported per process. Restore validates the replacement before publishing it.
-The native metadata backup excludes executable addons, cookies and chapter bytes.
+A full backup ([backups](backups.md)) carries profiles, addon packages and configuration (credentials in plaintext), device settings and, only when chosen, finished chapter files; it never carries cookies, sync identity or the installed-source list.
 
 Device appearance preferences live separately under `reader:appearance` in the
 same database. Missing values use Nova's defaults; palette/radius/spacing edits
@@ -371,7 +372,7 @@ writer lock. Package version history rejects changed bytes at the same identity
 and version. Packages are app-wide; source HTTP sessions are in-memory and
 source/profile scoped. Profile switching must cancel old work. Typed settings
 live under `addons/settings/<profile-sha256>/<addon-id>.json`, separately from
-metadata backups. Boolean/text/select/secret values are schema-validated; on Unix
+the sync store. Boolean/text/select/secret values are schema-validated; on Unix
 settings directories use 0700 and atomic settings files use 0600. The settings UI
 masks secrets. These file permissions do not imply encryption at rest.
 
@@ -551,6 +552,7 @@ generate all installable ZIPs; Reader does not depend on a sibling checkout.
 - Shared cache implementation/settings: Kit `crates/cache` and `crates/ui-base/slint/cache-settings-controls.slint`; Reader `src/chapter_cache.rs`, `src/image_storage.rs` and `tests/image_storage.rs`.
 - Library location, pinned controls, search and per-title actions: `src/library_navigation.rs`, `crates/ui/library-page.slint`, `crates/ui/library-search.slint`, `crates/ui/entry-menu.slint`, `tests/library_navigation.rs`, `tests/entry_menu.rs`.
 - Automatic source paging and Retry: `src/app.rs` (`browse`/`complete_browse`), `crates/ui/app.slint`, `tests/source_paging.rs`.
+- Backup, import, merge/replace, undo and the Data page: `docs/backups.md`, `src/backup/`, `src/backup_actions.rs`, `crates/ui/backup.slint`.
 - Profiles (identity, key scoping, switching, deletion, picker): `docs/profiles.md`, `src/profiles.rs`, `src/profile_actions.rs`, `crates/reader-domain/src/profile.rs`, `crates/ui/profiles.slint`.
 - Deferred, designed-but-unscheduled work (e.g. the lossless JPEG crop for tall-page strips): `docs/follow-ups.md`.
 - Per-entry Reader/Gallery preferences and optional addon hints (local KV plus the `reader_presentation` sync domain): `src/content_presentation.rs`, `src/sync.rs`, `src/services.rs::Services::{series,series_listing}`, `tests/content_presentation.rs`, `tests/presentation_sync.rs`.

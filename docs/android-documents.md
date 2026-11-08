@@ -59,10 +59,10 @@ metadata and private release signing configuration.
 
 After Android startup, call:
 
-- `pick_import(ImportKind::{AddonZip, ComicArchive, ImageFolder, BackupJson}, callback)`
+- `pick_import(ImportKind::{AddonZip, ComicArchive, ImageFolder, BackupFile}, callback)`
   with a `FnOnce(Result<PathBuf, String>) + Send + 'static` callback.
-- `cache_dir()` to obtain Android's app cache directory, stage validated metadata
-  backup JSON there, then call `export_backup(staged_path, callback)` with a
+- `cache_dir()` to obtain Android's app cache directory, stage the backup archive
+  there, then call `export_backup(staged_path, callback)` with a
   `FnOnce(Result<(), String>) + Send + 'static` callback.
 - `cancel_pending()` to cancel the current request explicitly.
 - `set_reader_immersive(bool)` to synchronize the Android status bar with reader
@@ -120,7 +120,8 @@ app cache; they never count as completed downloaded chapters.
 
 | Input | Limit |
 | --- | --- |
-| Addon ZIP / metadata JSON | 32 MiB |
+| Addon ZIP | 32 MiB |
+| Backup archive or legacy metadata JSON | 64 GiB, streamed through the cache, never held in memory |
 | CBZ/ZIP comic | 512 MiB |
 | Image folder | 512 MiB combined, 32 MiB per image |
 | Folder enumeration | 10,000 entries, depth 8, no repeated document IDs |
@@ -132,7 +133,10 @@ Rust service. Provider metadata and MIME labels never bypass these validators.
 
 Backup exports and explicit picker exports use `ACTION_CREATE_DOCUMENT`, accept
 only regular staged files under Android's canonical cache directory, and enforce
-the 32 MiB stream limit. Export
+the 32 MiB stream limit (64 GiB for a backup, MIME `application/zip`, default
+name `nova-reader.nova-reader-backup`). The backup picker offers archives and
+legacy JSON; the copy Rust receives keeps the provider's name and is deleted
+when the import ends. Export
 success means the provider output stream closed successfully. A failing external
 provider can leave a partial destination; an error is reported rather than
 claiming success. The caller owns its staging file's cleanup.
