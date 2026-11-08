@@ -148,9 +148,12 @@ fn an_export_holds_every_component_and_no_sync_identity() {
                 .unwrap();
             crate::reading_preferences::set_show_adult(true).unwrap();
             crate::reading_preferences::set_chapter_descending(&title.id, false).unwrap();
-            let mut limits = crate::image_limits::Settings::default();
-            limits.encoded_mib = 48;
-            limits.save().unwrap();
+            crate::image_limits::Settings {
+                encoded_mib: 48,
+                ..Default::default()
+            }
+            .save()
+            .unwrap();
 
             let profiles = crate::profiles::list().unwrap();
             let selection = Selection::everything(&profiles, Files::default());
@@ -373,9 +376,12 @@ fn export_fixture(directory: &Path) -> PathBuf {
         crate::content_presentation::UserPreference::Gallery,
     )
     .unwrap();
-    let mut limits = crate::image_limits::Settings::default();
-    limits.encoded_mib = 48;
-    limits.save().unwrap();
+    crate::image_limits::Settings {
+        encoded_mib: 48,
+        ..Default::default()
+    }
+    .save()
+    .unwrap();
     std::fs::write(
         directory.join("device-a"),
         nova_sync::local_device().unwrap().to_string(),
@@ -521,12 +527,17 @@ fn a_full_export_restores_everything_on_a_fresh_device() {
                 .parse()
                 .unwrap();
             assert_ne!(nova_sync::local_device().unwrap(), before);
-            assert!(
-                nova_storage::try_scan_prefix("sync:")
-                    .unwrap()
-                    .iter()
-                    .all(|(_, value)| !value.contains(&before.to_string()) || true)
-            );
+            // The device that exported never became a record author here.
+            let owner = nova_sync::local_store().unwrap();
+            let store = owner.lock().unwrap();
+            assert!(store.domains().iter().all(|domain| {
+                store.records(domain).iter().all(|(key, _)| {
+                    store
+                        .record(domain, key)
+                        .is_none_or(|r| r.version.dev != before)
+                })
+            }));
+            drop(store);
             assert_eq!(apply::recovery_inventory().unwrap().len(), 1);
         },
     );
