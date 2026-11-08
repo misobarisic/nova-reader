@@ -185,4 +185,42 @@ fn compact_mode_label_uses_the_effective_mode_and_aligned_action_slots() {
         let (x, _, w, h) = bounds(&control);
         assert!(x >= 0. && x + w <= 1280. && w >= 44. && h >= 44.);
     }
+    // Wide windows give spare width to the spacer only: the labelled actions keep
+    // their 76px slots and stay grouped against the trailing gutter.
+    for width in [1280., 1920.] {
+        ui.window().set_size(LogicalSize::new(width, 900.));
+        settle();
+        let xs: Vec<f32> = [
+            "fit-width",
+            "zoom",
+            "screencap",
+            "pages",
+            "chapters",
+            "settings",
+            "fullscreen",
+        ]
+        .iter()
+        .map(|glyph| {
+            let control = ElementHandle::find_by_element_type_name(&ui, "AddonIconButton")
+                .find(|control| {
+                    control.accessible_id().as_deref()
+                        == Some(format!("reader-osd-action:{glyph}:labeled").as_str())
+                })
+                .expect("desktop reader action");
+            bounds(&control).0
+        })
+        .collect();
+        for pair in xs.windows(2) {
+            assert!(
+                (pair[1] - pair[0] - 76.).abs() <= 0.5,
+                "labelled actions are packed at {width}px: {xs:?}"
+            );
+        }
+        // The last 44px icon is centred in a 76px slot that ends at the 18px gutter.
+        let last = xs[xs.len() - 1];
+        assert!(
+            (last + 44. + 16. - (width - 18.)).abs() <= 0.5,
+            "actions end at the trailing gutter at {width}px: {xs:?}"
+        );
+    }
 }
