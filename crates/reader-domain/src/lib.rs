@@ -380,6 +380,22 @@ fn decode(bytes: &[u8]) -> Result<ReaderState> {
     state.validate()?;
     Ok(state)
 }
+/// Proof that the domain serial lock is held ([`DomainStore::exclusive`]).
+pub struct Exclusive(());
+impl Exclusive {
+    /// A profile's state, active or not.
+    pub fn read(&self, profile: &str) -> Result<ReaderState> {
+        if !profile::valid_id(profile) {
+            return Err(Error::Invalid("invalid profile id".into()));
+        }
+        DomainStore::read(profile)
+    }
+}
+/// Decode and validate a metadata backup (`backup_json`), migrating schema
+/// zero. Installed-addon descriptors in it are not this device's.
+pub fn parse_backup(bytes: &[u8]) -> Result<ReaderState> {
+    decode(bytes)
+}
 #[derive(Clone, Debug)]
 pub struct DomainStore {
     _path: PathBuf,
@@ -511,6 +527,14 @@ impl DomainStore {
             Self::write_direct(profile, &state)?;
         }
         Ok(())
+    }
+    /// Run `f` while holding the domain serial lock, for a transaction that
+    /// commits through the persistence owner itself (a multi-profile import).
+    /// The lock order is domain first, then the record owner. `f` must not call
+    /// back into the store: use the [`Exclusive`] handle to read.
+    pub fn exclusive<T>(&self, f: impl FnOnce(&Exclusive) -> Result<T>) -> Result<T> {
+        let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        f(&Exclusive(()))
     }
     pub fn backup_json(&self) -> Result<Vec<u8>> {
         Ok(serde_json::to_vec_pretty(&self.snapshot()?)?)
