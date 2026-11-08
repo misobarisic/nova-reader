@@ -6,7 +6,10 @@ export struct ItemRow {
     // Chapter rows on the detail screen: the number column, the title without
     // a repeated "Chapter N" prefix (`title` stays whole for accessibility),
     // the status leading the details line and partly read progress.
-    number: string, short-title: string, status: string, status-danger: bool, read-fraction: float
+    number: string, short-title: string, status: string, status-danger: bool, read-fraction: float,
+    // The reading part of the status ("Page X"), kept so download polling can
+    // rebuild `status` when a transfer starts or ends.
+    reading-status: string
 }
 
 export struct SettingRow { key: string, name: string, kind: string, value: string, checked: bool, options: [string], selected: int }

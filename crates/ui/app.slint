@@ -1001,6 +1001,8 @@ export component AppWindow inherits Window {
                                             height: self.shown ? 70px : 0px; clip: true;
                                             ChapterRow {
                                                 y: 0px; width: parent.width; height: 68px; visible: parent.shown;
+                                                window-width: root.width; window-height: root.height;
+                                                safe-top: root.safe-area-insets.top; safe-bottom: root.safe-area-insets.bottom;
                                                 chapter: chapter; picked => { root.detail-scroll-y = page-scroll.content-y; root.open-item(i); }
                                                 action(action) => {
                                                     if action == "delete-download" { root.ask-confirm("chapter", action, "", i, @tr("Delete this downloaded chapter from this device?"), @tr("Delete download")); }

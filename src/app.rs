@@ -21,6 +21,8 @@ use std::{
     },
 };
 
+#[path = "chapter_batch.rs"]
+mod chapter_batch;
 #[path = "downloads.rs"]
 mod downloads;
 
@@ -2295,6 +2297,14 @@ impl Controller {
                         .into(),
                         status_danger: status.as_ref().is_some_and(|(_, danger)| *danger),
                         status: status.map(|(status, _)| status).unwrap_or_default().into(),
+                        reading_status: if view.section == 5 {
+                            crate::chapter_list::status(0, 0., page, gallery)
+                                .map(|(status, _)| status)
+                                .unwrap_or_default()
+                        } else {
+                            String::new()
+                        }
+                        .into(),
                         read_fraction: crate::chapter_list::read_fraction(page, page_total),
                         has_download: download.is_some(),
                         local_import,
@@ -4593,6 +4603,53 @@ impl Controller {
             Some(Row::Chapter(c)) => c.id,
             _ => return,
         };
+        if action == "download-next-5" {
+            // This chapter and the next ones in reading order that are not on
+            // disk or already waiting, five in all.
+            let targets = self.services.domain.snapshot().map(|state| {
+                chapter_batch::to_download(
+                    &state,
+                    &chapter.series,
+                    Some(&chapter),
+                    chapter_batch::Pick::From(5),
+                    &self.view().download_states,
+                )
+            });
+            match targets {
+                Ok(targets) => self.download_many(ui, targets),
+                Err(e) => ui.set_status(error(e).into()),
+            }
+            return;
+        }
+        if action == "read-previous" {
+            let mut newly_read = Vec::new();
+            let result = self
+                .services
+                .domain
+                .update_manual_progress(|state| {
+                    let earlier = chapter_batch::before(state, &chapter);
+                    newly_read = chapter_batch::mark_read(state, &earlier, now());
+                    Ok(())
+                })
+                .map_err(error);
+            match result {
+                Err(e) => ui.set_status(e.into()),
+                Ok(()) => {
+                    if !newly_read.is_empty() {
+                        let services = self.services.clone();
+                        crate::profiles::spawn(move || {
+                            crate::download_cleanup::after_read(
+                                &services.domain,
+                                &services.downloads,
+                                &newly_read,
+                            )
+                        });
+                    }
+                    self.render(ui);
+                }
+            }
+            return;
+        }
         if matches!(action, "pause" | "cancel") {
             self.downloads_action(
                 ui,

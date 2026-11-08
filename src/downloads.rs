@@ -140,6 +140,15 @@ impl Controller {
                 row.download_progress = progress;
                 row.has_download = status.is_some();
                 row.downloaded = next_state == 5;
+                // The details line leads with the transfer while there is one,
+                // and falls back to the reading position when it ends.
+                let status =
+                    crate::chapter_list::status(next_state, progress, None, false)
+                        .filter(|_| (1..=4).contains(&next_state));
+                row.status_danger = status.as_ref().is_some_and(|(_, danger)| *danger);
+                row.status = status
+                    .map(|(status, _)| status.into())
+                    .unwrap_or_else(|| row.reading_status.clone());
                 model.set_row_data(index, row);
             }
         }

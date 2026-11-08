@@ -1,0 +1,226 @@
+// The chapter ⋯ menu: a compact icon menu that grows from where it was opened
+// (the ⋯ button, a hold or a right-click), sits under its row or flips above it
+// when there is no room, and updates live with the row's download state. It
+// covers the window so it can animate out itself and own outside taps and
+// Escape, like the reader's image menu.
+import { Theme, SettingsStyle, Anim } from "@NovaUiShared";
+import { ControlTouchArea } from "@NovaUiBase/control-input.slint";
+import { ItemRow } from "media-models.slint";
+
+component MenuItem inherits Rectangle {
+    in property <string> label;
+    in property <string> icon;
+    in property <bool> danger;
+    in property <bool> live: true;
+    callback activated;
+    height: 44px;
+    border-radius: 10px;
+    background: (touch.has-hover || key.has-focus) && root.live ? Theme.current.control_hover : transparent;
+    border-width: key.has-focus && SettingsStyle.keyboard-mode ? 2px : 0px;
+    border-color: Theme.current.focus_ring;
+    accessible-role: button; accessible-label: root.label; accessible-enabled: root.live;
+    accessible-action-default => { if root.live { root.activated(); } }
+    Path {
+        x: 12px; y: 12px; width: 20px; height: 20px;
+        viewbox-width: 24; viewbox-height: 24; fill: transparent; stroke-width: 1.8px;
+        stroke: root.danger ? Theme.current.text_destructive : Theme.current.text_secondary;
+        commands: root.icon;
+        accessible-role: none;
+    }
+    Text {
+        x: 44px; width: parent.width - 52px; height: 100%;
+        text: root.label; font-size: 14px; overflow: elide; vertical-alignment: center;
+        color: root.danger ? Theme.current.text_destructive : Theme.current.text_bright;
+        accessible-role: none;
+    }
+    key := FocusScope {
+        enabled: root.live;
+        key-pressed(e) => {
+            if (e.text == Key.Return || e.text == " ") && !e.repeat { root.activated(); return accept; }
+            return reject;
+        }
+    }
+    forward-focus: key;
+    touch := ControlTouchArea {
+        enabled: root.live; mouse-cursor: pointer;
+        clicked => { root.activated(); }
+    }
+}
+
+export component ChapterMenu inherits Rectangle {
+    in property <ItemRow> chapter;
+    // Window coordinates of the press point and of the row it belongs to.
+    in property <length> anchor-x;
+    in property <length> anchor-y;
+    in property <length> row-left;
+    in property <length> row-top;
+    in property <length> row-width;
+    in property <length> row-height;
+    in property <length> safe-top;
+    in property <length> safe-bottom;
+    callback picked(string);
+    callback closed;
+    private property <bool> shown: false;
+    private property <bool> motion: Anim.enabled && Anim.player;
+    private property <float> scale-progress: 0;
+    private property <float> fade-progress: 0;
+    animate scale-progress { duration: root.motion ? (root.shown ? Anim.player_slide : Anim.player_fast) : 0ms; easing: ease-out; }
+    animate fade-progress { duration: root.motion ? Anim.player_fast : 0ms; easing: ease-out; }
+    changed motion => { root.scale-progress = root.shown ? 1 : 0; root.fade-progress = root.shown ? 1 : 0; }
+    // Mounted with the popup: reveal on the next frame so the growth animates.
+    init => { reveal.start(); }
+    reveal := Timer {
+        interval: 1ms; running: false;
+        triggered => { self.stop(); root.shown = true; root.scale-progress = 1; root.fade-progress = 1; first.focus(); }
+    }
+    // Pick or dismiss: input stops at once, then the menu shrinks away.
+    public function dismiss(action: string) {
+        if !root.shown { return; }
+        root.shown = false;
+        root.scale-progress = 0; root.fade-progress = 0;
+        if action != "" { root.picked(action); }
+        finish.start();
+    }
+    finish := Timer {
+        interval: root.motion ? max(1ms, Anim.player_fast) : 1ms; running: false;
+        triggered => { self.stop(); root.closed(); }
+    }
+    private property <int> state: root.chapter.download-state;
+    private property <bool> in-progress: root.state >= 1 && root.state <= 4;
+    private property <bool> partly-read: !root.chapter.read && root.chapter.reading-status != "";
+    private property <int> percent: Math.round(Math.clamp(root.chapter.download-progress, 0, 1) * 100);
+    // Items bubble unhandled keys up to this scope, so Escape works from any.
+    FocusScope {
+        key-pressed(e) => {
+            if (e.text == Key.Escape || e.text == Key.Back) && root.shown { root.dismiss(""); return accept; }
+            return reject;
+        }
+        TouchArea {
+            enabled: root.shown;
+            clicked => { root.dismiss(""); }
+        }
+        panel := Rectangle {
+            width: min(264px, max(1px, root.width - 16px));
+            height: content.preferred-height;
+            private property <bool> room-below: root.row-top + root.row-height - 4px + self.height <= root.height - root.safe-bottom - 8px;
+            x: Math.clamp(root.row-left + root.row-width - self.width, 8px, max(8px, root.width - self.width - 8px));
+            y: self.room-below ? root.row-top + root.row-height - 4px
+                : max(root.safe-top + 8px, root.row-top - self.height + 4px);
+            background: Theme.current.popup;
+            border-radius: 14px; border-width: 1px; border-color: Theme.current.border_soft;
+            drop-shadow-offset-y: 8px; drop-shadow-blur: 24px; drop-shadow-color: #00000070;
+            clip: true;
+            opacity: root.fade-progress;
+            transform-scale: 0.86 + 0.14 * root.scale-progress;
+            transform-origin: {
+                x: Math.clamp(root.anchor-x - self.x, 0px, self.width),
+                y: Math.clamp(root.anchor-y - self.y, 0px, self.height),
+            };
+            accessible-role: groupbox; accessible-label: @tr("Chapter options");
+            TouchArea { enabled: root.shown; }
+            content := VerticalLayout {
+                padding: 6px; spacing: 0px;
+                VerticalLayout {
+                    padding-left: 10px; padding-right: 10px; padding-top: 6px; padding-bottom: 8px; spacing: 2px;
+                    Text { text: root.chapter.title; color: Theme.current.text_bright; font-size: 14px; font-weight: 600; overflow: elide; }
+                    Text {
+                        text: root.chapter.read ? @tr("Read") : root.chapter.reading-status != "" ? root.chapter.reading-status : @tr("Unread");
+                        color: Theme.current.text_muted; font-size: 12px; overflow: elide;
+                    }
+                }
+                first := MenuItem {
+                    live: root.shown;
+                    label: root.chapter.read ? @tr("Mark as unread") : @tr("Mark as read");
+                    icon: root.chapter.read ? "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0" : "M21 12a9 9 0 1 1-3-6.7M7 12l3 3 9-10";
+                    activated => { root.dismiss("read"); }
+                }
+                MenuItem {
+                    live: root.shown; label: @tr("Mark previous as read");
+                    icon: "M3 7l3 3 5-6M3 16l3 3 5-6M15 8h6M15 17h6";
+                    activated => { root.dismiss("read-previous"); }
+                }
+                MenuItem {
+                    live: root.shown;
+                    label: root.chapter.bookmarked ? @tr("Remove bookmark") : @tr("Bookmark");
+                    icon: "M6 3h12v19l-6-4-6 4z";
+                    activated => { root.dismiss("bookmark"); }
+                }
+                if root.partly-read: MenuItem {
+                    live: root.shown; label: @tr("Clear progress");
+                    icon: "M3 12a9 9 0 1 0 3-6.7M3 4v5h5";
+                    activated => { root.dismiss("clear-progress"); }
+                }
+                if !root.chapter.local-import: Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.current.border_soft; } }
+                if !root.chapter.local-import: Text {
+                    text: @tr("DOWNLOAD"); color: Theme.current.text_muted; font-size: 11px; font-weight: 700;
+                    height: 24px; vertical-alignment: center;
+                }
+                // While a job exists: what it is doing and how far it got.
+                if !root.chapter.local-import && root.in-progress: Rectangle {
+                    height: 58px;
+                    Rectangle {
+                        x: 4px; y: 2px; width: parent.width - 8px; height: 52px; border-radius: 10px;
+                        background: Theme.current.settings_control;
+                        Text {
+                            x: 10px; y: 8px; width: parent.width - 20px;
+                            text: (root.state == 1 ? @tr("Queued") : root.state == 2 ? @tr("Downloading") : root.state == 3 ? @tr("Paused") : @tr("Failed"))
+                                + " · " + root.percent + "%";
+                            color: root.state == 4 ? Theme.current.text_destructive : Theme.current.text_bright; font-size: 13px;
+                        }
+                        Rectangle {
+                            x: 10px; y: 36px; width: parent.width - 20px; height: 4px; border-radius: 2px;
+                            background: Theme.current.progress_track_overlay;
+                            accessible-role: progress-indicator; accessible-label: @tr("Download progress");
+                            accessible-value: root.percent + "%";
+                            Rectangle {
+                                x: 0px; height: 100%; border-radius: 2px;
+                                width: parent.width * Math.clamp(root.chapter.download-progress, 0, 1);
+                                background: root.state == 4 ? Theme.current.text_destructive : Theme.current.accent_soft;
+                            }
+                        }
+                    }
+                }
+                if !root.chapter.local-import && (root.state == 0 || root.state == 6): MenuItem {
+                    live: root.shown; label: @tr("Download");
+                    icon: "M12 3v12M7 10l5 5 5-5M5 16v5h14v-5";
+                    activated => { root.dismiss("download"); }
+                }
+                if !root.chapter.local-import && (root.state == 0 || root.state == 6): MenuItem {
+                    live: root.shown; label: @tr("Download next 5");
+                    icon: "M12 3v9M8 8l4 4 4-4M5 16h14M5 20h14";
+                    activated => { root.dismiss("download-next-5"); }
+                }
+                if !root.chapter.local-import && (root.state == 1 || root.state == 2): MenuItem {
+                    live: root.shown; label: @tr("Pause");
+                    icon: "M8 5v14M16 5v14";
+                    activated => { root.dismiss("pause"); }
+                }
+                if !root.chapter.local-import && root.state == 3: MenuItem {
+                    live: root.shown; label: @tr("Resume");
+                    icon: "M8 5l11 7-11 7z";
+                    activated => { root.dismiss("resume"); }
+                }
+                if !root.chapter.local-import && root.state == 4: MenuItem {
+                    live: root.shown; label: @tr("Retry");
+                    icon: "M20 10a8 8 0 1 0-1 8M20 4v6h-6";
+                    activated => { root.dismiss("retry"); }
+                }
+                if !root.chapter.local-import && root.state >= 1 && root.state <= 3: MenuItem {
+                    live: root.shown; label: @tr("Cancel download"); danger: true;
+                    icon: "M6 6l12 12M18 6L6 18";
+                    activated => { root.dismiss("cancel"); }
+                }
+                if !root.chapter.local-import && root.state == 4: MenuItem {
+                    live: root.shown; label: @tr("Discard"); danger: true;
+                    icon: "M4 6h16M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7M14 10v7";
+                    activated => { root.dismiss("delete-download"); }
+                }
+                if !root.chapter.local-import && root.state == 5: MenuItem {
+                    live: root.shown; label: @tr("Delete download"); danger: true;
+                    icon: "M4 6h16M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7M14 10v7";
+                    activated => { root.dismiss("delete-download"); }
+                }
+            }
+        }
+    }
+}

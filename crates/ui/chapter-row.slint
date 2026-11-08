@@ -2,12 +2,11 @@ import { ControlTouchArea } from "@NovaUiBase/control-input.slint";
 // Compact chapter list requested from the Mihon reference; Nova Kit controls.
 import { Theme, SettingsStyle } from "@NovaUiShared";
 import { ItemRow } from "media-models.slint";
-import { DownloadIconButton } from "download-controls.slint";
-import { IconAction, ActionButton } from "controls.slint";
+import { DownloadRing } from "download-controls.slint";
+import { IconAction } from "controls.slint";
+import { ChapterMenu } from "chapter-menu.slint";
 export component ChapterRow inherits Rectangle {
     in property <ItemRow> chapter;
-    private property <string> transfer-action: root.chapter.download-state == 1 || root.chapter.download-state == 2 ? "pause" : root.chapter.download-state == 4 ? "retry" : root.chapter.has-download ? "resume" : "download";
-    private property <string> transfer-label: root.transfer-action == "pause" ? @tr("Pause download") : root.transfer-action == "retry" ? @tr("Retry download") : root.transfer-action == "resume" ? @tr("Resume download") : @tr("Download");
     callback picked;
     callback action(string);
     // Read state shows only in the text colour; the number column and the
@@ -79,52 +78,51 @@ export component ChapterRow inherits Rectangle {
     }
     scope := FocusScope {
         changed has-focus => { if self.has-focus { SettingsStyle.reveal_control(root.absolute-position.y, root.height, false); } }
-        key-pressed(e) => { if e.text == Key.Menu || (e.text == Key.F10 && e.modifiers.shift) { actions.show(); return accept; } if e.text == Key.Return || e.text == " " { if !e.repeat { root.picked(); } return accept; } return reject; }
+        key-pressed(e) => { if e.text == Key.Menu || (e.text == Key.F10 && e.modifiers.shift) { root.open-menu(root.width - 22px, root.height / 2); return accept; } if e.text == Key.Return || e.text == " " { if !e.repeat { root.picked(); } return accept; } return reject; }
     }
     touch := ControlTouchArea {
         private property <bool> held: false;
         mouse-cursor: pointer;
         clicked => { if !self.held { root.picked(); } self.held = false; }
         pointer-event(e) => {
-            if e.button == PointerEventButton.right && e.kind == PointerEventKind.up { self.held = true; actions.show(); }
+            if e.button == PointerEventButton.right && e.kind == PointerEventKind.up { self.held = true; root.open-menu(self.mouse-x, self.mouse-y); }
             else if e.kind == PointerEventKind.down { self.held = false; hold.start(); }
             else if e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel { hold.stop(); }
         }
         moved => { if Math.abs(self.mouse-y - self.pressed-y) + Math.abs(self.mouse-x - self.pressed-x) > 24px { hold.stop(); } }
     }
+    // The ⋯ menu covers the window so it can animate in and out and handle
+    // outside taps itself; it grows from the press point within this row.
+    in property <length> window-width;
+    in property <length> window-height;
+    in property <length> safe-top;
+    in property <length> safe-bottom;
+    private property <length> press-x;
+    private property <length> press-y;
+    function open-menu(x: length, y: length) { root.press-x = x; root.press-y = y; actions.show(); }
     actions := PopupWindow {
-        x: max(0px, root.width - self.width); y: root.height - 8px;
-        width: min(240px,root.width); height: root.chapter.local-import ? 160px : root.chapter.has-download && !root.chapter.downloaded ? 256px : 208px;
-        Rectangle {
-            background: Theme.current.popup; border-width: 1px; border-color: Theme.current.border_soft;
-            border-radius: Theme.card_corner_radius;
-            VerticalLayout {
-                padding: 8px; spacing: 4px;
-                ActionButton { text: @tr("Read / unread"); clicked => { actions.close(); root.action("read"); } }
-                ActionButton { text: @tr("Clear progress"); clicked => { actions.close(); root.action("clear-progress"); } }
-                ActionButton { text: root.chapter.bookmarked ? @tr("Unbookmark") : @tr("Bookmark"); clicked => { actions.close(); root.action("bookmark"); } }
-                if !root.chapter.local-import: ActionButton {
-                    text: root.chapter.downloaded ? @tr("Delete download") : root.transfer-label;
-                    clicked => { root.action(root.chapter.downloaded ? "delete-download" : root.transfer-action); actions.close(); }
-                }
-                if !root.chapter.local-import && root.chapter.has-download && !root.chapter.downloaded: ActionButton {
-                    text: root.chapter.download-state == 1 || root.chapter.download-state == 2 ? @tr("Cancel download") : @tr("Delete download");
-                    clicked => { root.action(root.chapter.download-state == 1 || root.chapter.download-state == 2 ? "cancel" : "delete-download"); actions.close(); }
-                }
-            }
+        x: -root.absolute-position.x; y: -root.absolute-position.y;
+        width: root.window-width; height: root.window-height;
+        close-policy: PopupClosePolicy.no-auto-close;
+        ChapterMenu {
+            width: 100%; height: 100%;
+            chapter: root.chapter;
+            anchor-x: root.absolute-position.x + root.press-x;
+            anchor-y: root.absolute-position.y + root.press-y;
+            row-left: root.absolute-position.x; row-top: root.absolute-position.y;
+            row-width: root.width; row-height: root.height;
+            safe-top: root.safe-top; safe-bottom: root.safe-bottom;
+            picked(action) => { root.action(action); }
+            closed => { actions.close(); }
         }
     }
-    hold := Timer { interval: 600ms; running: false; triggered => { self.stop(); touch.held = true; actions.show(); } }
-    if !root.chapter.local-import: DownloadIconButton {
-        x: root.width - 96px; y: (root.height - self.height) / 2; width: 44px; height: 48px;
-        label: root.chapter.downloaded ? @tr("Downloaded chapter options") : root.transfer-label;
-        glyph: root.chapter.downloaded ? "check" : root.chapter.download-state == 1 ? "clock" : root.chapter.download-state == 2 ? "pause" : root.chapter.download-state == 4 ? "retry" : root.chapter.has-download ? "play" : "download";
-        accent: root.chapter.has-download;
-        clicked => { if root.chapter.downloaded { actions.show(); } else { root.action(root.transfer-action); } }
+    hold := Timer { interval: 600ms; running: false; triggered => { self.stop(); touch.held = true; root.open-menu(touch.mouse-x, touch.mouse-y); } }
+    if !root.chapter.local-import: DownloadRing {
+        x: root.width - 96px; y: (root.height - self.height) / 2;
+        state: root.chapter.download-state; progress: root.chapter.download-progress;
+        // A finished download's ring opens the chapter menu; every other state
+        // runs its own next step (download, cancel, pause, resume, retry).
+        activated(action) => { if action == "menu" { root.open-menu(self.x + self.width / 2, self.y + self.height / 2); } else { root.action(action); } }
     }
-    if root.chapter.download-state == 2: Rectangle {
-        x: root.width - 90px; y: root.height - 9px; width: 32px; height: 2px; background: Theme.current.control_border;
-        Rectangle { x: 0px; y: 0px; width: parent.width * max(0,min(1,root.chapter.download-progress)); height: 2px; background: Theme.current.accent_soft; }
-    }
-    IconAction { x: root.width - 44px; y: (root.height - self.height) / 2; width: 40px; height: 48px; text: @tr("Chapter options"); icon: @image-url("../../assets/icons/navigation/more.svg"); clicked => { actions.show(); } }
+    IconAction { x: root.width - 44px; y: (root.height - self.height) / 2; width: 40px; height: 48px; text: @tr("Chapter options"); icon: @image-url("../../assets/icons/navigation/more.svg"); clicked => { root.open-menu(self.x + self.width / 2, self.y + self.height / 2); } }
 }
