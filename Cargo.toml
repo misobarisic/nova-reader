@@ -7,14 +7,14 @@ resolver = "3"
 license = "GPL-3.0-or-later"
 
 [workspace.dependencies]
-nova-storage = { git = "https://github.com/misobarisic/nova-kit", rev = "801daa1e0f2d37bd149d3a6d8b4f3aab9002681c" }
-nova-backup = { git = "https://github.com/misobarisic/nova-kit", rev = "801daa1e0f2d37bd149d3a6d8b4f3aab9002681c" }
-nova-ui-base = { git = "https://github.com/misobarisic/nova-kit", rev = "801daa1e0f2d37bd149d3a6d8b4f3aab9002681c" }
-nova-net = { git = "https://github.com/misobarisic/nova-kit", rev = "801daa1e0f2d37bd149d3a6d8b4f3aab9002681c" }
-nova-android = { git = "https://github.com/misobarisic/nova-kit", rev = "801daa1e0f2d37bd149d3a6d8b4f3aab9002681c" }
-nova-cache = { git = "https://github.com/misobarisic/nova-kit", rev = "801daa1e0f2d37bd149d3a6d8b4f3aab9002681c" }
-nova-image = { git = "https://github.com/misobarisic/nova-kit", rev = "801daa1e0f2d37bd149d3a6d8b4f3aab9002681c" }
-nova-sync = { git = "https://github.com/misobarisic/nova-kit", rev = "801daa1e0f2d37bd149d3a6d8b4f3aab9002681c", default-features = false }
+nova-storage = { git = "https://github.com/misobarisic/nova-kit", rev = "01de53be55b7f99f0bb57f93195607a521feed1c" }
+nova-backup = { git = "https://github.com/misobarisic/nova-kit", rev = "01de53be55b7f99f0bb57f93195607a521feed1c" }
+nova-ui-base = { git = "https://github.com/misobarisic/nova-kit", rev = "01de53be55b7f99f0bb57f93195607a521feed1c" }
+nova-net = { git = "https://github.com/misobarisic/nova-kit", rev = "01de53be55b7f99f0bb57f93195607a521feed1c" }
+nova-android = { git = "https://github.com/misobarisic/nova-kit", rev = "01de53be55b7f99f0bb57f93195607a521feed1c" }
+nova-cache = { git = "https://github.com/misobarisic/nova-kit", rev = "01de53be55b7f99f0bb57f93195607a521feed1c" }
+nova-image = { git = "https://github.com/misobarisic/nova-kit", rev = "01de53be55b7f99f0bb57f93195607a521feed1c" }
+nova-sync = { git = "https://github.com/misobarisic/nova-kit", rev = "01de53be55b7f99f0bb57f93195607a521feed1c", default-features = false }
 slint = { version = "=1.18.0", default-features = false, features = ["std", "compat-1-2", "accessibility"] }
 slint-build = "=1.18.0"
 
