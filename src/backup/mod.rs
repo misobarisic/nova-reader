@@ -15,8 +15,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub(crate) mod apply;
 pub(crate) mod archive;
 pub(crate) mod components;
+pub(crate) mod legacy;
+pub(crate) mod merge;
+pub(crate) mod plan;
 
 /// The file extension of an archive, without the dot.
 pub const EXTENSION: &str = "nova-reader-backup";
@@ -78,7 +82,7 @@ pub(crate) struct Snapshot {
     pub revisions: BTreeMap<String, String>,
 }
 
-const DEVICE_ROW_PREFIXES: &[&str] = &[
+pub(crate) const DEVICE_ROW_PREFIXES: &[&str] = &[
     "reader:image-storage",
     "reader:image-limits",
     "reader:captures",
@@ -91,6 +95,30 @@ pub(crate) fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+/// Hash of the device rows and the installed packages: a device restore is
+/// valid only while these are unchanged.
+pub(crate) fn device_revision(services: &Services, rows: &Rows) -> Result<String, String> {
+    let installed: Vec<(String, String)> = services
+        .sources
+        .list()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|source| {
+            let hash = services
+                .sources
+                .archive(&source.id)
+                .map(|(hash, _)| hash)
+                .unwrap_or_default();
+            (source.id, hash)
+        })
+        .collect();
+    Ok(archive::digest(
+        serde_json::to_string(&(rows, installed))
+            .map_err(|e| e.to_string())?
+            .as_bytes(),
+    ))
 }
 
 /// Hash of a profile's durable rows and its sync records: a preview is valid

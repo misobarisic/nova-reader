@@ -290,6 +290,20 @@ pub fn publish(services: &Services) -> Result<(), String> {
     commit_locked(&snapshot(services)?, false, false)
 }
 
+/// Publish `profile`'s addon descriptors, not only the selected profile's: its
+/// configuration and catalogue visibility are read as that profile.
+pub fn publish_profile(services: &Services, profile: &str) -> Result<(), String> {
+    reader_domain::profile::pinned(profile, || {
+        let scoped = Services {
+            sources: services
+                .sources
+                .with_profile(crate::profiles::registry_profile(profile)),
+            ..services.clone()
+        };
+        publish(&scoped)
+    })
+}
+
 /// Worker-only: package bytes use the authenticated package ALPN, never records.
 /// The lease/controller owns cancellation, and disabled sync performs no fetch.
 pub fn reconcile(services: &Services, cancel: Arc<AtomicBool>) -> Result<Status, String> {

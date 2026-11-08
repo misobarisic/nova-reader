@@ -3,6 +3,8 @@
 //! exist, how their records are validated and how a bundled addon package is
 //! checked are decided here. Applying and undoing a restore live in `apply.rs`.
 use super::components;
+#[cfg(test)]
+pub(super) use nova_backup::archive::encode_with_packages;
 pub(super) use nova_backup::archive::{
     Archive, Component, Manifest, Package, Payload, Profile, Writer, digest,
 };

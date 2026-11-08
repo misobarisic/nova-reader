@@ -14,7 +14,7 @@ use reader_domain::{
     Bookmark, Category, Chapter, ChapterId, HistoryEntry, LibraryEntry, ReaderPreferences,
     ReaderState, ReadingProgress, Series, SeriesId,
 };
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A profile's durable rows, keyed by logical key (without `profile:{id}:`).
@@ -70,6 +70,12 @@ pub(crate) fn definition(name: &str) -> Option<&'static Def> {
 pub(crate) fn supported(name: &str) -> bool {
     definition(name).is_some()
 }
+/// Components whose records stand for files on this device. A restore adds the
+/// ones that are missing; it never replaces or deletes a file.
+pub(crate) fn is_files(name: &str) -> bool {
+    matches!(name, "downloads" | "local_imports" | "packages")
+}
+
 pub(crate) const MAX_VALUE_BYTES: usize = 1024 * 1024;
 
 pub(crate) fn key(kind: &str, id: &str) -> String {
@@ -91,6 +97,11 @@ fn json_key(value: &impl serde::Serialize) -> String {
 pub(crate) fn category_key(name: &str) -> String {
     name.trim().to_lowercase()
 }
+/// Support records are a cache of titles and chapters, not user data.
+pub(crate) fn is_support(key: &str) -> bool {
+    matches!(split(key), Some(("series" | "chapter", _)))
+}
+
 // ---------------------------------------------------------------- state parts
 
 /// The records of a state component, decoded.
@@ -354,6 +365,112 @@ pub(crate) fn capture_state(name: &str, state: &ReaderState) -> Result<Payload, 
     Ok(payload)
 }
 
+/// The data a set of state components writes into `before`, and what could not
+/// be applied.
+pub(crate) struct Materialized {
+    pub state: ReaderState,
+    /// Library category assignments dropped because the category is unknown.
+    pub omitted_categories: usize,
+}
+
+/// Write the merged `after` payloads of the selected state components (and the
+/// state-owned preferences of `settings`) into a copy of `before`.
+pub(crate) fn materialize_state(
+    before: &ReaderState,
+    after: &BTreeMap<String, Payload>,
+    mut new_category_id: impl FnMut() -> Result<String, String>,
+) -> Result<Materialized, String> {
+    let mut next = before.clone();
+    let mut omitted_categories = 0;
+    if let Some(payload) = after.get("categories") {
+        let parts = parse_state("categories", payload)?;
+        let wanted: BTreeMap<&String, &String> =
+            parts.categories.iter().map(|(k, n)| (k, n)).collect();
+        let mut categories: Vec<Category> = Vec::new();
+        for category in &before.categories {
+            let key = category_key(&category.name);
+            if wanted.contains_key(&key) && !categories.iter().any(|c| category_key(&c.name) == key)
+            {
+                categories.push(category.clone());
+            }
+        }
+        for (key, name) in &parts.categories {
+            if !categories.iter().any(|c| &category_key(&c.name) == key) {
+                categories.push(Category {
+                    id: new_category_id()?,
+                    name: name.trim().to_owned(),
+                });
+            }
+        }
+        next.categories = categories;
+        let live: BTreeSet<&String> = next.categories.iter().map(|c| &c.id).collect();
+        for entry in &mut next.library {
+            entry.categories.retain(|id| live.contains(id));
+        }
+    }
+    // Cached titles and chapters first: the other records refer to them.
+    for name in ["library", "progress", "history", "bookmarks"] {
+        let Some(payload) = after.get(name) else {
+            continue;
+        };
+        let parts = parse_state(name, payload)?;
+        for series in parts.series {
+            if !next.series.iter().any(|s| s.id == series.id) {
+                next.series.push(series);
+            }
+        }
+        for chapter in parts.chapters {
+            if !next.chapters.iter().any(|c| c.id == chapter.id) {
+                next.chapters.push(chapter);
+            }
+        }
+    }
+    if let Some(payload) = after.get("library") {
+        let parts = parse_state("library", payload)?;
+        let ids: BTreeMap<String, String> = next
+            .categories
+            .iter()
+            .map(|c| (category_key(&c.name), c.id.clone()))
+            .collect();
+        next.library = parts
+            .library
+            .into_iter()
+            .map(|(mut entry, names)| {
+                for name in names {
+                    match ids.get(&name) {
+                        Some(id) => {
+                            entry.categories.insert(id.clone());
+                        }
+                        None => omitted_categories += 1,
+                    }
+                }
+                entry
+            })
+            .collect();
+    }
+    if let Some(payload) = after.get("progress") {
+        next.progress = parse_state("progress", payload)?.progress;
+    }
+    if let Some(payload) = after.get("history") {
+        next.history = parse_state("history", payload)?.history;
+    }
+    if let Some(payload) = after.get("bookmarks") {
+        next.bookmarks = parse_state("bookmarks", payload)?.bookmarks;
+    }
+    if let Some(preferences) = after
+        .get("settings")
+        .and_then(|payload| payload.records.get(&key("preferences", "state")))
+    {
+        next.preferences = serde_json::from_value(preferences.clone())
+            .map_err(|_| "Invalid reader preferences".to_owned())?;
+    }
+    next.validate().map_err(|e| e.to_string())?;
+    Ok(Materialized {
+        state: next,
+        omitted_categories,
+    })
+}
+
 // ------------------------------------------------------------- settings rows
 
 /// Documents of a profile that the `settings` component holds as they are
@@ -450,12 +567,45 @@ pub(crate) struct ProfileCapture<'a> {
     pub registry: &'a reader_sources::SourceRegistry,
 }
 
+/// An untouched setting. A backup leaves these out and treats them as absent
+/// when it compares, so a profile that was never configured (or whose defaults
+/// were written by sync) takes the archive's choices in a merge.
+fn is_default(logical: &str, value: &Value) -> bool {
+    match logical {
+        "reader:download-cleanup" => {
+            serde_json::from_value::<crate::download_cleanup::Settings>(cleanup_by_id(value, &[]))
+                .is_ok_and(|settings| settings == crate::download_cleanup::Settings::default())
+        }
+        "reader:image-limits" => {
+            serde_json::from_value::<crate::image_limits::Settings>(value.clone())
+                .is_ok_and(|settings| settings == crate::image_limits::Settings::default())
+        }
+        "reader:source-browser" => {
+            value
+                .get("pinned")
+                .is_none_or(|pins| pins.as_array().is_some_and(Vec::is_empty))
+                && value.get("last_used").is_none_or(Value::is_null)
+        }
+        "reader:last-update" => false,
+        _ if logical.starts_with(COMPRESSION_PREFIX) => value.is_null(),
+        _ if logical.starts_with("reader:chapter-order:") => value == &Value::Bool(true),
+        _ if logical.starts_with(PRESENTATION_PREFIX) => {
+            crate::content_presentation::settings_of(value)
+                .is_some_and(|settings| settings == Default::default())
+        }
+        _ => crate::sync_settings::is_default_document(logical, value),
+    }
+}
+
 fn capture_settings(cx: &ProfileCapture) -> Payload {
     let mut payload = empty();
     for logical in SETTINGS_KEYS {
         let Some(value) = cx.rows.get(*logical).and_then(|raw| json_row(raw)) else {
             continue;
         };
+        if is_default(logical, &value) {
+            continue;
+        }
         let value = if *logical == "reader:download-cleanup" {
             cleanup_by_name(&value, &cx.state.categories)
         } else {
@@ -474,6 +624,7 @@ fn capture_title_settings(cx: &ProfileCapture) -> Payload {
     for (logical, raw) in cx.rows {
         if title_key_family(logical).is_some()
             && let Some(value) = json_row(raw)
+            && !is_default(logical, &value)
         {
             payload.records.insert(key("kv", logical), value);
         }
@@ -552,6 +703,7 @@ pub(crate) fn capture_device(name: &str, cx: &DeviceCapture) -> Result<Payload, 
                 if (DEVICE_KEYS.contains(&logical.as_str())
                     || logical.starts_with(COMPRESSION_PREFIX))
                     && let Some(value) = json_row(raw)
+                    && !is_default(logical, &value)
                 {
                     payload.records.insert(key("kv", logical), value);
                 }
@@ -731,4 +883,18 @@ pub(crate) fn validate(name: &str, payload: &Payload) -> Result<(), String> {
         }),
         _ => Err("Unknown component".into()),
     }
+}
+
+/// A plain-text summary of one record, for preview examples.
+pub(crate) fn describe(record: &str) -> String {
+    match split(record) {
+        Some(("kv", id)) => id.rsplit(':').next().unwrap_or(id).to_owned(),
+        Some((_, id)) => id.replace('\0', " / "),
+        None => record.to_owned(),
+    }
+}
+
+/// Fields of a JSON object, as a map (empty for anything else).
+pub(crate) fn object(value: &Value) -> Map<String, Value> {
+    value.as_object().cloned().unwrap_or_default()
 }

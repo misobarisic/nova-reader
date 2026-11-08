@@ -229,6 +229,39 @@ fn publish(series: &SeriesId, settings: &Settings, raw: String) -> nova_sync::Re
     }
     Ok(())
 }
+/// Stage one entry's local row and account record for `profile` in a restore's
+/// transaction: `None` removes both. Callers drop the cache afterwards with
+/// [`reset`], since the row is not in the cache's profile necessarily.
+pub(crate) fn stage_import(
+    store: &mut nova_sync::Store,
+    dev: u64,
+    profile: &str,
+    series: &SeriesId,
+    settings: Option<&Settings>,
+) -> nova_sync::Result<bool> {
+    let physical = reader_domain::profile::key_in(profile, &key(series));
+    let domain = crate::sync::domain_for(profile, "presentation");
+    let identity = key_json(series);
+    let prior = store
+        .record(&domain, &identity)
+        .and_then(|record| record.value.clone());
+    let Some(settings) = settings else {
+        store.queue_extra(&physical, None);
+        return Ok(prior.is_some() && store.set(&domain, &identity, None, 0, dev));
+    };
+    store.queue_extra(
+        &physical,
+        Some(local_raw(settings).map_err(std::io::Error::other)?),
+    );
+    if prior.is_none() && is_default(settings) {
+        return Ok(false);
+    }
+    let mut value = wire_value(settings)?;
+    if let Some(old) = &prior {
+        value = crate::sync::preserve_fields(old, &value)?;
+    }
+    Ok(store.set(&domain, &identity, Some(value), 0, dev))
+}
 /// Whether `stored` is a valid local row of this module.
 pub(crate) fn valid_stored(stored: &serde_json::Value) -> bool {
     serde_json::from_value::<Record>(stored.clone()).is_ok_and(|record| {
@@ -240,7 +273,14 @@ pub(crate) fn valid_stored(stored: &serde_json::Value) -> bool {
                 .is_none_or(known_hint)
     })
 }
-fn key_json(series: &SeriesId) -> String {
+/// The local row of a stored value, for a restore to compare and re-stage.
+pub(crate) fn settings_of(stored: &serde_json::Value) -> Option<Settings> {
+    serde_json::from_value::<Record>(stored.clone())
+        .ok()
+        .filter(|record| record.schema_version == SCHEMA)
+        .map(|record| record.settings)
+}
+pub(crate) fn key_json(series: &SeriesId) -> String {
     serde_json::to_string(series).expect("SeriesId serializes")
 }
 

@@ -92,6 +92,10 @@ pub fn snapshot(source: &str) -> Option<CompressionOverride> {
             .map(CompressionOverride::normalized)
     })
 }
+/// Forget the cached overrides after a restore rewrote their rows.
+pub fn reset_cache() {
+    CURRENT.write().unwrap_or_else(|e| e.into_inner()).clear();
+}
 /// Also used by addon sync projection; write succeeds before workers see it.
 pub fn persist(source: &str, value: Option<CompressionOverride>) -> Result<(), String> {
     let _mutation = MUTATION.lock().unwrap_or_else(|e| e.into_inner());

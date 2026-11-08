@@ -306,14 +306,53 @@ fn validate(storage: &str, value: &Value) -> bool {
         _ => false,
     }
 }
+/// `value` through its module's typed schema, so fields added since it was
+/// saved take their defaults.
+fn typed(key: &str, value: Value) -> serde_json::Result<Value> {
+    match key {
+        "reader:appearance" => serde_json::to_value(serde_json::from_value::<
+            crate::appearance::Preferences,
+        >(value)?),
+        "reader:captures" => serde_json::to_value(serde_json::from_value::<
+            crate::capture_settings::CapturePreferences,
+        >(value)?),
+        "reader:image-storage" => serde_json::to_value(serde_json::from_value::<
+            crate::image_storage::ImageStoragePreferences,
+        >(value)?),
+        "reader:reader-settings" => serde_json::to_value(serde_json::from_value::<
+            crate::reader_settings::ReaderSettings,
+        >(value)?),
+        _ if key.starts_with(SERIES_PREFIX) => serde_json::to_value(serde_json::from_value::<
+            crate::reader_settings::SeriesOverrides,
+        >(value)?),
+        _ => Ok(value),
+    }
+}
 fn documents(store: &nova_sync::Store) -> nova_sync::Result<BTreeMap<String, Value>> {
     let mut documents = templates();
     // Include legacy local decisions and remote identities not opened here yet.
     for (key, _) in
         reader_domain::profile::kv::try_scan_prefixes(&[SERIES_PREFIX.into(), MODE_PREFIX.into()])?
     {
+        // A removal queued in this transaction is not a document any more.
+        if store.extra_value(&kv(&key))?.is_none() {
+            continue;
+        }
         if let Some(value) = template(&key) {
             documents.insert(key, value);
+        }
+    }
+    // Documents written in this transaction are not durable yet: a restore
+    // queues per-title rows and prepares their records before it saves.
+    let strip = format!("profile:{}:", reader_domain::profile::active());
+    for prefix in [SERIES_PREFIX, MODE_PREFIX] {
+        for physical in store.queued_extra_keys_with_prefix(&kv(prefix)) {
+            let logical = physical.strip_prefix(&strip).unwrap_or(&physical);
+            if store.extra_value(&physical)?.is_some()
+                && let Some(value) = template(logical)
+            {
+                documents.insert(logical.to_owned(), value);
+            }
         }
     }
     for (key, _) in store.records(&domain()) {
@@ -328,26 +367,7 @@ fn documents(store: &nova_sync::Store) -> nova_sync::Result<BTreeMap<String, Val
             let value = unpack_document(key, serde_json::from_str(&raw)?);
             // Deserialize and reserialize through each module's defaults so
             // preferences introduced after the last local edit participate.
-            let normalized = match key.as_str() {
-                "reader:appearance" => serde_json::to_value(serde_json::from_value::<
-                    crate::appearance::Preferences,
-                >(value)?)?,
-                "reader:captures" => serde_json::to_value(serde_json::from_value::<
-                    crate::capture_settings::CapturePreferences,
-                >(value)?)?,
-                "reader:image-storage" => serde_json::to_value(serde_json::from_value::<
-                    crate::image_storage::ImageStoragePreferences,
-                >(value)?)?,
-                "reader:reader-settings" => serde_json::to_value(serde_json::from_value::<
-                    crate::reader_settings::ReaderSettings,
-                >(value)?)?,
-                _ if key.starts_with(SERIES_PREFIX) => {
-                    serde_json::to_value(serde_json::from_value::<
-                        crate::reader_settings::SeriesOverrides,
-                    >(value)?)?
-                }
-                _ => value,
-            };
+            let normalized = typed(key, value)?;
             let normalized = normalize_document(key, normalized)?;
             if !validate(key, &normalized) {
                 return Err(std::io::Error::other("invalid saved Reader preferences").into());
@@ -408,11 +428,60 @@ pub fn supported(key: &str, value: &Value) -> bool {
     }
     false
 }
+/// Every portable field of the profile's documents, as `store` sees them.
+pub(crate) fn snapshot_fields(store: &nova_sync::Store) -> nova_sync::Result<Fields> {
+    Ok(fields(&documents(store)?))
+}
+/// Whether `stored` is exactly what an unedited document holds. A backup treats
+/// such a document as absent: an untouched default has no authority over a value
+/// that someone chose, and projection writes defaults to a fresh profile.
+pub(crate) fn is_default_document(storage: &str, stored: &Value) -> bool {
+    let Some(default) = template(storage) else {
+        return false;
+    };
+    typed(storage, unpack_document(storage, stored.clone())).is_ok_and(|value| value == default)
+}
 /// Whether `stored`, a document exactly as it is saved, is a valid value of the
 /// settings document `storage` (wrapper included). Unknown documents are not.
 pub(crate) fn valid_stored(storage: &str, stored: &Value) -> bool {
     let value = unpack_document(storage, stored.clone());
     validate(storage, &value) && normalize_document(storage, value).is_ok()
+}
+/// Publish the fields a restore changed in the documents it wrote (`imported`),
+/// as fresh edits, and move the baseline to what is now stored. `before` is
+/// [`snapshot_fields`] taken before the documents were queued: a field the
+/// restore left as it was (a merge that kept the local value) stays unpublished,
+/// so it cannot override a newer account value that has not been projected yet.
+/// Fields under a per-device override stay local, as for every other edit.
+pub(crate) fn stage_import(
+    store: &mut nova_sync::Store,
+    dev: u64,
+    before: &Fields,
+    imported: &std::collections::BTreeSet<String>,
+) -> nova_sync::Result<bool> {
+    let documents = documents(store)?;
+    let current = fields(&documents);
+    let overrides = read_map(store, OVERRIDES)?;
+    let account = shared(store);
+    let mut changed = false;
+    for (key, value) in &current {
+        let Some(storage) = documents
+            .keys()
+            .find(|storage| document_pointer(storage, key).is_some())
+        else {
+            continue;
+        };
+        if !imported.contains(storage)
+            || overrides.contains_key(key)
+            || before.get(key) == Some(value)
+            || account.get(key) == Some(value)
+        {
+            continue;
+        }
+        changed |= store.set(&domain(), key, Some(serde_json::to_string(value)?), 0, dev);
+    }
+    store.queue_extra(&kv(BASELINE), Some(serde_json::to_string(&current)?));
+    Ok(changed)
 }
 /// Stage local differences, or acknowledge an already-applied projection. The
 /// caller saves once alongside Reader's other domains before waking the mesh.

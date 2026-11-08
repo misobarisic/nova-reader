@@ -143,6 +143,15 @@ pub fn create(name: &str) -> Result<Profile, String> {
     DIRECTORY.create(name)
 }
 
+/// A fresh profile ID, in the form [`create`] hands out (`p{device}_{sequence}`),
+/// for a transaction that writes the directory row itself (a restore).
+pub fn allocate_id() -> Result<String, String> {
+    let device = nova_sync::local_device().map_err(|e| e.to_string())?;
+    let sequence =
+        nova_storage::try_allocate_local_sequence("profiles", 1).map_err(|e| e.to_string())?;
+    Ok(format!("p{device:x}_{sequence:x}"))
+}
+
 pub fn rename(id: &str, name: &str) -> Result<(), String> {
     let name = validated_name(name)?;
     if !list()?.iter().any(|profile| profile.id == id) {

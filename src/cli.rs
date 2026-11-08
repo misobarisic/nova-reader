@@ -21,6 +21,36 @@ fn read(path: &Path, limit: u64) -> Result<Vec<u8>> {
     }
     Ok(bytes)
 }
+/// Restore an archive, or a legacy metadata JSON backup, without a review step.
+/// Archives merge by default and legacy backups replace, as they always did.
+fn restore(services: &Services, path: &Path, flags: &[String]) -> Result<()> {
+    let (mut replace, mut use_backup) = (false, false);
+    for flag in flags {
+        match flag.as_str() {
+            "--replace" => replace = true,
+            "--use-backup" => use_backup = true,
+            _ => return Err("Unknown option. Run nova-reader --help.".into()),
+        }
+    }
+    let opened = crate::backup::plan::open(path)?;
+    let mut choices = crate::backup::plan::default_choices(&opened)?;
+    for choice in &mut choices {
+        choice.replace |= replace;
+        if use_backup {
+            choice.use_backup = choice.components.clone();
+        }
+    }
+    let preview = crate::backup::plan::preview(services, std::sync::Arc::new(opened), choices)?;
+    for line in preview.lines() {
+        println!("{line}");
+    }
+    let applied = crate::backup::apply::apply(services, &preview)?;
+    for warning in &applied.warnings {
+        eprintln!("{warning}");
+    }
+    println!("Restored into {} profile(s).", applied.targets.len());
+    Ok(())
+}
 pub fn run() -> Result<bool> {
     let mut args = std::env::args_os().skip(1);
     let Some(command) = args.next() else {
@@ -29,7 +59,7 @@ pub fn run() -> Result<bool> {
     let command = command.to_str().ok_or("Invalid command")?;
     if command == "--help" || command == "-h" {
         println!(
-            "Nova Reader {}\n\nRun without arguments to open the reader.\n\n  install-addon FILE.zip\n  list-sources\n  import FILE.cbz\n  import-folder DIRECTORY\n  backup FILE.nova-reader-backup\n  verify-backup FILE.nova-reader-backup\n  restore FILE.json\n  catalogue-keiyoushi [HTTPS_INDEX_URL]\n\nSet NOVA_READER_DATA_DIR to use an independent application directory.\nSources are executable JavaScript packages; APK/JAR catalogues are discovery only.",
+            "Nova Reader {}\n\nRun without arguments to open the reader.\n\n  install-addon FILE.zip\n  list-sources\n  import FILE.cbz\n  import-folder DIRECTORY\n  backup FILE.nova-reader-backup\n  verify-backup FILE.nova-reader-backup\n  restore FILE [--replace] [--use-backup]\n  undo-restore\n  catalogue-keiyoushi [HTTPS_INDEX_URL]\n\nSet NOVA_READER_DATA_DIR to use an independent application directory.\nSources are executable JavaScript packages; APK/JAR catalogues are discovery only.",
             env!("CARGO_PKG_VERSION")
         );
         return Ok(true);
@@ -62,11 +92,23 @@ pub fn run() -> Result<bool> {
         );
         return Ok(true);
     }
+    if command == "undo-restore" {
+        let preview = crate::backup::apply::undo_preview(&services)?;
+        for line in preview.lines() {
+            println!("{line}");
+        }
+        let applied = crate::backup::apply::apply(&services, &preview)?;
+        println!("Undone for {} profile(s).", applied.targets.len());
+        return Ok(true);
+    }
     let path = PathBuf::from(
         args.next()
             .ok_or("This command requires a file or directory")?,
     );
-    if args.next().is_some() {
+    let flags: Vec<String> = args
+        .map(|flag| flag.to_string_lossy().into_owned())
+        .collect();
+    if !flags.is_empty() && command != "restore" {
         return Err("Unexpected extra arguments".into());
     }
     match command {
@@ -88,10 +130,7 @@ pub fn run() -> Result<bool> {
             );
         }
         "verify-backup" => println!("{}", crate::backup::describe(&path)?),
-        "restore" => services
-            .domain
-            .restore_json(&read(&path, 32 * 1024 * 1024)?)
-            .map_err(error)?,
+        "restore" => restore(&services, &path, &flags)?,
         _ => return Err("Unknown command. Run nova-reader --help.".into()),
     }
     Ok(true)
