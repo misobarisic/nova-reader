@@ -4529,7 +4529,12 @@ impl Controller {
                             view.download_states.get(c)
                                 == Some(&reader_downloads::JobStatus::Complete)
                         })
-                        .filter(|c| snapshot.progress.iter().any(|p| &p.chapter == c && p.completed))
+                        .filter(|c| {
+                            snapshot
+                                .progress
+                                .iter()
+                                .any(|p| &p.chapter == c && p.completed)
+                        })
                         .filter(|c| !snapshot.bookmarks.iter().any(|b| &b.chapter == c))
                         .collect()
                 };
@@ -6313,7 +6318,12 @@ fn publish_title_menu(
         .collect();
     let unread = chapters
         .iter()
-        .filter(|c| !snapshot.progress.iter().any(|p| p.chapter == c.id && p.completed))
+        .filter(|c| {
+            !snapshot
+                .progress
+                .iter()
+                .any(|p| p.chapter == c.id && p.completed)
+        })
         .count();
     let downloaded = chapters
         .iter()
@@ -6323,11 +6333,17 @@ fn publish_title_menu(
         .downloads
         .jobs
         .iter()
-        .filter(|j| &j.chapter.series == series && j.status == reader_downloads::JobStatus::Complete)
+        .filter(|j| {
+            &j.chapter.series == series && j.status == reader_downloads::JobStatus::Complete
+        })
         .map(|j| j.downloaded_bytes())
         .sum();
     let mut parts = Vec::new();
-    if let Some(entry) = snapshot.library.iter().find(|entry| &entry.series == series) {
+    if let Some(entry) = snapshot
+        .library
+        .iter()
+        .find(|entry| &entry.series == series)
+    {
         let status = view
             .series
             .as_ref()

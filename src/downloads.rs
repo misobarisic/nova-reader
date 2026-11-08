@@ -101,7 +101,11 @@ fn resume_all_targets(jobs: &[ChapterDownload]) -> Vec<ChapterId> {
 }
 /// The open title's unfinished downloads, shown in a card above its chapters.
 pub(super) fn publish_detail_queue(view: &View, ui: &AppWindow) {
-    let series = view.series.as_ref().map(|s| &s.id).filter(|_| view.section == 5);
+    let series = view
+        .series
+        .as_ref()
+        .map(|s| &s.id)
+        .filter(|_| view.section == 5);
     let jobs: Vec<&ChapterDownload> = view
         .downloads
         .jobs
@@ -242,9 +246,8 @@ impl Controller {
                 row.downloaded = next_state == 5;
                 // The details line leads with the transfer while there is one,
                 // and falls back to the reading position when it ends.
-                let status =
-                    crate::chapter_list::status(next_state, progress, None, false)
-                        .filter(|_| (1..=4).contains(&next_state));
+                let status = crate::chapter_list::status(next_state, progress, None, false)
+                    .filter(|_| (1..=4).contains(&next_state));
                 row.status_danger = status.as_ref().is_some_and(|(_, danger)| *danger);
                 row.status = status
                     .map(|(status, _)| status.into())

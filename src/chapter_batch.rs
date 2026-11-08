@@ -107,7 +107,10 @@ pub(super) fn to_download(
             .take(n)
             .cloned()
             .collect(),
-        Pick::Unread => candidates.filter(|id| !is_read(state, id)).cloned().collect(),
+        Pick::Unread => candidates
+            .filter(|id| !is_read(state, id))
+            .cloned()
+            .collect(),
         Pick::All => candidates.cloned().collect(),
     }
 }

@@ -33,7 +33,11 @@ impl Controller {
                         set.insert(chapter);
                     }
                     // Unselecting the last row leaves selection mode.
-                    if view.chapter_selection.as_ref().is_some_and(|set| set.is_empty()) {
+                    if view
+                        .chapter_selection
+                        .as_ref()
+                        .is_some_and(|set| set.is_empty())
+                    {
                         view.chapter_selection = None;
                     }
                 }
@@ -47,12 +51,15 @@ impl Controller {
                         .iter()
                         .enumerate()
                         .filter_map(|(i, row)| match row {
-                            Row::Chapter(c) => model.row_data(i).filter(|item| match filter {
-                                1 => !item.read,
-                                2 => item.downloaded,
-                                3 => item.bookmarked,
-                                _ => true,
-                            }).map(|_| c.id.clone()),
+                            Row::Chapter(c) => model
+                                .row_data(i)
+                                .filter(|item| match filter {
+                                    1 => !item.read,
+                                    2 => item.downloaded,
+                                    3 => item.bookmarked,
+                                    _ => true,
+                                })
+                                .map(|_| c.id.clone()),
                             _ => None,
                         })
                         .collect();
