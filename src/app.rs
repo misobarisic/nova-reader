@@ -23,6 +23,8 @@ use std::{
 
 #[path = "chapter_batch.rs"]
 mod chapter_batch;
+#[path = "chapter_selection.rs"]
+mod chapter_selection;
 #[path = "downloads.rs"]
 mod downloads;
 
@@ -1452,6 +1454,8 @@ struct View {
     /// The current visit to a title's detail screen, kept through the reader
     /// and page overview so its "new" chapters stay marked until it is left.
     chapter_news: Option<crate::chapter_news::Visit>,
+    /// Chapters selected on the detail screen; `Some` while selecting.
+    chapter_selection: Option<BTreeSet<ChapterId>>,
     rows: Vec<Row>,
     downloads: downloads::DownloadView,
     download_states: BTreeMap<ChapterId, reader_downloads::JobStatus>,
@@ -2138,6 +2142,11 @@ impl Controller {
         } else if !matches!(view.section, 6 | 23) {
             view.chapter_news = None;
         }
+        // Selection belongs to one visit of the chapter list.
+        if view.section != 5 {
+            view.chapter_selection = None;
+        }
+        chapter_selection::publish(&view, ui);
         let clock = crate::timeline::TimelineClock::now();
         view.artwork_rows = view
             .rows
@@ -2335,6 +2344,10 @@ impl Controller {
                         }
                         .into(),
                         read_fraction: crate::chapter_list::read_fraction(page, page_total),
+                        selected: view
+                            .chapter_selection
+                            .as_ref()
+                            .is_some_and(|set| set.contains(&c.id)),
                         is_new: view.section == 5
                             && view
                                 .chapter_news
@@ -6392,6 +6405,8 @@ pub fn run(services: Services) -> Result<()> {
             });
     }
     wire!(on_library_sort_changed, |app, ui| app.render(&ui));
+    wire!(on_chapter_selection, |app, ui, op, index| app
+        .chapter_selection(&ui, &op, index));
     wire!(on_chapter_order_changed, |app, ui, descending| {
         let series = app.view().series.as_ref().map(|series| series.id.clone());
         if let Some(series) = series {

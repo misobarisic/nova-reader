@@ -11,7 +11,9 @@ export struct ItemRow {
     // rebuild `status` when a transfer starts or ends.
     reading-status: string,
     // New since the title was last opened (stays for the whole visit).
-    is-new: bool
+    is-new: bool,
+    // Part of the detail screen's multi-chapter selection.
+    selected: bool
 }
 
 export struct SettingRow { key: string, name: string, kind: string, value: string, checked: bool, options: [string], selected: int }

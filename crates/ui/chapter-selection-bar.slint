@@ -1,0 +1,93 @@
+// The floating bar for a multi-chapter selection on the detail screen. It
+// slides up from the bottom edge inside the safe area while chapters are being
+// selected; its actions run on the whole selection.
+import { Theme, SettingsStyle, Anim } from "@NovaUiShared";
+import { ControlTouchArea } from "@NovaUiBase/control-input.slint";
+import { DownloadGlyph } from "download-controls.slint";
+
+component BarButton inherits Rectangle {
+    in property <string> label;
+    in property <string> glyph;
+    in property <bool> danger;
+    in property <bool> live: true;
+    callback activated;
+    width: 44px; height: 44px; border-radius: 22px;
+    background: (touch.has-hover || key.has-focus) && root.live ? Theme.current.control_hover : transparent;
+    border-width: key.has-focus && SettingsStyle.keyboard-mode ? 2px : 0px;
+    border-color: Theme.current.focus_ring;
+    accessible-role: button; accessible-label: root.label; accessible-enabled: root.live;
+    accessible-action-default => { if root.live { root.activated(); } }
+    DownloadGlyph {
+        x: 10px; y: 10px;
+        glyph: root.glyph;
+        stroke: root.danger ? Theme.current.text_destructive : Theme.current.text_bright;
+        accessible-role: none;
+    }
+    key := FocusScope {
+        enabled: root.live;
+        key-pressed(e) => {
+            if (e.text == Key.Return || e.text == " ") && !e.repeat { root.activated(); return accept; }
+            return reject;
+        }
+    }
+    touch := ControlTouchArea {
+        enabled: root.live; mouse-cursor: pointer;
+        clicked => { root.activated(); }
+    }
+}
+
+export component ChapterSelectionBar inherits Rectangle {
+    in property <bool> shown;
+    in property <int> count;
+    in property <length> safe-bottom;
+    in property <length> safe-left;
+    in property <length> safe-right;
+    callback action(string);
+    private property <bool> motion: Anim.enabled && Anim.player;
+    private property <float> slide: root.shown ? 1 : 0;
+    animate slide { duration: root.motion ? Anim.player_slide : 0ms; easing: ease-out; }
+    changed shown => { root.slide = root.shown ? 1 : 0; }
+    changed motion => { root.slide = root.shown ? 1 : 0; }
+    visible: root.shown || root.slide > 0;
+    bar := Rectangle {
+        width: min(560px, max(1px, root.width - root.safe-left - root.safe-right - 24px));
+        height: 60px;
+        x: root.safe-left + (root.width - root.safe-left - root.safe-right - self.width) / 2;
+        y: root.height - root.safe-bottom - 12px - self.height
+            + (1 - root.slide) * (self.height + 12px + root.safe-bottom);
+        background: Theme.current.popup;
+        border-radius: 16px; border-width: 1px; border-color: Theme.current.border_soft;
+        drop-shadow-offset-y: 8px; drop-shadow-blur: 24px; drop-shadow-color: #00000070;
+        accessible-role: groupbox; accessible-label: @tr("Selected chapters");
+        TouchArea { enabled: root.shown; }
+        HorizontalLayout {
+            padding-left: 6px; padding-right: 6px; padding-top: 8px; padding-bottom: 8px; spacing: 2px;
+            BarButton {
+                label: @tr("Close selection"); glyph: "cancel"; live: root.shown;
+                activated => { root.action("clear"); }
+            }
+            selected-count := Text {
+                horizontal-stretch: 1; min-width: 0px;
+                text: @tr("{} selected", root.count);
+                color: Theme.current.text_bright; font-size: 14px; font-weight: 600;
+                vertical-alignment: center; overflow: elide;
+            }
+            BarButton {
+                label: @tr("Select all"); glyph: "selected"; live: root.shown;
+                activated => { root.action("all"); }
+            }
+            BarButton {
+                label: @tr("Mark read"); glyph: "check"; live: root.shown;
+                activated => { root.action("mark-read"); }
+            }
+            BarButton {
+                label: @tr("Download"); glyph: "download"; live: root.shown;
+                activated => { root.action("download"); }
+            }
+            BarButton {
+                label: @tr("Delete downloads"); glyph: "delete"; danger: true; live: root.shown;
+                activated => { root.action("delete-downloads"); }
+            }
+        }
+    }
+}
