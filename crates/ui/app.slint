@@ -36,12 +36,13 @@ export { SaveImageSource } from "save-image-sheet.slint";
 import { SaveOutputFormats } from "save-output.slint";
 import { LibraryFilterChip } from "@NovaUiBase/filter-chip.slint";
 import { LibraryHost } from "library-host.slint";
-import { EntryMenu, EntryCategoryRow } from "entry-menu.slint";
-export { EntryCategoryRow } from "entry-menu.slint";
-export { ReaderSyncSettings, SyncPeer, SyncInvite, SyncInspectorRow } from "sync-bridge.slint";
+import { EntryMenu } from "entry-menu.slint";
+import { EntryCategoryRow } from "@NovaUiShared";
+export { EntryCategoryRow } from "@NovaUiShared";
+export { ReaderSyncSettings, SyncPeer, SyncInvite, SyncInspectorRow } from "@NovaUiShared";
 import { SettingsSync } from "@NovaUiShared";
-import { ReaderSyncSettings } from "sync-bridge.slint";
-import { SyncContent } from "sync-host.slint";
+import { ReaderSyncSettings } from "@NovaUiShared";
+import { SyncContent } from "@NovaUiShared";
 import { SettingSyncModal } from "settings-sync.slint";
 import { SyncPeerRemovalModal } from "@NovaUiBase/sync-peer-removal.slint";
 import { MorePage } from "more.slint";
@@ -50,14 +51,14 @@ export { OverviewTile } from "page-overview.slint";
 import { LicenseSource } from "about-models.slint";
 export { LicenseSource } from "about-models.slint";
 export { Appearance } from "@NovaUiShared";
-export { ImageLimitSettings } from "image-limit-settings.slint";
-export { DownloadCleanupSettings } from "download-cleanup-settings.slint";
-export { BackupBridge, BackupOption, BackupMapping } from "backup.slint";
-import { BackupBridge } from "backup.slint";
+export { ImageLimitSettings } from "@NovaUiShared";
+export { DownloadCleanupSettings } from "@NovaUiShared";
+export { BackupBridge, BackupOption, BackupMapping } from "@NovaUiShared";
+import { BackupBridge } from "@NovaUiShared";
 export { ProfilesBridge, ProfileRow } from "profiles.slint";
-export { CaptureSettings } from "capture-settings.slint";
-import { CaptureSettings } from "capture-settings.slint";
-export { ImageStorageSettings } from "image-storage-settings.slint";
+export { CaptureSettings } from "@NovaUiShared";
+import { CaptureSettings } from "@NovaUiShared";
+export { ImageStorageSettings } from "@NovaUiShared";
 export { SourceCompressionSettings } from "source-compression-settings.slint";
 import { SourceSettingsPage } from "source-settings.slint";
 export { Theme, Anim } from "@NovaUiShared";
@@ -260,6 +261,11 @@ export component AppWindow inherits Window {
     in property <int> detail-unread-count;
     in property <int> detail-downloaded-count;
     in property <int> detail-bookmarked-count;
+    // Each chapter's place among the rows the Unread/Downloaded/Bookmarked
+    // filters show (`publish_chapter_filter_counts`), for the two-column list.
+    in property <[int]> detail-rank-unread;
+    in property <[int]> detail-rank-downloaded;
+    in property <[int]> detail-rank-bookmarked;
     in property <int> detail-new-count;
     // Multi-chapter selection on the detail screen; the backend owns it.
     in property <bool> chapter-selecting;
@@ -291,6 +297,8 @@ export component AppWindow inherits Window {
     in property <[string]> series-genres;
     in property <string> series-artwork-key;
     in-out property <image> series-poster;
+    // A few-pixel copy of the poster for the desktop detail backdrop.
+    in-out property <image> series-backdrop;
     in-out property <int> chapter-filter;
     in-out property <bool> chapters-descending: true;
     in property <bool> in-library;
@@ -830,6 +838,7 @@ export component AppWindow inherits Window {
                         timeline-host := TimelineHost {
                             width: parent.width; height: parent.height;
                             viewport-width: self.width; viewport-height: self.height;
+                            columns: !root.mobile-ui && self.width >= 960px ? 2 : 1;
                             visible: root.section == 1 || root.section == 2;
                             active: root.section == 1 || root.section == 2;
                             history: root.section == 2;
@@ -890,7 +899,7 @@ export component AppWindow inherits Window {
                                     title: root.series-title; description: root.series-description; resume-chapter: root.resume-chapter;
                                     action-label: root.resume-action-label;
                                     metadata: root.series-metadata; genres: root.series-genres;
-                                    poster: root.series-poster; in-library: root.in-library; can-resume: root.items.length > 0;
+                                    poster: root.series-poster; backdrop: root.series-backdrop; in-library: root.in-library; can-resume: root.items.length > 0;
                                     narrow: root.mobile-ui; scroll-y: page-scroll.content-y;
                                     expanded <=> root.detail-synopsis-expanded;
                                     resume => { root.detail-scroll-y = page-scroll.content-y; root.chapter-step(0); } toggle-library => { if root.in-library { root.ask-confirm("library", "", "", 0, @tr("Remove this title from your library?"), @tr("Remove from library")); } else { root.toggle-library(); } }
@@ -982,11 +991,25 @@ export component AppWindow inherits Window {
                                     }
                                     // A filtered-out row collapses to height 0 inside a layout without
                                     // spacing (its 4px gap is part of the row), so no gaps remain.
-                                    VerticalLayout {
-                                        spacing: 0px;
+                                    // Wide screens show the chapters two to a row, left then
+                                    // right, so neighbours stay side by side however long the
+                                    // list; rows are placed by their rank among the shown rows.
+                                    Rectangle {
+                                        private property <int> columns: !root.mobile-ui && root.width >= 1000px ? 2 : 1;
+                                        private property <int> shown-count: root.chapter-filter == 0 ? root.items.length
+                                            : root.chapter-filter == 1 ? root.detail-unread-count
+                                            : root.chapter-filter == 2 ? root.detail-downloaded-count : root.detail-bookmarked-count;
+                                        private property <length> column-width: (self.width - (self.columns - 1) * 24px) / self.columns;
+                                        height: Math.ceil(self.shown-count / self.columns) * 70px;
                                         for chapter[i] in root.items: Rectangle {
                                             private property <bool> shown: root.chapter-filter == 0 || (root.chapter-filter == 1 && !chapter.read) || (root.chapter-filter == 2 && chapter.downloaded) || (root.chapter-filter == 3 && chapter.bookmarked);
-                                            height: self.shown ? 70px : 0px; clip: true;
+                                            private property <int> rank: root.chapter-filter == 0 ? i
+                                                : root.chapter-filter == 1 ? root.detail-rank-unread[i]
+                                                : root.chapter-filter == 2 ? root.detail-rank-downloaded[i] : root.detail-rank-bookmarked[i];
+                                            x: Math.mod(self.rank, parent.columns) * (parent.column-width + 24px);
+                                            y: Math.floor(self.rank / parent.columns) * 70px;
+                                            width: parent.column-width;
+                                            height: 70px; visible: self.shown; clip: true;
                                             ChapterRow {
                                                 y: 0px; width: parent.width; height: 68px; visible: parent.shown;
                                                 window-width: root.width; window-height: root.height;

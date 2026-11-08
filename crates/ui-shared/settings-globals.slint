@@ -1,0 +1,125 @@
+// Settings page globals: the window, Rust and the separately compiled
+// settings pages share one copy of each.
+import { SettingsStyle, Theme, InterfaceStyle } from "@NovaUiBase/host-globals.slint";
+import { EntryCategoryRow } from "media-models.slint";
+
+export struct BackupOption { id: string, label: string, detail: string, checked: bool }
+export struct BackupMapping { id: string, label: string, target: string }
+
+export global ImageStorageSettings {
+    in-out property <bool> cache-enabled: true;
+    in-out property <int> cache-format: 1;
+    in-out property <float> cache-quality: 85;
+    in-out property <bool> cache-jxl-lossless-jpeg: false;
+    in-out property <bool> cache-lossless-inputs: false;
+    in-out property <bool> downloads-enabled: false;
+    in-out property <int> downloads-format: 1;
+    in-out property <float> downloads-quality: 85;
+    in-out property <bool> downloads-jxl-lossless-jpeg: false;
+    in-out property <bool> downloads-lossless-inputs: false;
+    in-out property <bool> cache-split-tall-pages: true;
+    in-out property <int> cache-split-threshold-index: 2;
+    in-out property <int> cache-strip-index: 2;
+    in-out property <bool> downloads-split-tall-pages: false;
+    in-out property <int> downloads-split-threshold-index: 2;
+    in-out property <int> downloads-strip-index: 2;
+    in-out property <[string]> split-threshold-names;
+    in-out property <[string]> strip-names;
+    in-out property <bool> disk-enabled: true;
+    in-out property <[string]> disk-limit-names;
+    in-out property <int> chapter-disk-limit-index: 3;
+    in-out property <int> artwork-disk-limit-index: 3;
+    in-out property <float> memory-budget: 128;
+    in-out property <[string]> poster-resolution-names;
+    in-out property <int> poster-resolution-index: 0;
+    in-out property <string> chapter-cache-info;
+    in-out property <string> chapter-cache-status;
+    in-out property <bool> chapter-cache-busy: false;
+    in-out property <string> thumbnail-cache-info;
+    in-out property <string> thumbnail-cache-status;
+    in-out property <bool> thumbnail-cache-busy: false;
+    callback settings-changed(string, int);
+    callback policy-changed();
+    callback chapter-cache-refresh();
+    callback chapter-cache-clear();
+    callback thumbnail-cache-refresh();
+    callback thumbnail-cache-clear();
+}
+
+export global ImageLimitSettings {
+    in-out property <string> encoded-mib: "32";
+    in-out property <string> width-pixels: "16384";
+    in-out property <string> height-pixels: "65536";
+    in-out property <string> megapixels: "32";
+    in-out property <string> decoded-mib: "128";
+    in-out property <string> message;
+    in-out property <bool> error: false;
+    callback save(string, string, string, string, string);
+    callback reset();
+    public function apply() {
+        ImageLimitSettings.save(ImageLimitSettings.encoded-mib, ImageLimitSettings.width-pixels,
+            ImageLimitSettings.height-pixels, ImageLimitSettings.megapixels, ImageLimitSettings.decoded-mib);
+    }
+}
+
+export global DownloadCleanupSettings {
+    in-out property <bool> enabled: false;
+    in-out property <[EntryCategoryRow]> categories;
+    callback changed(string);
+}
+
+export global CaptureSettings {
+    in-out property <int> format-index: 0;
+    in-out property <int> resolution-index: 0;
+    in-out property <int> conflict-policy: 0;
+    in-out property <float> jpeg-quality: 85;
+    in-out property <float> webp-quality: 85;
+    in-out property <float> avif-quality: 85;
+    in-out property <float> jxl-quality: 85;
+    in-out property <bool> series-folders: false;
+    // Shows the simple Save image and screencap actions (stored as simple_screencaps).
+    in-out property <bool> simple-screencaps: true;
+    in-out property <int> save-source-index: 0;
+    in-out property <bool> convert-saves: false;
+    callback settings-changed(string, int);
+}
+
+export global BackupBridge {
+    in-out property <bool> busy;
+    // A file is open for import, and whether its current choices were previewed.
+    in-out property <bool> importing;
+    in-out property <bool> preview_ready;
+    in-out property <bool> undoing;
+    in-out property <bool> replace;
+    in-out property <bool> can_undo;
+    in-out property <string> status;
+    in-out property <string> file_label;
+    in-out property <[BackupOption]> export_profiles;
+    in-out property <[BackupOption]> export_components;
+    in-out property <[BackupOption]> export_device;
+    in-out property <[BackupOption]> profiles;
+    in-out property <[BackupMapping]> mappings;
+    in-out property <[BackupOption]> components;
+    in-out property <[BackupOption]> device_components;
+    in-out property <[BackupOption]> conflicts;
+    in-out property <[string]> preview_rows;
+    // The shared confirmation sheet: 1 applies the previewed import, 2 deletes
+    // the recovery copies that were listed.
+    in-out property <bool> confirm_open;
+    in-out property <int> confirm_kind;
+    in-out property <string> confirm_message;
+    in-out property <string> confirm_label;
+    callback confirm_choice(int);
+    callback opened();
+    callback export_preset(int);
+    callback export_toggle(string, string);
+    callback export_file();
+    callback import_file();
+    callback import_toggle(string, string);
+    callback cycle_target(string);
+    callback mode_changed(bool);
+    callback build_preview();
+    callback apply_import();
+    callback undo();
+    callback delete_recovery();
+}

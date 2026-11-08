@@ -1,0 +1,26 @@
+// More → Settings sub-pages compiled apart from the window. One section
+// host in More mounts the open page; the page reports its height here
+// because a ComponentContainer does not pass on its child's layout.
+export global SettingsPages {
+    in-out property <component-factory> storage;
+    in-out property <component-factory> limits;
+    in-out property <component-factory> cleanup;
+    in-out property <component-factory> capture;
+    in-out property <component-factory> sync;
+    in-out property <component-factory> backup;
+    in-out property <component-factory> theme;
+    in-out property <component-factory> motion;
+    in-out property <component-factory> display;
+    // The host's size, and the open page's measured height.
+    in-out property <length> slot-width;
+    in-out property <length> slot-height;
+    in-out property <length> content-height;
+    // More's state, bound by the host.
+    in-out property <bool> interactive;
+    in-out property <bool> narrow;
+    in-out property <bool> phone-layout;
+    in-out property <bool> image-cache-busy;
+    in-out property <string> image-cache-info;
+    in-out property <string> image-cache-status;
+    callback image-cache-clear();
+}

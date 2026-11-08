@@ -67,7 +67,7 @@ fn lines(
         let start = out.len();
         push(&mut out, &mut y, 0, 44., format!("Day {d}"), false);
         for g in 0..groups {
-            push(&mut out, &mut y, 1, 84., format!("Series {d}-{g}"), false);
+            push(&mut out, &mut y, 1, 116., format!("Series {d}-{g}"), false);
             for _ in 0..chapters {
                 push(&mut out, &mut y, 2, 48., format!("Series {d}-{g}"), false);
             }

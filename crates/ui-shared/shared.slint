@@ -3,10 +3,14 @@
 export { Theme, ThemePalette, Anim, InterfaceStyle, SettingsStyle, ControlInput, SliderGesture, SheetItem, SettingsHighlight } from "@NovaUiBase/host-globals.slint";
 export { SettingsSync, SettingSyncInfo } from "../ui/sync-scope.slint";
 export { Appearance } from "appearance.slint";
-export { ItemRow, SettingRow, SourceRow, ExtensionRow, PageMenuItem } from "media-models.slint";
+export { ItemRow, SettingRow, SourceRow, ExtensionRow, PageMenuItem, EntryCategoryRow } from "media-models.slint";
 export { LibraryBridge } from "library-bridge.slint";
 export { TimelineBridge, TimelineEntry, ShelfEntry } from "timeline-bridge.slint";
 export { BrowseBridge, FilterGroup, FilterPill, SearchSection } from "browse-bridge.slint";
+export { ImageStorageSettings, ImageLimitSettings, DownloadCleanupSettings, CaptureSettings, BackupBridge, BackupOption, BackupMapping } from "settings-globals.slint";
+export { ReaderSyncSettings, SyncPeer, SyncInvite, SyncInspectorRow } from "sync-bridge.slint";
+export { SyncContent } from "sync-host.slint";
+export { SettingsPages } from "settings-pages.slint";
 
 // Not mounted: the library owns contracts and globals only.
 export component SharedRoot inherits Window { background: transparent; width: 1px; height: 1px; }

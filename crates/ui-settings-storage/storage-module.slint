@@ -1,0 +1,47 @@
+import { ImageStorageSettingsPage } from "../ui/image-storage-settings.slint";
+import { ImageLimitSettingsPage } from "../ui/image-limit-settings.slint";
+import { DownloadCleanupSettingsPage } from "../ui/download-cleanup-settings.slint";
+import { SettingsPages } from "@NovaUiShared";
+
+// The page reports its height: More's section host sizes to it.
+export component StorageModule inherits Window {
+    background: transparent;
+    width: SettingsPages.slot-width; height: SettingsPages.slot-height;
+    private property <length> measured: body.preferred-height;
+    changed measured => { SettingsPages.content-height = root.measured; }
+    init => { SettingsPages.content-height = root.measured; }
+    body := ImageStorageSettingsPage {
+        x: 0px; y: 0px; width: 100%; height: max(self.preferred-height, root.height);
+        interactive: SettingsPages.interactive;
+        busy: SettingsPages.image-cache-busy;
+        image-cache-info: SettingsPages.image-cache-info;
+        image-cache-status: SettingsPages.image-cache-status;
+        image-cache-clear => { SettingsPages.image-cache-clear(); }
+    }
+}
+
+// The page reports its height: More's section host sizes to it.
+export component LimitsModule inherits Window {
+    background: transparent;
+    width: SettingsPages.slot-width; height: SettingsPages.slot-height;
+    private property <length> measured: body.preferred-height;
+    changed measured => { SettingsPages.content-height = root.measured; }
+    init => { SettingsPages.content-height = root.measured; }
+    body := ImageLimitSettingsPage {
+        x: 0px; y: 0px; width: 100%; height: max(self.preferred-height, root.height);
+        interactive: SettingsPages.interactive;
+    }
+}
+
+// The page reports its height: More's section host sizes to it.
+export component CleanupModule inherits Window {
+    background: transparent;
+    width: SettingsPages.slot-width; height: SettingsPages.slot-height;
+    private property <length> measured: body.preferred-height;
+    changed measured => { SettingsPages.content-height = root.measured; }
+    init => { SettingsPages.content-height = root.measured; }
+    body := DownloadCleanupSettingsPage {
+        x: 0px; y: 0px; width: 100%; height: max(self.preferred-height, root.height);
+        interactive: SettingsPages.interactive;
+    }
+}

@@ -1,0 +1,29 @@
+import { ReaderSyncSettingsPage } from "../ui/sync-settings.slint";
+import { BackupPage } from "../ui/backup.slint";
+import { SettingsPages } from "@NovaUiShared";
+
+// The page reports its height: More's section host sizes to it.
+export component SyncModule inherits Window {
+    background: transparent;
+    width: SettingsPages.slot-width; height: SettingsPages.slot-height;
+    private property <length> measured: body.preferred-height;
+    changed measured => { SettingsPages.content-height = root.measured; }
+    init => { SettingsPages.content-height = root.measured; }
+    body := ReaderSyncSettingsPage {
+        x: 0px; y: 0px; width: 100%; height: max(self.preferred-height, root.height);
+        
+    }
+}
+
+// The page reports its height: More's section host sizes to it.
+export component BackupModule inherits Window {
+    background: transparent;
+    width: SettingsPages.slot-width; height: SettingsPages.slot-height;
+    private property <length> measured: body.preferred-height;
+    changed measured => { SettingsPages.content-height = root.measured; }
+    init => { SettingsPages.content-height = root.measured; }
+    body := BackupPage {
+        x: 0px; y: 0px; width: 100%; height: max(self.preferred-height, root.height);
+        interactive: SettingsPages.interactive;
+    }
+}

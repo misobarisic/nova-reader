@@ -74,6 +74,9 @@ fn detail_entrance_fades_like_nova_and_respects_motion_settings_on_both_shells()
     let ui = AppWindow::new().unwrap();
     let mut poster = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(1, 1);
     poster.make_mut_slice()[0] = slint::Rgba8Pixel::new(230, 40, 30, 255);
+    // As `artwork::set_series_poster` publishes it: the poster and the
+    // few-pixel backdrop the desktop hero paints across the top.
+    ui.set_series_backdrop(slint::Image::from_rgba8(poster.clone()));
     ui.set_series_poster(slint::Image::from_rgba8(poster));
     ui.set_series_title("Entrance fixture".into());
     ui.set_items(rows(8));

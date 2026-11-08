@@ -1,0 +1,15 @@
+import { CaptureSettingsPage } from "../ui/capture-settings.slint";
+import { SettingsPages } from "@NovaUiShared";
+
+// The page reports its height: More's section host sizes to it.
+export component CaptureModule inherits Window {
+    background: transparent;
+    width: SettingsPages.slot-width; height: SettingsPages.slot-height;
+    private property <length> measured: body.preferred-height;
+    changed measured => { SettingsPages.content-height = root.measured; }
+    init => { SettingsPages.content-height = root.measured; }
+    body := CaptureSettingsPage {
+        x: 0px; y: 0px; width: 100%; height: max(self.preferred-height, root.height);
+        interactive: SettingsPages.interactive;
+    }
+}

@@ -80,6 +80,7 @@ forward_globals!(
     ReaderSettings,
     ReaderSettingsSync,
     ReaderSyncSettings,
+    SettingsPages,
     SourceCompressionSettings,
     Theme,
     TimelineBridge,

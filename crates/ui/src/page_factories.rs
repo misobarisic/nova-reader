@@ -1,7 +1,7 @@
 //! Installs the separately compiled pages into the window. Factories keep only
 //! a weak window and reuse its shared-globals bundle, so a page sees the same
 //! `Theme`, `Appearance` and bridge objects as the window.
-use crate::{BrowseBridge, LibraryBridge, TimelineBridge};
+use crate::{BrowseBridge, LibraryBridge, SettingsPages, TimelineBridge};
 use slint::ComponentHandle;
 
 pub(crate) fn install(app: &crate::generated::AppWindow) {
@@ -56,6 +56,7 @@ pub(crate) fn install(app: &crate::generated::AppWindow) {
             .ok()
         }));
     install_browse(app);
+    install_settings(app);
 }
 
 /// Browse: the window's callbacks keep their behaviour; the app wires the
@@ -125,4 +126,74 @@ fn install_browse(app: &crate::generated::AppWindow) {
         .inspect_err(|error| eprintln!("nova-reader-ui: could not attach Browse: {error}"))
         .ok()
     }));
+}
+
+/// Each More → Settings sub-page mounts from its own crate.
+fn install_settings(app: &crate::generated::AppWindow) {
+    let pages = app.global::<SettingsPages>();
+    crate::forward_app_callbacks!(app, &pages;
+        on_image_cache_clear => invoke_image_cache_clear(),
+    );
+    macro_rules! page {
+        ($setter:ident, $module:path, $name:literal) => {{
+            let weak = app.as_weak();
+            pages.$setter(slint::ComponentFactory::new(move |context| {
+                let app = weak.upgrade()?;
+                // A new page measures itself; until then the slot is empty.
+                app.global::<SettingsPages>().set_content_height(0.);
+                <$module>::new_embedded_with_shared_globals(
+                    context,
+                    app.shared_globals_novauishared(),
+                )
+                .inspect_err(|error| {
+                    eprintln!(
+                        concat!("nova-reader-ui: could not attach Settings/", $name, ": {}"),
+                        error
+                    )
+                })
+                .ok()
+            }));
+        }};
+    }
+    page!(
+        set_storage,
+        nova_reader_ui_settings_storage::StorageModule,
+        "cache"
+    );
+    page!(
+        set_limits,
+        nova_reader_ui_settings_storage::LimitsModule,
+        "image limits"
+    );
+    page!(
+        set_cleanup,
+        nova_reader_ui_settings_storage::CleanupModule,
+        "downloads"
+    );
+    page!(
+        set_capture,
+        nova_reader_ui_settings_capture::CaptureModule,
+        "screenshots"
+    );
+    page!(set_sync, nova_reader_ui_settings_sync::SyncModule, "sync");
+    page!(
+        set_backup,
+        nova_reader_ui_settings_sync::BackupModule,
+        "data"
+    );
+    page!(
+        set_theme,
+        nova_reader_ui_settings_look::ThemeModule,
+        "theme"
+    );
+    page!(
+        set_motion,
+        nova_reader_ui_settings_look::MotionModule,
+        "motion"
+    );
+    page!(
+        set_display,
+        nova_reader_ui_settings_look::DisplayModule,
+        "display"
+    );
 }

@@ -12,12 +12,7 @@ import { SettingSyncBadge } from "@NovaUiBase/settings-sync.slint";
 import { Spinner } from "std-widgets.slint";
 import { ReaderField, ReaderSelect } from "controls.slint";
 import { SeriesGrid } from "library-cards.slint";
-import { PageMenu, HeaderIcon, PageTitle } from "page-menu.slint";
-
-global BrowseMetrics {
-    // Readable maximum for the source list on wide screens.
-    out property <length> column: 760px;
-}
+import { PageMenu, HeaderIcon, PageTitle, PageMetrics } from "page-menu.slint";
 
 component SourceIcon inherits Rectangle {
     in property <image> icon;
@@ -325,8 +320,26 @@ export component BrowsePage inherits Rectangle {
     clip: true;
     private property <bool> catalog: BrowseBridge.source-catalog-open;
     private property <bool> searching: !root.catalog && BrowseBridge.global-query != "";
-    private property <length> column-width: min(root.width, BrowseMetrics.column);
+    private property <bool> motion: Anim.enabled && Anim.transitions;
+    // 0 the source list, 1 a source's catalogue.
+    private property <float> catalog-in: root.catalog ? 1 : 0;
+    animate catalog-in { duration: root.motion ? Anim.transition_slide : 0ms; easing: ease-in-out; }
+    // The home list fades in a little lower when its content changes (tab,
+    // search results).
+    private property <float> home-swap: 1;
+    animate home-swap { duration: root.motion ? Anim.player_fade : 0ms; easing: ease-out; }
+    private property <int> home-view: root.searching ? 2 : BrowseBridge.browse-tab;
+    changed home-view => { root.home-swap = 0; home-swap-timer.start(); }
+    home-swap-timer := Timer { interval: 1ms; running: false; triggered => { self.stop(); root.home-swap = 1; } }
+    // Browse fills the page on every width, as Library does.
+    private property <length> column-width: root.width;
     private property <length> column-x: (root.width - root.column-width) / 2;
+    // Source and extension rows go two to a row on wide screens, as
+    // Updates and History do.
+    private property <int> list-columns: !BrowseBridge.narrow && root.width >= 960px ? 2 : 1;
+    // Wide screens keep buttons and the tab switch at a fixed size instead
+    // of stretching them across the page.
+    private property <bool> wide: !BrowseBridge.narrow && root.width >= 700px;
     private property <bool> stuck: root.catalog ? -catalog-scroll.content-y > 6px : -home-scroll.content-y > 6px;
     private property <bool> menu-open;
     private property <string> menu-kind;
@@ -439,16 +452,18 @@ export component BrowsePage inherits Rectangle {
             }
         }
     }
-    private property <length> catalog-header-height: 52px + 50px + 46px + 8px;
+    private property <length> catalog-header-height: root.head-top + PageMetrics.row + 50px + 46px + 4px;
     catalog-view := Rectangle {
-        x: 0px; y: 0px; width: root.width; height: root.height; visible: root.catalog;
+        // Slides in from the right over the source list, and back out.
+        x: (1 - root.catalog-in) * 48px; y: 0px; width: root.width; height: root.height;
+        opacity: root.catalog-in; visible: root.catalog-in > 0;
         catalog-scroll := LibraryScroll {
             x: 0px; y: root.catalog-header-height; width: parent.width; height: max(0px, parent.height - root.catalog-header-height);
             content-height: catalog-content.preferred-height;
             // Leaving Browse empties the grid; only a visible catalogue records.
             changed content-y => { if BrowseBridge.active && !BrowseBridge.catalogue-restore-pending { BrowseBridge.catalogue-scroll-y = self.content-y; } }
             catalog-content := VerticalLayout {
-                width: catalog-scroll.width; padding: 12px; padding-top: 4px; padding-bottom: 30px + BrowseBridge.bottom-padding; spacing: 14px; alignment: start;
+                width: catalog-scroll.width; padding: PageMetrics.side; padding-top: 4px; padding-bottom: 30px + BrowseBridge.bottom-padding; spacing: 14px; alignment: start;
                 if BrowseBridge.status != "": Rectangle {
                     min-height: catalog-status.preferred-height + 20px; background: Theme.current.selection_wash; border-radius: Theme.card_corner_radius;
                     catalog-status := Text { x: 12px; y: 10px; width: parent.width - 24px; text: BrowseBridge.status; color: Theme.current.text_settings; wrap: word-wrap; }
@@ -503,24 +518,26 @@ export component BrowsePage inherits Rectangle {
             TouchArea {}
             if root.stuck: Rectangle { y: parent.height - 1px; height: 1px; background: Theme.current.border_soft; }
             HorizontalLayout {
-                x: 8px; y: 4px; width: parent.width - 16px; height: 52px; spacing: 6px;
-                HeaderIcon {
-                    y: 4px; label: @tr("Back"); icon: @image-url("../../assets/icons/navigation/back.svg");
+                // The back arrow's glyph lines up with the content below; the
+                // options button's edge with the other pages' header icons.
+                x: PageMetrics.side - 11px; y: root.head-top; width: parent.width - 2 * PageMetrics.side + 11px; height: PageMetrics.row; spacing: 6px;
+                VerticalLayout { alignment: center; HeaderIcon {
+                    label: @tr("Back"); icon: @image-url("../../assets/icons/navigation/back.svg");
                     clicked => { BrowseBridge.back(); }
-                }
+                } }
                 VerticalLayout { alignment: center; SourceIcon { width: 34px; height: 34px; icon: BrowseBridge.catalog-icon; name: BrowseBridge.source-title; } }
                 VerticalLayout {
                     horizontal-stretch: 1; alignment: center; spacing: 1px; min-width: 0px;
                     PageTitle { text: BrowseBridge.source-title; full-size: 17px; stuck: false; overflow: elide; }
                     Text { text: BrowseBridge.catalog-language + (BrowseBridge.catalog-adult ? " · 18+" : ""); font-size: 12px; color: Theme.current.text_muted; overflow: elide; }
                 }
-                catalog-more := HeaderIcon {
-                    y: 4px; label: @tr("Source options"); icon: @image-url("../../assets/icons/navigation/more.svg");
+                VerticalLayout { alignment: center; catalog-more := HeaderIcon {
+                    label: @tr("Source options"); icon: @image-url("../../assets/icons/navigation/more.svg");
                     clicked => { root.open-menu("catalog", "", self.absolute-position.x + self.width, self.absolute-position.y + self.height); }
-                }
+                } }
             }
             Rectangle {
-                x: 16px; y: 60px; width: parent.width - 32px; height: 44px;
+                x: PageMetrics.side; y: root.head-top + 56px; width: parent.width - 2 * PageMetrics.side; height: 44px;
                 catalog-search := SearchField {
                     x: 0px; y: 0px; width: 100%; height: 44px; roomy: true; search-icon: true;
                     text <=> root.catalog-draft;
@@ -546,7 +563,7 @@ export component BrowsePage inherits Rectangle {
                 }
             }
             HorizontalLayout {
-                x: 16px; y: 108px; width: parent.width - 32px; height: 44px; spacing: 6px;
+                x: PageMetrics.side; y: root.head-top + 104px; width: parent.width - 2 * PageMetrics.side; height: 44px; spacing: 6px;
                 Flickable {
                     horizontal-stretch: 1; height: 44px;
                     content-width: catalog-chips.preferred-width; content-height: self.height; content-y: 0px;
@@ -603,15 +620,20 @@ export component BrowsePage inherits Rectangle {
     }
 
     // ----------------------------------------------------------- home
-    private property <length> home-header-height: 8px + 52px + 52px + (root.searching ? 0px : 52px) + 6px;
+    // Library's header inset; it goes once the list scrolls under it.
+    private property <length> head-top: root.stuck ? 0px : PageMetrics.top;
+    animate head-top { duration: Anim.enabled ? Anim.player_slide : 0ms; easing: ease-out; }
+    private property <length> home-header-height: root.head-top + PageMetrics.row + 52px + (root.searching ? 0px : 52px) + 6px;
     home := Rectangle {
-        x: 0px; y: 0px; width: root.width; height: root.height; visible: !root.catalog;
+        x: -root.catalog-in * 24px; y: 0px; width: root.width; height: root.height;
+        opacity: 1 - root.catalog-in; visible: root.catalog-in < 1;
         home-scroll := LibraryScroll {
             x: root.column-x; y: root.home-header-height; width: root.column-width;
             height: max(0px, parent.height - root.home-header-height);
             content-height: home-content.preferred-height;
             home-content := VerticalLayout {
-                width: home-scroll.width; padding-left: 16px; padding-right: 16px; padding-bottom: 24px + BrowseBridge.bottom-padding;
+                y: (1 - root.home-swap) * 8px; opacity: root.home-swap;
+                width: home-scroll.width; padding-left: PageMetrics.side; padding-right: PageMetrics.side; padding-bottom: 24px + BrowseBridge.bottom-padding;
                 spacing: 0px; alignment: start;
                 if BrowseBridge.status != "": Rectangle {
                     min-height: home-status.preferred-height + 20px; background: Theme.current.selection_wash; border-radius: Theme.card_corner_radius;
@@ -677,19 +699,23 @@ export component BrowsePage inherits Rectangle {
                     if BrowseBridge.has-last-used: VerticalLayout {
                         SectionTitle { text: @tr("Last used"); }
                         Tap {
-                            height: 140px; radius: Theme.card_corner_radius + 4px;
+                            height: root.wide ? 80px : 140px; radius: Theme.card_corner_radius + 4px;
                             label: @tr("Last used: {}", BrowseBridge.last-used.name);
                             background: @linear-gradient(135deg, Theme.current.selection_fill 0%, Theme.current.card 100%);
                             border-width: 1px; border-color: Theme.current.border_subtle;
                             activated => { root.open-source(BrowseBridge.last-used.index, "popular"); }
                             SourceIcon { x: 14px; y: 14px; width: 52px; height: 52px; icon: BrowseBridge.last-used.icon; name: BrowseBridge.last-used.name; }
                             VerticalLayout {
-                                x: 78px; y: 14px; width: parent.width - 92px; height: 52px; alignment: center; spacing: 2px;
+                                x: 78px; y: 14px; width: parent.width - 92px - (root.wide ? last-used-actions.width + 16px : 0px); height: 52px; alignment: center; spacing: 2px;
                                 Text { text: BrowseBridge.last-used.name; font-size: 17px; font-weight: 700; color: Theme.current.text_bright; overflow: elide; }
                                 Text { text: BrowseBridge.last-used-detail; font-size: 12px; color: Theme.current.text_secondary; overflow: elide; }
                             }
-                            HorizontalLayout {
-                                x: 14px; y: 80px; width: parent.width - 28px; height: 44px; spacing: 8px;
+                            // Phones: two halves under the name. Wide: two
+                                // fixed buttons at the card's end.
+                            last-used-actions := HorizontalLayout {
+                                x: root.wide ? parent.width - 14px - self.width : 14px; y: root.wide ? 18px : 80px;
+                                width: root.wide ? (BrowseBridge.last-used.latest ? 2 * 132px + 8px : 132px) : parent.width - 28px;
+                                height: 44px; spacing: 8px;
                                 WidePill {
                                     horizontal-stretch: 1; primary: true; text: @tr("Popular"); icon: @image-url("../../assets/icons/navigation/flame.svg");
                                     activated => { root.open-source(BrowseBridge.last-used.index, "popular"); }
@@ -704,17 +730,20 @@ export component BrowsePage inherits Rectangle {
                     if BrowseBridge.pinned.length > 0: VerticalLayout {
                         SectionTitle { text: @tr("Pinned"); action: @tr("Edit"); activated => { root.show-pin-buttons(); } }
                         Rectangle {
-                            private property <length> cell: (self.width - 3 * 10px) / 4;
-                            height: Math.ceil((BrowseBridge.pinned.length + 1) / 4) * 102px;
+                            // Four on phones; wide screens fit more instead of
+                            // spreading four across the page.
+                            private property <int> cols: max(4, Math.floor((self.width + 10px) / 110px));
+                            private property <length> cell: (self.width - (self.cols - 1) * 10px) / self.cols;
+                            height: Math.ceil((BrowseBridge.pinned.length + 1) / self.cols) * 102px;
                             for pin[i] in BrowseBridge.pinned: PinTile {
-                                x: Math.mod(i, 4) * (parent.cell + 10px); y: Math.floor(i / 4) * 102px; width: parent.cell;
+                                x: Math.mod(i, parent.cols) * (parent.cell + 10px); y: Math.floor(i / parent.cols) * 102px; width: parent.cell;
                                 source: pin;
                                 activated => { root.open-source(pin.index, "popular"); }
                                 unpin => { BrowseBridge.unpin(pin.id); }
                             }
                             Tap {
-                                x: Math.mod(BrowseBridge.pinned.length, 4) * (parent.cell + 10px);
-                                y: Math.floor(BrowseBridge.pinned.length / 4) * 102px;
+                                x: Math.mod(BrowseBridge.pinned.length, parent.cols) * (parent.cell + 10px);
+                                y: Math.floor(BrowseBridge.pinned.length / parent.cols) * 102px;
                                 width: parent.cell; height: 92px; radius: 12px; label: @tr("Add pinned source");
                                 activated => { root.show-pin-buttons(); }
                                 Rectangle {
@@ -749,11 +778,17 @@ export component BrowsePage inherits Rectangle {
                             }
                         }
                     }
-                    for source[i] in BrowseBridge.source-rows: SourceRowView {
-                        source: source; highlight-pin: root.highlight-pins;
-                        activated => { root.open-source(source.index, "popular"); }
-                        latest => { root.open-source(source.index, "latest"); }
-                        pin => { BrowseBridge.source-pin-picked(source.id); }
+                    Rectangle {
+                        private property <length> cell: (self.width - (root.list-columns - 1) * 12px) / root.list-columns;
+                        height: Math.ceil(BrowseBridge.source-rows.length / root.list-columns) * 64px;
+                        for source[i] in BrowseBridge.source-rows: SourceRowView {
+                            x: Math.mod(i, root.list-columns) * (parent.cell + 12px); y: Math.floor(i / root.list-columns) * 64px;
+                            width: parent.cell;
+                            source: source; highlight-pin: root.highlight-pins;
+                            activated => { root.open-source(source.index, "popular"); }
+                            latest => { root.open-source(source.index, "latest"); }
+                            pin => { BrowseBridge.source-pin-picked(source.id); }
+                        }
                     }
                     if BrowseBridge.source-rows.length == 0: Text {
                         height: 80px; vertical-alignment: center; wrap: word-wrap; color: Theme.current.text_secondary;
@@ -765,28 +800,33 @@ export component BrowsePage inherits Rectangle {
                 // browse refresh plan).
                 if !root.searching && BrowseBridge.browse-tab == 1: VerticalLayout {
                     SectionTitle { text: @tr("Installed"); trailing: BrowseBridge.extensions.length; }
-                    for extension[i] in BrowseBridge.extensions: Rectangle {
-                        height: 64px;
-                        opacity: extension.enabled ? 1 : 0.55;
-                        SourceIcon { x: 8px; y: 10px; width: 44px; height: 44px; icon: extension.icon; name: extension.name; }
-                        VerticalLayout {
-                            x: 64px; width: parent.width - self.x - 104px; alignment: center; spacing: 2px;
-                            Text { text: extension.name; font-size: 15px; font-weight: 600; color: Theme.current.text_bright; overflow: elide; }
-                            Text {
-                                text: extension.version + " · " + extension.language + " · " + (extension.sources == 1 ? @tr("1 source") : @tr("{} sources", extension.sources));
-                                font-size: 12px; color: Theme.current.text_muted; overflow: elide;
+                    Rectangle {
+                        private property <length> cell: (self.width - (root.list-columns - 1) * 12px) / root.list-columns;
+                        height: Math.ceil(BrowseBridge.extensions.length / root.list-columns) * 64px;
+                        for extension[i] in BrowseBridge.extensions: Rectangle {
+                            x: Math.mod(i, root.list-columns) * (parent.cell + 12px); y: Math.floor(i / root.list-columns) * 64px;
+                            width: parent.cell; height: 64px;
+                            opacity: extension.enabled ? 1 : 0.55;
+                            SourceIcon { x: 8px; y: 10px; width: 44px; height: 44px; icon: extension.icon; name: extension.name; }
+                            VerticalLayout {
+                                x: 64px; width: parent.width - self.x - 104px; alignment: center; spacing: 2px;
+                                Text { text: extension.name; font-size: 15px; font-weight: 600; color: Theme.current.text_bright; overflow: elide; }
+                                Text {
+                                    text: extension.version + " · " + extension.language + " · " + (extension.sources == 1 ? @tr("1 source") : @tr("{} sources", extension.sources));
+                                    font-size: 12px; color: Theme.current.text_muted; overflow: elide;
+                                }
                             }
-                        }
-                        ToggleSwitch {
-                            x: parent.width - 96px; y: (parent.height - self.height) / 2;
-                            name: @tr("{} enabled", extension.name); checked: extension.enabled;
-                            accessible-action-default => { BrowseBridge.extension-action(extension.id, "toggle"); }
-                            toggled => { BrowseBridge.extension-action(extension.id, "toggle"); }
-                        }
-                        HeaderIcon {
-                            x: parent.width - 44px; y: 10px; label: @tr("{} options", extension.name);
-                            icon: @image-url("../../assets/icons/navigation/more.svg");
-                            clicked => { root.open-menu("extension", extension.id, self.absolute-position.x + self.width, self.absolute-position.y + self.height); }
+                            ToggleSwitch {
+                                x: parent.width - 96px; y: (parent.height - self.height) / 2;
+                                name: @tr("{} enabled", extension.name); checked: extension.enabled;
+                                accessible-action-default => { BrowseBridge.extension-action(extension.id, "toggle"); }
+                                toggled => { BrowseBridge.extension-action(extension.id, "toggle"); }
+                            }
+                            HeaderIcon {
+                                x: parent.width - 44px; y: 10px; label: @tr("{} options", extension.name);
+                                icon: @image-url("../../assets/icons/navigation/more.svg");
+                                clicked => { root.open-menu("extension", extension.id, self.absolute-position.x + self.width, self.absolute-position.y + self.height); }
+                            }
                         }
                     }
                     Tap {
@@ -814,22 +854,22 @@ export component BrowsePage inherits Rectangle {
             TouchArea {}
             if root.stuck: Rectangle { y: parent.height - 1px; height: 1px; background: Theme.current.border_soft; }
             Rectangle {
-                x: root.column-x + 16px; y: 8px; width: root.column-width - 32px; height: parent.height - 8px;
+                x: root.column-x + PageMetrics.side; y: root.head-top; width: root.column-width - 2 * PageMetrics.side; height: parent.height - root.head-top;
                 HorizontalLayout {
-                    x: 0px; y: 0px; width: parent.width; height: 52px; spacing: 4px;
-                    if root.searching: HeaderIcon {
-                        y: 4px; label: @tr("Back to sources"); icon: @image-url("../../assets/icons/navigation/back.svg");
+                    x: 0px; y: 0px; width: parent.width; height: PageMetrics.row; spacing: 4px;
+                    if root.searching: VerticalLayout { alignment: center; HeaderIcon {
+                        label: @tr("Back to sources"); icon: @image-url("../../assets/icons/navigation/back.svg");
                         clicked => { root.global-draft = ""; BrowseBridge.global-search(""); }
-                    }
+                    } }
                     VerticalLayout {
                         alignment: center; horizontal-stretch: 1;
-                        PageTitle { text: @tr("Browse"); stuck: root.stuck; }
+                        PageTitle { text: @tr("Browse"); stuck: root.stuck; full-size: PageMetrics.title-size(BrowseBridge.narrow); }
                     }
                     if BrowseBridge.sync-enabled: VerticalLayout { alignment: center; SettingSyncBadge { setting_key: "reader:show-adult"; setting_title: @tr("Show adult sources"); } }
-                    browse-more := HeaderIcon {
-                        y: 4px; label: @tr("Browse options"); icon: @image-url("../../assets/icons/navigation/more.svg");
+                    VerticalLayout { alignment: center; browse-more := HeaderIcon {
+                        label: @tr("Browse options"); icon: @image-url("../../assets/icons/navigation/more.svg");
                         clicked => { root.open-menu("browse", "", self.absolute-position.x + self.width, self.absolute-position.y + self.height); }
-                    }
+                    } }
                 }
                 Rectangle {
                     x: 0px; y: 56px; width: parent.width; height: 46px;
@@ -861,14 +901,19 @@ export component BrowsePage inherits Rectangle {
                 }
                 // Sources | Extensions.
                 if !root.searching: Rectangle {
-                    x: 0px; y: 112px; width: parent.width; height: 42px;
+                    x: 0px; y: 112px; width: root.wide ? min(parent.width, 320px) : parent.width; height: 42px;
                     border-radius: Theme.button_corner_radius + 3px; background: Theme.current.hover_subtle;
                     accessible-role: tab-list; accessible-label: @tr("Browse");
+                    // One highlight that slides to the picked tab.
+                    Rectangle {
+                        x: 3px + BrowseBridge.browse-tab * (parent.width - 6px) / 2; y: 3px;
+                        width: (parent.width - 6px) / 2; height: 36px;
+                        border-radius: Theme.button_corner_radius; background: Theme.current.selection_fill;
+                        animate x { duration: root.motion ? Anim.player_slide : 0ms; easing: ease-in-out; }
+                    }
                     for tab-label[k] in [@tr("Sources"), @tr("Extensions")]: Tap {
                         x: 3px + k * (parent.width - 6px) / 2; y: 3px; width: (parent.width - 6px) / 2; height: 36px;
                         hover-wash: false; radius: Theme.button_corner_radius;
-                        background: BrowseBridge.browse-tab == k ? Theme.current.selection_fill : transparent;
-                        animate background { duration: Anim.enabled ? 140ms : 0ms; }
                         accessible-role: tab; accessible-item-selected: BrowseBridge.browse-tab == k;
                         label: k == 1 && BrowseBridge.attention-count > 0 ? @tr("{0}, {1} disabled", tab-label, BrowseBridge.attention-count) : tab-label;
                         activated => { BrowseBridge.browse-tab = k; }

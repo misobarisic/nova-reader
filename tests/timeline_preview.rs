@@ -31,9 +31,60 @@ fn cover(index: usize) -> slint::Image {
 struct Lines {
     out: Vec<TimelineEntry>,
     y: f32,
+    /// Lay cards out in two columns, as `timeline_groups::two_columns` does.
+    wide: bool,
+    /// Wide History: whole days side by side (`two_column_days`).
+    by_day: bool,
 }
 
 impl Lines {
+    fn two_column_days(&mut self) {
+        let starts: Vec<usize> = (0..self.out.len())
+            .filter(|&i| self.out[i].kind == 0)
+            .collect();
+        let original: Vec<f32> = self.out.iter().map(|e| e.y).collect();
+        let mut columns = [original[0]; 2];
+        for (k, &from) in starts.iter().enumerate() {
+            let to = starts.get(k + 1).copied().unwrap_or(self.out.len());
+            let next = starts.get(k + 1).map_or(self.y, |&n| original[n]);
+            let column = usize::from(columns[1] < columns[0]);
+            let shift = columns[column] - original[from];
+            for entry in &mut self.out[from..to] {
+                entry.y += shift;
+                entry.column = column as i32 + 1;
+            }
+            columns[column] += next - original[from];
+        }
+        self.y = columns[0].max(columns[1]);
+    }
+    fn two_columns(&mut self) {
+        let starts: Vec<usize> = (0..self.out.len())
+            .filter(|&i| [0, 1, 5, 6].contains(&self.out[i].kind))
+            .collect();
+        let original: Vec<f32> = self.out.iter().map(|e| e.y).collect();
+        let mut columns = [original[0]; 2];
+        let mut y = original[0];
+        for (k, &from) in starts.iter().enumerate() {
+            let to = starts.get(k + 1).copied().unwrap_or(self.out.len());
+            let next = starts.get(k + 1).map_or(self.y, |&n| original[n]);
+            let size = next - original[from];
+            if self.out[from].kind == 0 {
+                y = columns[0].max(columns[1]);
+                self.out[from].y = y;
+                y += size;
+                columns = [y; 2];
+                continue;
+            }
+            let column = usize::from(columns[1] < columns[0]);
+            let shift = columns[column] - original[from];
+            for entry in &mut self.out[from..to] {
+                entry.y += shift;
+                entry.column = column as i32 + 1;
+            }
+            columns[column] += size;
+        }
+        self.y = columns[0].max(columns[1]).max(y);
+    }
     fn push(&mut self, mut entry: TimelineEntry, height: f32, last: bool) {
         entry.index = self.out.len() as i32;
         entry.y = self.y;
@@ -46,12 +97,27 @@ impl Lines {
         self.out.push(entry);
     }
     fn finish(mut self, bridge: &TimelineBridge) {
+        if self.wide && self.by_day {
+            self.two_column_days();
+        } else if self.wide {
+            self.two_columns();
+        }
         let ends: Vec<usize> = (0..self.out.len())
             .filter(|&i| self.out[i].kind == 0)
             .collect();
         for (k, &i) in ends.iter().enumerate() {
             let next = ends.get(k + 1).map_or(self.y, |&j| self.out[j].y);
-            self.out[i].span = next - self.out[i].y;
+            let to = ends.get(k + 1).copied().unwrap_or(self.out.len());
+            self.out[i].span = if self.out[i].column == 0 {
+                next - self.out[i].y
+            } else {
+                self.out[i..to]
+                    .iter()
+                    .map(|e| e.y + e.height)
+                    .fold(0., f32::max)
+                    - self.out[i].y
+                    + 8.
+            };
         }
         let days: Vec<_> = ends.iter().map(|&i| self.out[i].clone()).collect();
         bridge.set_content_height(self.y);
@@ -68,10 +134,12 @@ fn line(kind: i32) -> TimelineEntry {
     }
 }
 
-fn updates(bridge: &TimelineBridge) {
+fn updates(bridge: &TimelineBridge, wide: bool) {
     let mut l = Lines {
         out: Vec::new(),
         y: 0.,
+        wide,
+        by_day: false,
     };
     l.push(
         TimelineEntry {
@@ -93,7 +161,7 @@ fn updates(bridge: &TimelineBridge) {
             poster: cover(1),
             ..line(1)
         },
-        84.,
+        116.,
         false,
     );
     for (n, read, state) in [(54, false, 0), (53, false, 2), (52, true, 5)] {
@@ -132,7 +200,7 @@ fn updates(bridge: &TimelineBridge) {
             poster: cover(0),
             ..line(5)
         },
-        84.,
+        116.,
         true,
     );
     l.push(
@@ -146,7 +214,7 @@ fn updates(bridge: &TimelineBridge) {
             poster: cover(4),
             ..line(1)
         },
-        84.,
+        116.,
         false,
     );
     l.push(
@@ -186,7 +254,7 @@ fn updates(bridge: &TimelineBridge) {
     );
     for (i, name) in [
         "The Ninth Lantern",
-        "Paper Tigers of Okane",
+        "Paper Tigers of Okane and the Lantern Festival of the Northern Coast",
         "Ember Courier",
     ]
     .iter()
@@ -200,7 +268,7 @@ fn updates(bridge: &TimelineBridge) {
                 poster: cover(i + 2),
                 ..line(5)
             },
-            84.,
+            116.,
             true,
         );
     }
@@ -210,10 +278,12 @@ fn updates(bridge: &TimelineBridge) {
     bridge.set_filter_counts(ModelRc::new(VecModel::from(vec![25, 17, 3])));
 }
 
-fn history(bridge: &TimelineBridge, timeline: bool) {
+fn history(bridge: &TimelineBridge, timeline: bool, wide: bool) {
     let mut l = Lines {
         out: Vec::new(),
         y: 312.,
+        wide,
+        by_day: true,
     };
     if timeline {
         l.push(
@@ -234,18 +304,19 @@ fn history(bridge: &TimelineBridge, timeline: bool) {
                 poster: cover(0),
                 ..line(6)
             },
-            64.,
+            82.,
             false,
         );
         l.push(
             TimelineEntry {
-                title: "Paper Tigers of Okane".into(),
+                title: "Paper Tigers of Okane and the Lantern Festival of the Northern Coast"
+                    .into(),
                 subtitle: "Chapter 99 · page 12/44".into(),
                 time: "13:10".into(),
                 poster: cover(3),
                 ..line(6)
             },
-            64.,
+            82.,
             false,
         );
     } else {
@@ -268,7 +339,7 @@ fn history(bridge: &TimelineBridge, timeline: bool) {
                 poster: cover(0),
                 ..line(1)
             },
-            84.,
+            116.,
             false,
         );
         for (n, t) in [(87, "21:42 · page 18 of 30"), (86, "21:20"), (85, "21:02")] {
@@ -292,15 +363,51 @@ fn history(bridge: &TimelineBridge, timeline: bool) {
         );
         l.push(
             TimelineEntry {
-                title: "Paper Tigers of Okane".into(),
+                title: "Paper Tigers of Okane and the Lantern Festival of the Northern Coast"
+                    .into(),
                 subtitle: "Chapter 99".into(),
                 time: "13:10".into(),
                 progress: 0.27,
                 poster: cover(3),
                 ..line(5)
             },
-            84.,
+            116.,
             true,
+        );
+    }
+    let timeline_view = timeline;
+    l.push(
+        TimelineEntry {
+            title: "Yesterday".into(),
+            subtitle: if timeline_view {
+                "Fri 7 Nov"
+            } else {
+                "Fri 7 Nov · 3 chapters"
+            }
+            .into(),
+            ..line(0)
+        },
+        if timeline_view { 36. } else { 44. },
+        false,
+    );
+    for (i, (name, detail, time)) in [
+        ("Ember Courier", "Chapter 18", "22:15"),
+        ("Salt & Saffron", "Chapter 40", "19:02"),
+        ("Tidebound", "Chapter 202 · page 3/41", "08:40"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        l.push(
+            TimelineEntry {
+                title: (*name).into(),
+                subtitle: (*detail).into(),
+                time: (*time).into(),
+                poster: cover(i + 2),
+                ..line(if timeline_view { 6 } else { 5 })
+            },
+            if timeline_view { 82. } else { 116. },
+            !timeline_view,
         );
     }
     l.finish(bridge);
@@ -350,10 +457,12 @@ fn updates_and_history_previews() {
             ui.global::<Anim>().set_enabled(false);
             ui.global::<Appearance>().set_history_view(view);
             let bridge = ui.global::<TimelineBridge>();
+            let wide = width >= 960;
+            bridge.set_columns(if wide { 2 } else { 1 });
             if section == 1 {
-                updates(&bridge)
+                updates(&bridge, wide)
             } else {
-                history(&bridge, view == 1)
+                history(&bridge, view == 1, wide)
             }
             ui.set_section(section);
             ui.show().unwrap();

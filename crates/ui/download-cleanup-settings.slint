@@ -2,13 +2,9 @@
 import { Theme } from "@NovaUiShared";
 import { SettingsCard, SectionHeader, ToggleSwitch, PillButton } from "@NovaUiBase/settings-controls.slint";
 import { SettingsRow } from "settings-row.slint";
-import { EntryCategoryRow } from "entry-menu.slint";
+import { EntryCategoryRow } from "@NovaUiShared";
+import { DownloadCleanupSettings } from "@NovaUiShared";
 
-export global DownloadCleanupSettings {
-    in-out property <bool> enabled: false;
-    in-out property <[EntryCategoryRow]> categories;
-    callback changed(string);
-}
 export component DownloadCleanupSettingsPage inherits VerticalLayout {
     in property <bool> interactive: true;
     spacing: 18px; alignment: start;

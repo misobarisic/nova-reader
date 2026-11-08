@@ -198,10 +198,25 @@ pub(super) fn publish(view: &mut View, snapshot: &ReaderState, ui: &AppWindow, i
     } else {
         groups::history_cards(&facts, &view.timeline.expansion, top)
     };
+    // Wide screens: Updates' cards fill two columns; History puts whole days
+    // side by side so each day stays one unbroken history.
+    let (lines, end) = match (bridge.get_columns() > 1, history) {
+        (true, false) => groups::two_columns(lines, end),
+        (true, true) => groups::two_column_days(lines, end),
+        (false, _) => (lines, end),
+    };
     let mut entries: Vec<TimelineEntry> = lines
         .iter()
         .enumerate()
-        .map(|(index, line)| entry(view, snapshot, &facts, line, index, history))
+        .map(|(index, line)| {
+            let mut out = entry(view, snapshot, &facts, line, index, history);
+            // Covers already decoded for the library rows; only cold ones
+            // arrive later through `request-artwork`.
+            if line.kind != Kind::Day {
+                out.poster = poster(items, &facts[line.facts[0]]);
+            }
+            out
+        })
         .collect();
     // A day's section runs to the next day's heading (or the list's end).
     let day_starts: Vec<usize> = (0..lines.len())
@@ -209,7 +224,18 @@ pub(super) fn publish(view: &mut View, snapshot: &ReaderState, ui: &AppWindow, i
         .collect();
     for (k, &i) in day_starts.iter().enumerate() {
         let next = day_starts.get(k + 1).map_or(end, |&j| lines[j].y);
-        entries[i].span = next - lines[i].y;
+        entries[i].span = if lines[i].column == 0 {
+            next - lines[i].y
+        } else {
+            // Days side by side: a day's section is its own lines.
+            let to = day_starts.get(k + 1).copied().unwrap_or(lines.len());
+            lines[i..to]
+                .iter()
+                .map(|l| l.y + l.height)
+                .fold(lines[i].y, f32::max)
+                - lines[i].y
+                + groups::CARD_GAP
+        };
     }
     let days: Vec<TimelineEntry> = day_starts.iter().map(|&i| entries[i].clone()).collect();
     let shelf_entries: Vec<ShelfEntry> = shelf
@@ -265,13 +291,26 @@ pub(super) fn publish(view: &mut View, snapshot: &ReaderState, ui: &AppWindow, i
         filter,
         appearance.get_history_view(),
     );
-    if view.timeline.shown.as_ref() != Some(&shown) {
+    let same_list = view.timeline.shown.as_ref() == Some(&shown);
+    if !same_list {
         bridge.set_reset_serial(bridge.get_reset_serial().wrapping_add(1));
         view.timeline.shown = Some(shown);
     }
-    // Update in place so the lines below an expanding group can slide.
     let model = bridge.get_entries();
     match model.as_any().downcast_ref::<VecModel<TimelineEntry>>() {
+        // The same list again (a group expanded, a chapter read): keep each
+        // line on its row so it slides to its new place, and insert or
+        // remove only the lines that changed, which fade in.
+        Some(existing) if same_list => {
+            let old: Vec<String> = view
+                .timeline
+                .lines
+                .iter()
+                .map(|line| identity(&view.timeline.facts, line))
+                .collect();
+            let new: Vec<String> = lines.iter().map(|line| identity(&facts, line)).collect();
+            patch(existing, &old, &new, entries);
+        }
         Some(existing) => existing.set_vec(entries),
         None => bridge.set_entries(ModelRc::new(VecModel::from(entries))),
     }
@@ -299,6 +338,53 @@ pub(super) fn publish(view: &mut View, snapshot: &ReaderState, ui: &AppWindow, i
     view.timeline.facts = facts;
     view.timeline.lines = lines;
     view.timeline.shelf = shelf;
+}
+
+/// What a line shows, stable across renders: its kind and group, and the
+/// chapter or day its first fact names.
+fn identity(facts: &[Fact], line: &Line) -> String {
+    let first = line.facts.first().and_then(|&i| facts.get(i));
+    format!(
+        "{:?}|{}|{}|{}|{:?}",
+        line.kind,
+        line.key,
+        first.map_or("", |f| f.series.as_str()),
+        first.map_or("", |f| f.chapter_title.as_str()),
+        first.and_then(|f| f.day_key),
+    )
+}
+
+/// Turn the rows named `old` into `entries` (named `new`): the common
+/// head and tail stay on their rows, the middle is removed and inserted.
+fn patch(
+    model: &VecModel<TimelineEntry>,
+    old: &[String],
+    new: &[String],
+    entries: Vec<TimelineEntry>,
+) {
+    if model.row_count() != old.len() {
+        model.set_vec(entries);
+        return;
+    }
+    let head = old.iter().zip(new).take_while(|(a, b)| a == b).count();
+    let tail = old[head..]
+        .iter()
+        .rev()
+        .zip(new[head..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    for _ in head..old.len() - tail {
+        model.remove(head);
+    }
+    for (offset, entry) in entries.iter().enumerate().take(new.len() - tail).skip(head) {
+        model.insert(offset, entry.clone());
+    }
+    for (row, entry) in entries.into_iter().enumerate() {
+        let inserted = row >= head && row < new.len() - tail;
+        if !inserted && model.row_data(row).as_ref() != Some(&entry) {
+            model.set_row_data(row, entry);
+        }
+    }
 }
 
 fn poster(items: &[ItemRow], fact: &Fact) -> slint::Image {
@@ -349,6 +435,7 @@ fn entry(
         height: line.height,
         expanded: line.expanded,
         last: line.last,
+        column: line.column,
         progress: -1.,
         count: line.facts.len() as i32,
         poster: Default::default(),
@@ -655,8 +742,17 @@ impl Controller {
                 )
                 .collect()
         };
+        let items = ui.get_items();
         for row in rows {
-            self.request_artwork(ui, row as i32, row as i32 + 1);
+            // A cover the row already holds is never requested again, so
+            // hand it to the timeline lines directly.
+            match items.row_data(row) {
+                Some(item) if item.poster.size().width > 0 => {
+                    let key = item.artwork_key.to_string();
+                    crate::artwork::set_timeline_posters(ui, |k| k == key, &item.poster);
+                }
+                _ => self.request_artwork(ui, row as i32, row as i32 + 1),
+            }
         }
     }
 }
@@ -698,6 +794,8 @@ pub(super) fn wire(app: &Arc<Controller>, ui: &AppWindow) {
         app.view().query = query.to_string();
         app.render(&ui);
     });
+    // Crossing the two-column width lays the lines out again.
+    on!(on_columns_changed, |app, ui| app.render(&ui));
     on!(on_shelf_picked, |app, ui, index| app
         .timeline_shelf_picked(&ui, index as usize));
     on!(on_request_artwork, |app, ui, first, last| app
@@ -711,6 +809,33 @@ pub(super) fn wire(app: &Arc<Controller>, ui: &AppWindow) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn patch_keeps_the_head_and_tail_rows_and_replaces_the_middle() {
+        let entry = |title: &str| TimelineEntry {
+            title: title.into(),
+            ..Default::default()
+        };
+        let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let model = VecModel::from(vec![entry("a"), entry("b"), entry("e")]);
+        let new = ["a", "b", "c", "d", "e"];
+        patch(
+            &model,
+            &names(&["a", "b", "e"]),
+            &names(&new),
+            new.iter().map(|n| entry(n)).collect(),
+        );
+        let titles: Vec<_> = model.iter().map(|e| e.title.to_string()).collect();
+        assert_eq!(titles, new);
+        patch(
+            &model,
+            &names(&new),
+            &names(&["a", "e"]),
+            vec![entry("a"), entry("e")],
+        );
+        let titles: Vec<_> = model.iter().map(|e| e.title.to_string()).collect();
+        assert_eq!(titles, ["a", "e"]);
+    }
     use reader_domain::{HistoryEntry, LibraryEntry, PublicationStatus, SeriesId};
 
     #[test]

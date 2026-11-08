@@ -1,0 +1,43 @@
+import { ThemeSettings, MotionSettings } from "../ui/theme-settings.slint";
+import { DisplaySettings } from "../ui/display-settings.slint";
+import { SettingsPages } from "@NovaUiShared";
+
+// The page reports its height: More's section host sizes to it.
+export component ThemeModule inherits Window {
+    background: transparent;
+    width: SettingsPages.slot-width; height: SettingsPages.slot-height;
+    private property <length> measured: body.preferred-height;
+    changed measured => { SettingsPages.content-height = root.measured; }
+    init => { SettingsPages.content-height = root.measured; }
+    body := ThemeSettings {
+        x: 0px; y: 0px; width: 100%; height: max(self.preferred-height, root.height);
+        interactive: SettingsPages.interactive;
+        narrow: SettingsPages.narrow; phone-layout: SettingsPages.phone-layout;
+    }
+}
+
+// The page reports its height: More's section host sizes to it.
+export component MotionModule inherits Window {
+    background: transparent;
+    width: SettingsPages.slot-width; height: SettingsPages.slot-height;
+    private property <length> measured: body.preferred-height;
+    changed measured => { SettingsPages.content-height = root.measured; }
+    init => { SettingsPages.content-height = root.measured; }
+    body := MotionSettings {
+        x: 0px; y: 0px; width: 100%; height: max(self.preferred-height, root.height);
+        interactive: SettingsPages.interactive;
+    }
+}
+
+// The page reports its height: More's section host sizes to it.
+export component DisplayModule inherits Window {
+    background: transparent;
+    width: SettingsPages.slot-width; height: SettingsPages.slot-height;
+    private property <length> measured: body.preferred-height;
+    changed measured => { SettingsPages.content-height = root.measured; }
+    init => { SettingsPages.content-height = root.measured; }
+    body := DisplaySettings {
+        x: 0px; y: 0px; width: 100%; height: max(self.preferred-height, root.height);
+        interactive: SettingsPages.interactive;
+    }
+}

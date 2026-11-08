@@ -59,17 +59,18 @@ pub(crate) enum Kind {
 impl Kind {
     /// Visual height in logical pixels. The list positions lines from these,
     /// so they must match `timeline-page.slint`.
-    pub(crate) fn height(self, history: bool, timeline: bool) -> f32 {
+    pub(crate) fn height(self, timeline: bool) -> f32 {
         match self {
             Kind::Day if timeline => 36.,
             Kind::Day => 44.,
-            Kind::GroupHeader => 84.,
+            // A 64×96 cover with 10px above and below.
+            Kind::GroupHeader => 116.,
             Kind::Chapter => 48.,
             Kind::ShowMore => 42.,
             Kind::GroupActions => 50.,
-            Kind::Single if history => 84.,
-            Kind::Single => 84.,
-            Kind::TimelineItem => 64.,
+            Kind::Single => 116.,
+            // A 44×66 cover with 8px above and below.
+            Kind::TimelineItem => 82.,
         }
     }
 }
@@ -109,6 +110,9 @@ pub(crate) struct Line {
     pub last: bool,
     pub y: f32,
     pub height: f32,
+    /// Two-column layout: 1 left, 2 right; 0 spans the width (day headings
+    /// and the single-column layout).
+    pub column: i32,
 }
 
 /// A day, then its series in order of their newest chapter.
@@ -160,21 +164,19 @@ fn group_key(prefix: &str, fact: &Fact) -> String {
 struct Builder {
     lines: Vec<Line>,
     y: f32,
-    history: bool,
     timeline: bool,
 }
 
 impl Builder {
-    fn new(history: bool, timeline: bool, top: f32) -> Self {
+    fn new(timeline: bool, top: f32) -> Self {
         Self {
             lines: Vec::new(),
             y: top,
-            history,
             timeline,
         }
     }
     fn push(&mut self, kind: Kind, key: String, facts: Vec<usize>) -> &mut Line {
-        let height = kind.height(self.history, self.timeline);
+        let height = kind.height(self.timeline);
         self.lines.push(Line {
             kind,
             key,
@@ -184,6 +186,7 @@ impl Builder {
             last: false,
             y: self.y,
             height,
+            column: 0,
         });
         self.y += height;
         self.lines.last_mut().unwrap()
@@ -205,7 +208,7 @@ pub(crate) fn updates(
     state: &ExpansionState,
     top: f32,
 ) -> (Vec<Line>, f32) {
-    let mut out = Builder::new(false, false, top);
+    let mut out = Builder::new(false, top);
     for day in days(facts) {
         out.push(Kind::Day, String::new(), day.facts.clone());
         for group in day.groups {
@@ -262,7 +265,7 @@ pub(crate) fn updates(
 /// History as session cards: one card per series per day, collapsed by
 /// default; a one-chapter session is a single row.
 pub(crate) fn history_cards(facts: &[Fact], state: &ExpansionState, top: f32) -> (Vec<Line>, f32) {
-    let mut out = Builder::new(true, false, top);
+    let mut out = Builder::new(false, top);
     for day in days(facts) {
         out.push(Kind::Day, String::new(), day.facts.clone());
         for session in day.groups {
@@ -289,7 +292,7 @@ pub(crate) fn history_cards(facts: &[Fact], state: &ExpansionState, top: f32) ->
 
 /// History as a timeline: one item per session under each day.
 pub(crate) fn history_timeline(facts: &[Fact], top: f32) -> (Vec<Line>, f32) {
-    let mut out = Builder::new(true, true, top);
+    let mut out = Builder::new(true, top);
     for day in days(facts) {
         out.push(Kind::Day, String::new(), day.facts.clone());
         for session in day.groups {
@@ -299,6 +302,82 @@ pub(crate) fn history_timeline(facts: &[Fact], top: f32) -> (Vec<Line>, f32) {
         out.y += CARD_GAP;
     }
     (out.lines, out.y)
+}
+
+/// Wide screens: lay each day's cards out in two columns. A card (a group
+/// with its chapters and actions, a single row or a timeline item) goes to
+/// the shorter column, so expanding one only moves the cards below it in
+/// its own column. Day headings span both columns. Gaps between lines are
+/// kept as the one-column layout made them.
+pub(crate) fn two_columns(mut lines: Vec<Line>, end: f32) -> (Vec<Line>, f32) {
+    let starts_card = |kind: Kind| {
+        matches!(
+            kind,
+            Kind::Day | Kind::GroupHeader | Kind::Single | Kind::TimelineItem
+        )
+    };
+    // Units: [first, last) ranges, each a day heading or one card.
+    let mut units: Vec<(usize, usize)> = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        if i == 0 || starts_card(line.kind) {
+            units.push((i, i + 1));
+        } else if let Some(unit) = units.last_mut() {
+            unit.1 = i + 1;
+        }
+    }
+    let original_y: Vec<f32> = lines.iter().map(|l| l.y).collect();
+    let Some(&first) = original_y.first() else {
+        return (lines, end);
+    };
+    let mut y = first;
+    let mut columns = [first; 2];
+    for (k, &(from, to)) in units.iter().enumerate() {
+        // The unit's footprint: its lines and the gap after them.
+        let next = units.get(k + 1).map_or(end, |&(n, _)| original_y[n]);
+        let size = next - original_y[from];
+        if lines[from].kind == Kind::Day {
+            y = columns[0].max(columns[1]);
+            lines[from].y = y;
+            lines[from].column = 0;
+            y += size;
+            columns = [y; 2];
+            continue;
+        }
+        let column = usize::from(columns[1] < columns[0]);
+        let shift = columns[column] - original_y[from];
+        for line in &mut lines[from..to] {
+            line.y += shift;
+            line.column = column as i32 + 1;
+        }
+        columns[column] += size;
+    }
+    (lines, columns[0].max(columns[1]).max(y))
+}
+
+/// Wide History: whole days go into the shorter of two columns, each day
+/// heading over its own sessions, so a day stays one unbroken history (a
+/// card-by-card split read as two separate histories per day).
+pub(crate) fn two_column_days(mut lines: Vec<Line>, end: f32) -> (Vec<Line>, f32) {
+    let starts: Vec<usize> = (0..lines.len())
+        .filter(|&i| lines[i].kind == Kind::Day)
+        .collect();
+    let Some(&first) = lines.first().map(|l| &l.y) else {
+        return (lines, end);
+    };
+    let original: Vec<f32> = lines.iter().map(|l| l.y).collect();
+    let mut columns = [first; 2];
+    for (k, &from) in starts.iter().enumerate() {
+        let to = starts.get(k + 1).copied().unwrap_or(lines.len());
+        let next = starts.get(k + 1).map_or(end, |&n| original[n]);
+        let column = usize::from(columns[1] < columns[0]);
+        let shift = columns[column] - original[from];
+        for line in &mut lines[from..to] {
+            line.y += shift;
+            line.column = column as i32 + 1;
+        }
+        columns[column] += next - original[from];
+    }
+    (lines, columns[0].max(columns[1]))
 }
 
 /// Header tap: a full group goes back to its peek, a peek closes to the
@@ -497,7 +576,7 @@ mod tests {
         // Positions follow the heights, with the gap after the card.
         assert_eq!(lines[1].y, 44.);
         let (_, end) = updates(&facts, true, &ExpansionState::new(), 0.);
-        assert_eq!(end, 44. + 84. + 3. * 48. + 42. + 50. + CARD_GAP);
+        assert_eq!(end, 44. + 116. + 3. * 48. + 42. + 50. + CARD_GAP);
     }
 
     #[test]
@@ -691,5 +770,52 @@ mod tests {
         assert_eq!(progress(&f), Some(0.3));
         f.pages = None;
         assert_eq!(progress(&f), None);
+    }
+    #[test]
+    fn two_columns_fill_the_shorter_side_under_full_width_days() {
+        let mut facts = burst("a", 1, 5, 1);
+        facts.extend(burst("b", 1, 1, 1));
+        facts.extend(burst("c", 1, 1, 1));
+        facts.extend(burst("d", 1, 1, 0));
+        let (lines, end) = updates(&facts, true, &ExpansionState::new(), 0.);
+        let (two, two_end) = two_columns(lines.clone(), end);
+        // Day headings span; the five-chapter group takes the left column,
+        // both singles fit on the right beside it.
+        assert_eq!(two[0].column, 0);
+        assert_eq!(two[1].column, 1);
+        let singles: Vec<_> = two.iter().filter(|l| l.kind == Kind::Single).collect();
+        assert_eq!(singles[0].column, 2);
+        assert_eq!(singles[0].y, two[1].y);
+        assert_eq!(singles[1].column, 2);
+        // The next day starts below the taller column.
+        let day = two.iter().rposition(|l| l.kind == Kind::Day).unwrap();
+        let group_end = two[1..day]
+            .iter()
+            .filter(|l| l.column == 1)
+            .map(|l| l.y + l.height)
+            .fold(0., f32::max);
+        assert_eq!(two[day].y, group_end + CARD_GAP);
+        assert!(two_end < end);
+    }
+    #[test]
+    fn wide_history_keeps_each_day_whole_in_one_column() {
+        let mut facts = burst("a", 1, 3, 2);
+        facts.extend(burst("b", 1, 1, 2));
+        facts.extend(burst("c", 1, 1, 1));
+        facts.extend(burst("d", 1, 1, 0));
+        let (lines, end) = history_timeline(&facts, 0.);
+        let (two, _) = two_column_days(lines, end);
+        let days: Vec<_> = two.iter().filter(|l| l.kind == Kind::Day).collect();
+        assert_eq!(days[0].column, 1);
+        assert_eq!(days[1].column, 2);
+        assert_eq!(days[1].y, days[0].y);
+        // Every line sits in its day's column.
+        let mut column = 0;
+        for line in &two {
+            if line.kind == Kind::Day {
+                column = line.column;
+            }
+            assert_eq!(line.column, column);
+        }
     }
 }

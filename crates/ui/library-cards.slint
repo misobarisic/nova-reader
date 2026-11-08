@@ -90,8 +90,9 @@ export component LibraryCard inherits Rectangle {
         width: 100%; height: 100%;
         y: root.lifted ? -4px : 0px;
         animate y { duration: Anim.hover_fast; easing: ease-out; }
+        // Explicit position: an unpositioned child is centred in the card.
         cover-art := Rectangle {
-            width: 100%; height: root.width * 3 / 2;
+            x: 0px; y: 0px; width: 100%; height: root.width * 3 / 2;
             border-radius: Theme.card_corner_radius; clip: true;
             background: Theme.current.home_artwork_placeholder;
             border-width: scope.has-focus ? 2px : 0px; border-color: Theme.current.focus_ring;
@@ -114,6 +115,25 @@ export component LibraryCard inherits Rectangle {
                     stroke: Theme.current.accent_soft; stroke-width: 2px;
                 }
             }
+            // Title and detail sit on the cover over a dark fade, so every
+            // cover reads the same whatever its colours.
+            Rectangle {
+                x: 0px; y: parent.height - self.height; width: 100%;
+                height: min(parent.height, caption.preferred-height + 36px);
+                background: @linear-gradient(180deg, #00000000 0%, #000000b3 55%, #000000e0 100%);
+            }
+            caption := VerticalLayout {
+                x: 8px; y: parent.height - self.height - 8px; width: parent.width - 16px; height: self.preferred-height;
+                spacing: 2px; alignment: end;
+                Text {
+                    text: root.card.title; color: #ffffff;
+                    font-size: 13px; font-weight: 600; wrap: word-wrap; max-lines: 2; overflow: elide; min-width: 0px;
+                }
+                if root.card.detail != "": Text {
+                    text: root.card.detail; font-size: 11px; overflow: elide; min-width: 0px;
+                    color: root.card.detail-success ? Theme.current.scope_synced_text : #ffffffb8;
+                }
+            }
             if root.partly-read: cover_progress_track := Rectangle {
                 y: parent.height - 3px; height: 3px; width: 100%;
                 background: Theme.current.progress_track_overlay;
@@ -123,18 +143,6 @@ export component LibraryCard inherits Rectangle {
                     x: 0px; y: 0px; height: 100%; background: Theme.current.progress_fill;
                     width: parent.width * root.card.completed / root.card.total;
                 }
-            }
-        }
-        VerticalLayout {
-            y: cover-art.height + 6px; width: 100%; height: parent.height - self.y;
-            spacing: 2px; alignment: start;
-            Text {
-                text: root.card.title; color: Theme.current.text_home_title;
-                font-size: 13px; font-weight: 600; wrap: word-wrap; max-lines: 2; overflow: elide; min-width: 0px;
-            }
-            if root.card.detail != "": Text {
-                text: root.card.detail; font-size: 11px; overflow: elide; min-width: 0px;
-                color: root.card.detail-success ? Theme.current.scope_synced_text : Theme.current.text_muted;
             }
         }
     }
@@ -259,12 +267,11 @@ export component SeriesGrid inherits Rectangle {
     out property <int> columns: root.list-view ? 1
         : max(root.library-style && root.width < 600px ? 3 : root.min-cols, Math.floor((root.width + Theme.card_spacing) / (160px + Theme.card_spacing)));
     private property <length> item-width: max(1px, min(root.list-view ? root.width : 230px, (root.width - (root.columns - 1) * Theme.card_spacing) / root.columns));
-    // Library cards: cover, then two title lines and one detail line.
+    // Library cards are the cover alone; the caption sits on it.
     private property <length> card-height: root.library-style
-        ? (root.list-view ? 94px : root.item-width * 3 / 2 + 54px)
+        ? (root.list-view ? 94px : root.item-width * 3 / 2)
         : root.list-view ? 138px : root.item-width * 3 / 2 + (root.overlay-caption ? 0px : 76px);
-    // A little more room between grid rows for two-line titles.
-    private property <length> stride: root.card-height + Theme.card_spacing + (root.library-style && !root.list-view ? 6px : 0px);
+    private property <length> stride: root.card-height + Theme.card_spacing;
     out property <length> row-stride: root.stride;
     private property <int> first-row: max(0, Math.floor((root.viewport-top - root.absolute-position.y) / root.stride) - 2);
     private property <int> last-row: max(0, Math.ceil((root.viewport-top + root.viewport-height - root.absolute-position.y) / root.stride) + 2);

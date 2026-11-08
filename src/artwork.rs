@@ -662,7 +662,7 @@ fn admit(ui: &AppWindow, id: u64, shared: &Shared, key: &str, loaded: Loaded) {
 
 /// Updates/History lines and the History shelf also carry covers: set the
 /// image on every entry whose key `matches` (and whose cover differs).
-fn set_timeline_posters(ui: &AppWindow, matches: impl Fn(&str) -> bool, image: &Image) {
+pub(crate) fn set_timeline_posters(ui: &AppWindow, matches: impl Fn(&str) -> bool, image: &Image) {
     use slint::ComponentHandle;
     let bridge = ui.global::<crate::TimelineBridge>();
     let entries = bridge.get_entries();
@@ -712,8 +712,55 @@ fn publish(ui: &AppWindow, key: &str, image: Image) {
     set_timeline_posters(ui, |row| row == key, &image);
     crate::app::set_global_posters(ui, |row| row == key, &image);
     if ui.get_series_artwork_key().as_str() == key {
-        ui.set_series_poster(image);
+        set_series_poster(ui, image);
     }
+}
+
+/// The detail screen's poster, and the few-pixel copy its desktop hero
+/// scales up smoothly into a blurred backdrop.
+pub(crate) fn set_series_poster(ui: &AppWindow, image: Image) {
+    ui.set_series_backdrop(backdrop(&image).unwrap_or_default());
+    ui.set_series_poster(image);
+}
+
+/// Average the poster down to `WIDTH` pixels across (keeping its shape).
+fn backdrop(image: &Image) -> Option<Image> {
+    const WIDTH: u32 = 12;
+    let source = image.to_rgba8()?;
+    let (w, h) = (source.width(), source.height());
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let height = (WIDTH * h / w).clamp(1, 48);
+    let pixels = source.as_slice();
+    let mut out = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(WIDTH, height);
+    for (i, pixel) in out.make_mut_slice().iter_mut().enumerate() {
+        let (x, y) = (i as u32 % WIDTH, i as u32 / WIDTH);
+        let (x0, x1) = (x * w / WIDTH, ((x + 1) * w / WIDTH).max(x * w / WIDTH + 1));
+        let (y0, y1) = (
+            y * h / height,
+            ((y + 1) * h / height).max(y * h / height + 1),
+        );
+        // Every fourth pixel each way is plenty for an average.
+        let (mut sum, mut count) = ([0u64; 3], 0u64);
+        for sy in (y0..y1.min(h)).step_by(4) {
+            for sx in (x0..x1.min(w)).step_by(4) {
+                let p = pixels[(sy * w + sx) as usize];
+                sum[0] += u64::from(p.r);
+                sum[1] += u64::from(p.g);
+                sum[2] += u64::from(p.b);
+                count += 1;
+            }
+        }
+        let count = count.max(1);
+        *pixel = slint::Rgba8Pixel::new(
+            (sum[0] / count) as u8,
+            (sum[1] / count) as u8,
+            (sum[2] / count) as u8,
+            255,
+        );
+    }
+    Some(Image::from_rgba8(out))
 }
 
 fn forget_images(ui: &AppWindow, id: u64, keys: &BTreeSet<String>) {
@@ -749,7 +796,7 @@ fn forget_images(ui: &AppWindow, id: u64, keys: &BTreeSet<String>) {
     set_timeline_posters(ui, |row| keys.contains(row), &Image::default());
     crate::app::set_global_posters(ui, |row| keys.contains(row), &Image::default());
     if keys.contains(ui.get_series_artwork_key().as_str()) {
-        ui.set_series_poster(Image::default());
+        set_series_poster(ui, Image::default());
     }
 }
 

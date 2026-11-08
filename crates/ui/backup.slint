@@ -5,49 +5,9 @@
 import { Theme } from "@NovaUiShared";
 import { SettingsCard, SectionHeader, ToggleSwitch, PillButton } from "@NovaUiBase/settings-controls.slint";
 import { SettingsRow } from "settings-row.slint";
+import { BackupBridge, BackupOption, BackupMapping } from "@NovaUiShared";
 
-export struct BackupOption { id: string, label: string, detail: string, checked: bool }
-export struct BackupMapping { id: string, label: string, target: string }
 
-export global BackupBridge {
-    in-out property <bool> busy;
-    // A file is open for import, and whether its current choices were previewed.
-    in-out property <bool> importing;
-    in-out property <bool> preview_ready;
-    in-out property <bool> undoing;
-    in-out property <bool> replace;
-    in-out property <bool> can_undo;
-    in-out property <string> status;
-    in-out property <string> file_label;
-    in-out property <[BackupOption]> export_profiles;
-    in-out property <[BackupOption]> export_components;
-    in-out property <[BackupOption]> export_device;
-    in-out property <[BackupOption]> profiles;
-    in-out property <[BackupMapping]> mappings;
-    in-out property <[BackupOption]> components;
-    in-out property <[BackupOption]> device_components;
-    in-out property <[BackupOption]> conflicts;
-    in-out property <[string]> preview_rows;
-    // The shared confirmation sheet: 1 applies the previewed import, 2 deletes
-    // the recovery copies that were listed.
-    in-out property <bool> confirm_open;
-    in-out property <int> confirm_kind;
-    in-out property <string> confirm_message;
-    in-out property <string> confirm_label;
-    callback confirm_choice(int);
-    callback opened();
-    callback export_preset(int);
-    callback export_toggle(string, string);
-    callback export_file();
-    callback import_file();
-    callback import_toggle(string, string);
-    callback cycle_target(string);
-    callback mode_changed(bool);
-    callback build_preview();
-    callback apply_import();
-    callback undo();
-    callback delete_recovery();
-}
 
 // PillButton has no default accessibility action of its own; give screen
 // readers and headless tests the same activation a tap performs.

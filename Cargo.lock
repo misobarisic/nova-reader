@@ -5009,6 +5009,10 @@ dependencies = [
  "i-slint-core",
  "nova-reader-ui-browse",
  "nova-reader-ui-library",
+ "nova-reader-ui-settings-capture",
+ "nova-reader-ui-settings-look",
+ "nova-reader-ui-settings-storage",
+ "nova-reader-ui-settings-sync",
  "nova-reader-ui-shared",
  "nova-reader-ui-timeline",
  "nova-ui-base",
@@ -5029,6 +5033,50 @@ dependencies = [
 
 [[package]]
 name = "nova-reader-ui-library"
+version = "0.1.0"
+dependencies = [
+ "i-slint-core",
+ "nova-reader-ui-shared",
+ "nova-ui-base",
+ "slint",
+ "slint-build",
+]
+
+[[package]]
+name = "nova-reader-ui-settings-capture"
+version = "0.1.0"
+dependencies = [
+ "i-slint-core",
+ "nova-reader-ui-shared",
+ "nova-ui-base",
+ "slint",
+ "slint-build",
+]
+
+[[package]]
+name = "nova-reader-ui-settings-look"
+version = "0.1.0"
+dependencies = [
+ "i-slint-core",
+ "nova-reader-ui-shared",
+ "nova-ui-base",
+ "slint",
+ "slint-build",
+]
+
+[[package]]
+name = "nova-reader-ui-settings-storage"
+version = "0.1.0"
+dependencies = [
+ "i-slint-core",
+ "nova-reader-ui-shared",
+ "nova-ui-base",
+ "slint",
+ "slint-build",
+]
+
+[[package]]
+name = "nova-reader-ui-settings-sync"
 version = "0.1.0"
 dependencies = [
  "i-slint-core",

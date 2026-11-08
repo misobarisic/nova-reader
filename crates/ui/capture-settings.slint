@@ -4,22 +4,8 @@ import { SettingsCard, SectionHeader, PillButton, MiniSlider, ValueBox, ToggleSw
 import { ReaderSelect } from "controls.slint";
 import { Segmented } from "@NovaUiBase/settings-controls.slint";
 import { SettingsRow } from "settings-row.slint";
+import { CaptureSettings } from "@NovaUiShared";
 
-export global CaptureSettings {
-    in-out property <int> format-index: 0;
-    in-out property <int> resolution-index: 0;
-    in-out property <int> conflict-policy: 0;
-    in-out property <float> jpeg-quality: 85;
-    in-out property <float> webp-quality: 85;
-    in-out property <float> avif-quality: 85;
-    in-out property <float> jxl-quality: 85;
-    in-out property <bool> series-folders: false;
-    // Shows the simple Save image and screencap actions (stored as simple_screencaps).
-    in-out property <bool> simple-screencaps: true;
-    in-out property <int> save-source-index: 0;
-    in-out property <bool> convert-saves: false;
-    callback settings-changed(string, int);
-}
 
 // NumericSetting is owned by Nova's settings host; its three building blocks
 // remain Kit controls so touch targets, slider behavior and value boxes match.

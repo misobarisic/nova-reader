@@ -1367,6 +1367,25 @@ pub(crate) fn publish_chapter_filter_counts(ui: &AppWindow) {
     ui.set_detail_downloaded_count(rows.iter().filter(|row| row.downloaded).count() as i32);
     ui.set_detail_bookmarked_count(rows.iter().filter(|row| row.bookmarked).count() as i32);
     ui.set_detail_new_count(rows.iter().filter(|row| row.is_new).count() as i32);
+    // Each row's place among the rows a filter shows, so wide screens can
+    // split the shown chapters into two even columns.
+    let ranks = |shown: fn(&ItemRow) -> bool| {
+        let mut next = 0;
+        let ranks = rows
+            .iter()
+            .map(|row| {
+                let rank = next;
+                if shown(row) {
+                    next += 1;
+                }
+                rank
+            })
+            .collect::<Vec<i32>>();
+        ModelRc::new(VecModel::from(ranks))
+    };
+    ui.set_detail_rank_unread(ranks(|row| !row.read));
+    ui.set_detail_rank_downloaded(ranks(|row| row.downloaded));
+    ui.set_detail_rank_bookmarked(ranks(|row| row.bookmarked));
 }
 fn has_saved_reading_position(progress: &ReadingProgress) -> bool {
     !progress.completed && !progress.anchor.is_cleared() && !progress.anchor.page_id.is_empty()
@@ -2073,7 +2092,10 @@ impl Controller {
                     )));
                     let key = crate::artwork::key(series);
                     ui.set_series_artwork_key(key.into());
-                    ui.set_series_poster(self.artwork.cached_image(series).unwrap_or_default());
+                    crate::artwork::set_series_poster(
+                        ui,
+                        self.artwork.cached_image(series).unwrap_or_default(),
+                    );
                     ui.set_in_library(snapshot.library.iter().any(|l| l.series == series.id));
                     view.chapters = snapshot
                         .chapters
@@ -6608,7 +6630,7 @@ pub fn run(services: Services) -> Result<()> {
                 model.set_row_data(i, row);
             }
         }
-        ui.set_series_poster(slint::Image::default());
+        crate::artwork::set_series_poster(&ui, slint::Image::default());
     });
     {
         let owner = app.clone();

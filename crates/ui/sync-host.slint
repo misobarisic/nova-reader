@@ -1,13 +1,3 @@
-import { SettingsStyle } from "@NovaUiShared";
-export { ReaderSyncSettings as SyncBridge } from "sync-bridge.slint";
-export global SyncContent {
-    in-out property <bool> advanced_visible: true;
-    in-out property <bool> input_focused: false;
-    in-out property <length> content_min_height;
-    in-out property <length> content_preferred_height;
-    in-out property <bool> sync_remove_prompt_visible: false;
-    in-out property <string> sync_remove_prompt_id;
-    in-out property <string> sync_remove_prompt_name;
-    callback schedule_setting(string);
-    public function reveal_detail_control(y: length, height: length) { SettingsStyle.reveal_control(y, height, false); }
-}
+// Kit's sync page imports its host globals from `@NovaSyncHost`. Every UI
+// crate resolves that here, to the shared library's single copies.
+export { ReaderSyncSettings as SyncBridge, SyncContent } from "@NovaUiShared";

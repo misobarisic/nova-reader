@@ -12,6 +12,10 @@ nova-reader-ui-shared = { path = "../ui-shared" }
 nova-reader-ui-library = { path = "../ui-library" }
 nova-reader-ui-timeline = { path = "../ui-timeline" }
 nova-reader-ui-browse = { path = "../ui-browse" }
+nova-reader-ui-settings-storage = { path = "../ui-settings-storage" }
+nova-reader-ui-settings-capture = { path = "../ui-settings-capture" }
+nova-reader-ui-settings-sync = { path = "../ui-settings-sync" }
+nova-reader-ui-settings-look = { path = "../ui-settings-look" }
 
 [build-dependencies]
 slint-build = { workspace = true, features = ["experimental-module-builds"] }

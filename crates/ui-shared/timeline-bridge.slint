@@ -32,6 +32,8 @@ export struct TimelineEntry {
     has-unread: bool,
     // Closes a card: bottom corners.
     last: bool,
+    // Wide layout: 1 left, 2 right column; 0 the full width.
+    column: int,
     poster: image,
     artwork-key: string,
 }
@@ -43,7 +45,7 @@ export struct ShelfEntry {
     headline: string,
     detail: string,
     progress: float,
-    // Caught up: no next chapter, no play badge.
+    // Caught up: no next chapter; the card does not open anything.
     caught-up: bool,
     poster: image,
     artwork-key: string,
@@ -94,4 +96,7 @@ export global TimelineBridge {
     callback search(string);
     callback shelf-picked(int);
     callback request-artwork(int, int);
+    // 2 on wide screens; Rust lays the lines out in two columns.
+    in-out property <int> columns: 1;
+    callback columns-changed();
 }

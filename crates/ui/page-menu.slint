@@ -178,6 +178,15 @@ export component HeaderIcon inherits Rectangle {
 }
 
 // The pinned page title: shrinks from the page size to 20px after scrolling.
+// Shared page header geometry, taken from Library: Updates, History and
+// Browse line their titles, icons and content up with it.
+export global PageMetrics {
+    out property <length> side: 18px;
+    out property <length> top: 18px;
+    out property <length> row: 52px;
+    pure public function title-size(narrow: bool) -> length { return narrow ? 28px : 32px; }
+}
+
 export component PageTitle inherits Text {
     in property <bool> stuck;
     in property <length> full-size: 28px;

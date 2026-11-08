@@ -542,7 +542,7 @@ fn poster_layout_timelines_chapters_and_reader_controls() {
     let single = |kind: i32, y: f32| nova_reader::TimelineEntry {
         kind,
         y,
-        height: if kind == 0 { 44. } else { 84. },
+        height: if kind == 0 { 44. } else { 116. },
         title: if kind == 0 { "Today" } else { "Story 0" }.into(),
         subtitle: "Chapter 0".into(),
         time: "12:30".into(),

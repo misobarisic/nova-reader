@@ -10,15 +10,13 @@ import { LibraryFilterChip } from "@NovaUiBase/filter-chip.slint";
 import { SearchField } from "@NovaUiBase/searchfield.slint";
 import { Spinner } from "std-widgets.slint";
 import { DownloadRing } from "download-controls.slint";
-import { PageMenu, HeaderIcon, PageTitle } from "page-menu.slint";
+import { PageMenu, HeaderIcon, PageTitle, PageMetrics } from "page-menu.slint";
 
 // History's "Pick up" shelf, and the section title under it. Rust starts the
 // list at `SHELF_TOP` in `src/timeline_page.rs`; keep the two in step.
 global TimelineMetrics {
     out property <length> shelf-height: 268px;
     out property <length> section-height: 44px;
-    // Content column on wide screens.
-    out property <length> column: 760px;
 }
 
 component Cover inherits Rectangle {
@@ -98,6 +96,10 @@ component TimelineLine inherits Rectangle {
     in property <TimelineEntry> entry;
     in property <bool> history;
     in property <bool> timeline;
+    // Two columns: "Mark read" follows the day's date instead of sitting at
+    // the far right, where it read as part of the right-hand column.
+    private property <bool> inline-mark: TimelineBridge.columns > 1;
+    private property <bool> can-mark: root.entry.kind == 0 && !root.timeline && !root.history && root.entry.has-unread;
     callback picked;
     callback series-picked;
     callback action(string);
@@ -116,11 +118,18 @@ component TimelineLine inherits Rectangle {
 
     // Day heading.
     if root.entry.kind == 0 && !root.timeline: HorizontalLayout {
-        x: 4px; y: 0px; width: parent.width - 4px - (root.history ? 0px : 84px); height: 100%; padding-top: 14px; padding-bottom: 8px; spacing: 8px;
+        x: 4px; y: 0px; width: parent.width - 4px - (root.history || root.inline-mark ? 0px : 84px); height: 100%; padding-top: 14px; padding-bottom: 8px; spacing: 8px;
         Text { text: root.entry.title; font-size: 15px; font-weight: 700; color: Theme.current.text_bright; vertical-alignment: bottom; }
-        Text { text: root.entry.subtitle; font-size: 12px; color: Theme.current.text_muted; vertical-alignment: bottom; horizontal-stretch: 1; overflow: elide; min-width: 0px; }
+        Text { text: root.entry.subtitle; font-size: 12px; color: Theme.current.text_muted; vertical-alignment: bottom; horizontal-stretch: root.inline-mark ? 0 : 1; overflow: elide; min-width: 0px; }
+        if root.inline-mark && root.can-mark: Tap {
+            width: inline-mark-text.preferred-width + 16px; radius: Theme.button_corner_radius;
+            label: @tr("Mark {} read", root.entry.title);
+            activated => { root.action("mark-day-read"); }
+            inline-mark-text := Text { x: 8px; y: 0px; height: 100%; text: @tr("Mark read"); font-size: 12px; color: Theme.current.accent_soft; vertical-alignment: bottom; }
+        }
+        if root.inline-mark: Rectangle { horizontal-stretch: 1; }
     }
-    if root.entry.kind == 0 && !root.timeline && !root.history && root.entry.has-unread: Tap {
+    if root.can-mark && !root.inline-mark: Tap {
         x: parent.width - 84px; y: 0px; width: 84px; height: 44px; radius: Theme.button_corner_radius;
         label: @tr("Mark {} read", root.entry.title);
         activated => { root.action("mark-day-read"); }
@@ -141,16 +150,16 @@ component TimelineLine inherits Rectangle {
         activated => { root.action("toggle"); }
         accessible-expandable: true; accessible-expanded: root.entry.expanded;
         Tap {
-            x: 10px; y: 10px; width: 44px; height: 64px; hover-wash: false;
+            x: 12px; y: 10px; width: 64px; height: 96px; hover-wash: false;
             radius: min(Theme.card_corner_radius, 7px);
             label: @tr("Open series details: {}", root.entry.title);
             activated => { root.series-picked(); }
             Cover { width: 100%; height: 100%; poster: root.entry.poster; }
         }
         VerticalLayout {
-            x: 66px; width: parent.width - self.x - (root.history ? 44px : 86px);
+            x: 90px; width: parent.width - self.x - (root.history ? 44px : 86px);
             alignment: center; spacing: 3px;
-            Text { text: root.entry.title; font-size: 15px; font-weight: 600; color: Theme.current.text_home_title; overflow: elide; }
+            Text { text: root.entry.title; font-size: 15px; font-weight: 600; color: Theme.current.text_home_title; wrap: word-wrap; max-lines: 2; overflow: elide; min-width: 0px; }
             HorizontalLayout {
                 spacing: 0px;
                 Text { text: root.entry.emphasis; font-size: 12px; font-weight: 600; color: Theme.current.accent_vivid; }
@@ -184,11 +193,11 @@ component TimelineLine inherits Rectangle {
             + (!root.history && !root.entry.read ? ", " + @tr("unread") : "");
         activated => { root.picked(); }
         if !root.history: Rectangle {
-            x: 50px; y: (parent.height - 6px) / 2; width: 6px; height: 6px; border-radius: 3px;
+            x: 74px; y: (parent.height - 6px) / 2; width: 6px; height: 6px; border-radius: 3px;
             background: Theme.current.accent_vivid; visible: !root.entry.read;
         }
         HorizontalLayout {
-            x: 66px; width: parent.width - self.x - 48px; spacing: 6px;
+            x: 90px; width: parent.width - self.x - 48px; spacing: 6px;
             Text {
                 text: root.entry.subtitle; font-size: 14px; overflow: elide; vertical-alignment: center; min-width: 0px;
                 color: root.entry.read && !root.history ? Theme.current.text_muted : Theme.current.text_primary;
@@ -218,10 +227,11 @@ component TimelineLine inherits Rectangle {
         }
     }
 
-    // Narrow cards drop the pill icons so the three actions still fit.
-    private property <bool> compact-actions: root.width < 380px;
+    // Narrow cards start the actions under the cover rather than the title
+    // and drop the pill icons so the three actions still fit.
+    private property <bool> compact-actions: root.width < 420px;
     if root.entry.kind == 4: HorizontalLayout {
-        x: 66px; y: 0px; width: parent.width - 76px; height: 100%; padding-top: 8px; padding-bottom: 10px; spacing: 6px; alignment: start;
+        x: root.compact-actions ? 12px : 90px; y: 0px; width: parent.width - self.x - 10px; height: 100%; padding-top: 8px; padding-bottom: 10px; spacing: 6px; alignment: start;
         if root.entry.action != "": Pill {
             has-icon: !root.compact-actions || root.history; primary: true; text: root.entry.action;
             icon: @image-url("../../assets/icons/navigation/play.svg");
@@ -247,15 +257,15 @@ component TimelineLine inherits Rectangle {
         label: root.entry.title + ", " + root.entry.subtitle + (!root.history && !root.entry.read ? ", " + @tr("unread") : "");
         activated => { root.picked(); }
         Tap {
-            x: 10px; y: 10px; width: 44px; height: 64px; hover-wash: false;
+            x: 12px; y: 10px; width: 64px; height: 96px; hover-wash: false;
             radius: min(Theme.card_corner_radius, 7px);
             label: @tr("Open series details: {}", root.entry.title);
             activated => { root.series-picked(); }
             Cover { width: 100%; height: 100%; poster: root.entry.poster; }
         }
         VerticalLayout {
-            x: 66px; width: parent.width - self.x - 52px; alignment: center; spacing: 3px;
-            Text { text: root.entry.title; font-size: 15px; font-weight: 600; color: Theme.current.text_home_title; overflow: elide; }
+            x: 90px; width: parent.width - self.x - 52px; alignment: center; spacing: 3px;
+            Text { text: root.entry.title; font-size: 15px; font-weight: 600; color: Theme.current.text_home_title; wrap: word-wrap; max-lines: 2; overflow: elide; min-width: 0px; }
             HorizontalLayout {
                 spacing: 6px;
                 if !root.history && !root.entry.read: Rectangle {
@@ -295,14 +305,14 @@ component TimelineLine inherits Rectangle {
         }
         Text { x: 22px; width: 44px; height: 100%; text: root.entry.time; font-size: 11px; color: Theme.current.text_muted; vertical-alignment: center; }
         Tap {
-            x: 66px; y: 8px; width: 34px; height: 48px; hover-wash: false; radius: 5px;
+            x: 66px; y: 8px; width: 44px; height: 66px; hover-wash: false; radius: 6px;
             label: @tr("Open series details: {}", root.entry.title);
             activated => { root.series-picked(); }
             Cover { width: 100%; height: 100%; poster: root.entry.poster; }
         }
         VerticalLayout {
-            x: 110px; width: parent.width - self.x - 44px; alignment: center; spacing: 2px;
-            Text { text: root.entry.title; font-size: 14px; font-weight: 600; color: Theme.current.text_home_title; overflow: elide; }
+            x: 122px; width: parent.width - self.x - 44px; alignment: center; spacing: 2px;
+            Text { text: root.entry.title; font-size: 14px; font-weight: 600; color: Theme.current.text_home_title; wrap: word-wrap; max-lines: 2; overflow: elide; min-width: 0px; }
             HorizontalLayout {
                 if root.entry.emphasis != "": Text { text: root.entry.emphasis + (root.entry.subtitle != "" ? " · " : ""); font-size: 12px; color: Theme.current.accent_soft; }
                 Text { text: root.entry.subtitle; font-size: 12px; color: Theme.current.text_muted; overflow: elide; horizontal-stretch: 1; min-width: 0px; }
@@ -340,11 +350,6 @@ component ShelfCard inherits Tap {
         if root.item.progress > 0: ProgressBar {
             y: parent.height - 3px; width: parent.width; border-radius: 0px; value: root.item.progress;
         }
-        if !root.item.caught-up: Rectangle {
-            x: parent.width - 38px; y: 8px; width: 30px; height: 30px; border-radius: 15px;
-            background: Theme.current.scrim_artwork;
-            Image { x: 9px; y: 9px; width: 12px; height: 12px; source: @image-url("../../assets/icons/navigation/play.svg"); colorize: Theme.current.text_bright; }
-        }
     }
     Text {
         y: 197px; width: 100%; text: root.item.title; font-size: 13px; font-weight: 600;
@@ -358,11 +363,16 @@ export component TimelinePage inherits Rectangle {
     private property <bool> history: TimelineBridge.history;
     private property <bool> timeline: root.history && Appearance.history-view == 1;
     private property <bool> checking: TimelineBridge.refreshing && TimelineBridge.busy;
-    private property <length> column-width: min(root.width, TimelineMetrics.column);
+    // The list fills the page on every width, as Library and Browse do.
+    private property <length> column-width: root.width;
     private property <length> column-x: (root.width - root.column-width) / 2;
+    // One of two columns, 12px apart, inside the page inset.
+    private property <length> half: (root.column-width - 2 * PageMetrics.side - 12px) / 2;
     // The title shrinks and the hairline appears a few pixels into the list.
     private property <bool> stuck: -list.content-y > 8px;
-    private property <length> head-height: root.stuck ? 52px : 64px;
+    // Library's header: an 18px inset and a 52px title row; once stuck the
+    // inset goes and the title shrinks.
+    private property <length> head-height: PageMetrics.row + (root.stuck ? 0px : PageMetrics.top);
     animate head-height { duration: Anim.enabled ? Anim.player_slide : 0ms; easing: ease-out; }
     private property <length> sub-height: !root.history && !root.stuck ? 20px : 0px;
     animate sub-height { duration: Anim.enabled ? Anim.player_slide : 0ms; easing: ease-out; }
@@ -382,7 +392,8 @@ export component TimelinePage inherits Rectangle {
     changed view => { root.swap = 0; swap-timer.start(); }
     swap-timer := Timer { interval: 1ms; running: false; triggered => { self.stop(); root.swap = 1; } }
     private property <int> reset: TimelineBridge.reset-serial;
-    changed reset => { list.content-y = 0px; }
+    // A different list (section, filter, search) fades in from the top too.
+    changed reset => { list.content-y = 0px; root.swap = 0; swap-timer.start(); }
     private property <[PageMenuItem]> updates-menu: [
         { label: @tr("Group"), kind: 0, id: "" },
         { label: @tr("By day and series"), kind: 1, checked: Appearance.updates-grouping == 0, id: "group-series" },
@@ -420,7 +431,7 @@ export component TimelinePage inherits Rectangle {
         if root.history && TimelineBridge.shelf.length > 0: Rectangle {
             y: 0px; width: 100%; height: TimelineMetrics.shelf-height + TimelineMetrics.section-height;
             HorizontalLayout {
-                x: 16px; y: 0px; width: parent.width - 32px; height: TimelineMetrics.section-height;
+                x: PageMetrics.side; y: 0px; width: parent.width - 2 * PageMetrics.side; height: TimelineMetrics.section-height;
                 Text { text: @tr("Pick up where you left off"); font-size: 17px; font-weight: 700; color: Theme.current.text_bright; vertical-alignment: center; horizontal-stretch: 1; }
             }
             shelf-rail := Flickable {
@@ -429,7 +440,7 @@ export component TimelinePage inherits Rectangle {
                 content-y: 0px;
                 changed content-y => { if self.content-y != 0px { self.content-y = 0px; } }
                 shelf-row := HorizontalLayout {
-                    padding-left: 16px; padding-right: 16px; spacing: 10px; alignment: start;
+                    padding-left: PageMetrics.side; padding-right: PageMetrics.side; spacing: 10px; alignment: start;
                     for item[i] in TimelineBridge.shelf: ShelfCard {
                         y: 4px; item: item;
                         activated => { TimelineBridge.shelf-picked(i); }
@@ -437,7 +448,7 @@ export component TimelinePage inherits Rectangle {
                 }
             }
             Text {
-                x: 16px; y: TimelineMetrics.shelf-height; height: TimelineMetrics.section-height;
+                x: PageMetrics.side; y: TimelineMetrics.shelf-height; height: TimelineMetrics.section-height;
                 text: root.timeline ? @tr("Timeline") : @tr("Recent sessions");
                 font-size: 17px; font-weight: 700; color: Theme.current.text_bright; vertical-alignment: center;
             }
@@ -450,10 +461,21 @@ export component TimelinePage inherits Rectangle {
                     && entry.y + entry.height >= root.top - root.margin
                     && entry.y <= root.top + list.height + root.margin;
                 changed near => { if self.near && entry.kind != 0 { TimelineBridge.request-artwork(i, i + 1); } }
-                x: entry.kind == 0 ? 12px : (root.timeline ? 16px : 12px);
-                y: entry.y; width: parent.width - 24px - (root.timeline && entry.kind == 6 ? 4px : 0px);
+                // Wide screens: cards sit in one of two columns 12px apart;
+                // day headings keep the full width.
+                // Cards line up with the header title (18px); a day heading's
+                // text has its own 4px inset.
+                x: (entry.kind == 0 ? PageMetrics.side - 4px : (root.timeline ? PageMetrics.side + 4px : PageMetrics.side)) + max(0, entry.column - 1) * (root.half + 12px);
+                y: entry.y;
+                width: (entry.column == 0 ? parent.width - 2 * PageMetrics.side : root.half) + (entry.kind == 0 ? 8px : 0px) - (root.timeline && entry.kind == 6 ? 4px : 0px);
                 height: entry.height;
                 animate y { duration: Anim.enabled && Anim.transitions ? Anim.transition_slide : 0ms; easing: ease-in-out; }
+                // Lines inserted into a shown list (an expanding group) fade
+                // in while the lines below slide down to make room.
+                private property <float> arrive: 0;
+                opacity: self.arrive;
+                animate arrive { duration: Anim.enabled && Anim.transitions ? Anim.transition_slide : 0ms; easing: ease-out; }
+                init => { self.arrive = 1; }
                 if slot.near: TimelineLine {
                     width: 100%; height: 100%;
                     entry: entry; history: root.history; timeline: root.timeline;
@@ -496,7 +518,9 @@ export component TimelinePage inherits Rectangle {
         height: max(0px, root.height - root.header-height); clip: true;
         for day in TimelineBridge.days: Rectangle {
             visible: day.y < root.top && day.y + day.span > root.top;
-            x: 12px; width: parent.width - 24px; height: day.height;
+            // Days side by side (wide History) each stick in their column.
+            x: PageMetrics.side - 4px + max(0, day.column - 1) * (root.half + 12px);
+            width: (day.column == 0 ? parent.width - 2 * PageMetrics.side : root.half) + 8px; height: day.height;
             y: min(0px, day.y + day.span - root.top - day.height);
             background: Theme.current.artwork_canvas;
             if parent.visible: TimelineLine {
@@ -508,8 +532,8 @@ export component TimelinePage inherits Rectangle {
 
     // Errors and notices (failed refresh, could not save), under the header.
     if TimelineBridge.status != "": Rectangle {
-        x: root.column-x + 12px; y: root.header-height + 4px;
-        width: root.column-width - 24px; height: status-text.preferred-height + 20px;
+        x: root.column-x + PageMetrics.side; y: root.header-height + 4px;
+        width: root.column-width - 2 * PageMetrics.side; height: status-text.preferred-height + 20px;
         background: Theme.current.selection_wash; border-radius: Theme.card_corner_radius;
         status-text := Text {
             x: 12px; y: 10px; width: parent.width - 24px;
@@ -528,10 +552,10 @@ export component TimelinePage inherits Rectangle {
         Rectangle {
             x: root.column-x; y: 0px; width: root.column-width; height: parent.height;
             HorizontalLayout {
-                x: 16px; y: 0px; width: parent.width - 24px; height: root.head-height; spacing: 4px; padding-top: root.stuck ? 2px : 8px;
+                x: PageMetrics.side; y: 0px; width: parent.width - 2 * PageMetrics.side; height: root.head-height; spacing: 4px; padding-top: root.head-height - PageMetrics.row;
                 HorizontalLayout {
                     horizontal-stretch: 1; spacing: 10px; min-width: 0px;
-                    PageTitle { text: root.history ? @tr("History") : @tr("Updates"); stuck: root.stuck; }
+                    VerticalLayout { alignment: center; PageTitle { text: root.history ? @tr("History") : @tr("Updates"); stuck: root.stuck; full-size: PageMetrics.title-size(TimelineBridge.narrow); } }
                     if !root.history && TimelineBridge.count-label != "": Text {
                         text: TimelineBridge.count-label; font-size: 13px; font-weight: 500; color: Theme.current.text_muted;
                         vertical-alignment: center; overflow: elide; min-width: 0px; horizontal-stretch: 1;
@@ -563,14 +587,12 @@ export component TimelinePage inherits Rectangle {
                         }
                     }
                 }
-                if !root.history: HeaderIcon {
-                    y: (parent.height - parent.padding-top - 44px) / 2;
+                if !root.history: VerticalLayout { alignment: center; HeaderIcon {
                     label: @tr("Refresh library"); enabled: !root.checking;
                     icon: @image-url("../../assets/icons/navigation/refresh.svg");
                     clicked => { TimelineBridge.refresh(); }
-                }
-                if root.history: HeaderIcon {
-                    y: (parent.height - parent.padding-top - 44px) / 2;
+                } }
+                if root.history: VerticalLayout { alignment: center; HeaderIcon {
                     label: TimelineBridge.search-open ? @tr("Close history search") : @tr("Search history");
                     active: TimelineBridge.search-open;
                     icon: @image-url("../../assets/icons/navigation/search.svg");
@@ -578,15 +600,14 @@ export component TimelinePage inherits Rectangle {
                         if TimelineBridge.search-open { TimelineBridge.search-open = false; TimelineBridge.query = ""; TimelineBridge.search(""); }
                         else { TimelineBridge.search-open = true; }
                     }
-                }
-                more-button := HeaderIcon {
-                    y: (parent.height - parent.padding-top - 44px) / 2;
+                } }
+                VerticalLayout { alignment: center; more-button := HeaderIcon {
                     label: @tr("Options"); icon: @image-url("../../assets/icons/navigation/more.svg");
                     clicked => { root.open-menu(); }
-                }
+                } }
             }
             if !root.history && root.sub-height > 0px: HorizontalLayout {
-                x: 16px; y: root.head-height; width: parent.width - 32px; height: root.sub-height; spacing: 8px;
+                x: PageMetrics.side; y: root.head-height; width: parent.width - 2 * PageMetrics.side; height: root.sub-height; spacing: 8px;
                 opacity: root.sub-height / 20px;
                 if root.checking: Spinner { width: 14px; height: 14px; y: 3px; indeterminate: true; }
                 Text {
@@ -599,7 +620,7 @@ export component TimelinePage inherits Rectangle {
                 content-width: chip-row.preferred-width; content-height: self.height; content-y: 0px;
                 changed content-y => { if self.content-y != 0px { self.content-y = 0px; } }
                 chip-row := HorizontalLayout {
-                    padding-left: 16px; padding-right: 16px; spacing: 6px; alignment: start;
+                    padding-left: PageMetrics.side; padding-right: PageMetrics.side; spacing: 6px; alignment: start;
                     for label[k] in [@tr("All"), @tr("Unread"), @tr("Downloaded")]: LibraryFilterChip {
                         y: 10px; tonal: true; chip-height: 34px; keyboard-focusable: true;
                         label: label; selected: TimelineBridge.filter == k;
@@ -610,7 +631,7 @@ export component TimelinePage inherits Rectangle {
                 }
             }
             if root.history && root.search-height > 0px: Rectangle {
-                x: 16px; y: root.head-height + 6px; width: parent.width - 32px; height: max(0px, root.search-height - 10px);
+                x: PageMetrics.side; y: root.head-height + 6px; width: parent.width - 2 * PageMetrics.side; height: max(0px, root.search-height - 10px);
                 clip: true;
                 // Opening the search focuses its field once it has room.
                 init => { search-focus.start(); }

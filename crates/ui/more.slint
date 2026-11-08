@@ -1,18 +1,12 @@
 // Reader destinations hosted in Nova's retained More landing/push-page pattern.
 // Layout, SettingsCard/SettingsLink rows and transitions follow Nova b69a1e5.
-import { BackupPage } from "backup.slint";
 import { Theme, Anim, SettingsStyle, SliderGesture } from "@NovaUiShared";
 import { SettingsCard } from "@NovaUiBase/settings-controls.slint";
 import { ScrollView } from "@NovaUiBase/scrollview.slint";
-import { ImageLimitSettingsPage } from "image-limit-settings.slint";
-import { DownloadCleanupSettingsPage } from "download-cleanup-settings.slint";
-import { DisplaySettings } from "display-settings.slint";
 import { ReaderSettingsForm } from "reader-settings.slint";
-import { CaptureSettingsPage } from "capture-settings.slint";
-import { ImageStorageSettingsPage } from "image-storage-settings.slint";
-import { ThemeSettings, MotionSettings } from "theme-settings.slint";
 import { PageHeader } from "page-header.slint";
-import { ReaderSyncSettingsPage } from "sync-settings.slint";
+import { SettingsSectionHost } from "settings-section-host.slint";
+import { SettingsPages } from "@NovaUiShared";
 import { AboutPage } from "about.slint";
 import { ProfilesPage, ProfilesBridge } from "profiles.slint";
 import { LicenseSource } from "about-models.slint";
@@ -373,9 +367,22 @@ export component MorePage inherits Rectangle {
                         narrow: root.narrow; show-back: true; back => { if root.detail-active { root.navigate(10); } }
                     }
                     if root.status != "": Text { min-width: 0px; text: root.status; color: Theme.current.text_settings; wrap: word-wrap; }
-                    if root.detail-section == 22: ImageLimitSettingsPage { interactive: root.detail-active; }
-                    if root.detail-section == 21: DownloadCleanupSettingsPage { interactive: root.detail-active; }
-                    if root.detail-section == 20: ReaderSyncSettingsPage {}
+                    // Sub-pages compiled in their own crates (`crates/ui-settings-*`).
+                    if root.detail-section == 22 || root.detail-section == 21 || root.detail-section == 20
+                        || root.detail-section == 12 || root.detail-section == 14 || root.detail-section == 16
+                        || root.detail-section == 18 || root.detail-section == 17 || root.detail-section == 15: SettingsSectionHost {
+                        factory: root.detail-section == 22 ? SettingsPages.limits : root.detail-section == 21 ? SettingsPages.cleanup
+                            : root.detail-section == 20 ? SettingsPages.sync : root.detail-section == 12 ? SettingsPages.backup
+                            : root.detail-section == 14 ? SettingsPages.theme : root.detail-section == 16 ? SettingsPages.display
+                            : root.detail-section == 18 ? SettingsPages.capture : root.detail-section == 17 ? SettingsPages.storage
+                            : SettingsPages.motion;
+                        slot-width: self.width; slot-height: self.height;
+                        interactive: root.detail-active;
+                        narrow: root.width < 700px; phone-layout: root.narrow;
+                        image-cache-busy: root.image-cache-busy;
+                        image-cache-info: root.image-cache-info;
+                        image-cache-status: root.image-cache-status;
+                    }
                     if root.detail-section == 11: SettingsCard {
                         VerticalLayout {
                             padding: 16px; spacing: 12px;
@@ -384,18 +391,6 @@ export component MorePage inherits Rectangle {
                             ActionButton { enabled: root.detail-active; text: @tr("Add category"); clicked => { root.add-category(root.category-text); } }
                         }
                     }
-                    if root.detail-section == 12: BackupPage { interactive: root.detail-active; }
-                    if root.detail-section == 14: ThemeSettings { narrow: root.width < 700px; phone-layout: root.narrow; interactive: root.detail-active; }
-                    if root.detail-section == 16: DisplaySettings { interactive: root.detail-active; }
-                    if root.detail-section == 18: CaptureSettingsPage { interactive: root.detail-active; }
-                    if root.detail-section == 17: ImageStorageSettingsPage {
-                        interactive: root.detail-active;
-                        busy: root.image-cache-busy;
-                        image-cache-info: root.image-cache-info;
-                        image-cache-status: root.image-cache-status;
-                        image-cache-clear => { root.image-cache-clear(); }
-                    }
-                    if root.detail-section == 15: MotionSettings { interactive: root.detail-active; }
                 }
             }
         }

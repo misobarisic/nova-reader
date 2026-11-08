@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/reader-capture", "crates/reader-domain", "crates/reader-sources", "crates/reader-engine", "crates/reader-downloads", "crates/reader-catalogue", "crates/ui", "crates/ui-shared", "crates/ui-library", "crates/ui-timeline", "crates/ui-browse"]
+members = ["crates/reader-capture", "crates/reader-domain", "crates/reader-sources", "crates/reader-engine", "crates/reader-downloads", "crates/reader-catalogue", "crates/ui", "crates/ui-shared", "crates/ui-library", "crates/ui-timeline", "crates/ui-browse", "crates/ui-settings-storage", "crates/ui-settings-capture", "crates/ui-settings-sync", "crates/ui-settings-look"]
 exclude = ["vendor/i-slint-core", "vendor/i-slint-compiler"]
 resolver = "3"
 

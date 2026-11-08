@@ -3,22 +3,8 @@ import { Theme } from "@NovaUiShared";
 import { SettingsCard } from "@NovaUiBase/settings-controls.slint";
 import { SettingsRow } from "settings-row.slint";
 import { ReaderField, ActionButton } from "controls.slint";
+import { ImageLimitSettings } from "@NovaUiShared";
 
-export global ImageLimitSettings {
-    in-out property <string> encoded-mib: "32";
-    in-out property <string> width-pixels: "16384";
-    in-out property <string> height-pixels: "65536";
-    in-out property <string> megapixels: "32";
-    in-out property <string> decoded-mib: "128";
-    in-out property <string> message;
-    in-out property <bool> error: false;
-    callback save(string, string, string, string, string);
-    callback reset();
-    public function apply() {
-        ImageLimitSettings.save(ImageLimitSettings.encoded-mib, ImageLimitSettings.width-pixels,
-            ImageLimitSettings.height-pixels, ImageLimitSettings.megapixels, ImageLimitSettings.decoded-mib);
-    }
-}
 
 export component ImageLimitSettingsPage inherits VerticalLayout {
     in property <bool> interactive: true;

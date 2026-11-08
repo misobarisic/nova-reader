@@ -1,0 +1,22 @@
+import { SettingsPages } from "@NovaUiShared";
+
+// Mounts one separately compiled settings page. A ComponentContainer does not
+// pass on its child's height, so the page reports it in `SettingsPages`; the
+// container is positioned explicitly so the page's own layout (which reads
+// `slot-width`) never feeds back into this host's.
+export component SettingsSectionHost inherits Rectangle {
+    in property <component-factory> factory;
+    in-out property <bool> interactive <=> SettingsPages.interactive;
+    in-out property <bool> narrow <=> SettingsPages.narrow;
+    in-out property <bool> phone-layout <=> SettingsPages.phone-layout;
+    in-out property <bool> image-cache-busy <=> SettingsPages.image-cache-busy;
+    in-out property <string> image-cache-info <=> SettingsPages.image-cache-info;
+    in-out property <string> image-cache-status <=> SettingsPages.image-cache-status;
+    in-out property <length> slot-width <=> SettingsPages.slot-width;
+    in-out property <length> slot-height <=> SettingsPages.slot-height;
+    min-height: SettingsPages.content-height;
+    preferred-height: SettingsPages.content-height;
+    vertical-stretch: 0;
+    min-width: 0px;
+    ComponentContainer { x: 0px; y: 0px; width: 100%; height: 100%; component-factory: root.factory; }
+}

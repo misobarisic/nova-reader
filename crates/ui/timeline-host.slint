@@ -12,6 +12,9 @@ export component TimelineHost inherits Rectangle {
     in-out property <bool> busy <=> TimelineBridge.busy;
     in-out property <length> viewport-width <=> TimelineBridge.viewport-width;
     in-out property <length> viewport-height <=> TimelineBridge.viewport-height;
+    // 2 on wide screens (bound in `app.slint`); Rust re-lays the lines out.
+    in-out property <int> columns <=> TimelineBridge.columns;
+    changed columns => { TimelineBridge.columns-changed(); }
     // Explicit positioning keeps the page's layout out of the host's.
     ComponentContainer { x: 0px; y: 0px; width: 100%; height: 100%; component-factory: TimelineBridge.factory; }
 }

@@ -186,3 +186,31 @@ fn chapter_rows_fit_phone_and_wide_windows() {
         }
     }
 }
+
+#[test]
+fn wide_screens_show_the_chapters_two_to_a_row() {
+    i_slint_backend_testing::init_no_event_loop();
+    let at = |ui: &AppWindow, title: &str| row(ui, title).expect(title).absolute_position();
+    // Phones: one column in order.
+    let phone = detail(390.);
+    assert_eq!(
+        at(&phone, "Chapter 16: Night Survey").x,
+        at(&phone, "Chapter 3: Paper Compass").x
+    );
+    // Desktop: left then right on each row, so neighbours stay side by side.
+    let desktop = detail(1280.);
+    let (first, second) = (
+        at(&desktop, "Chapter 16: Night Survey"),
+        at(&desktop, "Chapter 9: The Quiet Meridian"),
+    );
+    let (third, fourth) = (
+        at(&desktop, "Chapter 7: Lanterns Under Ice"),
+        at(&desktop, "Chapter 3: Paper Compass"),
+    );
+    assert!((second.y - first.y).abs() < 0.5);
+    assert!(second.x > first.x + 200.);
+    assert_eq!(third.x, first.x);
+    assert!(third.y > first.y);
+    assert_eq!(fourth.x, second.x);
+    assert!((fourth.y - third.y).abs() < 0.5);
+}

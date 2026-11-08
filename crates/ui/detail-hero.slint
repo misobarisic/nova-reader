@@ -53,6 +53,9 @@ export component DetailHero inherits Rectangle {
     in property <string> metadata;
     in property <[string]> genres;
     in property <image> poster;
+    // A few-pixel copy of the poster (`src/artwork.rs`); scaled up smoothly
+    // it is a blurred colour wash behind the desktop hero.
+    in property <image> backdrop;
     in property <bool> in-library;
     in property <bool> narrow;
     in property <bool> can-resume: true;
@@ -63,15 +66,26 @@ export component DetailHero inherits Rectangle {
     in-out property <bool> expanded: false;
     private property <length> gutter: root.narrow ? 20px : 64px;
     private property <length> overview-width: max(1px, root.viewport-width - 2 * root.gutter - root.safe-left - root.safe-right);
-    private property <length> text-width: root.narrow ? root.overview-width : min(650px, root.overview-width * 0.55);
-    private property <length> backdrop-height: (root.narrow ? 560px : 740px) + root.safe-top;
+    // Desktop: the whole cover as a card beside the text, at its own shape
+    // (covers are tall; stretching one across the width only showed a blurry
+    // middle strip).
+    private property <length> card-width: root.viewport-width >= 1200px ? 200px : 160px;
+    private property <float> cover-aspect: root.poster.width > 0 ? Math.clamp(root.poster.height / root.poster.width, 1.2, 1.9) : 1.5;
+    private property <length> card-height: root.card-width * root.cover-aspect;
+    private property <length> text-width: root.narrow ? root.overview-width : min(760px, root.overview-width - root.card-width - 48px);
+    private property <length> backdrop-height: (root.narrow ? 560px : root.card-height + 260px) + root.safe-top;
     height: body.preferred-height;
     Rectangle {
         x: 0px; y: 0px; width: root.width; height: min(root.height, root.backdrop-height + 60px); clip: true;
         background: Theme.current.artwork_backdrop;
-        if root.poster.width > 0: Image {
-            y: max(root.narrow ? -56px : -80px, min(0px, root.scroll-y * 0.12));
+        if root.narrow && root.poster.width > 0: Image {
+            y: max(-56px, min(0px, root.scroll-y * 0.12));
             source: root.poster; image-fit: cover; width: 100%; height: root.backdrop-height;
+        }
+        if !root.narrow && root.backdrop.width > 0: Image {
+            y: max(-80px, min(0px, root.scroll-y * 0.12));
+            source: root.backdrop; image-fit: cover; image-rendering: smooth;
+            width: 100%; height: root.backdrop-height; opacity: 0.7;
         }
         Image { source: Theme.detail_bottom_scrim; width: 100%; height: root.backdrop-height + 60px; image-fit: fill; }
         if !root.narrow: Image { source: Theme.detail_side_scrim; width: 100%; height: root.backdrop-height + 60px; image-fit: fill; }
@@ -79,9 +93,20 @@ export component DetailHero inherits Rectangle {
     body := VerticalLayout {
         width: root.width;
         padding-left: root.gutter + root.safe-left; padding-right: root.gutter + root.safe-right;
-        padding-top: (root.narrow ? 250px : 100px) + root.safe-top; padding-bottom: 16px;
+        padding-top: (root.narrow ? 250px : 72px) + root.safe-top; padding-bottom: 16px;
         spacing: root.narrow ? 14px : 18px; alignment: start;
         HorizontalLayout {
+            spacing: 48px;
+            if !root.narrow: VerticalLayout {
+                alignment: start; horizontal-stretch: 0;
+                cover-card := Rectangle {
+                    width: root.card-width; height: root.card-height;
+                    border-radius: Theme.card_corner_radius + 4px; clip: true;
+                    background: Theme.current.home_artwork_placeholder;
+                    drop-shadow-offset-y: 12px; drop-shadow-blur: 36px; drop-shadow-color: Theme.current.scrim_shadow;
+                    if root.poster.width > 0: Image { width: 100%; height: 100%; source: root.poster; image-fit: cover; }
+                }
+            }
             VerticalLayout {
                 width: root.text-width; horizontal-stretch: 0;
                 spacing: root.narrow ? 14px : 18px; alignment: start;
@@ -132,9 +157,11 @@ export component DetailHero inherits Rectangle {
                         key-pressed(e) => { if e.text == Key.Return || e.text == " " { if !e.repeat { root.expanded = !root.expanded; } return accept; } return reject; }
                     }
                 }
+                // Desktop keeps the primary button button-sized rather than
+                // stretching it across the text column.
                 HorizontalLayout {
-                    spacing: 12px;
-                    HeroAction { horizontal-stretch: 1; primary: true; narrow: root.narrow; enabled: root.can-resume; label: root.action-label; clicked => { root.resume(); } }
+                    spacing: 12px; alignment: root.narrow ? LayoutAlignment.stretch : LayoutAlignment.start;
+                    HeroAction { horizontal-stretch: 1; min-width: root.narrow ? 0px : 300px; max-width: root.narrow ? 100000px : 380px; primary: true; narrow: root.narrow; enabled: root.can-resume; label: root.action-label; clicked => { root.resume(); } }
                     HeroAction { width: root.narrow ? 56px : 62px; narrow: root.narrow; saved: root.in-library; label: root.in-library ? @tr("Remove from library") : @tr("Add to library"); clicked => { root.toggle-library(); } }
                 }
             }
