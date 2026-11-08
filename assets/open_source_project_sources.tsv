@@ -21,4 +21,5 @@ JPEG XL decoder jxl-oxide 0.12.6	MIT OR Apache-2.0	https://github.com/tirr-c/jxl
 Mihon tap navigation maps (feadad5e1e2bf638be6e2ca317d11657b09d4596)	Apache-2.0	https://github.com/mihonapp/mihon/tree/feadad5e1e2bf638be6e2ca317d11657b09d4596/app/src/main/java/eu/kanade/tachiyomi/ui/reader/viewer
 Nova player OSD and idle worker (ac1c981955b812e4766202646aa45bb61321aaf4)	GPL-3.0-or-later	https://github.com/misobarisic/nova/tree/ac1c981955b812e4766202646aa45bb61321aaf4
 Slint 1.18.0 native pinch input corrections	GPL-3.0-only	https://github.com/misobarisic/nova-reader/tree/main/vendor/i-slint-core
+Slint 1.18.0 compiled component embedding	GPL-3.0-only	https://github.com/misobarisic/nova-reader/tree/main/vendor/i-slint-compiler
 Nova Android download foreground service (ee3877808764d70362a6e0b442e79e5128317abf)	GPL-3.0-or-later	https://github.com/misobarisic/nova/tree/ee3877808764d70362a6e0b442e79e5128317abf/android/java/dev/misob/nova/NovaBackgroundService.java

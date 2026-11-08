@@ -1,3 +1,4 @@
-export { ReaderSettingsSync, SettingSyncInfo } from "sync-scope.slint";
+// The shared library owns the global; its exported name is SettingsSync.
+export { SettingsSync as ReaderSettingsSync, SettingSyncInfo } from "@NovaUiShared";
 export { SettingSyncBadge } from "@NovaUiBase/settings-sync.slint";
 export { SettingSyncModal } from "@NovaUiBase/settings-sync-modal.slint";

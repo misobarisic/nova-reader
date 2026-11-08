@@ -8,7 +8,8 @@ license.workspace = true
 slint = { workspace = true }
 nova-ui-base = { workspace = true }
 i-slint-core = { version = "=1.18.0", default-features = false }
+nova-reader-ui-shared = { path = "../ui-shared" }
 
 [build-dependencies]
-slint-build = { workspace = true }
+slint-build = { workspace = true, features = ["experimental-module-builds"] }
 nova-ui-base = { workspace = true }

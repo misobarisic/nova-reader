@@ -54,6 +54,14 @@ relative pinch scaling and aborted two-finger input corrections documented in
 vendor/i-slint-core/NOVA_PATCH.md. Original source attribution and LICENSES
 are retained; the generated Cargo catalogue selects GPL-3.0-only.
 
+SLINT COMPILED COMPONENT EMBEDDING
+i-slint-compiler 1.18.0 is vendored from Nova's copy of its exact published
+registry archive, with the compiled-root embedding, cross-library alias,
+shared translation catalog and source-library metadata changes documented in
+vendor/i-slint-compiler/NOVA_PATCH.md. Original source attribution and
+LICENSES are retained; it is a build-time compiler and is not linked into the
+application.
+
 NOVA ANDROID DOWNLOAD SERVICE
 The foreground service and notification permission method derive from Nova
 revision ee3877808764d70362a6e0b442e79e5128317abf under GPL-3.0-or-later,

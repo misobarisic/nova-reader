@@ -1,6 +1,6 @@
 [workspace]
-members = ["crates/reader-capture", "crates/reader-domain", "crates/reader-sources", "crates/reader-engine", "crates/reader-downloads", "crates/reader-catalogue", "crates/ui"]
-exclude = ["vendor/i-slint-core"]
+members = ["crates/reader-capture", "crates/reader-domain", "crates/reader-sources", "crates/reader-engine", "crates/reader-downloads", "crates/reader-catalogue", "crates/ui", "crates/ui-shared"]
+exclude = ["vendor/i-slint-core", "vendor/i-slint-compiler"]
 resolver = "3"
 
 [workspace.package]
@@ -214,3 +214,7 @@ keystore_password = "android"
 # contract. See the vendored provenance note and native finger-distance test.
 [patch.crates-io]
 i-slint-core = { path = "vendor/i-slint-core" }
+# Nova's compiled-component embedding patch: separately compiled page crates
+# attach to the window and share one NovaUiShared globals bundle. Copied from
+# Nova; see vendor/i-slint-compiler/NOVA_PATCH.md.
+i-slint-compiler = { path = "vendor/i-slint-compiler" }

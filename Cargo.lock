@@ -3029,8 +3029,6 @@ dependencies = [
 [[package]]
 name = "i-slint-compiler"
 version = "1.18.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2412bc535ec506ca7917fdda20a2fb0a32cb03c5f9b215566d098b949d31b720"
 dependencies = [
  "annotate-snippets",
  "by_address",
@@ -5006,6 +5004,17 @@ dependencies = [
 
 [[package]]
 name = "nova-reader-ui"
+version = "0.1.0"
+dependencies = [
+ "i-slint-core",
+ "nova-reader-ui-shared",
+ "nova-ui-base",
+ "slint",
+ "slint-build",
+]
+
+[[package]]
+name = "nova-reader-ui-shared"
 version = "0.1.0"
 dependencies = [
  "i-slint-core",
