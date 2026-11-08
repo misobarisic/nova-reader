@@ -408,6 +408,12 @@ pub fn supported(key: &str, value: &Value) -> bool {
     }
     false
 }
+/// Whether `stored`, a document exactly as it is saved, is a valid value of the
+/// settings document `storage` (wrapper included). Unknown documents are not.
+pub(crate) fn valid_stored(storage: &str, stored: &Value) -> bool {
+    let value = unpack_document(storage, stored.clone());
+    validate(storage, &value) && normalize_document(storage, value).is_ok()
+}
 /// Stage local differences, or acknowledge an already-applied projection. The
 /// caller saves once alongside Reader's other domains before waking the mesh.
 pub fn prepare(

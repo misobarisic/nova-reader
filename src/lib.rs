@@ -11,6 +11,7 @@ pub mod android_sync;
 mod app;
 pub mod appearance;
 mod artwork;
+pub mod backup;
 mod browser;
 pub mod capture_settings;
 pub mod chapter_cache;

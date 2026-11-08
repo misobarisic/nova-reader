@@ -229,6 +229,17 @@ fn publish(series: &SeriesId, settings: &Settings, raw: String) -> nova_sync::Re
     }
     Ok(())
 }
+/// Whether `stored` is a valid local row of this module.
+pub(crate) fn valid_stored(stored: &serde_json::Value) -> bool {
+    serde_json::from_value::<Record>(stored.clone()).is_ok_and(|record| {
+        record.schema_version == SCHEMA
+            && record
+                .settings
+                .last_known_addon_hint
+                .as_deref()
+                .is_none_or(known_hint)
+    })
+}
 fn key_json(series: &SeriesId) -> String {
     serde_json::to_string(series).expect("SeriesId serializes")
 }

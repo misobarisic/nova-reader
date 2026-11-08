@@ -1640,6 +1640,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1dd6dbb5841937940781866fa1281a1ff7bd3bf827091440879f9994983d5c2"
 dependencies = [
  "block-buffer 0.12.1",
+ "const-oid 0.10.2",
  "crypto-common 0.2.2",
 ]
 
@@ -4905,6 +4906,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nova-backup"
+version = "0.1.0"
+source = "git+https://github.com/misobarisic/nova-kit?rev=801daa1e0f2d37bd149d3a6d8b4f3aab9002681c#801daa1e0f2d37bd149d3a6d8b4f3aab9002681c"
+dependencies = [
+ "nova-storage",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "zip",
+]
+
+[[package]]
 name = "nova-cache"
 version = "0.1.0"
 source = "git+https://github.com/misobarisic/nova-kit?rev=801daa1e0f2d37bd149d3a6d8b4f3aab9002681c#801daa1e0f2d37bd149d3a6d8b4f3aab9002681c"
@@ -4960,6 +4973,7 @@ dependencies = [
  "jni 0.21.1",
  "ndk-context",
  "nova-android",
+ "nova-backup",
  "nova-cache",
  "nova-image",
  "nova-net",

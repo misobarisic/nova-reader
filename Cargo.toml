@@ -8,6 +8,7 @@ license = "GPL-3.0-or-later"
 
 [workspace.dependencies]
 nova-storage = { git = "https://github.com/misobarisic/nova-kit", rev = "801daa1e0f2d37bd149d3a6d8b4f3aab9002681c" }
+nova-backup = { git = "https://github.com/misobarisic/nova-kit", rev = "801daa1e0f2d37bd149d3a6d8b4f3aab9002681c" }
 nova-ui-base = { git = "https://github.com/misobarisic/nova-kit", rev = "801daa1e0f2d37bd149d3a6d8b4f3aab9002681c" }
 nova-net = { git = "https://github.com/misobarisic/nova-kit", rev = "801daa1e0f2d37bd149d3a6d8b4f3aab9002681c" }
 nova-android = { git = "https://github.com/misobarisic/nova-kit", rev = "801daa1e0f2d37bd149d3a6d8b4f3aab9002681c" }
@@ -40,13 +41,14 @@ nova-cache = { workspace = true }
 nova-net = { workspace = true }
 nova-image = { workspace = true }
 nova-sync = { workspace = true }
+nova-backup = { workspace = true }
 anyhow = "1"
 qrcode = { version = "0.14", default-features = false }
 # Nova's embedded license catalog uses the same zstd implementation as storage.
 zstd = { version = "0.13", default-features = false }
 sha2 = "0.10"
 time = { version = "0.3", features = ["formatting", "local-offset", "parsing"] }
-nova-storage = { workspace = true }
+nova-storage = { workspace = true, features = ["zip"] }
 slint = { workspace = true }
 nova-reader-ui = { path = "crates/ui" }
 reader-domain = { path = "crates/reader-domain" }

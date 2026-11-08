@@ -5,7 +5,7 @@ Nova Reader and its reader-domain, reader-sources, reader-engine,
 reader-downloads, reader-catalogue, reader-capture and UI crates are GPL-3.0-or-later.
 Application/build/UI foundations derive from Nova revision
 b69a1e5765ecc65ac3b00acdfe2f16e2f46a5dda. nova-storage, nova-ui-base,
-nova-cache, nova-image and nova-sync are
+nova-cache, nova-image, nova-sync and nova-backup are
 consumed from nova-kit revision 801daa1e0f2d37bd149d3a6d8b4f3aab9002681c.
 The generated Cargo catalog lists runtime crates for the actual target and
 features; the complete project license and third-party notices follow.

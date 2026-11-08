@@ -29,7 +29,7 @@ pub fn run() -> Result<bool> {
     let command = command.to_str().ok_or("Invalid command")?;
     if command == "--help" || command == "-h" {
         println!(
-            "Nova Reader {}\n\nRun without arguments to open the reader.\n\n  install-addon FILE.zip\n  list-sources\n  import FILE.cbz\n  import-folder DIRECTORY\n  backup FILE.json\n  restore FILE.json\n  catalogue-keiyoushi [HTTPS_INDEX_URL]\n\nSet NOVA_READER_DATA_DIR to use an independent application directory.\nSources are executable JavaScript packages; APK/JAR catalogues are discovery only.",
+            "Nova Reader {}\n\nRun without arguments to open the reader.\n\n  install-addon FILE.zip\n  list-sources\n  import FILE.cbz\n  import-folder DIRECTORY\n  backup FILE.nova-reader-backup\n  verify-backup FILE.nova-reader-backup\n  restore FILE.json\n  catalogue-keiyoushi [HTTPS_INDEX_URL]\n\nSet NOVA_READER_DATA_DIR to use an independent application directory.\nSources are executable JavaScript packages; APK/JAR catalogues are discovery only.",
             env!("CARGO_PKG_VERSION")
         );
         return Ok(true);
@@ -79,8 +79,15 @@ pub fn run() -> Result<bool> {
             println!("Imported {}", id.local_id);
         }
         "backup" => {
-            std::fs::write(path, services.domain.backup_json().map_err(error)?).map_err(error)?
+            let profiles = crate::profiles::list()?;
+            let selection = crate::backup::Selection::everything(&profiles, Default::default());
+            let exported = crate::backup::export(&services, &selection, &path)?;
+            println!(
+                "Saved {} profile(s), {} bytes. The archive includes addon credentials in plaintext.",
+                exported.profiles, exported.bytes
+            );
         }
+        "verify-backup" => println!("{}", crate::backup::describe(&path)?),
         "restore" => services
             .domain
             .restore_json(&read(&path, 32 * 1024 * 1024)?)
