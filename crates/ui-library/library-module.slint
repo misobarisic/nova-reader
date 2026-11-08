@@ -1,0 +1,43 @@
+import { LibraryPage } from "../ui/library-page.slint";
+import { LibraryBridge } from "@NovaUiShared";
+
+export component LibraryModule inherits Window {
+    public function remember-position() { page.remember-position(); }
+    background: transparent;
+    width: LibraryBridge.viewport-width; height: LibraryBridge.viewport-height;
+    page := LibraryPage {
+        width: 100%; height: 100%;
+        items: LibraryBridge.items;
+        categories: LibraryBridge.categories;
+        category-counts: LibraryBridge.category-counts;
+        count-label: LibraryBridge.count-label;
+        category-index: LibraryBridge.category-index;
+        heading: LibraryBridge.heading;
+        caption: LibraryBridge.caption;
+        status: LibraryBridge.status;
+        busy: LibraryBridge.busy;
+        narrow: LibraryBridge.narrow;
+        list-view: LibraryBridge.list-view;
+        min-cols: LibraryBridge.min-cols;
+        touch-menus: LibraryBridge.touch-menus;
+        bottom-padding: LibraryBridge.bottom-padding;
+        search-open: LibraryBridge.search-open;
+        search-focus-request: LibraryBridge.search-focus-request;
+        query <=> LibraryBridge.query;
+        scroll-y <=> LibraryBridge.scroll-y;
+        restore-index: LibraryBridge.restore-index;
+        restore-fraction: LibraryBridge.restore-fraction;
+        restore-serial: LibraryBridge.restore-serial;
+        category-selected(i) => { LibraryBridge.category-selected(i); }
+        sort-changed => { LibraryBridge.sort-changed(); }
+        search(q) => { LibraryBridge.search(q); }
+        close-search => { LibraryBridge.close-search(); }
+        toggle-search => { LibraryBridge.toggle-search(); }
+        submitted => { LibraryBridge.submitted(); }
+        picked(i) => { LibraryBridge.picked(i); }
+        context-requested(key, title, in-library, x, y) => { LibraryBridge.context-requested(key, title, in-library, x, y); }
+        request-artwork(first, last) => { LibraryBridge.request-artwork(first, last); }
+        viewport-changed(key, fraction, y) => { LibraryBridge.viewport-changed(key, fraction, y); }
+        checkpoint => { LibraryBridge.checkpoint(); }
+    }
+}

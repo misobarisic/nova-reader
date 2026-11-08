@@ -1,7 +1,7 @@
 import { SettingSyncInfo } from "@NovaUiBase/sync-types.slint";
 export { SettingSyncInfo }
 
-export global ReaderSettingsSync {
+export global SettingsSync {
     in-out property <[SettingSyncInfo]> rows;
     // Mirrors the device's actual cross-device sync setting. Scope badges are
     // presentation only and disappear when syncing is disabled.

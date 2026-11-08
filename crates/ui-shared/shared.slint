@@ -1,7 +1,10 @@
 // The contract Nova Kit components import as `@NovaUiShared`, compiled once so
 // the window and separately compiled pages share the same globals.
 export { Theme, ThemePalette, Anim, InterfaceStyle, SettingsStyle, ControlInput, SliderGesture, SheetItem, SettingsHighlight } from "@NovaUiBase/host-globals.slint";
-export { ReaderSettingsSync as SettingsSync, SettingSyncInfo } from "../ui/sync-scope.slint";
+export { SettingsSync, SettingSyncInfo } from "../ui/sync-scope.slint";
+export { Appearance } from "appearance.slint";
+export { ItemRow, SettingRow, SourceRow, ExtensionRow } from "media-models.slint";
+export { LibraryBridge } from "library-bridge.slint";
 
 // Not mounted: the library owns contracts and globals only.
 export component SharedRoot inherits Window { background: transparent; width: 1px; height: 1px; }

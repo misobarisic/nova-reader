@@ -1,0 +1,44 @@
+import { ItemRow } from "media-models.slint";
+
+// The library page's contract. `LibraryHost` and `LibraryBindings` in the
+// window bind backend state here once; the separately compiled page binds
+// its own properties to the same global.
+export global LibraryBridge {
+    in-out property <component-factory> factory;
+    in-out property <length> viewport-width;
+    in-out property <length> viewport-height;
+    in-out property <[ItemRow]> items;
+    in-out property <[string]> categories;
+    in-out property <[int]> category-counts;
+    in-out property <string> count-label;
+    in-out property <int> category-index;
+    in-out property <string> heading;
+    in-out property <string> caption;
+    in-out property <string> status;
+    in-out property <bool> busy;
+    in-out property <bool> narrow;
+    in-out property <bool> list-view;
+    in-out property <int> min-cols: 2;
+    in-out property <bool> touch-menus;
+    in-out property <length> bottom-padding;
+    in-out property <bool> search-open;
+    in-out property <int> search-focus-request;
+    in-out property <string> query;
+    in-out property <length> scroll-y;
+    in-out property <int> restore-index: -1;
+    in-out property <float> restore-fraction;
+    in-out property <int> restore-serial;
+    callback category-selected(int);
+    callback sort-changed();
+    callback search(string);
+    callback close-search();
+    callback toggle-search();
+    callback submitted();
+    callback picked(int);
+    callback context-requested(string, string, bool, length, length);
+    callback request-artwork(int, int);
+    callback viewport-changed(string, float, float);
+    callback checkpoint();
+    // Set by the page factory: records the scroll anchor of the mounted page.
+    callback remember-position();
+}

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/reader-capture", "crates/reader-domain", "crates/reader-sources", "crates/reader-engine", "crates/reader-downloads", "crates/reader-catalogue", "crates/ui", "crates/ui-shared"]
+members = ["crates/reader-capture", "crates/reader-domain", "crates/reader-sources", "crates/reader-engine", "crates/reader-downloads", "crates/reader-catalogue", "crates/ui", "crates/ui-shared", "crates/ui-library"]
 exclude = ["vendor/i-slint-core", "vendor/i-slint-compiler"]
 resolver = "3"
 

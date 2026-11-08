@@ -1,4 +1,4 @@
-export { ReaderSettingsSync, SettingSyncInfo } from "settings-sync.slint";
+export { SettingsSync, SettingSyncInfo } from "settings-sync.slint";
 import { SettingSyncBadge } from "settings-sync.slint";
 import { ProfilesBridge } from "profiles.slint";
 import { ControlTouchArea } from "@NovaUiBase/control-input.slint";
@@ -7,14 +7,14 @@ import { Theme, Anim, SettingsStyle, ControlInput, SliderGesture } from "@NovaUi
 import { ScrollView } from "@NovaUiBase/scrollview.slint";
 import { ReaderField as LineEdit, ReaderSelect as ComboBox, ReaderToggle as CheckBox } from "controls.slint";
 import { PageHeader } from "page-header.slint";
-import { SourceRow, ExtensionRow } from "media-models.slint";
-export { SourceRow, ExtensionRow } from "media-models.slint";
+import { SourceRow, ExtensionRow } from "@NovaUiShared";
+export { SourceRow, ExtensionRow } from "@NovaUiShared";
 import { SourceList } from "source-list.slint";
 import { ExtensionList } from "extensions.slint";
 import { Segmented } from "@NovaUiBase/settings-controls.slint";
-import { ItemRow } from "media-models.slint";
-export { ItemRow } from "media-models.slint";
-import { Appearance } from "appearance.slint";
+import { ItemRow } from "@NovaUiShared";
+export { ItemRow } from "@NovaUiShared";
+import { Appearance, LibraryBridge } from "@NovaUiShared";
 import { SeriesGrid, LibraryViewSwitch } from "library-cards.slint";
 import { DetailHero } from "detail-hero.slint";
 import { DownloadsPanel, DownloadEntry } from "downloads.slint";
@@ -40,11 +40,11 @@ import { DownloadIconButton } from "download-controls.slint";
 export { SaveImageSource } from "save-image-sheet.slint";
 import { SaveOutputFormats } from "save-output.slint";
 import { LibraryFilterChip } from "@NovaUiBase/filter-chip.slint";
-import { LibraryPage } from "library-page.slint";
+import { LibraryHost } from "library-host.slint";
 import { EntryMenu, EntryCategoryRow } from "entry-menu.slint";
 export { EntryCategoryRow } from "entry-menu.slint";
 export { ReaderSyncSettings, SyncPeer, SyncInvite, SyncInspectorRow } from "sync-bridge.slint";
-import { SettingsSync as ReaderSettingsSync } from "@NovaUiShared";
+import { SettingsSync } from "@NovaUiShared";
 import { ReaderSyncSettings } from "sync-bridge.slint";
 import { SyncContent } from "sync-host.slint";
 import { SettingSyncModal } from "settings-sync.slint";
@@ -54,7 +54,7 @@ import { PageOverview, OverviewTile } from "page-overview.slint";
 export { OverviewTile } from "page-overview.slint";
 import { LicenseSource } from "about-models.slint";
 export { LicenseSource } from "about-models.slint";
-export { Appearance } from "appearance.slint";
+export { Appearance } from "@NovaUiShared";
 export { ImageLimitSettings } from "image-limit-settings.slint";
 export { DownloadCleanupSettings } from "download-cleanup-settings.slint";
 export { BackupBridge, BackupOption, BackupMapping } from "backup.slint";
@@ -75,8 +75,8 @@ export struct TileRow { image: image, offset: float, fraction: float, left: floa
 export struct ReaderBoundaryRow { position: float, previous: string, next: string }
 export struct PageRow { tiles:[TileRow], page-id: string, image: image, ratio: float, position: float, loaded: bool, preview: bool, error: string }
 export struct ReaderCaptureViewport { x: float, y: float, width: float, height: float, content-x: float, content-y: float }
-export { SettingRow } from "media-models.slint";
-import { SettingRow } from "media-models.slint";
+export { SettingRow } from "@NovaUiShared";
+import { SettingRow } from "@NovaUiShared";
 
 export component AppWindow inherits Window {
     title: "Nova Reader";
@@ -634,8 +634,10 @@ export component AppWindow inherits Window {
     in-out property <int> library-restore-serial: 0;
     callback library-viewport-changed(string,float,float);
     callback library-checkpoint();
+    // The library page's Enter hands focus back to the window's key handler.
+    public function library-search-submitted() { if !root.mobile-ui { keyboard.focus(); } }
     public function remember-library-position() {
-        if root.section == 0 { library-page.remember-position(); root.library-checkpoint(); }
+        if root.section == 0 { LibraryBridge.remember-position(); root.library-checkpoint(); }
     }
     private property <bool> library-search-open: false;
     private property <int> library-search-focus-request: 0;
@@ -644,13 +646,13 @@ export component AppWindow inherits Window {
         root.library-search-open = true;
         root.library-search-focus-request += 1;
     }
-    function close-library-search() {
+    public function close-library-search() {
         root.library-search-open = false;
         root.library-query = "";
         keyboard.focus();
         root.search("");
     }
-    function toggle-library-search() {
+    public function toggle-library-search() {
         if root.library-search-open { root.close-library-search(); }
         else { root.focus-library-search(); }
     }
@@ -715,7 +717,7 @@ export component AppWindow inherits Window {
         if root.capture-editor-visible {
             root.capture-editor-action(root.capture-editor-preview-mode ? "adjust" : "cancel"); return;
         }
-        if ReaderSettingsSync.open { ReaderSettingsSync.open = false; return; }
+        if SettingsSync.open { SettingsSync.open = false; return; }
         if SyncContent.sync_remove_prompt_visible {
             SyncContent.sync_remove_prompt_visible = false;
             SyncContent.sync_remove_prompt_id = "";
@@ -751,7 +753,7 @@ export component AppWindow inherits Window {
             ReaderSyncSettings.sync_inspector_active = false;
             SyncContent.sync_remove_prompt_visible = false;
         }
-        ReaderSettingsSync.open = false;
+        SettingsSync.open = false;
         if root.export-conflict-open { root.resolve-export-conflict(2); }
         if root.action-confirm-open { root.resolve-action-confirm(1); }
         if BackupBridge.confirm_open { root.resolve-restore-confirm(1); }
@@ -800,7 +802,9 @@ export component AppWindow inherits Window {
                     page-content := Rectangle {
                         min-width: 0px;
                         opacity: root.section == 5 ? root.detail-opacity : 1;
-                        library-page := LibraryPage {
+                        library-host := LibraryHost {
+                            width: parent.width; height: parent.height;
+                            viewport-width: self.width; viewport-height: self.height;
                             visible: root.section == 0;
                             items: root.section == 0 ? root.items : []; categories: root.categories; category-index: root.category-index;
                             category-counts: root.category-counts; count-label: root.library-count-label;
@@ -812,17 +816,6 @@ export component AppWindow inherits Window {
                             query <=> root.library-query; scroll-y <=> root.library-scroll-y;
                             restore-index: root.library-restore-index; restore-fraction: root.library-restore-fraction;
                             restore-serial: root.library-restore-serial;
-                            viewport-changed(key,fraction,y) => { root.library-viewport-changed(key,fraction,y); }
-                            checkpoint => { root.library-checkpoint(); }
-                            category-selected(i) => { root.category-selected(i); }
-                            sort-changed => { root.library-sort-changed(); }
-                            picked(i) => { root.open-item(i); }
-                            context-requested(key,title,in-library,x,y) => { root.open-entry-menu(key,title,in-library,x,y); }
-                            request-artwork(first,last) => { root.request-artwork(first,last); }
-                            close-search => { root.close-library-search(); }
-                            toggle-search => { root.toggle-library-search(); }
-                            search(query) => { root.search(query); }
-                            submitted => { if !root.mobile-ui { keyboard.focus(); } }
                         }
                         if root.section != 0 && root.section != 6 && root.section != 4 && root.section != 7 && root.section != 8 && root.section < 9: page-scroll := ScrollView {
                             private property <int> control-focus-request: SettingsStyle.focus-request;
@@ -898,7 +891,7 @@ export component AppWindow inherits Window {
                                         HorizontalLayout {
                                             spacing: 8px;
                                             CheckBox { horizontal-stretch: 1; min-width: 0px; text: @tr("Show adult sources"); checked <=> root.show-adult; toggled => { root.adult-visibility-changed(self.checked); } }
-                                            if ReaderSettingsSync.enabled: SettingSyncBadge { setting_key: "reader:show-adult"; setting_title: @tr("Show adult sources"); }
+                                            if SettingsSync.enabled: SettingSyncBadge { setting_key: "reader:show-adult"; setting_title: @tr("Show adult sources"); }
                                         }
                                         SourceList {
                                             items: root.source-rows;
@@ -1551,7 +1544,7 @@ export component AppWindow inherits Window {
                 return accept;
             }
             if event.text == Key.Back && root.section == 0
-                && !ReaderSettingsSync.open && !SyncContent.sync_remove_prompt_visible
+                && !SettingsSync.open && !SyncContent.sync_remove_prompt_visible
                 && !root.entry-menu-visible && !root.reader-context-visible
                 && !root.library-search-open {
                 // Slint's Android backend finishes the Activity for an

@@ -2,9 +2,9 @@
 import { Theme, SettingsStyle, SliderGesture } from "@NovaUiShared";
 import { Spinner } from "std-widgets.slint";
 import { ReaderField as LineEdit, ReaderSelect as ComboBox, ReaderToggle as CheckBox } from "controls.slint";
-import { SettingRow } from "media-models.slint";
+import { SettingRow } from "@NovaUiShared";
 import { PageHeader } from "page-header.slint";
-import { SettingsSync as ReaderSettingsSync } from "@NovaUiShared";
+import { SettingsSync } from "@NovaUiShared";
 import { SourceCompressionSettingsPanel } from "source-compression-settings.slint";
 
 export component SourceSettingsPage inherits Flickable {
@@ -47,7 +47,7 @@ export component SourceSettingsPage inherits Flickable {
         }
         SourceCompressionSettingsPanel { interactive: !root.busy; }
         if root.catalogues.length > 0: Text { text: @tr("Catalogues"); color: Theme.current.text_bright; font-size: 18px; font-weight: 600; }
-        if root.catalogues.length > 0 && ReaderSettingsSync.enabled: Text {
+        if root.catalogues.length > 0 && SettingsSync.enabled: Text {
             text: @tr("Catalogue switches sync with this addon. Source permissions and credentials stay on this device.");
             color: Theme.current.text_secondary; wrap: word-wrap; min-width: 0px;
         }
@@ -57,7 +57,7 @@ export component SourceSettingsPage inherits Flickable {
         }
         for setting in root.settings: VerticalLayout {
             spacing: 8px;
-            if ReaderSettingsSync.enabled: Text {
+            if SettingsSync.enabled: Text {
                 text: setting.kind == "secret" ? @tr("This device") : @tr("Synced with this addon");
                 color: Theme.current.text_secondary; font-size: 11px; wrap: word-wrap; min-width: 0px;
             }
