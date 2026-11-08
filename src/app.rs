@@ -2148,6 +2148,11 @@ impl Controller {
         }
         chapter_selection::publish(&view, ui);
         downloads::publish_detail_queue(&view, ui);
+        if view.section == 5
+            && let Some(series) = view.series.as_ref()
+        {
+            publish_title_menu(&view, &snapshot, &series.id, ui);
+        }
         let clock = crate::timeline::TimelineClock::now();
         view.artwork_rows = view
             .rows
@@ -4486,6 +4491,70 @@ impl Controller {
                 self.render(ui);
                 return Ok(());
             }
+            // Title menu → Download: chosen in reading order, skipping chapters
+            // already on disk or waiting.
+            let pick = match action {
+                "download-unread" => Some(chapter_batch::Pick::Unread),
+                "download-all" => Some(chapter_batch::Pick::All),
+                _ => action
+                    .strip_prefix("download-next:")
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .map(chapter_batch::Pick::NextUnread),
+            };
+            if let Some(pick) = pick {
+                let targets = chapter_batch::to_download(
+                    &snapshot,
+                    &id,
+                    None,
+                    pick,
+                    &self.view().download_states,
+                );
+                if targets.is_empty() {
+                    ui.set_status(text::tr("Nothing left to download.").into());
+                } else {
+                    self.download_many(ui, targets);
+                }
+                return Ok(());
+            }
+            if action == "delete-read-downloads" {
+                // Read, fully downloaded chapters; bookmarked ones keep theirs.
+                let targets: Vec<ChapterId> = {
+                    let view = self.view();
+                    snapshot
+                        .chapters
+                        .iter()
+                        .filter(|c| c.id.series == id)
+                        .map(|c| c.id.clone())
+                        .filter(|c| {
+                            view.download_states.get(c)
+                                == Some(&reader_downloads::JobStatus::Complete)
+                        })
+                        .filter(|c| snapshot.progress.iter().any(|p| &p.chapter == c && p.completed))
+                        .filter(|c| !snapshot.bookmarks.iter().any(|b| &b.chapter == c))
+                        .collect()
+                };
+                self.task(
+                    ui,
+                    move |app, _| {
+                        for chapter in &targets {
+                            app.remove_download(chapter)?;
+                        }
+                        Ok(targets)
+                    },
+                    |app, ui, targets| {
+                        {
+                            let mut view = app.view();
+                            for chapter in &targets {
+                                view.download_states.remove(chapter);
+                            }
+                        }
+                        app.render(ui);
+                        ui.set_status(text::tr("Read downloads deleted.").into());
+                        app.refresh_download_states(ui);
+                    },
+                );
+                return Ok(());
+            }
             if matches!(
                 action,
                 "mark-all-read" | "mark-all-unread" | "clear-all-positions"
@@ -6228,6 +6297,58 @@ fn wire_reader_context(app: &Arc<Controller>, ui: &AppWindow) {
             ui.invoke_reader_context_action(index, "save-image-plan".into());
         }
     });
+}
+
+/// The detail title menu's summary line and its download counts.
+fn publish_title_menu(
+    view: &View,
+    snapshot: &reader_domain::ReaderState,
+    series: &reader_domain::SeriesId,
+    ui: &AppWindow,
+) {
+    let chapters: Vec<&Chapter> = snapshot
+        .chapters
+        .iter()
+        .filter(|c| &c.id.series == series)
+        .collect();
+    let unread = chapters
+        .iter()
+        .filter(|c| !snapshot.progress.iter().any(|p| p.chapter == c.id && p.completed))
+        .count();
+    let downloaded = chapters
+        .iter()
+        .filter(|c| view.download_states.get(&c.id) == Some(&reader_downloads::JobStatus::Complete))
+        .count();
+    let bytes: u64 = view
+        .downloads
+        .jobs
+        .iter()
+        .filter(|j| &j.chapter.series == series && j.status == reader_downloads::JobStatus::Complete)
+        .map(|j| j.downloaded_bytes())
+        .sum();
+    let mut parts = Vec::new();
+    if let Some(entry) = snapshot.library.iter().find(|entry| &entry.series == series) {
+        let status = view
+            .series
+            .as_ref()
+            .map(|s| s.publication_status)
+            .unwrap_or_default();
+        parts.push(text::tr(
+            reader_domain::library_bucket(entry, &snapshot.chapters, &snapshot.progress, status)
+                .label(),
+        ));
+    }
+    parts.push(format!("{unread} {}", text::tr("unread")));
+    parts.push(format!("{downloaded} {}", text::tr("downloaded")));
+    if bytes > 0 {
+        parts.push(text::file_size(bytes as usize));
+    }
+    ui.set_detail_menu_summary(parts.join(" · ").into());
+    let count = |pick| {
+        chapter_batch::to_download(snapshot, series, None, pick, &view.download_states).len() as i32
+    };
+    ui.set_detail_unread_to_download(count(chapter_batch::Pick::Unread));
+    ui.set_detail_all_to_download(count(chapter_batch::Pick::All));
 }
 
 /// Names compare case-insensitively after trimming, like the visible label.

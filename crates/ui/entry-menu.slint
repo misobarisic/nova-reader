@@ -29,6 +29,8 @@ export component EntryMenu inherits Rectangle {
     callback picked(string);
     callback category-toggled(string);
     callback dismissed;
+    // Open straight into the Presentation picker (the detail title menu's Layout).
+    in property <bool> start-presentation;
     private property <int> selected: 0;
     private property <length> scroll-y: 0px;
     private property <length> list-height: 0px;
@@ -74,7 +76,10 @@ export component EntryMenu inherits Rectangle {
         status-picked(code) => { root.picked("status:" + code); }
         closed => { root.dismissed(); }
     }
-    init => { if !root.narrow || root.editing { scope.focus(); } }
+    init => {
+        if root.start-presentation { root.pick-action("presentation"); }
+        else if !root.narrow || root.editing { scope.focus(); }
+    }
     changed editing => { root.selected = 0; if root.editing { scope.focus(); } }
     function reveal-selected() {
         if root.presentation-editing { return; }

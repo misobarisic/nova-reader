@@ -35,6 +35,7 @@ import { SaveConflictSheet } from "save-conflict-sheet.slint";
 import { ActionConfirmSheet } from "action-confirm-sheet.slint";
 import { SaveImageSheet, SaveImageSource } from "save-image-sheet.slint";
 import { ChapterSelectionBar } from "chapter-selection-bar.slint";
+import { TitleMenu } from "title-menu.slint";
 import { DownloadIconButton } from "download-controls.slint";
 export { SaveImageSource } from "save-image-sheet.slint";
 import { SaveOutputFormats } from "save-output.slint";
@@ -412,6 +413,29 @@ export component AppWindow inherits Window {
     private property <bool> entry-menu-editing;
     private property <bool> entry-menu-status-editing;
     private property <length> entry-menu-x;
+    private property <bool> entry-menu-presentation-start;
+    // The detail screen's title ⋯ menu and what its pages show.
+    in-out property <bool> title-menu-open;
+    private property <length> title-menu-right;
+    private property <length> title-menu-bottom;
+    in property <string> detail-menu-summary;
+    in property <int> detail-unread-to-download;
+    in property <int> detail-all-to-download;
+    function title-menu-picked(action: string) {
+        let key = root.detail-series-key;
+        if action == "change-status" || action == "categories" || action == "presentation" {
+            // The existing pickers handle these, opened at the same spot.
+            root.entry-menu-presentation-start = action == "presentation";
+            root.open-entry-menu(key, root.series-title, root.in-library, root.title-menu-right - 288px, root.title-menu-bottom);
+            if action != "presentation" { root.entry-menu-picked(action); }
+        } else if action == "remove" || action == "mark-all-read" || action == "mark-all-unread" || action == "clear-all-positions" {
+            root.confirm-entry-action(key, action);
+        } else if action == "delete-read-downloads" {
+            root.ask-confirm("entry", key, action, 0, @tr("Delete the downloads of read chapters from this device? Bookmarked chapters keep theirs."), @tr("Delete read downloads"));
+        } else {
+            root.entry-action(key, action);
+        }
+    }
     private property <length> entry-menu-y;
     callback entry-action(string,string);
     public function open-entry-menu(key: string,title: string,in-library: bool,x: length,y: length) {
@@ -421,7 +445,7 @@ export component AppWindow inherits Window {
         root.entry-menu-requested(key);
         root.entry-menu-x = x; root.entry-menu-y = y; root.entry-menu-visible = true;
     }
-    public function close-entry-menu() { root.entry-menu-visible = false; root.entry-menu-editing = false; root.entry-menu-status-editing = false; if root.section == 23 { root.overview-focus-request += 1; } else { keyboard.focus(); } }
+    public function close-entry-menu() { root.entry-menu-presentation-start = false; root.entry-menu-visible = false; root.entry-menu-editing = false; root.entry-menu-status-editing = false; if root.section == 23 { root.overview-focus-request += 1; } else { keyboard.focus(); } }
     function entry-menu-picked(action: string) {
         // Dispatch before the conditional overlay is destroyed, including
         // accessibility actions. Category toggles retain this captured ID.
@@ -681,6 +705,7 @@ export component AppWindow inherits Window {
         if BackupBridge.confirm_open { root.resolve-restore-confirm(1); return; }
         if root.download-confirm-open { root.resolve-download-confirm(1); return; }
         if root.export-conflict-open { root.resolve-export-conflict(2); return; }
+        if root.title-menu-open { root.title-menu-open = false; keyboard.focus(); return; }
         // Back leaves chapter selection before it leaves the title.
         if root.section == 5 && root.chapter-selecting { root.chapter-selection("clear", -1); return; }
         if root.capture-editor-visible {
@@ -1417,7 +1442,13 @@ export component AppWindow inherits Window {
                                 padding-bottom: root.mobile-ui ? 10px : 16px; spacing: root.mobile-ui ? 6px : 12px;
                                 BackButton { clicked => { root.go-back(); } }
                                 Rectangle { horizontal-stretch: 1; }
-                                IconAction { width: 44px; text: @tr("Title options"); icon: @image-url("../../assets/icons/navigation/more.svg"); clicked => { root.open-entry-menu(root.detail-series-key,root.series-title,root.in-library,self.absolute-position.x,self.absolute-position.y + self.height); } }
+                                IconAction { width: 44px; text: @tr("Title options"); icon: @image-url("../../assets/icons/navigation/more.svg"); clicked => {
+                                    if root.section == 5 {
+                                        root.title-menu-right = self.absolute-position.x + self.width;
+                                        root.title-menu-bottom = self.absolute-position.y + self.height;
+                                        root.title-menu-open = true;
+                                    } else { root.open-entry-menu(root.detail-series-key,root.series-title,root.in-library,self.absolute-position.x,self.absolute-position.y + self.height); }
+                                } }
                             }
                         }
                         if root.section == 23: overview := PageOverview {
@@ -1587,8 +1618,18 @@ export component AppWindow inherits Window {
         selection-changed(crop) => { root.capture-editor-selection-changed(crop); }
         action(action) => { root.capture-editor-action(action); }
     }
+    if root.section == 5 && root.title-menu-open: TitleMenu {
+        width: root.width; height: root.height;
+        title: root.series-title; summary: root.detail-menu-summary; in-library: root.in-library;
+        unread-to-download: root.detail-unread-to-download; all-to-download: root.detail-all-to-download;
+        anchor-right: root.title-menu-right; anchor-bottom: root.title-menu-bottom;
+        safe-bottom: root.safe-area-insets.bottom;
+        picked(action) => { root.title-menu-picked(action); }
+        closed => { root.title-menu-open = false; keyboard.focus(); }
+    }
     if root.entry-menu-visible: EntryMenu {
         width: root.width; height: root.height;
+        start-presentation: root.entry-menu-presentation-start;
         narrow: root.mobile-ui; editing: root.entry-menu-editing; status-editing: root.entry-menu-status-editing;
         title: root.entry-menu-title; in-library: root.entry-menu-library;
         collection: root.section == 23 && root.overview-collection;

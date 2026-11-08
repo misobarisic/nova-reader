@@ -7,8 +7,10 @@ import { Theme, SettingsStyle, Anim } from "@NovaUiShared";
 import { ControlTouchArea } from "@NovaUiBase/control-input.slint";
 import { ItemRow } from "media-models.slint";
 
-component MenuItem inherits Rectangle {
+export component MenuItem inherits Rectangle {
     in property <string> label;
+    // A count or "›" at the trailing edge.
+    in property <string> trailing;
     in property <string> icon;
     in property <bool> danger;
     in property <bool> live: true;
@@ -19,6 +21,7 @@ component MenuItem inherits Rectangle {
     border-width: key.has-focus && SettingsStyle.keyboard-mode ? 2px : 0px;
     border-color: Theme.current.focus_ring;
     accessible-role: button; accessible-label: root.label; accessible-enabled: root.live;
+    accessible-description: root.trailing;
     accessible-action-default => { if root.live { root.activated(); } }
     Path {
         x: 12px; y: 12px; width: 20px; height: 20px;
@@ -27,8 +30,14 @@ component MenuItem inherits Rectangle {
         commands: root.icon;
         accessible-role: none;
     }
+    if root.trailing != "": Text {
+        x: parent.width - 52px; width: 40px; height: 100%;
+        text: root.trailing; font-size: 13px; horizontal-alignment: right; vertical-alignment: center;
+        color: Theme.current.text_muted;
+        accessible-role: none;
+    }
     Text {
-        x: 44px; width: parent.width - 52px; height: 100%;
+        x: 44px; width: parent.width - (root.trailing != "" ? 100px : 52px); height: 100%;
         text: root.label; font-size: 14px; overflow: elide; vertical-alignment: center;
         color: root.danger ? Theme.current.text_destructive : Theme.current.text_bright;
         accessible-role: none;
