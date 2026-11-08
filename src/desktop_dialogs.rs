@@ -61,8 +61,13 @@ impl PathRequest {
                 .add_filter("Local chapter", &["cbz", "zip"])
                 .pick_file(),
             Self::ChapterFolder => dialog.pick_folder(),
-            Self::BackupOpen => dialog.add_filter("Metadata backup", &["json"]).pick_file(),
-            Self::BackupSave => dialog.set_file_name("nova-reader-backup.json").save_file(),
+            Self::BackupOpen => dialog
+                .add_filter("Nova Reader backup", &[crate::backup::EXTENSION, "json"])
+                .pick_file(),
+            Self::BackupSave => dialog
+                .add_filter("Nova Reader backup", &[crate::backup::EXTENSION])
+                .set_file_name(format!("nova-reader.{}", crate::backup::EXTENSION))
+                .save_file(),
         }
     }
 }

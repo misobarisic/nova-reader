@@ -63,7 +63,7 @@ pub enum ImportKind {
     AddonZip = 0,
     ComicArchive = 1,
     ImageFolder = 2,
-    BackupJson = 3,
+    BackupFile = 3,
 }
 
 fn take_java_exception(env: &mut JNIEnv<'_>) -> Option<String> {

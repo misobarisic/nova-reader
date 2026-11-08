@@ -59,7 +59,7 @@ impl Controller {
 
     /// Reset everything the previous profile put on screen or in memory, then
     /// reload the new profile's personal preferences.
-    fn reset_profile_view(self: &Arc<Self>, ui: &AppWindow) {
+    pub(super) fn reset_profile_view(self: &Arc<Self>, ui: &AppWindow) {
         {
             let mut view = self.view();
             // A late refresh started before the switch is recognized as stale.

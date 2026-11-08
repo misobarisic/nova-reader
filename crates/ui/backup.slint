@@ -1,0 +1,222 @@
+// Settings → Data: export the chosen profiles and this device's data as one
+// backup file, or import one with a profile mapping, merge or replace, a
+// reviewed preview and an undo. The state machine lives in src/backup_actions.rs;
+// this file only shows it and reports the user's choices.
+import { Theme } from "@NovaUiShared";
+import { SettingsCard, SectionHeader, ToggleSwitch, PillButton } from "@NovaUiBase/settings-controls.slint";
+import { SettingsRow } from "settings-row.slint";
+
+export struct BackupOption { id: string, label: string, detail: string, checked: bool }
+export struct BackupMapping { id: string, label: string, target: string }
+
+export global BackupBridge {
+    in-out property <bool> busy;
+    // A file is open for import, and whether its current choices were previewed.
+    in-out property <bool> importing;
+    in-out property <bool> preview_ready;
+    in-out property <bool> undoing;
+    in-out property <bool> replace;
+    in-out property <bool> can_undo;
+    in-out property <string> status;
+    in-out property <string> file_label;
+    in-out property <[BackupOption]> export_profiles;
+    in-out property <[BackupOption]> export_components;
+    in-out property <[BackupOption]> export_device;
+    in-out property <[BackupOption]> profiles;
+    in-out property <[BackupMapping]> mappings;
+    in-out property <[BackupOption]> components;
+    in-out property <[BackupOption]> device_components;
+    in-out property <[BackupOption]> conflicts;
+    in-out property <[string]> preview_rows;
+    // The shared confirmation sheet: 1 applies the previewed import, 2 deletes
+    // the recovery copies that were listed.
+    in-out property <bool> confirm_open;
+    in-out property <int> confirm_kind;
+    in-out property <string> confirm_message;
+    in-out property <string> confirm_label;
+    callback confirm_choice(int);
+    callback opened();
+    callback export_preset(int);
+    callback export_toggle(string, string);
+    callback export_file();
+    callback import_file();
+    callback import_toggle(string, string);
+    callback cycle_target(string);
+    callback mode_changed(bool);
+    callback build_preview();
+    callback apply_import();
+    callback undo();
+    callback delete_recovery();
+}
+
+// PillButton has no default accessibility action of its own; give screen
+// readers and headless tests the same activation a tap performs.
+component BackupButton inherits PillButton {
+    callback activate();
+    clicked => { root.activate(); }
+    accessible-action-default => { if root.enabled { root.activate(); } }
+}
+
+component BackupToggle inherits SettingsRow {
+    in property <bool> interactive: true;
+    in property <bool> checked;
+    callback toggled();
+    // A tap flips the switch's own state. Hand authority back to the model
+    // afterwards, including when the request is refused or changes nothing else.
+    changed checked => { toggle.checked = root.checked; }
+    toggle := ToggleSwitch {
+        name: root.row-title;
+        enabled: root.interactive && !BackupBridge.busy;
+        checked: root.checked;
+        toggled => { root.toggled(); toggle.checked = root.checked; }
+        accessible-action-default => { if self.enabled { root.toggled(); toggle.checked = root.checked; } }
+    }
+}
+
+export component BackupPage inherits VerticalLayout {
+    in property <bool> interactive: true;
+    spacing: 16px; alignment: start;
+    init => { BackupBridge.opened(); }
+
+    SectionHeader { label: @tr("Export"); }
+    Text {
+        min-width: 0px; wrap: word-wrap; color: Theme.current.text_secondary;
+        text: @tr("Save your profiles and this device's data as one file. Addon credentials are saved in plain text, so keep the file private. Sync identity, paired devices and caches are never included.");
+    }
+    SettingsCard {
+        SettingsRow {
+            row-title: @tr("Everything"); row-desc: @tr("All profiles, their data and settings, addon packages and this device's settings.");
+            BackupButton { label: @tr("Select"); enabled: root.interactive && !BackupBridge.busy; activate => { BackupBridge.export_preset(0); } }
+        }
+        SettingsRow {
+            row-title: @tr("Library and reading"); row-desc: @tr("Library, categories, progress, history and bookmarks.");
+            BackupButton { label: @tr("Select"); enabled: root.interactive && !BackupBridge.busy; activate => { BackupBridge.export_preset(1); } }
+        }
+        SettingsRow {
+            row-title: @tr("Settings and addons"); row-desc: @tr("Settings, addon configuration and credentials, and addon packages.");
+            BackupButton { label: @tr("Select"); enabled: root.interactive && !BackupBridge.busy; activate => { BackupBridge.export_preset(2); } }
+        }
+    }
+    SectionHeader { label: @tr("Profiles"); }
+    SettingsCard {
+        for option in BackupBridge.export_profiles: BackupToggle {
+            row-title: option.label; row-desc: option.detail; checked: option.checked; interactive: root.interactive;
+            toggled => { BackupBridge.export_toggle("profile", option.id); }
+        }
+    }
+    SectionHeader { label: @tr("Profile data"); }
+    SettingsCard {
+        for option in BackupBridge.export_components: BackupToggle {
+            row-title: option.label; row-desc: option.detail; checked: option.checked; interactive: root.interactive;
+            toggled => { BackupBridge.export_toggle("component", option.id); }
+        }
+    }
+    SectionHeader { label: @tr("This device"); }
+    SettingsCard {
+        for option in BackupBridge.export_device: BackupToggle {
+            row-title: option.label; row-desc: option.detail; checked: option.checked; interactive: root.interactive;
+            toggled => { BackupBridge.export_toggle("device", option.id); }
+        }
+    }
+    BackupButton {
+        label: @tr("Export backup"); primary: true; roomy: true; wrap_label: true;
+        enabled: root.interactive && !BackupBridge.busy;
+        activate => { BackupBridge.export_file(); }
+    }
+
+    SectionHeader { label: @tr("Import"); }
+    Text {
+        min-width: 0px; wrap: word-wrap; color: Theme.current.text_secondary;
+        text: @tr("Choose a backup file, decide where each profile goes, and review every change before it is applied. Older metadata backups still import. The last three imports can be undone.");
+    }
+    BackupButton {
+        label: BackupBridge.importing ? @tr("Choose another file") : @tr("Choose backup file"); roomy: true; wrap_label: true;
+        enabled: root.interactive && !BackupBridge.busy;
+        activate => { BackupBridge.import_file(); }
+    }
+    if BackupBridge.importing: VerticalLayout {
+        spacing: 16px; alignment: start;
+        if BackupBridge.file_label != "": Text {
+            min-width: 0px; wrap: word-wrap; color: Theme.current.text_settings; text: BackupBridge.file_label;
+        }
+        SectionHeader { label: @tr("Profiles"); }
+        SettingsCard {
+            for option in BackupBridge.profiles: BackupToggle {
+                row-title: option.label; row-desc: option.detail; checked: option.checked; interactive: root.interactive;
+                toggled => { BackupBridge.import_toggle("profile", option.id); }
+            }
+            for mapping in BackupBridge.mappings: SettingsRow {
+                row-title: mapping.label; row-desc: mapping.target;
+                BackupButton {
+                    label: @tr("Change"); enabled: root.interactive && !BackupBridge.busy;
+                    activate => { BackupBridge.cycle_target(mapping.id); }
+                }
+            }
+        }
+        SettingsCard {
+            BackupToggle {
+                row-title: @tr("Replace selected data"); checked: BackupBridge.replace; interactive: root.interactive && !BackupBridge.undoing;
+                row-desc: BackupBridge.replace
+                    ? @tr("Records that are not in the backup are deleted from the selected data. Deletions sync to your other devices.")
+                    : @tr("Missing records are added and conflicting local values are kept. Newer reading progress wins.");
+                toggled => { BackupBridge.mode_changed(!BackupBridge.replace); }
+            }
+        }
+        SectionHeader { label: @tr("Profile data"); }
+        SettingsCard {
+            for option in BackupBridge.components: BackupToggle {
+                row-title: option.label; row-desc: option.detail; checked: option.checked; interactive: root.interactive && !BackupBridge.undoing;
+                toggled => { BackupBridge.import_toggle("component", option.id); }
+            }
+        }
+        if BackupBridge.device_components.length > 0: SectionHeader { label: @tr("This device"); }
+        if BackupBridge.device_components.length > 0: SettingsCard {
+            for option in BackupBridge.device_components: BackupToggle {
+                row-title: option.label; row-desc: option.detail; checked: option.checked; interactive: root.interactive && !BackupBridge.undoing;
+                toggled => { BackupBridge.import_toggle("device", option.id); }
+            }
+        }
+        if BackupBridge.conflicts.length > 0: SectionHeader { label: @tr("Use backup for conflicts"); }
+        if BackupBridge.conflicts.length > 0: SettingsCard {
+            for option in BackupBridge.conflicts: BackupToggle {
+                row-title: option.label; checked: option.checked; interactive: root.interactive;
+                toggled => { BackupBridge.import_toggle("conflict", option.id); }
+            }
+        }
+        if BackupBridge.preview_rows.length > 0: SectionHeader { label: @tr("Review"); }
+        if BackupBridge.preview_rows.length > 0: SettingsCard {
+            for row in BackupBridge.preview_rows: SettingsRow {
+                row-desc: row; full-width-text: true; accessible-role: text; accessible-label: row;
+            }
+        }
+        Text {
+            min-width: 0px; wrap: word-wrap; color: Theme.current.text_settings;
+            text: @tr("Imported changes, including deletions, sync to your paired devices. The file's addon credentials are applied as they are.");
+        }
+        BackupButton {
+            label: BackupBridge.preview_ready ? (BackupBridge.undoing ? @tr("Undo reviewed changes") : @tr("Import reviewed changes")) : @tr("Review changes");
+            primary: true; roomy: true; wrap_label: true;
+            enabled: root.interactive && !BackupBridge.busy;
+            activate => { if BackupBridge.preview_ready { BackupBridge.apply_import(); } else { BackupBridge.build_preview(); } }
+        }
+        if BackupBridge.preview_ready: BackupButton {
+            label: @tr("Review again"); roomy: true; wrap_label: true;
+            enabled: root.interactive && !BackupBridge.busy;
+            activate => { BackupBridge.build_preview(); }
+        }
+    }
+    if BackupBridge.status != "": SettingsCard {
+        SettingsRow { row-desc: BackupBridge.status; full-width-text: true; }
+    }
+    SectionHeader { label: @tr("Recovery"); }
+    BackupButton {
+        label: @tr("Undo last import"); roomy: true; wrap_label: true;
+        enabled: root.interactive && !BackupBridge.busy && BackupBridge.can_undo;
+        activate => { BackupBridge.undo(); }
+    }
+    BackupButton {
+        label: @tr("Delete recovery copies"); roomy: true; wrap_label: true; destructive: true;
+        enabled: root.interactive && !BackupBridge.busy && BackupBridge.can_undo;
+        activate => { BackupBridge.delete_recovery(); }
+    }
+}

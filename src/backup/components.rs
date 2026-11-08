@@ -28,38 +28,109 @@ pub(crate) enum Scope {
 pub(crate) struct Def {
     pub id: &'static str,
     pub label: &'static str,
+    /// One line of what the component holds, for the Data page.
+    pub detail: &'static str,
     pub scope: Scope,
     /// Selected by the "Everything" preset. Large files are opt-in.
     pub everything: bool,
 }
-const fn def(id: &'static str, label: &'static str, scope: Scope, everything: bool) -> Def {
+const fn def(
+    id: &'static str,
+    label: &'static str,
+    detail: &'static str,
+    scope: Scope,
+    everything: bool,
+) -> Def {
     Def {
         id,
         label,
+        detail,
         scope,
         everything,
     }
 }
 pub(crate) const COMPONENTS: &[Def] = &[
-    def("library", "Library", Scope::Profile, true),
-    def("categories", "Categories", Scope::Profile, true),
-    def("progress", "Reading progress", Scope::Profile, true),
-    def("history", "History", Scope::Profile, true),
-    def("bookmarks", "Bookmarks", Scope::Profile, true),
-    def("settings", "Reader and app settings", Scope::Profile, true),
-    def("title_settings", "Per-title settings", Scope::Profile, true),
-    def("addons", "Addon settings", Scope::Profile, true),
-    def("addon_secrets", "Addon credentials", Scope::Profile, true),
     def(
-        "sync_overrides",
-        "Per-device sync overrides",
+        "library",
+        "Library",
+        "Titles you follow, their category assignments and cached chapter lists.",
         Scope::Profile,
         true,
     ),
-    def("packages", "Addon packages", Scope::Device, true),
+    def(
+        "categories",
+        "Categories",
+        "Your category names. Categories match by name.",
+        Scope::Profile,
+        true,
+    ),
+    def(
+        "progress",
+        "Reading progress",
+        "Where you stopped in each chapter and whether it is read.",
+        Scope::Profile,
+        true,
+    ),
+    def(
+        "history",
+        "History",
+        "The chapters you read recently.",
+        Scope::Profile,
+        true,
+    ),
+    def(
+        "bookmarks",
+        "Bookmarks",
+        "Saved places in chapters, with notes.",
+        Scope::Profile,
+        true,
+    ),
+    def(
+        "settings",
+        "Reader and app settings",
+        "Appearance, reader defaults, adult content, source shortcuts and download cleanup.",
+        Scope::Profile,
+        true,
+    ),
+    def(
+        "title_settings",
+        "Per-title settings",
+        "Reading mode, layout, chapter order and presentation chosen for single titles.",
+        Scope::Profile,
+        true,
+    ),
+    def(
+        "addons",
+        "Addon settings",
+        "Each addon's configuration and hidden catalogues, without credentials.",
+        Scope::Profile,
+        true,
+    ),
+    def(
+        "addon_secrets",
+        "Addon credentials",
+        "Tokens and passwords of your addons, saved in plain text.",
+        Scope::Profile,
+        true,
+    ),
+    def(
+        "sync_overrides",
+        "Per-device sync overrides",
+        "Settings this device keeps to itself instead of following your account.",
+        Scope::Profile,
+        true,
+    ),
+    def(
+        "packages",
+        "Addon packages",
+        "The installed addon files. They are installed disabled and need enabling in Browse.",
+        Scope::Device,
+        true,
+    ),
     def(
         "device_settings",
         "This device's settings",
+        "Image limits and storage, screenshot options and per-addon compression.",
         Scope::Device,
         true,
     ),

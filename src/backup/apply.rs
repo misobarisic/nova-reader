@@ -402,6 +402,52 @@ pub(crate) fn recovery_inventory() -> Result<Vec<(String, String)>, String> {
     rows.sort_by_key(|(key, _)| sequence(key));
     Ok(rows)
 }
+/// One line per kept recovery copy, newest first: when it was made and for
+/// which profiles.
+pub(crate) fn recovery_lines(rows: &[(String, String)]) -> Vec<String> {
+    use time::{OffsetDateTime, UtcOffset, macros::format_description};
+    rows.iter()
+        .rev()
+        .filter_map(|(_, raw)| serde_json::from_str::<Receipt>(raw).ok())
+        .map(|receipt| {
+            let when = OffsetDateTime::from_unix_timestamp(receipt.created_at as i64)
+                .ok()
+                .map(|utc| {
+                    let offset = UtcOffset::local_offset_at(utc).unwrap_or(UtcOffset::UTC);
+                    utc.to_offset(offset)
+                        .format(format_description!("[year]-[month]-[day] [hour]:[minute]"))
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default();
+            let names: Vec<&str> = receipt.choices.iter().map(|c| c.name.as_str()).collect();
+            format!("{when} · {}", names.join(", "))
+        })
+        .collect()
+}
+/// Delete exactly the copies the user reviewed, if none changed since.
+pub(crate) fn delete_reviewed_recovery(
+    services: &Services,
+    reviewed: &[(String, String)],
+) -> Result<(), String> {
+    services
+        .domain
+        .exclusive(|_| {
+            if reviewed.is_empty() || recovery_inventory().map_err(invalid)? != reviewed {
+                return Err(invalid(text::tr(
+                    "Recovery copies changed. Review them again before deleting.",
+                )));
+            }
+            nova_storage::try_write_batch(
+                &reviewed
+                    .iter()
+                    .map(|(key, _)| (key.clone(), None))
+                    .collect::<Vec<_>>(),
+            )?;
+            Ok(())
+        })
+        .map_err(|e| e.to_string())
+}
+
 fn latest_receipt() -> Result<Receipt, String> {
     let rows = recovery_inventory()?;
     let (_, raw) = rows

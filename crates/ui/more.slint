@@ -1,5 +1,6 @@
 // Reader destinations hosted in Nova's retained More landing/push-page pattern.
 // Layout, SettingsCard/SettingsLink rows and transitions follow Nova b69a1e5.
+import { BackupPage } from "backup.slint";
 import { Theme, Anim, SettingsStyle, SliderGesture } from "@NovaUiShared";
 import { SettingsCard } from "@NovaUiBase/settings-controls.slint";
 import { ScrollView } from "@NovaUiBase/scrollview.slint";
@@ -41,7 +42,6 @@ export component MorePage inherits Rectangle {
     callback navigate(int);
     callback install-addon;
     callback local-import(bool);
-    callback backup(bool);
     callback add-category(string);
     callback check-update;
     background: Theme.current.artwork_canvas;
@@ -384,18 +384,7 @@ export component MorePage inherits Rectangle {
                             ActionButton { enabled: root.detail-active; text: @tr("Add category"); clicked => { root.add-category(root.category-text); } }
                         }
                     }
-                    if root.detail-section == 12: VerticalLayout {
-                        spacing: 12px;
-                        SettingsCard { MenuLink {
-                            interactive: root.detail-active; title: @tr("Export metadata backup"); subtitle: @tr("Save your library and reading progress"); icon-kind: 8;
-                            picked => { root.backup(false); }
-                        } }
-                        SettingsCard { MenuLink {
-                            interactive: root.detail-active; title: @tr("Restore metadata backup"); subtitle: @tr("Restore a saved library and reading progress"); icon-kind: 7;
-                            picked => { root.backup(true); }
-                        } }
-                        Text { min-width: 0px; text: @tr("Backups include library, categories, history and reading position. Chapter files, cookies and addon code are excluded."); color: Theme.current.text_secondary; wrap: word-wrap; }
-                    }
+                    if root.detail-section == 12: BackupPage { interactive: root.detail-active; }
                     if root.detail-section == 14: ThemeSettings { narrow: root.width < 700px; phone-layout: root.narrow; interactive: root.detail-active; }
                     if root.detail-section == 16: DisplaySettings { interactive: root.detail-active; }
                     if root.detail-section == 18: CaptureSettingsPage { interactive: root.detail-active; }

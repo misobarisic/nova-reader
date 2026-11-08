@@ -1255,7 +1255,7 @@ fn application_context_launches_and_callbacks_resolve() {
             "android.intent.action.OPEN_DOCUMENT_TREE",
         ),
         (
-            ImportKind::BackupJson,
+            ImportKind::BackupFile,
             "android.intent.action.OPEN_DOCUMENT",
         ),
     ] {

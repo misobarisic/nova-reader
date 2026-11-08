@@ -28,6 +28,8 @@ mod downloads;
 mod library_navigation;
 
 static LIFECYCLE: OnceLock<Weak<Controller>> = OnceLock::new();
+#[path = "backup_actions.rs"]
+mod backup_actions;
 #[path = "gallery_presentation.rs"]
 mod gallery_presentation;
 #[path = "page_overview.rs"]
@@ -6018,14 +6020,6 @@ fn category_exists(categories: &[reader_domain::Category], name: &str) -> bool {
         .any(|category| category.name.trim().to_lowercase() == wanted)
 }
 
-/// One wording for desktop and Android so both report the same outcome.
-fn backup_done_message(restore: bool) -> &'static str {
-    if restore {
-        "Metadata restored. Missing sources can be installed in Browse."
-    } else {
-        "Metadata backup saved."
-    }
-}
 pub fn run(services: Services) -> Result<()> {
     let ui = AppWindow::new().map_err(error)?;
     ui.set_app_version(env!("CARGO_PKG_VERSION").into());
@@ -6134,6 +6128,7 @@ pub fn run(services: Services) -> Result<()> {
     }));
     wire_reader_context(&app, &ui);
     profile_actions::wire(&app, &ui);
+    backup_actions::wire(&app, &ui);
     reader_controls::wire(&app, &ui);
     reader_open::wire(&app, &ui);
     let _overview_timer = page_overview::wire(&app, &ui);
@@ -6517,103 +6512,6 @@ pub fn run(services: Services) -> Result<()> {
                     Err(e) => ui.set_status(text::error(&e).into()),
                 });
             });
-        }
-    });
-    wire!(on_backup, |app, ui, restore| {
-        #[cfg(not(target_os = "android"))]
-        {
-            use crate::desktop_dialogs::PathRequest;
-            let app = app.clone();
-            let request = if restore {
-                PathRequest::BackupOpen
-            } else {
-                PathRequest::BackupSave
-            };
-            crate::desktop_dialogs::pick_path(&ui, request, move |ui, path| {
-                app.task(
-                    ui,
-                    move |app, _| {
-                        if restore {
-                            let file = std::fs::File::open(path).map_err(error)?;
-                            if file.metadata().map_err(error)?.len() > 32 * 1024 * 1024 {
-                                return Err("Backup exceeds 32 MiB".into());
-                            }
-                            use std::io::Read;
-                            let mut bytes = Vec::new();
-                            file.take(32 * 1024 * 1024 + 1)
-                                .read_to_end(&mut bytes)
-                                .map_err(error)?;
-                            app.services.domain.restore_json(&bytes).map_err(error)?;
-                        } else {
-                            std::fs::write(path, app.services.domain.backup_json().map_err(error)?)
-                                .map_err(error)?;
-                        }
-                        Ok(())
-                    },
-                    move |app, ui, _| {
-                        app.render(ui);
-                        ui.set_status(text::tr(backup_done_message(restore)).into());
-                    },
-                );
-            });
-        }
-        #[cfg(target_os = "android")]
-        {
-            if restore {
-                let weak = ui.as_weak();
-                let app = app.clone();
-                crate::android_documents::pick_import(
-                    crate::android_documents::ImportKind::BackupJson,
-                    move |result| {
-                        let _ = weak.upgrade_in_event_loop(move |ui| match result {
-                            Ok(path) => app.task(
-                                &ui,
-                                move |app, _| {
-                                    let bytes = std::fs::read(&path).map_err(error)?;
-                                    let result =
-                                        app.services.domain.restore_json(&bytes).map_err(error);
-                                    let _ = std::fs::remove_file(path);
-                                    result
-                                },
-                                |app, ui, _| {
-                                    app.render(ui);
-                                    ui.set_status(text::tr(backup_done_message(true)).into());
-                                },
-                            ),
-                            Err(e) if text::is_user_cancel(&e) => {}
-                            Err(e) => ui.set_status(text::error(&e).into()),
-                        });
-                    },
-                );
-            } else {
-                app.task(
-                    &ui,
-                    |app, _| {
-                        let path = crate::android_documents::cache_dir()?
-                            .join("nova-reader-backup-staged.json");
-                        std::fs::write(&path, app.services.domain.backup_json().map_err(error)?)
-                            .map_err(error)?;
-                        Ok(path)
-                    },
-                    |_, ui, path| {
-                        let weak = ui.as_weak();
-                        let cleanup = path.clone();
-                        crate::android_documents::export_backup(path, move |result| {
-                            let _ = std::fs::remove_file(cleanup);
-                            let _ = weak.upgrade_in_event_loop(move |ui| {
-                                ui.set_status(
-                                    match result {
-                                        Ok(()) => text::tr(backup_done_message(false)),
-                                        Err(e) if text::is_user_cancel(&e) => String::new(),
-                                        Err(e) => text::error(&e),
-                                    }
-                                    .into(),
-                                )
-                            });
-                        });
-                    },
-                );
-            }
         }
     });
     wire!(on_category_selected, |app, ui, index| app

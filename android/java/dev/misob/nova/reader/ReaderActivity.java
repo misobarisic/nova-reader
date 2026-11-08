@@ -49,6 +49,8 @@ public final class ReaderActivity extends NativeActivity {
     private static final long MIB = 1024L * 1024L;
     private static final long PAGE_LIMIT = 32 * MIB;
     private static final long COMIC_LIMIT = 512 * MIB;
+    // Backups carry downloaded chapters. They stream through a cache file, never memory.
+    private static final long BACKUP_LIMIT = 64L * 1024L * MIB;
     private static final int ENTRY_LIMIT = 10000;
     private static final Object LOCK = new Object();
     private static final ExecutorService COPIES = Executors.newSingleThreadExecutor();
@@ -251,7 +253,7 @@ public final class ReaderActivity extends NativeActivity {
     }
 
     public static void requestDocument(int kind, long id, String exportPath) {
-        queueDocument(kind,id,exportPath,"nova-reader-backup.json","application/json","",0);
+        queueDocument(kind,id,exportPath,"nova-reader.nova-reader-backup","application/zip","",0);
     }
     public static void requestImage(int kind, long id, String exportPath, String suggestedName, String mime) {
         if (kind!=5 && kind!=6) {nativeDocumentResult(id,null,null,"Unknown image operation");return;}
@@ -325,7 +327,7 @@ public final class ReaderActivity extends NativeActivity {
                 intent=new Intent(Intent.ACTION_CREATE_DOCUMENT);
                 intent.setType(mime);
                 intent.addCategory(Intent.CATEGORY_OPENABLE);
-                intent.putExtra(Intent.EXTRA_TITLE,kind==5?imageName(suggestedName,mime):"nova-reader-backup.json");
+                intent.putExtra(Intent.EXTRA_TITLE,kind==5?imageName(suggestedName,mime):"nova-reader.nova-reader-backup");
                 intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
             } else {
                 intent=new Intent(Intent.ACTION_OPEN_DOCUMENT);
@@ -333,7 +335,7 @@ public final class ReaderActivity extends NativeActivity {
                 // Providers inconsistently label CBZ and addon ZIP files. Rust
                 // validates the actual selected archive, never its MIME label.
                 intent.setType("*/*");
-                if (kind==3) intent.putExtra(Intent.EXTRA_MIME_TYPES,new String[]{"application/json","text/plain","application/octet-stream"});
+                if (kind==3) intent.putExtra(Intent.EXTRA_MIME_TYPES,new String[]{"application/zip","application/x-zip-compressed","application/json","text/plain","application/octet-stream"});
                 else if (kind==0 || kind==1) intent.putExtra(Intent.EXTRA_MIME_TYPES,new String[]{"application/zip","application/x-zip-compressed","application/x-cbz","application/vnd.comicbook+zip","application/octet-stream"});
                 else throw new IOException("Unknown import type");
                 intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
@@ -404,7 +406,7 @@ public final class ReaderActivity extends NativeActivity {
                 try (InputStream input=new FileInputStream(original);
                      OutputStream output=resolver.openOutputStream(uri,"wt")) {
                     if (output==null) throw new IOException("Unable to open export destination");
-                    transfer(input,output,PAGE_LIMIT,request);
+                    transfer(input,output,request.kind==4?BACKUP_LIMIT:PAGE_LIMIT,request);
                     output.flush();
                 }
                 request.check(); finish(request,original.getAbsolutePath(),request.suggestedName,null);return;
@@ -435,14 +437,17 @@ public final class ReaderActivity extends NativeActivity {
                 }
                 request.check();finish(request,staged.getAbsolutePath(),folderName,null);return;
             }
-            String suffix=request.kind==3?".json":request.kind==0?".zip":".cbz";
-            long cap=request.kind==1?COMIC_LIMIT:PAGE_LIMIT;
+            String suffix=request.kind==3?".nova-reader-backup":request.kind==0?".zip":".cbz";
+            long cap=request.kind==3?BACKUP_LIMIT:request.kind==1?COMIC_LIMIT:PAGE_LIMIT;
             String name="Imported document";long size=-1;
             try (Cursor cursor=resolver.query(uri,new String[]{OpenableColumns.DISPLAY_NAME,OpenableColumns.SIZE},null,null,null)) {
                 if (cursor!=null && cursor.moveToFirst()) {name=displayName(cursor.getString(0));if(!cursor.isNull(1))size=cursor.getLong(1);}
             } catch(RuntimeException ignored) { /* Unknown sizes still receive the streaming cap. */ }
             if(name.trim().isEmpty() || ".".equals(name) || "..".equals(name))name="Imported document";
-            if(!name.toLowerCase(Locale.ROOT).endsWith(suffix) && !(request.kind==1 && name.toLowerCase(Locale.ROOT).endsWith(".zip")))name+=suffix;
+            String lower=name.toLowerCase(Locale.ROOT);
+            // Rust reads the content, not the name: a backup may be an archive or an older .json file.
+            boolean known=request.kind==3 && (lower.endsWith(".zip") || lower.endsWith(".json"));
+            if(!lower.endsWith(suffix) && !known && !(request.kind==1 && lower.endsWith(".zip")))name+=suffix;
             stagingDirectory=File.createTempFile("document-","",directory);
             if(!stagingDirectory.delete() || !stagingDirectory.mkdir())throw new IOException("Unable to create document staging directory");
             staged=new File(stagingDirectory,name);
@@ -457,8 +462,9 @@ public final class ReaderActivity extends NativeActivity {
     private static File validateExport(Request request) throws IOException {
         File cache=request.cache.getCanonicalFile();
         File original=new File(request.exportPath).getCanonicalFile();
-        if (!original.getPath().startsWith(cache.getPath()+File.separator) || !original.isFile() || original.length()>PAGE_LIMIT) {
-            throw new IOException(request.kind==4?"Backup must be a JSON staging file inside the app cache (maximum 32 MiB)":"Image must be a staging file inside the app cache (maximum 32 MiB)");
+        long limit=request.kind==4?BACKUP_LIMIT:PAGE_LIMIT;
+        if (!original.getPath().startsWith(cache.getPath()+File.separator) || !original.isFile() || original.length()>limit) {
+            throw new IOException(request.kind==4?"Backup must be a staging file inside the app cache":"Image must be a staging file inside the app cache (maximum 32 MiB)");
         }
         return original;
     }

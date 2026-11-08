@@ -51,6 +51,8 @@ export { LicenseSource } from "about-models.slint";
 export { Appearance } from "appearance.slint";
 export { ImageLimitSettings } from "image-limit-settings.slint";
 export { DownloadCleanupSettings } from "download-cleanup-settings.slint";
+export { BackupBridge, BackupOption, BackupMapping } from "backup.slint";
+import { BackupBridge } from "backup.slint";
 export { ProfilesBridge, ProfileRow } from "profiles.slint";
 export { CaptureSettings } from "capture-settings.slint";
 import { CaptureSettings } from "capture-settings.slint";
@@ -112,12 +114,12 @@ export component AppWindow inherits Window {
     in-out property <bool> export-conflict-open: false;
     in-out property <string> export-conflict-name;
     callback export-conflict-choice(int);
-    in-out property <bool> restore-confirm-open: false;
     in property <bool> update-checking: false;
+    // The backup flow asks through the shared sheet before it changes data.
     function resolve-restore-confirm(choice: int) {
-        if !root.restore-confirm-open { return; }
-        root.restore-confirm-open = false;
-        if choice == 0 { root.backup(true); }
+        if !BackupBridge.confirm_open { return; }
+        BackupBridge.confirm_open = false;
+        BackupBridge.confirm_choice(choice);
     }
     in-out property <bool> download-confirm-open: false;
     in-out property <string> download-confirm-message;
@@ -614,7 +616,6 @@ export component AppWindow inherits Window {
     callback install-addon;
     callback install-path(string);
     callback local-import(bool);
-    callback backup(bool);
     callback check-update;
     callback toggle-library;
     callback download-chapter;
@@ -635,7 +636,7 @@ export component AppWindow inherits Window {
         // The startup picker cannot be dismissed without choosing a profile.
         if ProfilesBridge.require-selection && root.section == 24 && !root.action-confirm-open { return; }
         if root.action-confirm-open { root.resolve-action-confirm(1); return; }
-        if root.restore-confirm-open { root.resolve-restore-confirm(1); return; }
+        if BackupBridge.confirm_open { root.resolve-restore-confirm(1); return; }
         if root.download-confirm-open { root.resolve-download-confirm(1); return; }
         if root.export-conflict-open { root.resolve-export-conflict(2); return; }
         if root.capture-editor-visible {
@@ -680,7 +681,7 @@ export component AppWindow inherits Window {
         ReaderSettingsSync.open = false;
         if root.export-conflict-open { root.resolve-export-conflict(2); }
         if root.action-confirm-open { root.resolve-action-confirm(1); }
-        if root.restore-confirm-open { root.resolve-restore-confirm(1); }
+        if BackupBridge.confirm_open { root.resolve-restore-confirm(1); }
         if root.download-confirm-open { root.resolve-download-confirm(1); }
         if root.entry-menu-visible { root.close-entry-menu(); }
         root.detail-restore-pending = root.section == 5;
@@ -1355,7 +1356,6 @@ export component AppWindow inherits Window {
                             navigate(section) => { root.navigate(section); }
                             install-addon => { root.install-addon(); }
                             local-import(folder) => { root.local-import(folder); }
-                            backup(restore) => { if restore { root.restore-confirm-open = true; } else { root.backup(false); } }
                             add-category(name) => { root.add-category(name); }
                             check-update => { root.check-update(); }
                         }
@@ -1372,7 +1372,7 @@ export component AppWindow inherits Window {
                 if event.text == Key.Escape || event.text == Key.Back || event.text == Key.Backspace { root.resolve-action-confirm(1); }
                 return accept;
             }
-            if root.restore-confirm-open {
+            if BackupBridge.confirm_open {
                 if event.text == Key.Escape || event.text == Key.Back || event.text == Key.Backspace { root.resolve-restore-confirm(1); }
                 return accept;
             }
@@ -1525,9 +1525,9 @@ export component AppWindow inherits Window {
     }
     ActionConfirmSheet {
         width: root.width; height: root.height;
-        open: root.restore-confirm-open;
-        prompt: @tr("Restore backup? This replaces your library, categories and reading progress.");
-        confirm-label: @tr("Restore");
+        open: BackupBridge.confirm_open;
+        prompt: BackupBridge.confirm_message;
+        confirm-label: BackupBridge.confirm_label;
         safe-top: root.safe-area-insets.top; safe-bottom: root.safe-area-insets.bottom;
         safe-left: root.safe-area-insets.left; safe-right: root.safe-area-insets.right;
         choice(index) => { root.resolve-restore-confirm(index); }
