@@ -201,13 +201,13 @@ export component MorePage inherits Rectangle {
                     SettingsCard { MenuLink {
                         focused: SettingsStyle.keyboard-mode && root.choice == 2;
                         interactive: root.landing-active; title: @tr("Local chapters"); subtitle: @tr("Import chapter archives and image folders");
-                        destination-id: "more:local"; icon-kind: 2; picked => { root.choice = 2; root.navigate(9); }
+                        destination-id: "more:local"; icon: @image-url("../../assets/icons/settings/folder.svg"); picked => { root.choice = 2; root.navigate(9); }
                     } }
                     SettingsCard { MenuLink {
                         focused: SettingsStyle.keyboard-mode && root.choice == 3;
                         interactive: root.landing-active; title: @tr("Profiles");
                         subtitle: ProfilesBridge.active-name != "" ? ProfilesBridge.active-name : @tr("Separate libraries, history and settings");
-                        destination-id: "more:profiles"; icon-kind: 11; picked => { root.choice = 3; root.navigate(24); }
+                        destination-id: "more:profiles"; icon: @image-url("../../assets/icons/settings/profiles.svg"); picked => { root.choice = 3; root.navigate(24); }
                     } }
                     SettingsCard { MenuLink {
                         focused: SettingsStyle.keyboard-mode && root.choice == 4;
@@ -248,11 +248,11 @@ export component MorePage inherits Rectangle {
                     if root.child-section == 9: VerticalLayout {
                         spacing: 12px;
                         SettingsCard { MenuLink {
-                            interactive: root.child-active; title: @tr("Import a local chapter"); subtitle: @tr("Choose a CBZ or ZIP archive"); icon-kind: 8;
+                            interactive: root.child-active; title: @tr("Import a local chapter"); subtitle: @tr("Choose a CBZ or ZIP archive"); icon: @image-url("../../assets/icons/settings/archive-file.svg");
                             picked => { root.local-import(false); }
                         } }
                         SettingsCard { MenuLink {
-                            interactive: root.child-active; title: @tr("Import an image folder"); subtitle: @tr("Choose a folder of chapter pages"); icon-kind: 2;
+                            interactive: root.child-active; title: @tr("Import an image folder"); subtitle: @tr("Choose a folder of chapter pages"); icon: @image-url("../../assets/icons/settings/folder.svg");
                             picked => { root.local-import(true); }
                         } }
                     }
@@ -271,23 +271,23 @@ export component MorePage inherits Rectangle {
                             picked => { root.navigate(21); }
                         } }
                         SettingsCard { MenuLink {
-                            interactive: root.child-active; title: @tr("Reader"); subtitle: @tr("Reading defaults, navigation and image adjustments"); icon-kind: 4;
+                            interactive: root.child-active; title: @tr("Reader"); subtitle: @tr("Reading defaults, navigation and image adjustments"); icon: @image-url("../../assets/icons/settings/reader.svg");
                             picked => { root.navigate(19); }
                         } }
                         SettingsCard { MenuLink {
-                            interactive: root.child-active; title: @tr("Theme"); subtitle: @tr("Accent color, backgrounds and card styling"); icon-kind: 3;
+                            interactive: root.child-active; title: @tr("Theme"); subtitle: @tr("Accent color, backgrounds and card styling"); icon-kind: 14;
                             picked => { root.navigate(14); }
                         } }
                         SettingsCard { MenuLink {
-                            interactive: root.child-active; title: @tr("Display"); subtitle: @tr("Library and browse layouts"); icon-kind: 4;
+                            interactive: root.child-active; title: @tr("Display"); subtitle: @tr("Library and browse layouts"); icon-kind: 3;
                             picked => { root.navigate(16); }
                         } }
                         SettingsCard { MenuLink {
-                            interactive: root.child-active; title: @tr("Screenshots & saved images"); subtitle: @tr("Saved image source, image format, quality and save folders"); icon-kind: 3;
+                            interactive: root.child-active; title: @tr("Screenshots & saved images"); subtitle: @tr("Saved image source, image format, quality and save folders"); icon: @image-url("../../assets/icons/settings/screenshots.svg");
                             picked => { root.navigate(18); }
                         } }
                         SettingsCard { MenuLink {
-                            interactive: root.child-active; title: @tr("Look and feel"); subtitle: @tr("Animations and motion options"); icon-kind: 4;
+                            interactive: root.child-active; title: @tr("Look and feel"); subtitle: @tr("Animations and motion options"); icon-kind: 6;
                             picked => { root.navigate(15); }
                         } }
                         SettingsCard { MenuLink {
@@ -299,15 +299,15 @@ export component MorePage inherits Rectangle {
                             picked => { root.navigate(11); }
                         } }
                         SettingsCard { MenuLink {
-                            interactive: root.child-active; title: @tr("Data"); subtitle: @tr("Backup and import"); icon-kind: 8;
+                            interactive: root.child-active; title: @tr("Data"); subtitle: @tr("Backup and import"); icon: @image-url("../../assets/icons/settings/backup.svg");
                             picked => { root.navigate(12); }
                         } }
                         SettingsCard { MenuLink {
-                            interactive: root.child-active; title: @tr("Image limits"); subtitle: @tr("File size, dimensions and decoder memory"); icon-kind: 3;
+                            interactive: root.child-active; title: @tr("Image limits"); subtitle: @tr("File size, dimensions and decoder memory"); icon: @image-url("../../assets/icons/settings/image-limits.svg");
                             picked => { root.navigate(22); }
                         } }
                         SettingsCard { MenuLink {
-                            interactive: root.child-active; title: @tr("Cache"); subtitle: @tr("Chapter pages, artwork and storage limits"); icon-kind: 3;
+                            interactive: root.child-active; title: @tr("Cache"); subtitle: @tr("Chapter pages, artwork and storage limits"); icon-kind: 2;
                             picked => { root.navigate(17); root.image-cache-refresh(); }
                         } }
                     }

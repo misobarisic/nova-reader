@@ -54,4 +54,24 @@ fn settings_page_previews() {
         )
         .unwrap();
     }
+    // The Settings list itself, with each row's icon; desktop also shows
+    // More's own list beside it.
+    for (width, height) in [(390u32, 1100u32), (1280, 900)] {
+        let ui = AppWindow::new().unwrap();
+        ui.global::<Anim>().set_enabled(false);
+        ui.show().unwrap();
+        ui.window()
+            .set_size(LogicalSize::new(width as f32, height as f32));
+        ui.set_section(10);
+        settle();
+        let pixels = ui.window().take_snapshot().unwrap();
+        image::save_buffer(
+            dir.join(format!("settings-list-{width}.png")),
+            pixels.as_bytes(),
+            pixels.width(),
+            pixels.height(),
+            image::ColorType::Rgba8,
+        )
+        .unwrap();
+    }
 }
