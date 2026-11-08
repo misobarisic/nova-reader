@@ -1264,8 +1264,10 @@ export component AppWindow inherits Window {
                                 accessible-role: text; accessible-label: root.reader-collection ? @tr("Image {0} of {1}", root.reader-local-page, root.reader-page-count) : @tr("Page {0} of {1}", root.reader-local-page, root.reader-page-count);
                                 Text { width: 100%; height: 100%; text: root.reader-local-page + " / " + root.reader-page-count; color: #ffffff; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
                             }
-                            if root.reader-osd && !root.reader-opening: ReaderOsd {
+                            // Always mounted with the reader so it can animate out.
+                            ReaderOsd {
                                 width: 100%; height: 100%; compact: root.mobile-ui;
+                                shown: root.reader-osd && !root.reader-opening;
                                 title: root.series-title; chapter-title: root.reader-chapter-title;
                                 page: root.reader-local-page; page-count: root.reader-page-count;
                                 collection: root.reader-collection; group-count: root.reader-gallery-group-count;
@@ -1471,8 +1473,10 @@ export component AppWindow inherits Window {
             }
         }
     }
-    if root.section == 6 && root.reader-context-visible: ReaderContextMenu {
+    // Mounted with the reader so it can shrink away; `shown` drives it.
+    if root.section == 6: ReaderContextMenu {
         width: root.width; height: root.height;
+        shown: root.reader-context-visible;
         viewport-left: root.safe-area-insets.left; viewport-top: root.safe-area-insets.top;
         viewport-width: root.width - root.safe-area-insets.left - root.safe-area-insets.right;
         viewport-height: root.height - root.safe-area-insets.top - root.safe-area-insets.bottom;

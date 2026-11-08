@@ -1,5 +1,5 @@
 import { ControlTouchArea } from "@NovaUiBase/control-input.slint";
-import { Theme, SettingsStyle } from "@NovaUiShared";
+import { Theme, SettingsStyle, Anim } from "@NovaUiShared";
 import { Spinner } from "std-widgets.slint";
 
 // TouchArea remains inside the reader's Flickable: a pan cancels its pointer
@@ -175,6 +175,25 @@ export component ReaderContextMenu inherits Rectangle {
     in property <string> simple-save-detail;
     callback picked(string);
     callback dismissed;
+    // Mounted for the reader so it can animate out; `shown` drives it. The
+    // panel grows from the press point on open and shrinks back on close.
+    in property <bool> shown: true;
+    private property <bool> motion: Anim.enabled && Anim.player;
+    private property <float> scale-progress: root.shown ? 1 : 0;
+    private property <float> fade-progress: root.shown ? 1 : 0;
+    animate scale-progress { duration: root.motion ? (root.shown ? Anim.player_slide : Anim.player_fast) : 0ms; easing: ease-out; }
+    animate fade-progress { duration: root.motion ? Anim.player_fast : 0ms; easing: ease-out; }
+    changed shown => {
+        root.scale-progress = root.shown ? 1 : 0;
+        root.fade-progress = root.shown ? 1 : 0;
+        if root.shown { root.selected = 0; menu-scroll.content-y = 0px; scope.focus(); }
+    }
+    changed motion => {
+        // Explicit endpoints: turning animations off mid-animation snaps.
+        root.scale-progress = root.shown ? 1 : 0;
+        root.fade-progress = root.shown ? 1 : 0;
+    }
+    visible: root.shown || root.scale-progress > 0 || root.fade-progress > 0;
     private property <int> selected: 0;
     private property <[ReaderImageAction]> actions: root.simple-actions ? [
         { label: @tr("Save image (simple)"), id: "save-image-simple", icon: 0, detail: root.simple-save-detail },
@@ -193,7 +212,7 @@ export component ReaderContextMenu inherits Rectangle {
     private property <int> copy-start: root.simple-actions ? 4 : 2;
     private property <length> menu-content-height: 16px + root.actions.length * 54px + 9px;
     changed simple-actions => { root.selected = 0; }
-    init => { scope.focus(); }
+    init => { if root.shown { scope.focus(); } }
     function reveal-selected() {
         let top = 8px + root.selected * 54px + (root.selected >= root.copy-start ? 9px : 0px);
         if top < -menu-scroll.content-y { menu-scroll.content-y = -top; }
@@ -202,7 +221,7 @@ export component ReaderContextMenu inherits Rectangle {
         }
     }
     TouchArea {
-        width: 100%; height: 100%;
+        width: 100%; height: 100%; enabled: root.shown;
         clicked => { root.dismissed(); }
     }
     menu-panel := Rectangle {
@@ -217,8 +236,16 @@ export component ReaderContextMenu inherits Rectangle {
         border-width: 1px; border-color: Theme.current.border_medium;
         drop-shadow-offset-y: 6px; drop-shadow-blur: 20px; drop-shadow-color: #00000060;
         clip: true;
+        opacity: root.fade-progress;
+        transform-scale: 0.86 + 0.14 * root.scale-progress;
+        // Grow from where the finger or pointer was, even when the panel is
+        // pushed inward near an edge.
+        transform-origin: {
+            x: Math.clamp(root.anchor-x - self.x, 0px, self.width),
+            y: Math.clamp(root.anchor-y - self.y, 0px, self.height),
+        };
         accessible-role: groupbox; accessible-label: @tr("Image actions");
-        TouchArea { width: 100%; height: 100%; }
+        TouchArea { width: 100%; height: 100%; enabled: root.shown; }
         menu-scroll := Flickable {
             width: 100%; height: 100%;
             content-width: self.width; content-height: root.menu-content-height;
@@ -232,8 +259,8 @@ export component ReaderContextMenu inherits Rectangle {
                 opacity: root.busy ? 0.45 : 1;
                 accessible-role: button; accessible-label: action.label;
                 accessible-description: action.detail;
-                accessible-enabled: !root.busy;
-                accessible-action-default => { if !root.busy { root.picked(action.id); } }
+                accessible-enabled: !root.busy && root.shown;
+                accessible-action-default => { if !root.busy && root.shown { root.picked(action.id); } }
                 Path {
                     x: 14px; y: 17px; width: 20px; height: 20px;
                     viewbox-width: 24; viewbox-height: 24;
@@ -259,8 +286,8 @@ export component ReaderContextMenu inherits Rectangle {
                     accessible-label: @tr("Preparing image…");
                 }
                 touch := ControlTouchArea {
-                    enabled: !root.busy; mouse-cursor: pointer;
-                    clicked => { root.picked(action.id); }
+                    enabled: !root.busy && root.shown; mouse-cursor: pointer;
+                    clicked => { if root.shown { root.picked(action.id); } }
                     moved => { root.selected = index; SettingsStyle.keyboard-mode = false; }
                 }
             }
@@ -272,7 +299,7 @@ export component ReaderContextMenu inherits Rectangle {
     }
     scope := FocusScope {
         // Keyboard ownership must not cover pointer targets in the panel.
-        width: 0px; height: 0px;
+        width: 0px; height: 0px; enabled: root.shown;
         key-pressed(event) => {
             if event.text == Key.Escape || event.text == Key.Back || event.text == Key.Backspace || event.text == Key.Menu {
                 root.dismissed(); return accept;

@@ -1,5 +1,5 @@
 // Caption, progress rail and controls adapt Nova's PlayerOverlay geometry.
-import { Theme } from "@NovaUiShared";
+import { Theme, Anim } from "@NovaUiShared";
 import { AddonIconButton, MiniSlider } from "@NovaUiBase/settings-controls.slint";
 
 component ReaderGlyph inherits Path {
@@ -24,6 +24,13 @@ component ReaderGlyph inherits Path {
         : "M3 12h2M11 12h2M19 12h2";
 }
 
+// Whether the OSD takes input. It stays mounted while it animates out, so its
+// controls must let go of taps, focus and accessibility the moment it hides.
+// Reader shows one OSD at a time; that instance owns this state.
+global OsdInput {
+    in-out property <bool> live: true;
+}
+
 component OsdAction inherits Rectangle {
     in property <string> label;
     in property <string> glyph;
@@ -36,13 +43,15 @@ component OsdAction inherits Rectangle {
     height: root.show-label ? 66px : 44px;
     button := AddonIconButton {
         x: (parent.width - self.width) / 2; y: 0px;
-        name: root.label; enabled: root.enabled;
+        name: root.label; enabled: root.enabled && OsdInput.live;
+        // Dim for a disabled action only, not while the OSD slides away.
+        opacity: root.enabled ? 1 : 0.45;
         background: root.active ? Theme.current.selection_fill : root.surface ? Theme.current.player_control : transparent;
         border-radius: 10px;
         accessible-checkable: root.active; accessible-checked: root.active;
         accessible-id: "reader-osd-action:" + root.glyph + (root.show-label ? ":labeled" : ":icon");
-        accessible-action-default => { if root.enabled { root.clicked(); } }
-        clicked => { root.clicked(); }
+        accessible-action-default => { if self.enabled { root.clicked(); } }
+        clicked => { if OsdInput.live { root.clicked(); } }
         ReaderGlyph {
             x: 11px; y: 11px; width: 22px; height: 22px;
             name: root.glyph; stroke: root.active ? Theme.current.accent_soft : Theme.current.text_bright;
@@ -65,6 +74,8 @@ component ReaderProgressSlider inherits MiniSlider {
     in property <float> progress;
     callback scrub(float);
     name: @tr("Chapter progress"); minimum: 0; maximum: 1; step: 0.001;
+    // A hiding OSD slides away at full strength; only its input stops.
+    enabled: OsdInput.live; opacity: 1;
     value: root.reversed ? 1 - root.progress : root.progress;
     accessible-value: root.progress;
     accessible-action-set-value(v) => { if root.enabled && v.is-float() { root.scrub(Math.clamp(v.to-float(), 0, 1)); } }
@@ -117,36 +128,66 @@ export component ReaderOsd inherits Rectangle {
     private property <length> gutter: root.compact ? 12px : 18px;
     private property <length> rail-height: root.compact ? 190px : 170px;
     private property <bool> rtl: root.reading-mode == 2;
+    // Mounted for the whole reader; `shown` drives the reveal. Gradients fade
+    // while each control group slides to or from its nearest physical edge
+    // (RTL reading does not move them). Progress values rather than positions
+    // are animated, so a tap mid-animation reverses from where things are.
+    in property <bool> shown: true;
+    private property <bool> motion: Anim.enabled && Anim.player;
+    private property <float> fade-progress: root.shown ? 1 : 0;
+    private property <float> slide-progress: root.shown ? 1 : 0;
+    animate fade-progress { duration: root.motion ? Anim.player_fade : 0ms; easing: ease-out; }
+    animate slide-progress { duration: root.motion ? Anim.player_slide : 0ms; easing: ease-out; }
+    changed shown => {
+        OsdInput.live = root.shown;
+        root.fade-progress = root.shown ? 1 : 0;
+        root.slide-progress = root.shown ? 1 : 0;
+    }
+    changed motion => {
+        // Assign explicit endpoints so turning animations off mid-animation
+        // snaps to the end state instead of finishing the old animation.
+        root.fade-progress = root.shown ? 1 : 0;
+        root.slide-progress = root.shown ? 1 : 0;
+    }
+    init => { OsdInput.live = root.shown; }
+    visible: root.shown || root.fade-progress > 0 || root.slide-progress > 0;
+    private property <length> top-right-width: root.compact ? 44px : 96px;
     Rectangle {
         x: 0px; y: 0px;
         width: 100%; height: min(parent.height, root.safe-top + 96px);
+        opacity: root.fade-progress;
         background: @linear-gradient(0deg, transparent 0%, #00000088 100%);
     }
     Rectangle {
         y: max(0px, root.height - self.height); width: 100%;
         height: min(root.height, root.rail-height + root.safe-bottom + 64px);
+        opacity: root.fade-progress;
         background: @linear-gradient(180deg, transparent 0%, #00000088 32%, #000000df 100%);
     }
     OsdAction {
-        x: root.safe-left + root.gutter; y: root.safe-top + 12px;
+        x: root.safe-left + root.gutter - (1 - root.slide-progress) * (self.width + root.gutter + root.safe-left);
+        y: root.safe-top + 12px;
         width: 44px;
         label: @tr("Back"); glyph: "back"; show-label: false; surface: true;
         clicked => { root.action("back"); }
     }
     HorizontalLayout {
-        x: max(root.safe-left + 64px, root.width - root.safe-right - root.gutter - self.width);
-        y: root.safe-top + 12px; width: root.compact ? 44px : 96px; height: 44px; spacing: 8px;
+        x: max(root.safe-left + 64px, root.width - root.safe-right - root.gutter - self.width)
+            + (1 - root.slide-progress) * (self.width + root.gutter + root.safe-right);
+        y: root.safe-top + 12px; width: root.top-right-width; height: 44px; spacing: 8px;
         OsdAction { label: @tr("Bookmark chapter"); glyph: "bookmark"; show-label: false; surface: true; active: root.bookmarked; clicked => { root.action("bookmark"); } }
         // Wide controls have no bottom More action; the compact rail does.
         if !root.compact: OsdAction { label: @tr("More"); glyph: "more"; show-label: false; surface: true; clicked => { root.action("more"); } }
     }
     rail := Rectangle {
         x: root.safe-left + root.gutter;
-        y: max(root.safe-top + 68px, root.height - root.safe-bottom - root.rail-height);
+        y: max(root.safe-top + 68px, root.height - root.safe-bottom - root.rail-height)
+            + (1 - root.slide-progress) * (root.rail-height + root.safe-bottom);
         width: max(0px, root.width - root.safe-left - root.safe-right - 2 * root.gutter);
         height: root.rail-height;
-        // Consume gaps in the overlay's control lane without covering the page.
-        TouchArea { }
+        // Consume gaps in the overlay's control lane without covering the page,
+        // and only while shown: a hiding OSD lets page taps through.
+        TouchArea { enabled: root.shown; }
         Text {
             x: root.compact ? 4px : 8px; y: 0px; width: max(0px, parent.width - 16px); height: 26px;
             text: root.title; color: Theme.current.text_bright; font-size: 20px; font-weight: 600; overflow: elide;
