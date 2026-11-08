@@ -156,6 +156,14 @@ impl PageImage {
     pub fn encoded_len(&self) -> usize {
         self.0.encoded_len()
     }
+    /// The image file a whole page is, so a caller can tell its format
+    /// without copying it. A page stored in another layout is no image file.
+    pub fn whole_file(&self) -> Option<&[u8]> {
+        match &*self.0 {
+            Stored::Whole(bytes) => Some(bytes),
+            Stored::Strips(_) => None,
+        }
+    }
     pub fn dimensions(&self, limits: DecodeLimits) -> Result<PageDimensions> {
         self.0.dimensions(limits)
     }

@@ -289,7 +289,7 @@ export component MorePage inherits Rectangle {
                             picked => { root.navigate(16); }
                         } }
                         SettingsCard { MenuLink {
-                            interactive: root.child-active; title: @tr("Screenshots"); subtitle: @tr("Image format, quality and save folders"); icon-kind: 3;
+                            interactive: root.child-active; title: @tr("Screenshots & saved images"); subtitle: @tr("Saved image source, image format, quality and save folders"); icon-kind: 3;
                             picked => { root.navigate(18); }
                         } }
                         SettingsCard { MenuLink {
@@ -369,7 +369,7 @@ export component MorePage inherits Rectangle {
                     x: 0px; y: 0px; width: detail-scroll.width; height: self.preferred-height; min-width: 0px;
                     padding: 18px; spacing: 16px; alignment: start;
                     PageHeader {
-                        title: root.detail-section == 22 ? @tr("Image limits") : root.detail-section == 21 ? @tr("Downloads") : root.detail-section == 20 ? @tr("Sync") : root.detail-section == 11 ? @tr("Categories") : root.detail-section == 12 ? @tr("Data") : root.detail-section == 14 ? @tr("Theme") : root.detail-section == 16 ? @tr("Display") : root.detail-section == 17 ? @tr("Cache") : root.detail-section == 18 ? @tr("Screenshots") : @tr("Look and feel");
+                        title: root.detail-section == 22 ? @tr("Image limits") : root.detail-section == 21 ? @tr("Downloads") : root.detail-section == 20 ? @tr("Sync") : root.detail-section == 11 ? @tr("Categories") : root.detail-section == 12 ? @tr("Data") : root.detail-section == 14 ? @tr("Theme") : root.detail-section == 16 ? @tr("Display") : root.detail-section == 17 ? @tr("Cache") : root.detail-section == 18 ? @tr("Screenshots & saved images") : @tr("Look and feel");
                         narrow: root.narrow; show-back: true; back => { if root.detail-active { root.navigate(10); } }
                     }
                     if root.status != "": Text { min-width: 0px; text: root.status; color: Theme.current.text_settings; wrap: word-wrap; }

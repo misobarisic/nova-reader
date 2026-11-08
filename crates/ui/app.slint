@@ -33,6 +33,9 @@ import { ReaderSettings, ReaderSettingsPanel } from "reader-settings.slint";
 export { ReaderSettings } from "reader-settings.slint";
 import { SaveConflictSheet } from "save-conflict-sheet.slint";
 import { ActionConfirmSheet } from "action-confirm-sheet.slint";
+import { SaveImageSheet, SaveImageSource } from "save-image-sheet.slint";
+export { SaveImageSource } from "save-image-sheet.slint";
+import { SaveOutputFormats } from "save-output.slint";
 import { LibraryFilterChip } from "@NovaUiBase/filter-chip.slint";
 import { LibraryPage } from "library-page.slint";
 import { EntryMenu, EntryCategoryRow } from "entry-menu.slint";
@@ -468,10 +471,15 @@ export component AppWindow inherits Window {
     in-out property <bool> capture-editor-copy;
     in-out property <bool> capture-editor-can-extend-above;
     in-out property <bool> capture-editor-can-extend-below;
+    // The editor's Output panel starts from the Screenshots settings each time.
+    in-out property <int> capture-editor-format;
+    in-out property <float> capture-editor-quality: 85;
     callback capture-editor-selection-changed(CaptureCropRect);
     callback capture-editor-action(string);
     changed capture-editor-visible => {
         if root.capture-editor-visible {
+            root.capture-editor-format = CaptureSettings.format-index;
+            root.capture-editor-quality = SaveOutputFormats.quality(CaptureSettings.format-index);
             root.reader-osd = false; root.show-reader-options = false;
             root.reader-context-toast-open = false;
         } else { keyboard.focus(); }
@@ -479,6 +487,22 @@ export component AppWindow inherits Window {
     out property <color> reader-capture-background: root.reader-background;
     callback reader-context-action(int, string);
     callback reader-context-closed;
+    // What Save image (simple) will write; resolved by the backend on open.
+    in property <string> reader-context-save-detail;
+    // Save image…: the backend fills the sources; the sheet owns the draft.
+    in-out property <bool> save-image-open;
+    in property <bool> save-image-loading;
+    in property <string> save-image-subtitle;
+    in-out property <string> save-image-error;
+    in property <[SaveImageSource]> save-image-sources;
+    in-out property <int> save-image-source-index;
+    in-out property <bool> save-image-keep;
+    in-out property <int> save-image-format;
+    in-out property <float> save-image-quality: 85;
+    in-out property <bool> save-image-remember;
+    callback save-image-confirmed;
+    callback save-image-cancelled;
+    changed save-image-open => { if !root.save-image-open { keyboard.focus(); } }
     public function open-reader-context(page: int, x: length, y: length) {
         if root.section != 6 || page < 0 || page >= root.pages.length || !root.pages[page].loaded { return; }
         if root.reader-context-visible { root.close-reader-context(); }
@@ -1454,7 +1478,8 @@ export component AppWindow inherits Window {
         viewport-height: root.height - root.safe-area-insets.top - root.safe-area-insets.bottom;
         anchor-x: root.reader-context-x; anchor-y: root.reader-context-y;
         busy: root.reader-context-busy;
-        simple-screencaps: CaptureSettings.simple-screencaps;
+        simple-actions: CaptureSettings.simple-screencaps;
+        simple-save-detail: root.reader-context-save-detail;
         picked(action) => { root.reader-context-picked(action); }
         dismissed => { root.close-reader-context(); }
     }
@@ -1467,6 +1492,8 @@ export component AppWindow inherits Window {
         preview-mode: root.capture-editor-preview-mode; copy: root.capture-editor-copy;
         can-extend-above: root.capture-editor-can-extend-above;
         can-extend-below: root.capture-editor-can-extend-below;
+        output-format <=> root.capture-editor-format;
+        output-quality <=> root.capture-editor-quality;
         selection-changed(crop) => { root.capture-editor-selection-changed(crop); }
         action(action) => { root.capture-editor-action(action); }
     }
@@ -1494,6 +1521,21 @@ export component AppWindow inherits Window {
         safe-top: root.safe-area-insets.top; safe-bottom: root.safe-area-insets.bottom;
         safe-left: root.safe-area-insets.left; safe-right: root.safe-area-insets.right;
         closed => { more-page.focus_shell(); }
+    }
+    if root.section == 6 && root.save-image-open: SaveImageSheet {
+        width: root.width; height: root.height;
+        open: root.save-image-open; loading: root.save-image-loading; busy: root.reader-context-busy;
+        subtitle: root.save-image-subtitle; error: root.save-image-error;
+        sources: root.save-image-sources;
+        source-index <=> root.save-image-source-index;
+        keep <=> root.save-image-keep;
+        format-index <=> root.save-image-format;
+        quality <=> root.save-image-quality;
+        remember <=> root.save-image-remember;
+        safe-top: root.safe-area-insets.top; safe-bottom: root.safe-area-insets.bottom;
+        safe-left: root.safe-area-insets.left; safe-right: root.safe-area-insets.right;
+        save => { root.save-image-confirmed(); }
+        cancel => { root.save-image-open = false; root.save-image-cancelled(); }
     }
     ActionConfirmSheet {
         width: root.width; height: root.height;

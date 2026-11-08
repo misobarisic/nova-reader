@@ -754,12 +754,14 @@ fn simple_screencap_setting_hides_both_immediate_actions() {
     ui.window().set_size(LogicalSize::new(390., 844.));
     ui.invoke_open_reader_context(0, 10., 10.);
     settle();
+    button(&ui, "Save image (simple)");
     button(&ui, "Save screencap (simple)");
     button(&ui, "Copy screencap (simple)");
     let grouped_actions = [
-        "Save image",
+        "Save image (simple)",
+        "Save image…",
         "Save screencap (simple)",
-        "Save screencap",
+        "Save screencap…",
         "Copy image to clipboard",
         "Copy screencap (simple)",
         "Copy screencap",
@@ -767,17 +769,31 @@ fn simple_screencap_setting_hides_both_immediate_actions() {
     let positions = grouped_actions.map(|label| center(&button(&ui, label)).y);
     assert!(
         positions.windows(2).all(|pair| pair[0] < pair[1]),
-        "simple screencaps precede their corresponding normal actions"
+        "simple actions precede their corresponding normal actions"
     );
-    assert!((positions[2] - positions[1] - 54.).abs() < 0.5);
-    assert!((positions[5] - positions[4] - 54.).abs() < 0.5);
+    for pair in [(0, 1), (1, 2), (2, 3), (4, 5), (5, 6)] {
+        assert!((positions[pair.1] - positions[pair.0] - 54.).abs() < 0.5);
+    }
     assert!(
-        positions[3] - positions[2] >= 62.,
+        positions[4] - positions[3] >= 62.,
         "the divider separates save from copy, keeping each simple/normal pair together"
+    );
+    // The simple save's subtitle says what it will write.
+    ui.set_reader_context_save_detail("Cached · WebP".into());
+    settle();
+    assert_eq!(
+        button(&ui, "Save image (simple)")
+            .accessible_description()
+            .as_deref(),
+        Some("Cached · WebP")
     );
     ui.global::<CaptureSettings>().set_simple_screencaps(false);
     settle();
-    for label in ["Save screencap (simple)", "Copy screencap (simple)"] {
+    for label in [
+        "Save image (simple)",
+        "Save screencap (simple)",
+        "Copy screencap (simple)",
+    ] {
         assert!(
             ElementHandle::find_by_accessible_label(&ui, label)
                 .next()
@@ -785,9 +801,9 @@ fn simple_screencap_setting_hides_both_immediate_actions() {
         );
     }
     for label in [
-        "Save image",
+        "Save image…",
         "Copy image to clipboard",
-        "Save screencap",
+        "Save screencap…",
         "Copy screencap",
     ] {
         button(&ui, label);

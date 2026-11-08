@@ -14,7 +14,10 @@ export global CaptureSettings {
     in-out property <float> avif-quality: 85;
     in-out property <float> jxl-quality: 85;
     in-out property <bool> series-folders: false;
+    // Shows the simple Save image and screencap actions (stored as simple_screencaps).
     in-out property <bool> simple-screencaps: true;
+    in-out property <int> save-source-index: 0;
+    in-out property <bool> convert-saves: false;
     callback settings-changed(string, int);
 }
 
@@ -66,11 +69,49 @@ component NumericSetting inherits Rectangle {
 export component CaptureSettingsPage inherits VerticalLayout {
     in property <bool> interactive: true;
     spacing: 16px; alignment: start;
-    SectionHeader { label: @tr("Screenshots"); }
+    SectionHeader { label: @tr("Saved images"); }
+    SettingsCard {
+        SettingsRow { setting-key: "reader:captures/save_source";
+            row-title: @tr("Simple save image source");
+            row-desc: CaptureSettings.save-source-index == 1
+                ? @tr("Online chapters use the cached copy when it exists, otherwise the source. Downloaded chapters use the download.")
+                : @tr("Online chapters fetch the page from the source; downloaded chapters use the download.");
+            accessible-label: @tr("Simple save image source");
+            ReaderSelect {
+                width: Math.min(252px, Math.max(0px, root.width - 32px));
+                enabled: root.interactive;
+                placeholder-text: @tr("Simple save image source");
+                model: [@tr("Page as it is"), @tr("Prefer cached copy")];
+                current-index <=> CaptureSettings.save-source-index;
+                selected(_) => { CaptureSettings.settings-changed("save_source", self.current-index); }
+            }
+        }
+        SettingsRow { setting-key: "reader:captures/convert_saves";
+            row-title: @tr("Convert simple saves");
+            row-desc: @tr("Re-encode with the screenshot format and quality below instead of keeping the file as it is.");
+            ToggleSwitch {
+                name: @tr("Convert simple saves"); enabled: root.interactive;
+                checked <=> CaptureSettings.convert-saves;
+                accessible-action-default => { if self.enabled { self.checked = !self.checked; CaptureSettings.settings-changed("convert_saves", self.checked ? 1 : 0); } }
+                toggled => { CaptureSettings.settings-changed("convert_saves", self.checked ? 1 : 0); }
+            }
+        }
+        SettingsRow { setting-key: "reader:captures/simple_screencaps";
+            row-title: @tr("Show simple image actions");
+            row-desc: @tr("Add Save image (simple), Save screencap (simple) and Copy screencap (simple) to the reader menu. They act immediately with these settings; Save image… and Save screencap… let you choose first.");
+            ToggleSwitch {
+                name: @tr("Show simple image actions"); enabled: root.interactive;
+                checked <=> CaptureSettings.simple-screencaps;
+                accessible-action-default => { if self.enabled { self.checked = !self.checked; CaptureSettings.settings-changed("simple_screencaps", self.checked ? 1 : 0); } }
+                toggled => { CaptureSettings.settings-changed("simple_screencaps", self.checked ? 1 : 0); }
+            }
+        }
+    }
+    SectionHeader { label: @tr("Format"); }
     SettingsCard {
         SettingsRow { setting-key: "reader:captures/format";
             row-title: @tr("Screenshot format");
-            row-desc: @tr("Lossless formats preserve every pixel. Lossy formats use the quality setting below.");
+            row-desc: @tr("Used for screencaps, converted saves and split pages. Lossless formats preserve every pixel; lossy formats use the quality setting below.");
             accessible-label: @tr("Screenshot format");
             ReaderSelect {
                 width: Math.min(252px, Math.max(0px, root.width - 32px));
@@ -142,16 +183,9 @@ export component CaptureSettingsPage inherits VerticalLayout {
                 selected(_) => { CaptureSettings.settings-changed("resolution", self.current-index); }
             }
         }
-        SettingsRow { setting-key: "reader:captures/simple_screencaps";
-            row-title: @tr("Show simple screencap actions");
-            row-desc: @tr("Add Save screencap (simple) and Copy screencap (simple) to capture the visible area immediately. Standard screencap actions open the selection editor.");
-            ToggleSwitch {
-                name: @tr("Show simple screencap actions"); enabled: root.interactive;
-                checked <=> CaptureSettings.simple-screencaps;
-                accessible-action-default => { if self.enabled { self.checked = !self.checked; CaptureSettings.settings-changed("simple_screencaps", self.checked ? 1 : 0); } }
-                toggled => { CaptureSettings.settings-changed("simple_screencaps", self.checked ? 1 : 0); }
-            }
-        }
+    }
+    SectionHeader { label: @tr("Files"); }
+    SettingsCard {
         SettingsRow { setting-key: "reader:captures/series_folders";
             row-title: @tr("Screenshot folder");
             row-desc: @tr("Save in Pictures/Nova Reader or group captures by series.");

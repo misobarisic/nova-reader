@@ -3,6 +3,7 @@ use nova_reader::{
     AppWindow, CaptureSettings,
     capture_settings::{
         self, CaptureFormat, CapturePreferences, CaptureResolution, ConflictPolicy,
+        SaveSourcePreference,
     },
 };
 use slint::ComponentHandle;
@@ -57,6 +58,8 @@ fn capture_preferences_persist_recover_and_drive_accessible_controls() {
                     ("jxl_quality", 72),
                     ("series_folders", 1),
                     ("simple_screencaps", 0),
+                    ("save_source", 1),
+                    ("convert_saves", 1),
                 ] {
                     settings.invoke_settings_changed(key.into(), value);
                 }
@@ -71,6 +74,8 @@ fn capture_preferences_persist_recover_and_drive_accessible_controls() {
                     ("jxl_quality", 101),
                     ("series_folders", 2),
                     ("simple_screencaps", 2),
+                    ("save_source", 2),
+                    ("convert_saves", 2),
                     ("unknown", 1),
                 ] {
                     settings.invoke_settings_changed(key.into(), value);
@@ -95,6 +100,8 @@ fn capture_preferences_persist_recover_and_drive_accessible_controls() {
                     jxl_quality: 72,
                     series_folders: true,
                     simple_screencaps: false,
+                    save_source: SaveSourcePreference::PreferCached,
+                    convert_saves: true,
                 }
             ),
             "legacy" => {
@@ -115,6 +122,8 @@ fn capture_preferences_persist_recover_and_drive_accessible_controls() {
                 assert_eq!(preferences.jxl_quality, 85);
                 assert!(preferences.series_folders);
                 assert!(preferences.simple_screencaps);
+                assert_eq!(preferences.save_source, SaveSourcePreference::AsIs);
+                assert!(!preferences.convert_saves);
             }
             "controls" => {
                 for (key, value) in [
@@ -147,7 +156,7 @@ fn capture_preferences_persist_recover_and_drive_accessible_controls() {
                     select_option(&ui, "File conflicts", label);
                     assert_eq!(capture_settings::preferences(&ui).conflict, policy);
                 }
-                ElementHandle::find_by_accessible_label(&ui, "Show simple screencap actions")
+                ElementHandle::find_by_accessible_label(&ui, "Show simple image actions")
                     .find(|element| element.accessible_checkable() == Some(true))
                     .unwrap()
                     .invoke_accessible_default_action();

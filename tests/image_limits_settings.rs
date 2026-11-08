@@ -96,7 +96,7 @@ fn settings_headers_begin_at_the_top_on_phone_and_desktop() {
             (15, "Look and feel"),
             (16, "Display"),
             (17, "Cache"),
-            (18, "Screenshots"),
+            (18, "Screenshots & saved images"),
             (19, "Reader"),
             (20, "Sync"),
             (21, "Downloads"),

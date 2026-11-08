@@ -61,6 +61,8 @@ mod reader_progressive;
 #[cfg(test)]
 #[path = "reader_read_ahead_tests.rs"]
 mod reader_read_ahead_tests;
+#[path = "reader_save_image.rs"]
+mod reader_save_image;
 #[path = "reader_scroll_admission.rs"]
 mod reader_scroll_admission;
 #[path = "thumbnail_cache_settings.rs"]
@@ -5624,6 +5626,9 @@ fn wire_reader_context(app: &Arc<Controller>, ui: &AppWindow) {
     use std::{cell::RefCell, rc::Rc};
     let screencap = Rc::new(RefCell::new(None));
     let editor = reader_capture_editor::wire(app, ui);
+    let save_sheet = reader_save_image::SheetState::default();
+    // The sheet's confirmed choice, handed to the action that runs it.
+    let sheet_plan = Rc::new(RefCell::new(None::<(String, reader_save_image::Plan)>));
     let exporting = Arc::new(AtomicBool::new(false));
     type PendingConflict = Option<(crate::reader_export::ExportCurrent, ReplyOnDrop)>;
     let conflict = Arc::new(Mutex::new(PendingConflict::None));
@@ -5693,6 +5698,7 @@ fn wire_reader_context(app: &Arc<Controller>, ui: &AppWindow) {
             let owner = Arc::downgrade(app);
             let conflict = conflict.clone();
             let editor = editor.clone();
+            let save_sheet = save_sheet.clone();
             move || {
                 let Some(ui) = weak.upgrade() else {
                     return;
@@ -5700,6 +5706,7 @@ fn wire_reader_context(app: &Arc<Controller>, ui: &AppWindow) {
                 if let Some(app) = owner.upgrade() {
                     reader_capture_editor::stale(&editor, &app, &ui);
                 }
+                reader_save_image::stale(&save_sheet, &ui);
                 let mut pending = conflict.lock().unwrap_or_else(|e| e.into_inner());
                 let stale = pending.as_ref().is_some_and(|(current, _)| {
                     !current()
@@ -5736,6 +5743,7 @@ fn wire_reader_context(app: &Arc<Controller>, ui: &AppWindow) {
                 let naming = export_name_position(&app, &ui, index, true);
                 *screencap.borrow_mut() =
                     Some((app.generation.load(Ordering::Acquire), capture, naming));
+                reader_save_image::resolve_simple_detail(&app, &ui, index);
             }
         }
     });
@@ -5750,11 +5758,13 @@ fn wire_reader_context(app: &Arc<Controller>, ui: &AppWindow) {
     ui.on_reader_context_action({
         let app = app.clone();
         let weak = ui.as_weak();
+        let save_sheet = save_sheet.clone();
+        let sheet_plan = sheet_plan.clone();
         move |index, action| {
             let _timer = &timer;
             let Some(ui) = weak.upgrade() else { return };
             let (screen, clipboard) = match action.as_str() {
-                "save-image" => (false, false),
+                "save-image" | "save-image-simple" | "save-image-plan" => (false, false),
                 "save-screencap" | "save-screencap-simple" | "save-screencap-selection" => {
                     (true, false)
                 }
@@ -5768,6 +5778,47 @@ fn wire_reader_context(app: &Arc<Controller>, ui: &AppWindow) {
                 ui.set_reader_context_status(text::tr("Another image action is active").into());
                 return;
             }
+            if action == "save-image" {
+                reader_save_image::open_sheet(&app, &ui, &save_sheet, index);
+                return;
+            }
+            // Save image (simple) follows the settings; the sheet's Save runs
+            // exactly the source and output chosen there. Copy image keeps the
+            // page as the reader has it.
+            let plan = match action.as_str() {
+                "save-image-simple" => Some(reader_save_image::Plan::simple(
+                    crate::capture_settings::preferences(&ui),
+                )),
+                "save-image-plan" => {
+                    let Some((page_id, plan)) = sheet_plan.borrow_mut().take() else {
+                        return;
+                    };
+                    let same_page = app.view().reader.as_ref().is_some_and(|reader| {
+                        usize::try_from(index)
+                            .ok()
+                            .filter(|i| *i < reader.pages.len())
+                            .is_some_and(|i| reader.page_id(i) == page_id)
+                    });
+                    if !same_page {
+                        ui.set_reader_context_status(text::tr("Image action cancelled").into());
+                        return;
+                    }
+                    Some(plan)
+                }
+                _ => None,
+            };
+            let target = match plan {
+                Some(_) => match reader_save_image::Target::of(&app, index) {
+                    Some(target) => Some(target),
+                    None => {
+                        ui.set_reader_context_status(
+                            text::tr("Chapter image is unavailable").into(),
+                        );
+                        return;
+                    }
+                },
+                None => None,
+            };
             if action == "save-screencap" || action == "copy-screencap" {
                 reader_capture_editor::open(&editor, &app, &ui, clipboard);
                 return;
@@ -5805,7 +5856,17 @@ fn wire_reader_context(app: &Arc<Controller>, ui: &AppWindow) {
             }
             ui.set_reader_context_busy(true);
             ui.set_reader_context_status(text::tr("Preparing image…").into());
-            let preferences = crate::capture_settings::preferences(&ui);
+            let mut preferences = crate::capture_settings::preferences(&ui);
+            if action == "save-screencap-selection" {
+                // The editor's Output panel chose this save's format.
+                preferences = preferences.with_output(
+                    crate::capture_settings::CaptureFormat::try_from(
+                        ui.get_capture_editor_format(),
+                    )
+                    .unwrap_or_default(),
+                    ui.get_capture_editor_quality(),
+                );
+            }
             let naming = if screen {
                 None
             } else {
@@ -5926,6 +5987,8 @@ fn wire_reader_context(app: &Arc<Controller>, ui: &AppWindow) {
                             &preferences,
                             clipboard,
                         )
+                    } else if let (Some(plan), Some(target)) = (plan, &target) {
+                        target.export(&plan, &format!("nova-reader-page-{}", index + 1), &cancel)
                     } else {
                         let (page, source) =
                             input.ok_or_else(|| text::tr("Chapter image is unavailable"))?;
@@ -6008,6 +6071,23 @@ fn wire_reader_context(app: &Arc<Controller>, ui: &AppWindow) {
                     Err(message) => done(Err(message)),
                 }
             });
+        }
+    });
+    ui.on_save_image_cancelled({
+        let save_sheet = save_sheet.clone();
+        move || reader_save_image::cancelled(&save_sheet)
+    });
+    ui.on_save_image_confirmed({
+        let weak = ui.as_weak();
+        move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let Some((index, page_id, plan)) = reader_save_image::confirmed(&ui, &save_sheet)
+            else {
+                ui.set_reader_context_status(text::tr("Image action cancelled").into());
+                return;
+            };
+            *sheet_plan.borrow_mut() = Some((page_id, plan));
+            ui.invoke_reader_context_action(index, "save-image-plan".into());
         }
     });
 }

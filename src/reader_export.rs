@@ -66,6 +66,21 @@ impl ExportImage {
         })
     }
 
+    /// Save a page converted to the given format and quality, whatever form
+    /// it is in. A format that cannot hold the page falls back to PNG with a
+    /// notice, as split pages do.
+    pub fn from_page_converted(
+        page: &crate::page_store::PageImage,
+        name: &str,
+        preferences: &CapturePreferences,
+    ) -> Result<Self, String> {
+        reader_engine::with_current_limits(|| {
+            let limits = reader_engine::current_limits();
+            let pixels = page.decode(limits).map_err(|error| error.to_string())?;
+            Self::from_page_pixels(pixels, name, preferences, false, limits)
+        })
+    }
+
     fn from_page_pixels(
         pixels: image::RgbaImage,
         name: &str,
@@ -200,6 +215,75 @@ fn file_stem(name: &str) -> String {
 
 /// Encode RGBA with the screenshot format and quality, then check that the
 /// result is something this app can open again.
+/// What a page is, as far as a save needs to say: its file format (none for
+/// a page stored in another layout), size on disk and dimensions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PageFacts {
+    pub format: Option<&'static str>,
+    pub bytes: usize,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Facts about a page without decoding it: the format is sniffed from the
+/// file header and the dimensions come from the page's own header parse.
+pub fn page_facts(page: &crate::page_store::PageImage) -> Result<PageFacts, String> {
+    let dimensions = page
+        .dimensions(reader_engine::current_limits())
+        .map_err(|error| error.to_string())?;
+    Ok(PageFacts {
+        format: page.whole_file().and_then(format_name),
+        bytes: page.encoded_len(),
+        width: dimensions.width,
+        height: dimensions.height,
+    })
+}
+
+/// A short, untranslated format name for a whole image file.
+pub fn format_name(bytes: &[u8]) -> Option<&'static str> {
+    if reader_engine::is_jpeg_xl(bytes) {
+        return Some("JPEG XL");
+    }
+    match image::guess_format(bytes).ok()? {
+        image::ImageFormat::Png => Some("PNG"),
+        image::ImageFormat::Jpeg => Some("JPEG"),
+        image::ImageFormat::WebP => Some("WebP"),
+        image::ImageFormat::Avif => Some("AVIF"),
+        _ => None,
+    }
+}
+
+/// Why `format` cannot hold an image of this size, if it cannot. Checked
+/// before encoding so the Save image sheet can disable the format up front.
+pub fn format_limit(format: CaptureFormat, width: u32, height: u32) -> Option<String> {
+    match format {
+        CaptureFormat::WebpLossless | CaptureFormat::WebpLossy
+            if width > 16383 || height > 16383 =>
+        {
+            Some(text::tr(
+                "WebP supports image dimensions up to 16383 pixels",
+            ))
+        }
+        CaptureFormat::Jpeg if width > 65535 || height > 65535 => Some(text::tr(
+            "JPEG supports image dimensions up to 65535 pixels",
+        )),
+        _ => None,
+    }
+}
+
+/// The output label for a conversion, e.g. `AVIF 85` or `PNG`.
+pub fn output_label(preferences: &CapturePreferences) -> String {
+    match preferences.format {
+        CaptureFormat::Png => "PNG".into(),
+        CaptureFormat::Jpeg => format!("JPEG {}", preferences.jpeg_quality),
+        CaptureFormat::WebpLossless => text::tr("WebP lossless"),
+        CaptureFormat::WebpLossy => format!("WebP {}", preferences.webp_quality),
+        CaptureFormat::Avif => format!("AVIF {}", preferences.avif_quality),
+        CaptureFormat::JxlLossless => text::tr("JPEG XL lossless"),
+        CaptureFormat::JxlLossy => format!("JPEG XL {}", preferences.jxl_quality),
+    }
+}
+
 fn encode_with_preferences(
     width: u32,
     height: u32,
@@ -1187,6 +1271,43 @@ mod tests {
         assert_eq!(image.mime, "image/png");
         assert_eq!(image.name, "page.png");
         assert!(ExportImage::original(vec![1, 2, 3], "bad.png").is_err());
+    }
+
+    #[test]
+    fn page_facts_name_the_file_and_conversions_follow_the_chosen_format() {
+        let png = ExportImage::from_rgba(2, 3, &[9; 24]).unwrap().bytes;
+        let page = crate::page_store::PageImage::from_encoded(png.clone());
+        assert_eq!(
+            page_facts(&page).unwrap(),
+            PageFacts {
+                format: Some("PNG"),
+                bytes: png.len(),
+                width: 2,
+                height: 3,
+            }
+        );
+        let preferences = CapturePreferences {
+            format: CaptureFormat::Jpeg,
+            jpeg_quality: 70,
+            ..CapturePreferences::default()
+        };
+        assert_eq!(output_label(&preferences), "JPEG 70");
+        let converted = ExportImage::from_page_converted(&page, "page", &preferences).unwrap();
+        assert_eq!(converted.mime, "image/jpeg");
+        assert_eq!(converted.name, "page.jpg");
+        assert!(converted.notice.is_none());
+        // Keeping writes the file unchanged.
+        let kept = ExportImage::from_page(&page, "page", &preferences, false).unwrap();
+        assert_eq!(kept.bytes, png);
+    }
+
+    #[test]
+    fn format_limits_are_known_before_encoding() {
+        assert!(format_limit(CaptureFormat::WebpLossy, 1200, 16384).is_some());
+        assert!(format_limit(CaptureFormat::WebpLossless, 16384, 10).is_some());
+        assert!(format_limit(CaptureFormat::WebpLossy, 1200, 16383).is_none());
+        assert!(format_limit(CaptureFormat::Jpeg, 1200, 65536).is_some());
+        assert!(format_limit(CaptureFormat::Png, 1200, 65536).is_none());
     }
 
     #[test]

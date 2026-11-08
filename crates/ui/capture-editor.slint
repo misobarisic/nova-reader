@@ -5,6 +5,7 @@ import { ControlTouchArea } from "@NovaUiBase/control-input.slint";
 import { PillButton } from "@NovaUiBase/settings-controls.slint";
 import { BackButton } from "controls.slint";
 import { Spinner } from "std-widgets.slint";
+import { SaveOutputPanel } from "save-output.slint";
 
 export struct CaptureCropRect { x: float, y: float, width: float, height: float }
 struct HandlePosition { horizontal: int, vertical: int, label: string }
@@ -56,6 +57,9 @@ export component CaptureEditor inherits Rectangle {
     in property <bool> copy;
     in property <bool> can-extend-above;
     in property <bool> can-extend-below;
+    // Output for a saved screencap; copies go to the clipboard as pixels.
+    in-out property <int> output-format;
+    in-out property <float> output-quality: 85;
     in property <length> safe-top;
     in property <length> safe-bottom;
     in property <length> safe-left;
@@ -258,9 +262,20 @@ export component CaptureEditor inherits Rectangle {
     }
     footer := Rectangle {
         x: root.safe-left; width: root.width - root.safe-left - root.safe-right;
-        height: 76px + (root.error != "" ? error-text.preferred-height + 12px : 0px);
+        private property <length> error-height: root.error != "" ? error-text.preferred-height + 12px : 0px;
+        private property <length> output-height: root.copy ? 0px : output.preferred-height + 12px;
+        height: 76px + self.error-height + self.output-height;
         y: root.height - root.safe-bottom - self.height;
         background: Theme.current.popup;
+        // Same Output control as Save image…, without Keep: a screencap is pixels.
+        output := SaveOutputPanel {
+            visible: !root.copy;
+            x: (parent.width - self.width) / 2; y: 12px + footer.error-height;
+            width: min(560px, max(1px, parent.width - 24px));
+            show-keep: false; enabled: !root.busy;
+            format-index <=> root.output-format;
+            quality <=> root.output-quality;
+        }
         error-text := Text {
             x: 16px; y: 10px; width: max(1px, parent.width - 32px);
             visible: root.error != ""; text: root.error; wrap: word-wrap;

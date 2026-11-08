@@ -240,7 +240,10 @@ fn templates() -> BTreeMap<String, Value> {
 fn portable(storage: &str, pointer: &str) -> bool {
     match storage {
         "reader:appearance" | "reader:show-adult" => true,
-        "reader:captures" => !matches!(pointer, "/resolution" | "/conflict"),
+        "reader:captures" => !matches!(
+            pointer,
+            "/resolution" | "/conflict" | "/save_source" | "/convert_saves"
+        ),
         "reader:image-storage" => {
             pointer.starts_with("/cache/") || pointer.starts_with("/downloads/")
         }
@@ -977,6 +980,8 @@ mod tests {
         for key in [
             "reader:captures/conflict",
             "reader:captures/resolution",
+            "reader:captures/save_source",
+            "reader:captures/convert_saves",
             "reader:image-storage/policy/chapter_disk_limit_mb",
             "reader:reader-settings/brightness",
             "reader:reader-settings/keep_awake",

@@ -103,14 +103,15 @@ fn reader_context_menu_targets_images_and_preserves_reader_gestures() {
     assert_eq!(ui.get_reader_context_page(), 0);
     assert!(!ui.get_reader_osd());
     for label in [
-        "Save image",
-        "Save screencap",
+        "Save image (simple)",
+        "Save image…",
+        "Save screencap…",
         "Copy image to clipboard",
         "Copy screencap",
     ] {
         button(&ui, label);
     }
-    button(&ui, "Save image").mock_single_click(PointerEventButton::Left);
+    button(&ui, "Save image…").mock_single_click(PointerEventButton::Left);
     settle();
     assert!(!ui.get_reader_context_visible());
     assert_eq!(
@@ -200,6 +201,7 @@ fn reader_context_menu_targets_images_and_preserves_reader_gestures() {
     assert_eq!(ui.get_reader_context_page(), 1);
     key(&ui, Key::DownArrow);
     key(&ui, Key::DownArrow);
+    key(&ui, Key::DownArrow);
     key(&ui, Key::Return);
     assert!(!ui.get_reader_context_visible());
     assert_eq!(
@@ -217,7 +219,7 @@ fn reader_context_menu_targets_images_and_preserves_reader_gestures() {
     ui.set_reader_context_busy(true);
     settle();
     let before = lifecycle.borrow().len();
-    button(&ui, "Save image").mock_single_click(PointerEventButton::Left);
+    button(&ui, "Save image…").mock_single_click(PointerEventButton::Left);
     settle();
     assert_eq!(lifecycle.borrow().len(), before);
     assert!(
@@ -280,7 +282,7 @@ fn reader_context_menu_targets_images_and_preserves_reader_gestures() {
     );
     ui.set_section(10);
     settle();
-    button(&ui, "Screenshots").invoke_accessible_default_action();
+    button(&ui, "Screenshots & saved images").invoke_accessible_default_action();
     settle();
     assert_eq!(ui.get_section(), 18);
     ui.invoke_go_back();

@@ -16,6 +16,15 @@ pub fn image_cache_usage(bytes: u64, files: usize) -> String {
         bytes as f64 / (1024.0 * 1024.0)
     )
 }
+/// A file size for save summaries: KiB below one MiB, MiB with one decimal above.
+pub fn file_size(bytes: usize) -> String {
+    const MIB: f64 = 1024.0 * 1024.0;
+    if (bytes as f64) < MIB {
+        format!("{} KiB", bytes.div_ceil(1024))
+    } else {
+        format!("{:.1} MiB", bytes as f64 / MIB)
+    }
+}
 pub fn image_cache_clear_failed(error: &str) -> String {
     format!("{}: {error}", tr("Could not clear image cache"))
 }

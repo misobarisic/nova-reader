@@ -159,7 +159,7 @@ export component ReaderImageInteraction inherits ControlTouchArea {
     }
 }
 
-struct ReaderImageAction { label: string, id: string, icon: int }
+struct ReaderImageAction { label: string, id: string, icon: int, detail: string }
 
 export component ReaderContextMenu inherits Rectangle {
     in property <length> viewport-left;
@@ -169,26 +169,30 @@ export component ReaderContextMenu inherits Rectangle {
     in property <length> anchor-x;
     in property <length> anchor-y;
     in property <bool> busy;
-    in property <bool> simple-screencaps: true;
+    // Shows the simple (immediate) Save image and screencap actions.
+    in property <bool> simple-actions: true;
+    // What Save image (simple) will write, resolved when the menu opens.
+    in property <string> simple-save-detail;
     callback picked(string);
     callback dismissed;
     private property <int> selected: 0;
-    private property <[ReaderImageAction]> actions: root.simple-screencaps ? [
-        { label: @tr("Save image"), id: "save-image", icon: 0 },
-        { label: @tr("Save screencap (simple)"), id: "save-screencap-simple", icon: 1 },
-        { label: @tr("Save screencap"), id: "save-screencap", icon: 1 },
-        { label: @tr("Copy image to clipboard"), id: "copy-image", icon: 2 },
-        { label: @tr("Copy screencap (simple)"), id: "copy-screencap-simple", icon: 3 },
-        { label: @tr("Copy screencap"), id: "copy-screencap", icon: 3 },
+    private property <[ReaderImageAction]> actions: root.simple-actions ? [
+        { label: @tr("Save image (simple)"), id: "save-image-simple", icon: 0, detail: root.simple-save-detail },
+        { label: @tr("Save image…"), id: "save-image", icon: 0, detail: "" },
+        { label: @tr("Save screencap (simple)"), id: "save-screencap-simple", icon: 1, detail: "" },
+        { label: @tr("Save screencap…"), id: "save-screencap", icon: 1, detail: "" },
+        { label: @tr("Copy image to clipboard"), id: "copy-image", icon: 2, detail: "" },
+        { label: @tr("Copy screencap (simple)"), id: "copy-screencap-simple", icon: 3, detail: "" },
+        { label: @tr("Copy screencap"), id: "copy-screencap", icon: 3, detail: "" },
     ] : [
-        { label: @tr("Save image"), id: "save-image", icon: 0 },
-        { label: @tr("Save screencap"), id: "save-screencap", icon: 1 },
-        { label: @tr("Copy image to clipboard"), id: "copy-image", icon: 2 },
-        { label: @tr("Copy screencap"), id: "copy-screencap", icon: 3 },
+        { label: @tr("Save image…"), id: "save-image", icon: 0, detail: "" },
+        { label: @tr("Save screencap…"), id: "save-screencap", icon: 1, detail: "" },
+        { label: @tr("Copy image to clipboard"), id: "copy-image", icon: 2, detail: "" },
+        { label: @tr("Copy screencap"), id: "copy-screencap", icon: 3, detail: "" },
     ];
-    private property <int> copy-start: root.simple-screencaps ? 3 : 2;
+    private property <int> copy-start: root.simple-actions ? 4 : 2;
     private property <length> menu-content-height: 16px + root.actions.length * 54px + 9px;
-    changed simple-screencaps => { root.selected = 0; }
+    changed simple-actions => { root.selected = 0; }
     init => { scope.focus(); }
     function reveal-selected() {
         let top = 8px + root.selected * 54px + (root.selected >= root.copy-start ? 9px : 0px);
@@ -227,6 +231,7 @@ export component ReaderContextMenu inherits Rectangle {
                     ? Theme.current.settings_control_hover : transparent;
                 opacity: root.busy ? 0.45 : 1;
                 accessible-role: button; accessible-label: action.label;
+                accessible-description: action.detail;
                 accessible-enabled: !root.busy;
                 accessible-action-default => { if !root.busy { root.picked(action.id); } }
                 Path {
@@ -238,10 +243,16 @@ export component ReaderContextMenu inherits Rectangle {
                         : action.icon == 2 ? "M8 8h12v12H8zM4 16V4h12M10 17l3-4 3 3 2-2 2 3"
                         : "M9 5H5v16h15V5h-4M9 3h7v4H9zM8 11h3M14 11h3M8 15h3M14 15h3";
                 }
-                Text {
+                if action.detail == "": Text {
                     x: 48px; y: 0px; width: max(1px, parent.width - 60px); height: 100%;
                     text: action.label; color: Theme.current.text_bright;
                     font-size: 14px; wrap: word-wrap; vertical-alignment: center;
+                }
+                if action.detail != "": VerticalLayout {
+                    x: 48px; y: 0px; width: max(1px, parent.width - 60px); height: 100%;
+                    alignment: center; spacing: 2px;
+                    Text { text: action.label; color: Theme.current.text_bright; font-size: 14px; overflow: elide; }
+                    Text { text: action.detail; color: Theme.current.text_secondary; font-size: 12px; overflow: elide; }
                 }
                 if root.busy && index == 0: Spinner {
                     x: parent.width - 30px; y: 17px; width: 20px; height: 20px;

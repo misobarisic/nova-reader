@@ -71,6 +71,34 @@ impl From<CaptureFormat> for i32 {
     }
 }
 
+/// Where the simple Save image action reads a page from. `AsIs` is the page as
+/// the reader has it: the source for an online chapter, the download for a
+/// downloaded one, the file for an import. `PreferCached` lets an online
+/// chapter use its page-cache entry when one is on disk.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "i32", into = "i32")]
+#[repr(i32)]
+pub enum SaveSourcePreference {
+    #[default]
+    AsIs = 0,
+    PreferCached = 1,
+}
+impl TryFrom<i32> for SaveSourcePreference {
+    type Error = &'static str;
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::AsIs),
+            1 => Ok(Self::PreferCached),
+            _ => Err("unsupported save image source"),
+        }
+    }
+}
+impl From<SaveSourcePreference> for i32 {
+    fn from(value: SaveSourcePreference) -> Self {
+        value as Self
+    }
+}
+
 /// Existing destination handling for saved pages and screencaps.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "i32", into = "i32")]
@@ -108,8 +136,13 @@ pub struct CapturePreferences {
     pub avif_quality: u8,
     pub jxl_quality: u8,
     pub series_folders: bool,
+    /// Shows the simple (immediate) Save image and screencap actions. The
+    /// stored name predates simple Save image and is kept for compatibility.
     pub simple_screencaps: bool,
     pub conflict: ConflictPolicy,
+    pub save_source: SaveSourcePreference,
+    /// Simple Save image converts with the screenshot format and quality.
+    pub convert_saves: bool,
 }
 
 impl Default for CapturePreferences {
@@ -124,6 +157,8 @@ impl Default for CapturePreferences {
             series_folders: false,
             simple_screencaps: true,
             conflict: ConflictPolicy::Ask,
+            save_source: SaveSourcePreference::AsIs,
+            convert_saves: false,
         }
     }
 }
@@ -134,6 +169,25 @@ impl CapturePreferences {
             && (1..=100).contains(&self.webp_quality)
             && (1..=100).contains(&self.avif_quality)
             && (1..=100).contains(&self.jxl_quality)
+    }
+
+    /// These preferences with another output format and that format's quality,
+    /// for one save or screencap that chose its own output.
+    pub fn with_output(mut self, format: CaptureFormat, quality: f32) -> Self {
+        let quality = if quality.is_finite() {
+            quality.round().clamp(1., 100.) as u8
+        } else {
+            85
+        };
+        self.format = format;
+        match format {
+            CaptureFormat::Jpeg => self.jpeg_quality = quality,
+            CaptureFormat::WebpLossy => self.webp_quality = quality,
+            CaptureFormat::Avif => self.avif_quality = quality,
+            CaptureFormat::JxlLossy => self.jxl_quality = quality,
+            _ => {}
+        }
+        self
     }
 
     fn apply(&self, ui: &AppWindow) {
@@ -147,6 +201,8 @@ impl CapturePreferences {
         settings.set_series_folders(self.series_folders);
         settings.set_simple_screencaps(self.simple_screencaps);
         settings.set_conflict_policy(self.conflict.into());
+        settings.set_save_source_index(self.save_source.into());
+        settings.set_convert_saves(self.convert_saves);
     }
 
     fn change(&mut self, key: &str, value: i32) -> bool {
@@ -167,6 +223,11 @@ impl CapturePreferences {
             "webp_quality" if (1..=100).contains(&value) => self.webp_quality = value as u8,
             "avif_quality" if (1..=100).contains(&value) => self.avif_quality = value as u8,
             "jxl_quality" if (1..=100).contains(&value) => self.jxl_quality = value as u8,
+            "save_source" => match SaveSourcePreference::try_from(value) {
+                Ok(source) => self.save_source = source,
+                Err(_) => return false,
+            },
+            "convert_saves" if value == 0 || value == 1 => self.convert_saves = value == 1,
             "simple_screencaps" if value == 0 || value == 1 => self.simple_screencaps = value == 1,
             "series_folders" if value == 0 || value == 1 => self.series_folders = value == 1,
             _ => return false,
@@ -196,7 +257,28 @@ pub fn preferences(ui: &AppWindow) -> CapturePreferences {
         series_folders: settings.get_series_folders(),
         simple_screencaps: settings.get_simple_screencaps(),
         conflict: ConflictPolicy::try_from(settings.get_conflict_policy()).unwrap_or_default(),
+        save_source: SaveSourcePreference::try_from(settings.get_save_source_index())
+            .unwrap_or_default(),
+        convert_saves: settings.get_convert_saves(),
     }
+}
+
+/// The settings key holding a lossy format's quality.
+pub fn quality_key(format: CaptureFormat) -> Option<&'static str> {
+    match format {
+        CaptureFormat::Jpeg => Some("jpeg_quality"),
+        CaptureFormat::WebpLossy => Some("webp_quality"),
+        CaptureFormat::Avif => Some("avif_quality"),
+        CaptureFormat::JxlLossy => Some("jxl_quality"),
+        _ => None,
+    }
+}
+
+/// Apply one settings change through the same path as the settings page, so a
+/// choice remembered from the Save image sheet persists and syncs identically.
+pub fn change(ui: &AppWindow, key: &str, value: i32) {
+    ui.global::<CaptureSettings>()
+        .invoke_settings_changed(key.into(), value);
 }
 
 fn persist(
@@ -277,6 +359,8 @@ mod tests {
         assert_eq!(loaded.conflict, ConflictPolicy::Ask);
         assert_eq!(loaded.jxl_quality, 85);
         assert!(loaded.simple_screencaps);
+        assert_eq!(loaded.save_source, SaveSourcePreference::AsIs);
+        assert!(!loaded.convert_saves);
         for policy in [
             ConflictPolicy::Ask,
             ConflictPolicy::Overwrite,
@@ -313,6 +397,8 @@ mod tests {
             jxl_quality: 69,
             series_folders: true,
             conflict: ConflictPolicy::Overwrite,
+            save_source: SaveSourcePreference::PreferCached,
+            convert_saves: true,
             ..previous
         };
         next.apply(&ui);

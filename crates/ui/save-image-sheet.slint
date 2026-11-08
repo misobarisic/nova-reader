@@ -1,0 +1,212 @@
+// Save image…: pick where the page's bytes come from, then keep that file or
+// convert it. The backend probes the sources on disk only (Original is never
+// fetched to fill this sheet) and supplies them as rows; the sheet owns the
+// draft choices until Save or Cancel. A bottom sheet on phones, centred and
+// width-capped on wide windows, like the other Reader sheets.
+import { Theme, InterfaceStyle, SettingsStyle } from "@NovaUiShared";
+import { ControlTouchArea } from "@NovaUiBase/control-input.slint";
+import { PillButton, ToggleSwitch } from "@NovaUiBase/settings-controls.slint";
+import { ScrollView } from "@NovaUiBase/scrollview.slint";
+import { Spinner } from "std-widgets.slint";
+import { SaveOutputPanel, SaveOutputFormats } from "save-output.slint";
+
+export struct SaveImageSource {
+    title: string,
+    // Format and size on disk, "Downloads again", or why it is unavailable.
+    detail: string,
+    enabled: bool,
+    // False for a page stored in another layout: there is no file to keep.
+    keepable: bool,
+    // For the summary line; 0 and "" when unknown without fetching.
+    width: int,
+    height: int,
+    format: string,
+    size: string,
+    blocked: [string],
+}
+
+component SourceRow inherits Rectangle {
+    in property <SaveImageSource> source;
+    in property <bool> selected;
+    callback picked;
+    min-height: InterfaceStyle.tv ? 72px : 60px;
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: root.selected ? Theme.current.accent : Theme.current.border_soft;
+    background: root.selected ? Theme.current.settings_selected_wash
+        : touch.has-hover && root.source.enabled ? Theme.current.control_hover : Theme.current.card;
+    opacity: root.source.enabled ? 1 : 0.55;
+    accessible-role: radio-button;
+    accessible-checkable: true;
+    accessible-checked: root.selected;
+    accessible-enabled: root.source.enabled;
+    accessible-label: root.source.title;
+    accessible-description: root.source.detail;
+    accessible-action-default => { if root.source.enabled { root.picked(); } }
+    HorizontalLayout {
+        padding-left: 14px; padding-right: 14px; padding-top: 10px; padding-bottom: 10px;
+        spacing: 14px;
+        Rectangle {
+            width: 20px; height: 20px; y: (parent.height - self.height) / 2;
+            border-radius: 10px; border-width: 2px;
+            border-color: root.selected ? Theme.current.accent : Theme.current.text_muted;
+            if root.selected: Rectangle {
+                width: 10px; height: 10px; border-radius: 5px; background: Theme.current.accent;
+            }
+        }
+        VerticalLayout {
+            alignment: center; spacing: 2px;
+            Text {
+                text: root.source.title; color: Theme.current.text_bright;
+                font-size: InterfaceStyle.tv ? 20px : 15px; overflow: elide;
+            }
+            Text {
+                text: root.source.detail; color: Theme.current.text_secondary;
+                font-size: InterfaceStyle.tv ? 16px : 12px; wrap: word-wrap;
+            }
+        }
+    }
+    touch := ControlTouchArea {
+        enabled: root.source.enabled; mouse-cursor: pointer;
+        clicked => { root.picked(); }
+    }
+}
+
+export component SaveImageSheet inherits Rectangle {
+    in property <bool> open;
+    // While the sources are still being probed.
+    in property <bool> loading;
+    in property <bool> busy;
+    in property <string> subtitle;
+    in property <string> error;
+    in property <[SaveImageSource]> sources;
+    in-out property <int> source-index;
+    in-out property <bool> keep;
+    in-out property <int> format-index;
+    in-out property <float> quality: 85;
+    in-out property <bool> remember;
+    in property <length> safe-top;
+    in property <length> safe-bottom;
+    in property <length> safe-left;
+    in property <length> safe-right;
+    callback save;
+    callback cancel;
+    visible: root.open;
+    private property <SaveImageSource> current: root.source-index >= 0 && root.source-index < root.sources.length ? root.sources[root.source-index] : { title: "", detail: "", enabled: false, keepable: true, width: 0, height: 0, format: "", size: "", blocked: [] };
+    private property <bool> keeping: root.keep && root.current.keepable;
+    private property <string> dimensions: root.current.width > 0 ? root.current.width + " × " + root.current.height + " · " : "";
+    private property <string> summary: root.keeping
+        ? root.dimensions + (root.current.format != "" ? root.current.format : @tr("Original file")) + (root.current.size != "" ? " · " + root.current.size : "")
+        : root.dimensions + SaveOutputFormats.label(root.format-index, root.quality);
+    private property <bool> can-save: !root.loading && !root.busy && root.current.enabled && output.valid;
+    changed source-index => { if !root.current.keepable { root.keep = false; } }
+    // The dim backdrop swallows outside taps and cancels.
+    Rectangle { background: Theme.current.scrim_shadow; }
+    TouchArea { clicked => { if !root.busy { root.cancel(); } } }
+    panel := Rectangle {
+        width: min(InterfaceStyle.tv ? 720px : 560px, max(1px, root.width - root.safe-left - root.safe-right - 24px));
+        height: min(content.preferred-height + 2px, max(1px, root.height - root.safe-top - root.safe-bottom - 24px));
+        x: root.safe-left + (root.width - root.safe-left - root.safe-right - self.width) / 2;
+        y: root.height - root.safe-bottom - self.height - 12px;
+        background: Theme.current.popup;
+        border-radius: 16px; clip: true;
+        accessible-role: groupbox; accessible-label: @tr("Save image");
+        TouchArea { }
+        ScrollView {
+            mouse-drag-pan-enabled: true;
+            content := VerticalLayout {
+                width: panel.width; padding: 18px; spacing: 12px;
+                Rectangle {
+                    height: 4px;
+                    Rectangle { width: 36px; height: 4px; border-radius: 2px; background: Theme.current.border_medium; }
+                }
+                VerticalLayout {
+                    spacing: 2px;
+                    Text { text: @tr("Save image"); color: Theme.current.text_bright; font-size: InterfaceStyle.tv ? 24px : 19px; font-weight: 600; }
+                    if root.subtitle != "": Text { text: root.subtitle; color: Theme.current.text_secondary; font-size: 13px; overflow: elide; }
+                }
+                if root.loading: HorizontalLayout {
+                    alignment: center; height: 56px; spacing: 10px;
+                    Spinner { width: 20px; height: 20px; y: 18px; }
+                    Text { text: @tr("Checking sources…"); color: Theme.current.text_secondary; vertical-alignment: center; }
+                }
+                // One source needs no choice.
+                if !root.loading && root.sources.length > 1: Text {
+                    text: @tr("SOURCE"); color: Theme.current.text_muted; font-size: 12px; font-weight: 700;
+                }
+                if !root.loading && root.sources.length > 1: VerticalLayout {
+                    spacing: 8px;
+                    for row[i] in root.sources: SourceRow {
+                        source: row; selected: root.source-index == i;
+                        picked => { if !root.busy { root.source-index = i; } }
+                    }
+                }
+                if !root.loading && root.sources.length == 1: Text {
+                    text: root.current.title + " · " + root.current.detail;
+                    color: Theme.current.text_secondary; font-size: 13px; wrap: word-wrap;
+                }
+                if !root.loading: Text {
+                    text: @tr("OUTPUT"); color: Theme.current.text_muted; font-size: 12px; font-weight: 700;
+                }
+                output := SaveOutputPanel {
+                    visible: !root.loading;
+                    height: root.loading ? 0px : self.preferred-height;
+                    enabled: !root.busy;
+                    keep-enabled: root.current.keepable;
+                    keep <=> root.keep;
+                    format-index <=> root.format-index;
+                    quality <=> root.quality;
+                    blocked: root.current.blocked;
+                }
+                if !root.loading: Text {
+                    text: root.summary; color: Theme.current.text_secondary; font-size: 13px; overflow: elide;
+                    accessible-role: text; accessible-label: root.summary;
+                }
+                if !root.loading: HorizontalLayout {
+                    spacing: 12px;
+                    Text {
+                        horizontal-stretch: 1; min-width: 0px;
+                        text: @tr("Remember as default for simple save"); wrap: word-wrap;
+                        color: Theme.current.text_settings; vertical-alignment: center;
+                    }
+                    ToggleSwitch {
+                        name: @tr("Remember as default for simple save"); enabled: !root.busy;
+                        checked <=> root.remember;
+                        accessible-action-default => { if self.enabled { self.checked = !self.checked; } }
+                    }
+                }
+                if root.error != "": Text {
+                    text: root.error; wrap: word-wrap; color: Theme.current.text_destructive; font-size: 13px;
+                    accessible-role: text; accessible-label: root.error;
+                }
+                HorizontalLayout {
+                    spacing: 10px; height: 48px;
+                    PillButton {
+                        horizontal-stretch: 1; label: @tr("Cancel"); compact: true; wrap-label: true;
+                        enabled: !root.busy;
+                        accessible-action-default => { if self.enabled { root.cancel(); } }
+                        clicked => { root.cancel(); }
+                    }
+                    PillButton {
+                        horizontal-stretch: 1; label: @tr("Save"); primary: true; compact: true; wrap-label: true;
+                        enabled: root.can-save;
+                        accessible-action-default => { if self.enabled { root.save(); } }
+                        clicked => { if root.can-save { root.save(); } }
+                    }
+                }
+            }
+        }
+    }
+    scope := FocusScope {
+        width: 0px; height: 0px;
+        key-pressed(event) => {
+            if event.text == Key.Escape || event.text == Key.Back {
+                if !root.busy { root.cancel(); }
+                return accept;
+            }
+            // Reader navigation never runs underneath the open sheet.
+            return reject;
+        }
+    }
+    changed open => { if root.open { scope.focus(); } }
+}
