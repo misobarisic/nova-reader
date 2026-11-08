@@ -4961,7 +4961,7 @@ dependencies = [
 
 [[package]]
 name = "nova-reader"
-version = "0.1.35"
+version = "0.1.37"
 dependencies = [
  "anyhow",
  "arboard",
