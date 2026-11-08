@@ -516,10 +516,13 @@ impl DomainStore {
         Ok(serde_json::to_vec_pretty(&self.snapshot()?)?)
     }
     pub fn restore_json(&self, bytes: &[u8]) -> Result<()> {
-        let state = decode(bytes)?;
+        let mut state = decode(bytes)?;
         // Restoring completion flags is an explicit user action, rather than a
         // delayed reading checkpoint that an existing manual register can mask.
         self.update_with_kind(UpdateKind::ManualProgress, |current| {
+            // Installed addons belong to this device. The backup's list names
+            // the packages of the device it came from, so it never replaces ours.
+            state.sources = std::mem::take(&mut current.sources);
             *current = state;
             Ok(())
         })
@@ -629,6 +632,60 @@ mod tests {
             store
                 .restore_json(&serde_json::to_vec(&legacy).unwrap())
                 .is_err()
+        );
+    }
+    fn descriptor(id: &str) -> SourceDescriptor {
+        SourceDescriptor {
+            id: id.into(),
+            addon_id: id.into(),
+            name: id.into(),
+            language: "en".into(),
+            version: "1.0.0".into(),
+        }
+    }
+    /// Installed addons are device-global. A backup taken elsewhere names other
+    /// packages, and restoring it must neither drop the installed ones nor list
+    /// the ones that are not installed here.
+    #[test]
+    fn restoring_a_backup_keeps_the_installed_sources() {
+        const CHILD: &str = "NOVA_READER_TEST_SOURCES_DIR";
+        if let Some(directory) = std::env::var_os(CHILD) {
+            let store = DomainStore::open(&directory).unwrap();
+            store
+                .update(|state| {
+                    state.sources.push(descriptor("installed"));
+                    Ok(())
+                })
+                .unwrap();
+            let mut foreign = store.snapshot().unwrap();
+            foreign.sources = vec![descriptor("elsewhere")];
+            store
+                .restore_json(&serde_json::to_vec(&foreign).unwrap())
+                .unwrap();
+            let after = store.snapshot().unwrap().sources;
+            assert_eq!(
+                after.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+                ["installed"]
+            );
+            let raw = nova_storage::try_get_str(SOURCES_KEY).unwrap().unwrap();
+            assert!(!raw.contains("elsewhere"), "{raw}");
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::restoring_a_backup_keeps_the_installed_sources",
+                "--nocapture",
+            ])
+            .env(CHILD, directory.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
         );
     }
     #[test]
