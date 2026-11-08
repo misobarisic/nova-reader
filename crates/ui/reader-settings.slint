@@ -1,9 +1,12 @@
 // Reader preferences use Nova's shared rows, dropdowns, switches and sliders.
-import { Theme, SettingsStyle, Anim, SliderGesture } from "@NovaUiShared";
+import { Theme, SettingsStyle, Anim, SliderGesture, SettingsHighlight } from "@NovaUiShared";
 import { SettingsCard, ToggleSwitch, PillButton, AddonIconButton, SectionHeader } from "@NovaUiBase/settings-controls.slint";
 import { NumericSetting } from "@NovaUiBase/cache-settings-controls.slint";
 import { ReaderSelect } from "controls.slint";
 import { SettingsRow } from "settings-row.slint";
+import { SettingsSearchHighlight } from "@NovaUiBase/settings-row.slint";
+import { SettingSyncBadge } from "@NovaUiBase/settings-sync.slint";
+import { MiniSlider } from "@NovaUiBase/settings-controls.slint";
 import { Segmented } from "@NovaUiBase/settings-controls.slint";
 
 export global ReaderSettings {
@@ -48,10 +51,12 @@ export global ReaderSettings {
     callback settings-changed(string, int);
 }
 
+// Rows are a little tighter in the reader sheet than on Settings pages.
 component PreferenceToggle inherits SettingsRow {
     in property <bool> checked;
     in property <bool> enabled: true;
     callback changed(bool);
+    row-min-height: 56px;
     changed checked => { control.checked = root.checked; }
     control := ToggleSwitch {
         name: root.row-title; enabled: root.enabled; checked: root.checked;
@@ -65,34 +70,159 @@ component PreferenceChoice inherits SettingsRow {
     in property <int> selected;
     in property <bool> enabled: true;
     callback changed(int);
+    row-min-height: 56px;
     changed selected => { control.current-index = root.selected; }
     control := ReaderSelect {
-        width: min(252px, max(0px, root.width - 32px));
+        width: min(220px, max(0px, root.width - 32px));
         enabled: root.enabled; placeholder-text: root.row-title;
         model: root.choices; current-index: root.selected;
         selected(_) => { root.changed(self.current-index); self.current-index = root.selected; }
     }
 }
 
-component PreferenceNumber inherits SettingsRow {
+// A small uppercase section title with whom it applies to at its end.
+component ScopeHeader inherits HorizontalLayout {
+    in property <string> label;
+    // True: this series only (tinted); false: all series (neutral).
+    in property <bool> local;
+    spacing: 8px; padding-left: 4px; padding-right: 4px; height: 24px;
+    Text {
+        horizontal-stretch: 1; min-width: 0px; overflow: elide;
+        text: root.label; color: Theme.current.text_muted;
+        font-size: 13px; font-weight: 600; letter-spacing: 0.4px; vertical-alignment: center;
+    }
+    Rectangle {
+        width: scope-text.preferred-width + 16px; height: 20px; y: 2px; border-radius: 8px;
+        background: root.local ? Theme.current.scope_local_fill : Theme.current.control_hover;
+        scope-text := Text {
+            text: root.local ? @tr("This series") : @tr("All series");
+            color: root.local ? Theme.current.scope_local_text : Theme.current.text_secondary;
+            font-size: 11px; font-weight: 600; vertical-alignment: center; horizontal-alignment: center;
+        }
+    }
+}
+
+// A card section for a visual control (tiles, diagrams, swatches, slider). It
+// carries the same setting key as a row: search highlights it and the sync
+// badge sits beside its label.
+component KeyedBlock inherits Rectangle {
+    in property <string> setting-key;
+    in property <string> label;
+    // Shown at the trailing end of the label line, e.g. a slider's value.
+    in property <string> value-text;
+    min-width: 0px;
+    accessible-role: groupbox; accessible-label: root.label;
+    accessible-id: root.setting-key == "" ? "" : "setting:" + root.setting-key;
+    if SettingsHighlight.enabled && root.setting-key != "": SettingsSearchHighlight { setting-key: root.setting-key; }
+    Rectangle { x: 14px; y: parent.height - 1px; width: max(0px, parent.width - 28px); height: 1px; background: Theme.current.border_subtle; }
+    VerticalLayout {
+        padding-left: 14px; padding-right: 14px; padding-top: 12px; padding-bottom: 12px; spacing: 10px;
+        if root.label != "": HorizontalLayout {
+            spacing: 8px;
+            Text { text: root.label; color: Theme.current.text_primary; font-size: 15px; vertical-alignment: center; overflow: elide; }
+            if root.setting-key != "": SettingSyncBadge { setting_key: root.setting-key; setting_title: root.label; }
+            Rectangle { horizontal-stretch: 1; }
+            if root.value-text != "": Text { text: root.value-text; color: Theme.current.accent_soft; font-size: 14px; vertical-alignment: center; }
+        }
+        @children
+    }
+}
+
+// A selectable tile or swatch: pointer, keyboard (Return/Space) and assistive
+// selection behave alike. The caller draws its content.
+component ChoiceTile inherits Rectangle {
+    in property <string> label;
+    in property <bool> selected;
+    in property <bool> enabled: true;
+    in property <bool> outlined: true;
+    callback picked;
+    min-width: 44px; min-height: 44px;
+    border-radius: 10px;
+    background: !root.outlined ? transparent : root.selected ? Theme.current.selection_fill : Theme.current.settings_control;
+    border-width: key.has-focus && SettingsStyle.keyboard-mode ? 2px : root.outlined && root.selected ? 1px : 0px;
+    border-color: key.has-focus && SettingsStyle.keyboard-mode ? Theme.current.focus_ring : Theme.current.accent.with-alpha(0.5);
+    opacity: root.enabled ? 1 : 0.45;
+    accessible-role: radio-button; accessible-label: root.label;
+    accessible-checkable: true; accessible-checked: root.selected; accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.picked(); } }
+    @children
+    key := FocusScope {
+        enabled: root.enabled;
+        changed has-focus => { if self.has-focus { SettingsStyle.reveal_control(root.absolute-position.y, root.height, false); } }
+        key-pressed(e) => {
+            if (e.text == Key.Return || e.text == " ") && !e.repeat { SettingsStyle.keyboard-mode = true; root.picked(); return accept; }
+            return reject;
+        }
+    }
+    TouchArea {
+        enabled: root.enabled; mouse-cursor: pointer;
+        clicked => { SettingsStyle.keyboard-mode = false; root.picked(); }
+    }
+}
+
+// A full-width slider with its value shown in the block's label line.
+component SliderBlock inherits KeyedBlock {
     in property <int> value;
     in property <int> minimum: 0;
     in property <int> maximum: 100;
     in property <string> suffix: "%";
     in property <bool> enabled: true;
+    // Optional small and large icons either side (brightness).
+    in property <bool> suns;
     callback changed(int);
-    changed value => { control.value = root.value; }
-    control := NumericSetting {
-        width: min(252px, max(0px, root.width - 32px));
-        enabled: root.enabled; name: root.row-title;
-        decrease-label: @tr("Decrease {0}", root.row-title);
-        increase-label: @tr("Increase {0}", root.row-title);
-        value: root.value; minimum: root.minimum; maximum: root.maximum; suffix: root.suffix;
-        changed(v) => { root.changed(Math.round(v)); self.value = root.value; }
+    value-text: root.value + root.suffix;
+    opacity: root.enabled ? 1 : 0.45;
+    changed value => { slider.value = root.value; }
+    HorizontalLayout {
+        spacing: 10px;
+        if root.suns: Path {
+            width: 16px; height: 16px; y: 14px; viewbox-width: 24; viewbox-height: 24;
+            fill: transparent; stroke: Theme.current.text_muted; stroke-width: 2px;
+            commands: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM12 5v1M12 18v1M5 12h1M18 12h1";
+        }
+        slider := MiniSlider {
+            horizontal-stretch: 1; min-width: 60px;
+            name: root.label; enabled: root.enabled;
+            value: root.value; minimum: root.minimum; maximum: root.maximum; step: 1;
+            changed(v) => { root.changed(Math.round(v)); self.value = root.value; }
+        }
+        if root.suns: Path {
+            width: 22px; height: 22px; y: 11px; viewbox-width: 24; viewbox-height: 24;
+            fill: transparent; stroke: Theme.current.text_muted; stroke-width: 1.8px;
+            commands: "M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4";
+        }
     }
 }
 
+// One tap-zone scheme as a 3×3 grid: 0 menu, 1 previous, 2 next (row-major).
+component ZoneDiagram inherits ChoiceTile {
+    in property <[int]> cells;
+    outlined: false;
+    width: 64px; height: 104px;
+    Rectangle {
+        x: 6px; y: 2px; width: 52px; height: 78px; border-radius: 8px;
+        background: #000000;
+        border-width: 2px;
+        border-color: root.selected ? Theme.current.accent_soft : transparent;
+        for cell[i] in root.cells: Rectangle {
+            x: 4px + Math.mod(i, 3) * 15px; y: 4px + Math.floor(i / 3) * 23.3px;
+            width: 13px; height: 21px; border-radius: 2px;
+            background: cell == 1 ? Theme.current.accent.with-alpha(0.7) : cell == 2 ? Theme.current.text_bright.with-alpha(0.55) : Theme.current.text_bright.with-alpha(0.11);
+        }
+    }
+    Text {
+        y: 84px; width: 100%; height: 18px; text: root.label;
+        font-size: 11px; horizontal-alignment: center; overflow: elide;
+        color: root.selected ? Theme.current.text_selected : Theme.current.text_muted;
+    }
+}
+
+struct ModeTile { label: string, value: int, icon: string }
+struct PresetSwatch { label: string, color: int, intensity: int }
+
 // The same form is embedded in More → Settings and in the chapter overlay.
+// Layout applies to this series in the reader (to all series in Settings);
+// Display and Color always apply to all series.
 export component ReaderSettingsForm inherits Rectangle {
     in property <bool> global-settings: false;
     in property <bool> interactive: true;
@@ -106,14 +236,56 @@ export component ReaderSettingsForm inherits Rectangle {
     in-out property <int> current-tab: 0;
     callback mode-selected(int);
     callback rotation-selected(int);
-    private property <[int]> series-mode-map: [6, 4, 1, 2, 3, 0, 5];
-    private property <[int]> global-mode-map: [4, 1, 2, 3, 0, 5];
-    private property <int> mode-index: root.mode == 6 ? 0 : root.mode == 4 ? 1 : root.mode == 1 ? 2 : root.mode == 2 ? 3 : root.mode == 3 ? 4 : root.mode == 0 ? 5 : 6;
-    private property <int> global-mode-index: ReaderSettings.default-mode == 4 ? 0 : ReaderSettings.default-mode == 1 ? 1 : ReaderSettings.default-mode == 2 ? 2 : ReaderSettings.default-mode == 3 ? 3 : ReaderSettings.default-mode == 0 ? 4 : 5;
+    private property <bool> motion: Anim.enabled;
     private property <string> default-label: ReaderSettings.default-mode == 4 ? @tr("Automatic") : ReaderSettings.default-mode == 1 ? @tr("Left to right") : ReaderSettings.default-mode == 2 ? @tr("Right to left") : ReaderSettings.default-mode == 3 ? @tr("Vertical") : ReaderSettings.default-mode == 0 ? @tr("Webtoon") : @tr("Long strip with gaps");
     private property <int> layout-tab: root.global-settings
         ? ((ReaderSettings.default-mode == 0 || ReaderSettings.default-mode == 5) ? 1 : 0)
         : ((root.mode == 0 || root.mode == 5 || root.resolved-mode-index == 0) ? 1 : 0);
+    // Values are the mode codes `series-mode-map` / `global-mode-map` sent before.
+    private property <[ModeTile]> modes: [
+        { label: @tr("Automatic"), value: 4, icon: "M12 3l1.8 4.6L18.5 9l-4.7 1.4L12 15l-1.8-4.6L5.5 9l4.7-1.4zM18 15l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z" },
+        { label: @tr("Left to right"), value: 1, icon: "M4 12h15M14 7l5 5-5 5" },
+        { label: @tr("Right to left"), value: 2, icon: "M20 12H5M10 7l-5 5 5 5" },
+        { label: @tr("Vertical"), value: 3, icon: "M12 4v15M7 14l5 5 5-5" },
+        { label: @tr("Webtoon"), value: 0, icon: "M8 3h8v18H8zM8 9h8M8 15h8" },
+        { label: @tr("With gaps"), value: 5, icon: "M8 3h8v5H8zM8 10h8v5H8zM8 17h8v4H8z" },
+    ];
+    private property <int> selected-mode: root.global-settings ? ReaderSettings.default-mode : root.mode;
+    function pick-mode(value: int) {
+        if root.global-settings { ReaderSettings.settings-changed("default_mode", value); } else { root.mode-selected(value); }
+    }
+    // Tap-zone grids from `reader_navigation`: 0 menu, 1 previous, 2 next.
+    // Default resolves to Right and left in Paged, L-shaped in Webtoon.
+    private property <[[int]]> zone-grids: [
+        root.layout-tab == 0 ? [1, 0, 2, 1, 0, 2, 1, 0, 2] : [1, 1, 1, 1, 0, 2, 2, 2, 2],
+        [1, 1, 1, 1, 0, 2, 2, 2, 2],
+        [0, 0, 0, 1, 2, 2, 1, 2, 2],
+        [2, 0, 2, 2, 0, 2, 2, 1, 2],
+        [1, 0, 2, 1, 0, 2, 1, 0, 2],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0],
+    ];
+    private property <[string]> zone-names: [@tr("Default"), @tr("L-shaped"), @tr("Kindle"), @tr("Edge"), @tr("Right and left"), @tr("Disabled")];
+    private property <int> tap-zones: root.layout-tab == 0 ? ReaderSettings.paged-tap-zones : ReaderSettings.webtoon-tap-zones;
+    private property <int> invert-taps: root.layout-tab == 0 ? ReaderSettings.paged-invert-taps : ReaderSettings.webtoon-invert-taps;
+    private property <string> layout-prefix: root.layout-tab == 0 ? "paged" : "webtoon";
+    function layout-key(field: string) -> string {
+        return root.global-settings ? "reader:reader-settings/" + root.layout-prefix + "/" + field
+            : ReaderSettings.series-settings-key + "/" + root.layout-prefix + "/" + field;
+    }
+    function layout-changed(field: string, value: int) { ReaderSettings.settings-changed(root.layout-prefix + "_" + field, value); }
+    // Colour filter presets; the selection is worked out from the stored colour.
+    private property <[PresetSwatch]> presets: [
+        { label: @tr("Warm"), color: 16755290, intensity: 25 },
+        { label: @tr("Sepia"), color: 15122050, intensity: 35 },
+        { label: @tr("Night"), color: 16732220, intensity: 45 },
+        { label: @tr("Cool"), color: 9223935, intensity: 25 },
+    ];
+    private property <bool> custom-open;
+    private property <int> matched-preset: ReaderSettings.filter-color == root.presets[0].color ? 0
+        : ReaderSettings.filter-color == root.presets[1].color ? 1
+        : ReaderSettings.filter-color == root.presets[2].color ? 2
+        : ReaderSettings.filter-color == root.presets[3].color ? 3 : 4;
+    private property <int> selected-preset: root.custom-open ? 4 : root.matched-preset;
     private property <int> focus-request: SettingsStyle.focus-request;
     changed focus-request => {
         if SettingsStyle.keyboard-mode && root.interactive && root.visible {
@@ -128,24 +300,67 @@ export component ReaderSettingsForm inherits Rectangle {
         }
     }
     min-width: 0px;
-    // Nova Settings resets gesture ownership when its active leaf changes.
-    changed current-tab => { settings-scroll.content-y = 0px; SliderGesture.active = false; SliderGesture.hovered = false; }
+    // Tab content fades in; Nova Settings resets gesture ownership when its
+    // active leaf changes.
+    private property <float> content-fade: 1;
+    animate content-fade { duration: root.motion && Anim.player ? Anim.player_fade : 0ms; easing: ease-out; }
+    changed current-tab => {
+        settings-scroll.content-y = 0px; SliderGesture.active = false; SliderGesture.hovered = false;
+        root.custom-open = false;
+        if root.motion && Anim.player { root.content-fade = 0; fade-in.start(); } else { root.content-fade = 1; }
+    }
+    fade-in := Timer { interval: 1ms; running: false; triggered => { self.stop(); root.content-fade = 1; } }
     changed interactive => { if !root.interactive { SliderGesture.active = false; SliderGesture.hovered = false; } }
     VerticalLayout {
         spacing: 0px;
-        tabs := HorizontalLayout {
-            height: 48px; spacing: 0px;
-            for label[i] in [@tr("Reading mode"), @tr("General"), @tr("Filters")]: Rectangle {
-                horizontal-stretch: 1; min-width: 0px;
-                PillButton {
-                    width: parent.width; height: 44px; label: label;
-                    compact: true; wrap-label: true; enabled: root.interactive;
-                    background: transparent;
-                    accessible-role: tab; accessible-item-selectable: true; accessible-item-selected: root.current-tab == i;
-                    accessible-action-default => { if root.interactive { root.current-tab = i; } }
-                    clicked => { root.current-tab = i; }
+        tabs := Rectangle {
+            height: 48px;
+            private property <length> tab-width: self.width / 3;
+            tab-keys := FocusScope {
+                enabled: root.interactive;
+                key-pressed(e) => {
+                    if e.text == Key.LeftArrow && root.current-tab > 0 { SettingsStyle.keyboard-mode = true; root.current-tab -= 1; return accept; }
+                    if e.text == Key.RightArrow && root.current-tab < 2 { SettingsStyle.keyboard-mode = true; root.current-tab += 1; return accept; }
+                    return reject;
                 }
-                Rectangle { y: parent.height - 3px; height: 3px; width: parent.width; border-radius: 2px; background: root.current-tab == i ? Theme.current.accent_soft : transparent; }
+                HorizontalLayout {
+                    spacing: 0px;
+                    for tab-item[i] in [
+                        { label: @tr("Layout"), icon: "M4 4h7v16H4zM13 4h7v16h-7z" },
+                        { label: @tr("Display"), icon: "M3 5h18v12H3zM8 21h8M12 17v4" },
+                        { label: @tr("Color"), icon: "M12 3a9 9 0 1 0 0 18c1 0 1.5-.8 1.5-1.5 0-1.4-1-1.6-1-2.7 0-.8.7-1.3 1.5-1.3H16a5 5 0 0 0 5-5C21 6 17 3 12 3z" },
+                    ]: Rectangle {
+                        horizontal-stretch: 1; min-width: 0px; height: 44px;
+                        accessible-role: tab; accessible-label: tab-item.label;
+                        accessible-item-selectable: true; accessible-item-selected: root.current-tab == i;
+                        accessible-enabled: root.interactive;
+                        accessible-action-default => { if root.interactive { root.current-tab = i; } }
+                        HorizontalLayout {
+                            alignment: center; spacing: 8px;
+                            Path {
+                                width: 18px; height: 18px; y: 13px; viewbox-width: 24; viewbox-height: 24;
+                                fill: transparent; stroke-width: 1.8px;
+                                stroke: root.current-tab == i ? Theme.current.text_bright : Theme.current.text_settings;
+                                commands: tab-item.icon;
+                            }
+                            Text {
+                                text: tab-item.label; font-size: 14px; vertical-alignment: center;
+                                color: root.current-tab == i ? Theme.current.text_bright : Theme.current.text_settings;
+                            }
+                        }
+                        TouchArea {
+                            enabled: root.interactive; mouse-cursor: pointer;
+                            clicked => { root.current-tab = i; tab-keys.focus(); }
+                        }
+                    }
+                }
+            }
+            // One underline slides to the selected tab.
+            Rectangle {
+                y: parent.height - 3px; height: 3px; width: tabs.tab-width; border-radius: 2px;
+                x: root.current-tab * tabs.tab-width;
+                animate x { duration: root.motion ? Anim.transition_slide : 0ms; easing: ease-in-out; }
+                background: Theme.current.accent_soft;
             }
         }
         Rectangle { height: 1px; background: Theme.current.border_soft; }
@@ -159,131 +374,345 @@ export component ReaderSettingsForm inherits Rectangle {
             content-height: max(self.height, settings-content.preferred-height);
             settings-content := VerticalLayout {
                 width: settings-scroll.width; height: self.preferred-height;
-                alignment: start;
-                padding-top: 16px; padding-bottom: 24px; spacing: 16px;
+                alignment: start; opacity: root.content-fade;
+                padding-top: 14px; padding-bottom: 28px; spacing: 14px;
+                // ---------------------------------------------------- Layout
                 if root.current-tab == 0: VerticalLayout {
-                    spacing: 16px;
-                    SectionHeader { label: root.global-settings ? @tr("Reading defaults") : @tr("For this series"); }
+                    spacing: 14px;
+                    ScopeHeader { label: @tr("Reading mode"); local: !root.global-settings; }
                     SettingsCard {
-                        PreferenceChoice { setting-key: root.global-settings ? "reader:reader-settings/default_mode" : ReaderSettings.series-mode-key;
-                            row-title: @tr("Reading mode");
-                            row-desc: root.global-settings ? @tr("Automatic detects the reading direction for each series.") : @tr("Currently: {0}\nGlobal default: {1}", root.resolved-mode, root.default-label);
-                            enabled: root.interactive;
-                            choices: root.global-settings ? [@tr("Automatic"), @tr("Left to right"), @tr("Right to left"), @tr("Vertical"), @tr("Webtoon"), @tr("Long strip with gaps")] : [@tr("Default ({0})", root.default-label), @tr("Automatic"), @tr("Left to right"), @tr("Right to left"), @tr("Vertical"), @tr("Webtoon"), @tr("Long strip with gaps")];
-                            selected: root.global-settings ? root.global-mode-index : root.mode-index;
-                            changed(i) => { if root.global-settings { ReaderSettings.settings-changed("default_mode", root.global-mode-map[i]); } else { root.mode-selected(root.series-mode-map[i]); } }
+                        KeyedBlock {
+                            setting-key: root.global-settings ? "reader:reader-settings/default_mode" : ReaderSettings.series-mode-key;
+                            accessible-label: @tr("Reading mode");
+                            for row in [0, 1]: HorizontalLayout {
+                                spacing: 8px;
+                                for tile[i] in [root.modes[row * 3], root.modes[row * 3 + 1], root.modes[row * 3 + 2]]: ChoiceTile {
+                                    height: 72px; horizontal-stretch: 1;
+                                    label: tile.label; enabled: root.interactive;
+                                    selected: root.selected-mode == tile.value;
+                                    picked => { root.pick-mode(tile.value); }
+                                    VerticalLayout {
+                                        alignment: center; spacing: 6px;
+                                        HorizontalLayout { alignment: center; Path {
+                                            width: 22px; height: 22px; viewbox-width: 24; viewbox-height: 24;
+                                            fill: transparent; stroke-width: 1.8px;
+                                            stroke: root.selected-mode == tile.value ? Theme.current.text_selected : Theme.current.text_settings;
+                                            commands: tile.icon;
+                                        } }
+                                        Text {
+                                            text: tile.label; font-size: 12px; horizontal-alignment: center; overflow: elide;
+                                            color: root.selected-mode == tile.value ? Theme.current.text_selected : Theme.current.text_settings;
+                                        }
+                                    }
+                                }
+                            }
+                            // The series can follow the global default instead.
+                            if !root.global-settings: HorizontalLayout {
+                                spacing: 8px;
+                                Text {
+                                    horizontal-stretch: 1; min-width: 0px; overflow: elide;
+                                    text: @tr("Global default: {0}", root.default-label);
+                                    color: Theme.current.text_muted; font-size: 12px; vertical-alignment: center;
+                                }
+                                ChoiceTile {
+                                    width: use-default.preferred-width + 24px; height: 44px; border-radius: 16px;
+                                    label: @tr("Use default"); enabled: root.interactive;
+                                    selected: root.mode == 6;
+                                    picked => { root.mode-selected(6); }
+                                    use-default := Text {
+                                        text: @tr("Use default"); font-size: 12px;
+                                        horizontal-alignment: center; vertical-alignment: center;
+                                        color: root.mode == 6 ? Theme.current.text_selected : Theme.current.text_secondary;
+                                    }
+                                }
+                            }
                         }
                         PreferenceChoice { setting-key: root.global-settings ? "reader:reader-settings/rotation" : ReaderSettings.series-settings-key + "/rotation";
-                            row-title: root.rotation-label; enabled: root.interactive;
+                            row-title: root.rotation-label; row-desc: @tr("Stays on this device"); enabled: root.interactive;
                             choices: root.global-settings ? [@tr("System"), @tr("Free"), @tr("Portrait"), @tr("Landscape"), @tr("Locked portrait"), @tr("Locked landscape"), @tr("Reverse portrait")] : [@tr("Default"), @tr("System"), @tr("Free"), @tr("Portrait"), @tr("Landscape"), @tr("Locked portrait"), @tr("Locked landscape"), @tr("Reverse portrait")];
                             selected: root.global-settings ? ReaderSettings.rotation : root.rotation + 1;
                             changed(i) => { if root.global-settings { ReaderSettings.settings-changed("rotation", i); } else { root.rotation-selected(i - 1); } }
                         }
                     }
-                    SectionHeader { label: @tr("Page layout"); }
-                    HorizontalLayout { alignment: start; Segmented {
-                        enabled: root.interactive; labels: [@tr("Paged"), @tr("Webtoon")]; current-index: root.layout-tab;
-                        picked(i) => { root.layout-tab = i; }
-                    } }
-                    if root.layout-tab == 0: SettingsCard {
-                        PreferenceChoice { setting-key: root.global-settings ? "reader:reader-settings/paged/tap_zones" : ReaderSettings.series-settings-key + "/paged/tap_zones";
-                            row-title: @tr("Tap zones"); enabled: root.interactive;
-                            choices: [@tr("Default"), @tr("L-shaped"), @tr("Kindle"), @tr("Edge"), @tr("Right and left"), @tr("Disabled")];
-                            selected: ReaderSettings.paged-tap-zones;
-                            changed(i) => { ReaderSettings.settings-changed("paged_tap_zones", i); }
+                    ScopeHeader { label: @tr("Page layout"); local: !root.global-settings; }
+                    SettingsCard {
+                        KeyedBlock {
+                            HorizontalLayout { alignment: start; Segmented {
+                                enabled: root.interactive; labels: [@tr("Paged"), @tr("Webtoon")]; current-index: root.layout-tab;
+                                picked(i) => { root.layout-tab = i; }
+                            } }
                         }
-                        PreferenceChoice { setting-key: root.global-settings ? "reader:reader-settings/paged/invert_taps" : ReaderSettings.series-settings-key + "/paged/invert_taps";
-                            row-title: @tr("Invert tap zones"); enabled: root.interactive && ReaderSettings.paged-tap-zones != 5;
-                            choices: [@tr("None"), @tr("Horizontal"), @tr("Vertical"), @tr("Both")];
-                            selected: ReaderSettings.paged-invert-taps;
-                            changed(i) => { ReaderSettings.settings-changed("paged_invert_taps", i); }
+                        KeyedBlock {
+                            setting-key: root.layout-key("tap_zones"); label: @tr("Tap zones");
+                            zone-scroll := Flickable {
+                                height: 104px; content-width: zone-row.preferred-width; content-height: self.height;
+                                interactive: self.content-width > self.width;
+                                zone-row := HorizontalLayout {
+                                    spacing: 6px; height: parent.height;
+                                    for grid[i] in root.zone-grids: ZoneDiagram {
+                                        cells: grid; label: root.zone-names[i];
+                                        selected: root.tap-zones == i; enabled: root.interactive;
+                                        picked => { root.layout-changed("tap_zones", i); }
+                                    }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 12px;
+                                for item in [
+                                    { label: @tr("Previous"), kind: 1 },
+                                    { label: @tr("Next"), kind: 2 },
+                                    { label: @tr("Menu"), kind: 0 },
+                                ]: HorizontalLayout {
+                                    spacing: 5px;
+                                    Rectangle {
+                                        width: 8px; height: 8px; y: 4px; border-radius: 2px;
+                                        background: item.kind == 1 ? Theme.current.accent.with-alpha(0.7) : item.kind == 2 ? Theme.current.text_bright.with-alpha(0.55) : Theme.current.text_bright.with-alpha(0.19);
+                                    }
+                                    Text { text: item.label; font-size: 11px; color: Theme.current.text_muted; }
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                            }
                         }
-                        PreferenceNumber { setting-key: root.global-settings ? "reader:reader-settings/paged/side_padding" : ReaderSettings.series-settings-key + "/paged/side_padding"; row-title: @tr("Side padding"); value: ReaderSettings.paged-side-padding; maximum: 25; enabled: root.interactive; changed(v) => { ReaderSettings.settings-changed("paged_side_padding", v); } }
-                        PreferenceToggle { setting-key: root.global-settings ? "reader:reader-settings/paged/crop_borders" : ReaderSettings.series-settings-key + "/paged/crop_borders"; row-title: @tr("Crop borders"); row-desc: @tr("Remove empty space around each page."); checked: ReaderSettings.paged-crop-borders; enabled: root.interactive; changed(v) => { ReaderSettings.settings-changed("paged_crop_borders", v ? 1 : 0); } }
-                        PreferenceToggle { setting-key: root.global-settings ? "reader:reader-settings/paged/split_wide" : ReaderSettings.series-settings-key + "/paged/split_wide"; row-title: @tr("Split wide pages"); row-desc: @tr("Read landscape pages as two pages."); checked: ReaderSettings.paged-split-wide; enabled: root.interactive; changed(v) => { ReaderSettings.settings-changed("paged_split_wide", v ? 1 : 0); } }
-                        PreferenceToggle { setting-key: root.global-settings ? "reader:reader-settings/paged/rotate_wide" : ReaderSettings.series-settings-key + "/paged/rotate_wide"; row-title: @tr("Rotate wide pages"); row-desc: @tr("Turn landscape pages to fill the screen."); checked: ReaderSettings.paged-rotate-wide; enabled: root.interactive; changed(v) => { ReaderSettings.settings-changed("paged_rotate_wide", v ? 1 : 0); } }
-                        PreferenceToggle { setting-key: root.global-settings ? "reader:reader-settings/paged/flip_wide" : ReaderSettings.series-settings-key + "/paged/flip_wide"; row-title: @tr("Reverse wide-page rotation"); row-desc: @tr("Rotate landscape pages in the opposite direction."); checked: ReaderSettings.paged-flip-wide; enabled: root.interactive; changed(v) => { ReaderSettings.settings-changed("paged_flip_wide", v ? 1 : 0); } }
-                        PreferenceToggle { setting-key: root.global-settings ? "reader:reader-settings/paged/double_tap_zoom" : ReaderSettings.series-settings-key + "/paged/double_tap_zoom"; row-title: @tr("Double tap to zoom"); checked: ReaderSettings.paged-double-tap-zoom; enabled: root.interactive; changed(v) => { ReaderSettings.settings-changed("paged_double_tap_zoom", v ? 1 : 0); } }
-                    }
-                    if root.layout-tab == 1: SettingsCard {
-                        if !ReaderSettings.platform-android: PreferenceNumber {
+                        KeyedBlock {
+                            setting-key: root.layout-key("invert_taps"); label: @tr("Invert tap zones");
+                            opacity: root.tap-zones != 5 ? 1 : 0.45;
+                            HorizontalLayout { alignment: start; Segmented {
+                                enabled: root.interactive && root.tap-zones != 5;
+                                labels: [@tr("None"), @tr("Horizontal"), @tr("Vertical"), @tr("Both")];
+                                current-index: root.invert-taps;
+                                picked(i) => { root.layout-changed("invert_taps", i); }
+                            } }
+                        }
+                        if root.layout-tab == 1 && !ReaderSettings.platform-android: SliderBlock {
                             setting-key: "reader:reader-settings/desktop_webtoon_width";
-                            row-title: @tr("Desktop webtoon width");
-                            row-desc: @tr("Maximum column width before side padding, in logical pixels. Applies to all series on this device; Android uses the screen width.");
-                            value: ReaderSettings.desktop-webtoon-width; minimum: 320; maximum: 1600; suffix: "px";
+                            label: @tr("Desktop webtoon width"); suffix: "px";
+                            value: ReaderSettings.desktop-webtoon-width; minimum: 320; maximum: 1600;
                             enabled: root.interactive;
                             changed(v) => { ReaderSettings.settings-changed("desktop_webtoon_width", v); }
                         }
-                        PreferenceChoice { setting-key: root.global-settings ? "reader:reader-settings/webtoon/tap_zones" : ReaderSettings.series-settings-key + "/webtoon/tap_zones";
-                            row-title: @tr("Tap zones"); enabled: root.interactive;
-                            choices: [@tr("Default"), @tr("L-shaped"), @tr("Kindle"), @tr("Edge"), @tr("Right and left"), @tr("Disabled")];
-                            selected: ReaderSettings.webtoon-tap-zones;
-                            changed(i) => { ReaderSettings.settings-changed("webtoon_tap_zones", i); }
+                        SliderBlock {
+                            setting-key: root.layout-key("side_padding"); label: @tr("Side padding");
+                            value: root.layout-tab == 0 ? ReaderSettings.paged-side-padding : ReaderSettings.webtoon-side-padding;
+                            maximum: 25; enabled: root.interactive;
+                            changed(v) => { root.layout-changed("side_padding", v); }
                         }
-                        PreferenceChoice { setting-key: root.global-settings ? "reader:reader-settings/webtoon/invert_taps" : ReaderSettings.series-settings-key + "/webtoon/invert_taps";
-                            row-title: @tr("Invert tap zones"); enabled: root.interactive && ReaderSettings.webtoon-tap-zones != 5;
-                            choices: [@tr("None"), @tr("Horizontal"), @tr("Vertical"), @tr("Both")];
-                            selected: ReaderSettings.webtoon-invert-taps;
-                            changed(i) => { ReaderSettings.settings-changed("webtoon_invert_taps", i); }
+                        PreferenceToggle { setting-key: root.layout-key("crop_borders"); row-title: @tr("Crop borders"); row-desc: @tr("Remove empty space around pages");
+                            checked: root.layout-tab == 0 ? ReaderSettings.paged-crop-borders : ReaderSettings.webtoon-crop-borders; enabled: root.interactive;
+                            changed(v) => { root.layout-changed("crop_borders", v ? 1 : 0); } }
+                        PreferenceToggle { setting-key: root.layout-key("split_wide"); row-title: @tr("Split wide pages"); row-desc: @tr("Read spreads as two pages");
+                            checked: root.layout-tab == 0 ? ReaderSettings.paged-split-wide : ReaderSettings.webtoon-split-wide; enabled: root.interactive;
+                            changed(v) => { root.layout-changed("split_wide", v ? 1 : 0); } }
+                        PreferenceToggle { setting-key: root.layout-key("rotate_wide"); row-title: @tr("Rotate wide pages"); row-desc: @tr("Turn spreads to fill the screen");
+                            checked: root.layout-tab == 0 ? ReaderSettings.paged-rotate-wide : ReaderSettings.webtoon-rotate-wide; enabled: root.interactive;
+                            changed(v) => { root.layout-changed("rotate_wide", v ? 1 : 0); } }
+                        // Only meaningful while wide pages rotate.
+                        if (root.layout-tab == 0 ? ReaderSettings.paged-rotate-wide : ReaderSettings.webtoon-rotate-wide): Rectangle {
+                            background: Theme.current.card;
+                            height: reverse.preferred-height;
+                            reverse := PreferenceToggle {
+                                x: 20px; width: parent.width - 20px;
+                                setting-key: root.layout-key("flip_wide"); row-title: @tr("Reverse rotation");
+                                checked: root.layout-tab == 0 ? ReaderSettings.paged-flip-wide : ReaderSettings.webtoon-flip-wide; enabled: root.interactive;
+                                changed(v) => { root.layout-changed("flip_wide", v ? 1 : 0); }
+                            }
                         }
-                        PreferenceNumber { setting-key: root.global-settings ? "reader:reader-settings/webtoon/side_padding" : ReaderSettings.series-settings-key + "/webtoon/side_padding"; row-title: @tr("Side padding"); value: ReaderSettings.webtoon-side-padding; maximum: 25; enabled: root.interactive; changed(v) => { ReaderSettings.settings-changed("webtoon_side_padding", v); } }
-                        PreferenceToggle { setting-key: root.global-settings ? "reader:reader-settings/webtoon/crop_borders" : ReaderSettings.series-settings-key + "/webtoon/crop_borders"; row-title: @tr("Crop borders"); row-desc: @tr("Remove empty space around each page."); checked: ReaderSettings.webtoon-crop-borders; enabled: root.interactive; changed(v) => { ReaderSettings.settings-changed("webtoon_crop_borders", v ? 1 : 0); } }
-                        PreferenceToggle { setting-key: root.global-settings ? "reader:reader-settings/webtoon/split_wide" : ReaderSettings.series-settings-key + "/webtoon/split_wide"; row-title: @tr("Split wide pages"); row-desc: @tr("Read landscape pages as two pages."); checked: ReaderSettings.webtoon-split-wide; enabled: root.interactive; changed(v) => { ReaderSettings.settings-changed("webtoon_split_wide", v ? 1 : 0); } }
-                        PreferenceToggle { setting-key: root.global-settings ? "reader:reader-settings/webtoon/rotate_wide" : ReaderSettings.series-settings-key + "/webtoon/rotate_wide"; row-title: @tr("Rotate wide pages"); row-desc: @tr("Turn landscape pages to fill the screen."); checked: ReaderSettings.webtoon-rotate-wide; enabled: root.interactive; changed(v) => { ReaderSettings.settings-changed("webtoon_rotate_wide", v ? 1 : 0); } }
-                        PreferenceToggle { setting-key: root.global-settings ? "reader:reader-settings/webtoon/flip_wide" : ReaderSettings.series-settings-key + "/webtoon/flip_wide"; row-title: @tr("Reverse wide-page rotation"); row-desc: @tr("Rotate landscape pages in the opposite direction."); checked: ReaderSettings.webtoon-flip-wide; enabled: root.interactive; changed(v) => { ReaderSettings.settings-changed("webtoon_flip_wide", v ? 1 : 0); } }
-                        PreferenceToggle { setting-key: root.global-settings ? "reader:reader-settings/webtoon/double_tap_zoom" : ReaderSettings.series-settings-key + "/webtoon/double_tap_zoom"; row-title: @tr("Double tap to zoom"); checked: ReaderSettings.webtoon-double-tap-zoom; enabled: root.interactive; changed(v) => { ReaderSettings.settings-changed("webtoon_double_tap_zoom", v ? 1 : 0); } }
+                        PreferenceToggle { setting-key: root.layout-key("double_tap_zoom"); row-title: @tr("Double tap to zoom");
+                            checked: root.layout-tab == 0 ? ReaderSettings.paged-double-tap-zoom : ReaderSettings.webtoon-double-tap-zoom; enabled: root.interactive;
+                            changed(v) => { root.layout-changed("double_tap_zoom", v ? 1 : 0); } }
                     }
                     if !root.global-settings: HorizontalLayout {
-                        alignment: start;
+                        spacing: 10px; padding-left: 4px; padding-right: 4px;
+                        Path {
+                            width: 16px; height: 16px; y: 14px; viewbox-width: 24; viewbox-height: 24;
+                            fill: transparent; stroke: Theme.current.text_muted; stroke-width: 2px;
+                            commands: "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 16v-4M12 8h.01";
+                        }
+                        Text {
+                            horizontal-stretch: 1; min-width: 0px; wrap: word-wrap; vertical-alignment: center;
+                            text: @tr("Syncs for this series. Orientation stays on this device.");
+                            color: Theme.current.text_muted; font-size: 12px;
+                        }
                         PillButton {
-                            label: @tr("Reset layout and orientation");
-                            enabled: root.interactive; compact: true; wrap-label: true;
+                            label: @tr("Reset"); enabled: root.interactive; compact: true;
+                            accessible-label: @tr("Reset layout and orientation");
                             accessible-action-default => { if root.interactive { ReaderSettings.settings-changed("reset_series", 1); } }
                             clicked => { ReaderSettings.settings-changed("reset_series", 1); }
                         }
                     }
                 }
-                if !root.global-settings && root.current-tab == 0: Text {
-                    text: @tr("When sync is enabled, reading mode and page layout sync for this series unless overridden on this device. Reset restores global layout defaults. Orientation stays on this device. General and Filters change defaults for all series.");
-                    color: Theme.current.text_settings; wrap: word-wrap; min-width: 0px;
-                }
+                // --------------------------------------------------- Display
                 if root.current-tab == 1: VerticalLayout {
-                    spacing: 16px;
-                    SectionHeader { label: @tr("Appearance"); }
+                    spacing: 14px;
+                    ScopeHeader { label: @tr("Background"); local: false; }
                     SettingsCard {
-                        PreferenceChoice { setting-key: "reader:reader-settings/background"; row-title: @tr("Background"); enabled: root.interactive; choices: [@tr("Black"), @tr("Grey"), @tr("White"), @tr("Automatic")]; selected: ReaderSettings.background; changed(i) => { ReaderSettings.settings-changed("background", i); } }
+                        KeyedBlock {
+                            setting-key: "reader:reader-settings/background"; label: @tr("Background");
+                            HorizontalLayout {
+                                spacing: 10px; alignment: start;
+                                for swatch[i] in [@tr("Black"), @tr("Grey"), @tr("White"), @tr("Automatic")]: ChoiceTile {
+                                    min-width: 44px; preferred-width: 56px; height: 68px; outlined: false;
+                                    label: swatch; selected: ReaderSettings.background == i; enabled: root.interactive;
+                                    picked => { ReaderSettings.settings-changed("background", i); }
+                                    Rectangle {
+                                        x: (parent.width - 44px) / 2; y: 0px; width: 44px; height: 44px; border-radius: 22px;
+                                        border-width: 2px; border-color: ReaderSettings.background == i ? Theme.current.accent_soft : Theme.current.border_overlay;
+                                        clip: true;
+                                        background: i == 0 ? #000000 : i == 1 ? #3a3a40 : #ffffff;
+                                        // Automatic: half white, half black, split diagonally.
+                                        if i == 3: Path {
+                                            width: 100%; height: 100%; viewbox-width: 44; viewbox-height: 44;
+                                            fill: #000000; commands: "M44 0L44 44L0 44Z";
+                                        }
+                                    }
+                                    Text {
+                                        y: 50px; width: 100%; height: 16px; text: swatch; font-size: 12px; horizontal-alignment: center; overflow: elide;
+                                        color: ReaderSettings.background == i ? Theme.current.text_selected : Theme.current.text_muted;
+                                    }
+                                }
+                            }
+                        }
                         PreferenceToggle { setting-key: "reader:reader-settings/show_page_number"; row-title: @tr("Page counter"); checked: ReaderSettings.show-page-number; enabled: root.interactive; changed(v) => { ReaderSettings.settings-changed("show_page_number", v ? 1 : 0); } }
                     }
-                    SectionHeader { label: @tr("Reading experience"); }
+                    ScopeHeader { label: @tr("Screen"); local: false; }
                     SettingsCard {
-                        PreferenceToggle { setting-key: "reader:reader-settings/fullscreen"; row-title: @tr("Fullscreen"); row-desc: @tr("Hide system bars while reading."); checked: ReaderSettings.fullscreen; enabled: root.interactive; changed(v) => { ReaderSettings.settings-changed("fullscreen", v ? 1 : 0); } }
-                        PreferenceToggle { setting-key: "reader:reader-settings/cutout"; row-title: @tr("Extend into display cutout"); checked: ReaderSettings.cutout; enabled: root.interactive; changed(v) => { ReaderSettings.settings-changed("cutout", v ? 1 : 0); } }
+                        PreferenceToggle { setting-key: "reader:reader-settings/fullscreen"; row-title: @tr("Fullscreen"); row-desc: @tr("Hide system bars"); checked: ReaderSettings.fullscreen; enabled: root.interactive; changed(v) => { ReaderSettings.settings-changed("fullscreen", v ? 1 : 0); } }
+                        // Cutout applies on its own today, so it stays enabled.
+                        PreferenceToggle { setting-key: "reader:reader-settings/cutout"; row-title: @tr("Extend into cutout"); checked: ReaderSettings.cutout; enabled: root.interactive; changed(v) => { ReaderSettings.settings-changed("cutout", v ? 1 : 0); } }
                         PreferenceToggle { setting-key: "reader:reader-settings/keep_awake"; row-title: @tr("Keep screen awake"); checked: ReaderSettings.keep-awake; enabled: root.interactive; changed(v) => { ReaderSettings.settings-changed("keep_awake", v ? 1 : 0); } }
-                        PreferenceToggle { setting-key: "reader:reader-settings/long_press_actions"; row-title: @tr("Long press page actions"); checked: ReaderSettings.long-press-actions; enabled: root.interactive; changed(v) => { ReaderSettings.settings-changed("long_press_actions", v ? 1 : 0); } }
-                        PreferenceToggle { setting-key: "reader:reader-settings/chapter_transition"; row-title: @tr("Chapter transition"); row-desc: @tr("Show a transition between chapters."); checked: ReaderSettings.chapter-transition; enabled: root.interactive; changed(v) => { ReaderSettings.settings-changed("chapter_transition", v ? 1 : 0); } }
+                    }
+                    ScopeHeader { label: @tr("Behaviour"); local: false; }
+                    SettingsCard {
+                        PreferenceToggle { setting-key: "reader:reader-settings/long_press_actions"; row-title: @tr("Long press page actions"); row-desc: @tr("Save, share, copy"); checked: ReaderSettings.long-press-actions; enabled: root.interactive; changed(v) => { ReaderSettings.settings-changed("long_press_actions", v ? 1 : 0); } }
+                        PreferenceToggle { setting-key: "reader:reader-settings/chapter_transition"; row-title: @tr("Chapter transition"); checked: ReaderSettings.chapter-transition; enabled: root.interactive; changed(v) => { ReaderSettings.settings-changed("chapter_transition", v ? 1 : 0); } }
                         PreferenceToggle { setting-key: "reader:reader-settings/page_animations"; row-title: @tr("Page animations"); checked: ReaderSettings.page-animations; enabled: root.interactive; changed(v) => { ReaderSettings.settings-changed("page_animations", v ? 1 : 0); } }
-                        PreferenceToggle { setting-key: "reader:reader-settings/page_flash"; row-title: @tr("Flash on page change"); checked: ReaderSettings.page-flash; enabled: root.interactive; changed(v) => { ReaderSettings.settings-changed("page_flash", v ? 1 : 0); } }
+                        PreferenceToggle { setting-key: "reader:reader-settings/page_flash"; row-title: @tr("Flash on page change"); row-desc: @tr("For e-ink screens"); checked: ReaderSettings.page-flash; enabled: root.interactive; changed(v) => { ReaderSettings.settings-changed("page_flash", v ? 1 : 0); } }
                     }
                 }
+                // ----------------------------------------------------- Color
                 if root.current-tab == 2: VerticalLayout {
-                    spacing: 16px;
-                    SectionHeader { label: @tr("Brightness"); }
+                    spacing: 14px;
+                    ScopeHeader { label: @tr("Brightness"); local: false; }
                     SettingsCard {
-                        PreferenceToggle { setting-key: "reader:reader-settings/custom_brightness"; row-title: @tr("Custom brightness"); checked: ReaderSettings.custom-brightness; enabled: root.interactive; changed(v) => { ReaderSettings.settings-changed("custom_brightness", v ? 1 : 0); } }
-                        PreferenceNumber { setting-key: "reader:reader-settings/brightness"; row-title: @tr("Brightness"); value: ReaderSettings.brightness; minimum: 1; maximum: 100; enabled: root.interactive && ReaderSettings.custom-brightness; changed(v) => { ReaderSettings.settings-changed("brightness", v); } }
+                        PreferenceToggle { setting-key: "reader:reader-settings/custom_brightness"; row-title: @tr("Custom brightness"); row-desc: @tr("Overrides system brightness while reading"); checked: ReaderSettings.custom-brightness; enabled: root.interactive; changed(v) => { ReaderSettings.settings-changed("custom_brightness", v ? 1 : 0); } }
+                        SliderBlock {
+                            setting-key: "reader:reader-settings/brightness"; label: @tr("Brightness"); suns: true;
+                            value: ReaderSettings.brightness; minimum: 1; maximum: 100;
+                            enabled: root.interactive && ReaderSettings.custom-brightness;
+                            changed(v) => { ReaderSettings.settings-changed("brightness", v); }
+                        }
                     }
-                    SectionHeader { label: @tr("Color"); }
+                    ScopeHeader { label: @tr("Color filter"); local: false; }
                     SettingsCard {
                         PreferenceToggle { setting-key: "reader:reader-settings/color_filter"; row-title: @tr("Color filter"); checked: ReaderSettings.color-filter; enabled: root.interactive; changed(v) => { ReaderSettings.settings-changed("color_filter", v ? 1 : 0); } }
-                        PreferenceNumber { setting-key: "reader:reader-settings/filter_color"; row-title: @tr("Red"); value: Math.mod(Math.floor(ReaderSettings.filter-color / 65536), 256); maximum: 255; suffix: ""; enabled: root.interactive && ReaderSettings.color-filter;
-                            changed(v) => { ReaderSettings.settings-changed("filter_red", v); } }
-                        PreferenceNumber { setting-key: "reader:reader-settings/filter_color"; row-title: @tr("Green"); value: Math.mod(Math.floor(ReaderSettings.filter-color / 256), 256); maximum: 255; suffix: ""; enabled: root.interactive && ReaderSettings.color-filter;
-                            changed(v) => { ReaderSettings.settings-changed("filter_green", v); } }
-                        PreferenceNumber { setting-key: "reader:reader-settings/filter_color"; row-title: @tr("Blue"); value: Math.mod(Math.floor(ReaderSettings.filter-color / 1), 256); maximum: 255; suffix: ""; enabled: root.interactive && ReaderSettings.color-filter;
-                            changed(v) => { ReaderSettings.settings-changed("filter_blue", v); } }
-                        PreferenceNumber { setting-key: "reader:reader-settings/filter_intensity"; row-title: @tr("Filter intensity"); value: ReaderSettings.filter-intensity; enabled: root.interactive && ReaderSettings.color-filter; changed(v) => { ReaderSettings.settings-changed("filter_intensity", v); } }
-                        PreferenceToggle { setting-key: "reader:reader-settings/grayscale"; row-title: @tr("Grayscale"); checked: ReaderSettings.grayscale; enabled: root.interactive; changed(v) => { ReaderSettings.settings-changed("grayscale", v ? 1 : 0); } }
-                        PreferenceToggle { setting-key: "reader:reader-settings/invert_colors"; row-title: @tr("Invert colors"); checked: ReaderSettings.invert-colors; enabled: root.interactive; changed(v) => { ReaderSettings.settings-changed("invert_colors", v ? 1 : 0); } }
+                        KeyedBlock {
+                            setting-key: "reader:reader-settings/filter_color"; label: @tr("Filter color");
+                            opacity: ReaderSettings.color-filter ? 1 : 0.45;
+                            HorizontalLayout {
+                                spacing: 8px; alignment: start;
+                                for preset[i] in root.presets: ChoiceTile {
+                                    min-width: 44px; preferred-width: 52px; height: 68px; outlined: false;
+                                    label: preset.label; selected: root.selected-preset == i;
+                                    enabled: root.interactive && ReaderSettings.color-filter;
+                                    picked => {
+                                        root.custom-open = false;
+                                        ReaderSettings.settings-changed("filter_color", preset.color);
+                                        ReaderSettings.settings-changed("filter_intensity", preset.intensity);
+                                    }
+                                    Rectangle {
+                                        x: (parent.width - 44px) / 2; width: 44px; height: 44px; border-radius: 22px;
+                                        border-width: 2px; border-color: root.selected-preset == i ? Theme.current.accent_soft : Theme.current.border_overlay;
+                                        background: rgb(Math.mod(Math.floor(preset.color / 65536), 256), Math.mod(Math.floor(preset.color / 256), 256), Math.mod(preset.color, 256));
+                                    }
+                                    Text {
+                                        y: 50px; width: 100%; height: 16px; text: preset.label; font-size: 12px; horizontal-alignment: center; overflow: elide;
+                                        color: root.selected-preset == i ? Theme.current.text_selected : Theme.current.text_muted;
+                                    }
+                                }
+                                ChoiceTile {
+                                    min-width: 44px; preferred-width: 52px; height: 68px; outlined: false;
+                                    label: @tr("Custom"); selected: root.selected-preset == 4;
+                                    enabled: root.interactive && ReaderSettings.color-filter;
+                                    picked => { root.custom-open = true; }
+                                    Rectangle {
+                                        x: (parent.width - 44px) / 2; width: 44px; height: 44px; border-radius: 22px;
+                                        border-width: 2px; border-color: root.selected-preset == 4 ? Theme.current.accent_soft : Theme.current.border_overlay;
+                                        background: @linear-gradient(135deg, #ff5555 0%, #ffdd55 33%, #55ff88 66%, #5599ff 100%);
+                                    }
+                                    Text {
+                                        y: 50px; width: 100%; height: 16px; text: @tr("Custom"); font-size: 12px; horizontal-alignment: center; overflow: elide;
+                                        color: root.selected-preset == 4 ? Theme.current.text_selected : Theme.current.text_muted;
+                                    }
+                                }
+                            }
+                        }
+                        // The channels show only for a custom colour.
+                        if root.selected-preset == 4: SliderBlock {
+                            setting-key: "reader:reader-settings/filter_color"; label: @tr("Red"); suffix: "";
+                            value: Math.mod(Math.floor(ReaderSettings.filter-color / 65536), 256); maximum: 255;
+                            enabled: root.interactive && ReaderSettings.color-filter;
+                            changed(v) => { ReaderSettings.settings-changed("filter_red", v); }
+                        }
+                        if root.selected-preset == 4: SliderBlock {
+                            setting-key: "reader:reader-settings/filter_color"; label: @tr("Green"); suffix: "";
+                            value: Math.mod(Math.floor(ReaderSettings.filter-color / 256), 256); maximum: 255;
+                            enabled: root.interactive && ReaderSettings.color-filter;
+                            changed(v) => { ReaderSettings.settings-changed("filter_green", v); }
+                        }
+                        if root.selected-preset == 4: SliderBlock {
+                            setting-key: "reader:reader-settings/filter_color"; label: @tr("Blue"); suffix: "";
+                            value: Math.mod(ReaderSettings.filter-color, 256); maximum: 255;
+                            enabled: root.interactive && ReaderSettings.color-filter;
+                            changed(v) => { ReaderSettings.settings-changed("filter_blue", v); }
+                        }
+                        SliderBlock {
+                            setting-key: "reader:reader-settings/filter_intensity"; label: @tr("Intensity");
+                            value: ReaderSettings.filter-intensity;
+                            enabled: root.interactive && ReaderSettings.color-filter;
+                            changed(v) => { ReaderSettings.settings-changed("filter_intensity", v); }
+                        }
+                    }
+                    // Two switches as tiles; same keys as before.
+                    HorizontalLayout {
+                        spacing: 8px;
+                        for duo in [
+                            { label: @tr("Grayscale"), key: "grayscale", icon: "M12 3a9 9 0 1 0 0 18zM12 3a9 9 0 0 1 0 18" },
+                            { label: @tr("Invert colors"), key: "invert_colors", icon: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM12 3v18" },
+                        ]: duo-tile := Rectangle {
+                            private property <bool> on: duo.key == "grayscale" ? ReaderSettings.grayscale : ReaderSettings.invert-colors;
+                            horizontal-stretch: 1; height: 64px; border-radius: 10px;
+                            background: self.on ? Theme.current.selection_fill : Theme.current.card;
+                            border-width: duo-key.has-focus && SettingsStyle.keyboard-mode ? 2px : 1px;
+                            border-color: duo-key.has-focus && SettingsStyle.keyboard-mode ? Theme.current.focus_ring : self.on ? Theme.current.accent.with-alpha(0.5) : Theme.current.border_soft;
+                            accessible-role: switch; accessible-label: duo.label;
+                            accessible-id: "setting:reader:reader-settings/" + duo.key;
+                            accessible-checkable: true; accessible-checked: self.on; accessible-enabled: root.interactive;
+                            accessible-action-default => { if root.interactive { ReaderSettings.settings-changed(duo.key, self.on ? 0 : 1); } }
+                            if SettingsHighlight.enabled: SettingsSearchHighlight { setting-key: "reader:reader-settings/" + duo.key; }
+                            HorizontalLayout {
+                                padding-left: 14px; padding-right: 14px; spacing: 10px;
+                                Path {
+                                    width: 22px; height: 22px; y: 21px; viewbox-width: 24; viewbox-height: 24;
+                                    fill: transparent; stroke-width: 1.8px;
+                                    stroke: duo-tile.on ? Theme.current.text_selected : Theme.current.text_secondary;
+                                    commands: duo.icon;
+                                }
+                                Text {
+                                    horizontal-stretch: 1; min-width: 0px; text: duo.label; font-size: 14px; vertical-alignment: center; overflow: elide;
+                                    color: duo-tile.on ? Theme.current.text_selected : Theme.current.text_secondary;
+                                }
+                            }
+                            duo-key := FocusScope {
+                                enabled: root.interactive;
+                                key-pressed(e) => {
+                                    if (e.text == Key.Return || e.text == " ") && !e.repeat { ReaderSettings.settings-changed(duo.key, duo-tile.on ? 0 : 1); return accept; }
+                                    return reject;
+                                }
+                            }
+                            TouchArea {
+                                enabled: root.interactive; mouse-cursor: pointer;
+                                clicked => { ReaderSettings.settings-changed(duo.key, duo-tile.on ? 0 : 1); }
+                            }
+                        }
                     }
                 }
             }
@@ -292,6 +721,9 @@ export component ReaderSettingsForm inherits Rectangle {
 }
 
 // Overlay geometry never contributes to the chapter viewport's layout.
+// On phones the sheet opens at half height so the page stays visible while
+// settings change it; its handle expands it to full height, collapses it, or
+// closes it from half height.
 export component ReaderSettingsPanel inherits Rectangle {
     in property <bool> open: true;
     in property <bool> compact: root.width < 700px;
@@ -305,6 +737,8 @@ export component ReaderSettingsPanel inherits Rectangle {
     in property <int> rotation: -1;
     in property <string> rotation-label: @tr("Screen orientation");
     in property <string> resolved-mode;
+    // "<series> · <chapter>", under the title.
+    in property <string> subtitle;
     // Reading mode in effect (0 is Webtoon). The label above is display text
     // only; comparing it with translated literals breaks in other languages.
     in property <int> resolved-mode-index: -1;
@@ -317,8 +751,15 @@ export component ReaderSettingsPanel inherits Rectangle {
     private property <float> slide-progress: root.open ? 1 : 0;
     animate fade-progress { duration: root.motion ? Anim.player_fade : 0ms; easing: ease-out; }
     animate slide-progress { duration: root.motion ? Anim.player_slide : 0ms; easing: ease-out; }
+    out property <bool> expanded: false;
+    private property <length> safe-height: max(0px, root.height - root.safe-top - root.safe-bottom);
+    private property <length> full-height: min(root.compact ? 680px : 700px, max(0px, root.safe-height - (root.compact ? 12px : 160px)));
+    // Half height: about 56% of the safe height, at least 420px.
+    private property <length> resting-height: min(root.full-height, max(420px, root.safe-height * 0.56));
+    private property <bool> half-height: root.compact && !root.global-settings;
     changed open => {
         if !root.open { SliderGesture.active = false; SliderGesture.hovered = false; }
+        else { root.expanded = false; }
         root.fade-progress = root.open ? 1 : 0;
         root.slide-progress = root.open ? 1 : 0;
     }
@@ -330,11 +771,13 @@ export component ReaderSettingsPanel inherits Rectangle {
     visible: root.open || root.fade-progress > 0 || root.slide-progress > 0;
     opacity: root.fade-progress;
     public function reveal-control(y: length, h: length) { form.reveal-control(y, h); }
+    function toggle-height() { root.expanded = !root.expanded; }
     TouchArea { clicked => { if root.open && root.interactive { root.dismissed(); } } }
     panel := Rectangle {
         x: root.compact ? root.safe-left : max(root.safe-left + 12px, root.width - root.safe-right - self.width - 18px);
         width: root.compact ? max(0px, root.width - root.safe-left - root.safe-right) : min(440px, max(0px, root.width - root.safe-left - root.safe-right - 36px));
-        height: min(root.compact ? 680px : 700px, max(0px, root.height - root.safe-top - root.safe-bottom - (root.compact ? 12px : 160px)));
+        height: root.half-height && !root.expanded ? root.resting-height : root.full-height;
+        animate height { duration: Anim.transition_slide; easing: ease-in-out; }
         y: (root.compact ? root.height - root.safe-bottom - self.height : max(root.safe-top + 12px, root.height - root.safe-bottom - self.height - 142px))
             + (1 - root.slide-progress) * (root.compact ? self.height + root.safe-bottom : 12px);
         background: Theme.current.player_menu;
@@ -344,12 +787,40 @@ export component ReaderSettingsPanel inherits Rectangle {
         clip: true;
         accessible-role: groupbox; accessible-label: @tr("Reader settings");
         TouchArea { }
-        if root.compact: Rectangle { x: (parent.width - self.width) / 2; y: 9px; width: 40px; height: 4px; border-radius: 2px; background: Theme.current.text_muted; }
+        // The handle: tap to change height; drag up to expand, down to
+        // collapse (or close from half height).
+        if root.half-height: handle := Rectangle {
+            x: 0px; y: 0px; width: parent.width; height: 44px;
+            accessible-role: button;
+            accessible-label: root.expanded ? @tr("Collapse reader settings") : @tr("Expand reader settings");
+            accessible-enabled: root.interactive && root.open;
+            accessible-action-default => { if root.interactive && root.open { root.toggle-height(); } }
+            Rectangle { x: (parent.width - self.width) / 2; y: 9px; width: 40px; height: 4px; border-radius: 2px; background: Theme.current.text_muted; }
+            handle-touch := TouchArea {
+                enabled: root.interactive && root.open; mouse-cursor: pointer;
+                private property <bool> dragged;
+                pointer-event(e) => {
+                    if e.kind == PointerEventKind.down { self.dragged = false; }
+                    else if e.kind == PointerEventKind.up && self.dragged {
+                        let dy = self.mouse-y - self.pressed-y;
+                        if dy < -30px { root.expanded = true; }
+                        else if dy > 30px { if root.expanded { root.expanded = false; } else { root.dismissed(); } }
+                    }
+                }
+                moved => { if Math.abs(self.mouse-y - self.pressed-y) > 8px { self.dragged = true; } }
+                clicked => { if !self.dragged { root.toggle-height(); } }
+            }
+        }
+        if root.compact && !root.half-height: Rectangle { x: (parent.width - self.width) / 2; y: 9px; width: 40px; height: 4px; border-radius: 2px; background: Theme.current.text_muted; }
         VerticalLayout {
-            padding-left: 12px; padding-right: 12px; padding-top: root.compact ? 20px : 8px; spacing: 0px;
+            padding-left: 12px; padding-right: 12px; padding-top: root.compact ? 22px : 8px; spacing: 0px;
             HorizontalLayout {
-                height: 52px; spacing: 8px;
-                Text { text: @tr("Reader settings"); color: Theme.current.text_bright; font-size: 18px; font-weight: 600; vertical-alignment: center; min-width: 0px; }
+                height: 52px; spacing: 8px; padding-left: 8px;
+                VerticalLayout {
+                    horizontal-stretch: 1; min-width: 0px; alignment: center; spacing: 1px;
+                    Text { text: @tr("Reader settings"); color: Theme.current.text_bright; font-size: 18px; font-weight: 600; overflow: elide; }
+                    if root.subtitle != "": Text { text: root.subtitle; color: Theme.current.text_muted; font-size: 12px; overflow: elide; }
+                }
                 AddonIconButton {
                     name: @tr("Close reader settings"); background: transparent; enabled: root.interactive && root.open;
                     accessible-action-default => { if root.interactive && root.open { root.dismissed(); } }

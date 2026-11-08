@@ -28,9 +28,9 @@ fn element(ui: &AppWindow, id: &str) -> ElementHandle {
         .unwrap_or_else(|| panic!("missing {id}"))
 }
 fn filters(ui: &AppWindow) {
-    ElementHandle::find_by_accessible_label(ui, "Filters")
+    ElementHandle::find_by_accessible_label(ui, "Color")
         .find(|item| item.accessible_role() == Some(AccessibleRole::Tab))
-        .expect("reader settings Filters tab")
+        .expect("reader settings Color tab")
         .invoke_accessible_default_action();
     advance(400);
 }

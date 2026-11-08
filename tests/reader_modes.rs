@@ -129,10 +129,38 @@ fn button(ui: &AppWindow, label: &str) -> ElementHandle {
         .find(|e| e.accessible_role() == Some(AccessibleRole::Button))
         .unwrap_or_else(|| panic!("missing {label}"))
 }
+/// A mode tile, scrolling the settings form to it first: on a small window
+/// the half-height sheet shows only part of the grid, and clipped elements are
+/// not searchable.
+fn tile(ui: &AppWindow, label: &str) -> ElementHandle {
+    let find = || {
+        ElementHandle::find_by_accessible_label(ui, label)
+            .find(|e| e.accessible_role() == Some(AccessibleRole::RadioButton))
+    };
+    for direction in [-60., 60.] {
+        for _ in 0..12 {
+            if let Some(tile) = find() {
+                return tile;
+            }
+            if let Some(scroll) =
+                ElementHandle::find_by_element_id(ui, "ReaderSettingsForm::settings-scroll").next()
+            {
+                scroll.scroll(0., direction);
+            }
+            settle();
+        }
+    }
+    panic!("missing tile {label}")
+}
 #[test]
-fn automatic_option_and_manual_indicator_remain_reachable_on_small_viewports() {
+fn mode_tiles_send_the_dropdown_values_and_show_the_saved_choice() {
     i_slint_backend_testing::init_no_event_loop();
     let ui = AppWindow::new().unwrap();
+    let picked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    ui.on_mode_changed({
+        let picked = picked.clone();
+        move |mode| picked.borrow_mut().push(mode)
+    });
     ui.set_section(6);
     ui.set_reader_osd(true);
     ui.show().unwrap();
@@ -145,38 +173,36 @@ fn automatic_option_and_manual_indicator_remain_reachable_on_small_viewports() {
         settle();
         button(&ui, "Settings").invoke_accessible_default_action();
         settle();
-        let picker = ElementHandle::find_by_accessible_label(&ui, "Reading mode")
-            .find(|e| e.accessible_role() == Some(AccessibleRole::Combobox))
-            .unwrap();
-        picker.invoke_accessible_default_action();
+        // Each tile sends the mode code the dropdown used to send.
+        picked.borrow_mut().clear();
+        for label in [
+            "Automatic",
+            "Left to right",
+            "Right to left",
+            "Vertical",
+            "Webtoon",
+            "With gaps",
+        ] {
+            tile(&ui, label).invoke_accessible_default_action();
+            settle();
+        }
+        tile(&ui, "Use default").invoke_accessible_default_action();
         settle();
-        let automatic = button(&ui, "Automatic");
-        assert!(
-            automatic.absolute_position().y >= 0.
-                && automatic.absolute_position().y + automatic.size().height <= height + 1.,
-            "Automatic outside window at {width}x{height}: {:?} {:?}",
-            automatic.absolute_position(),
-            automatic.size()
-        );
-        automatic.invoke_accessible_default_action();
-        settle();
+        assert_eq!(*picked.borrow(), vec![4, 1, 2, 3, 0, 5, 6]);
+        // The selection reflects the saved series choice independently of page
+        // progress, and keeps inheritance separate from explicit Automatic.
+        // (Every tile was reached above; a taller window shows them all.)
+        ui.window().set_size(slint::LogicalSize::new(width, 1200.));
         ui.set_reader_mode_choice(2);
         ui.set_reading_mode(2);
         settle();
-        // The picker reflects the saved series choice independently of page
-        // progress, and keeps inheritance separate from explicit Automatic.
-        let picker = ElementHandle::find_by_accessible_label(&ui, "Reading mode")
-            .find(|e| e.accessible_role() == Some(AccessibleRole::Combobox))
-            .unwrap();
-        assert_eq!(picker.accessible_value().as_deref(), Some("Right to left"));
-        picker.invoke_accessible_default_action();
+        assert_eq!(tile(&ui, "Right to left").accessible_checked(), Some(true));
+        assert_eq!(tile(&ui, "Automatic").accessible_checked(), Some(false));
+        assert_eq!(tile(&ui, "Use default").accessible_checked(), Some(false));
+        ui.set_reader_mode_choice(6);
         settle();
-        assert!(
-            ElementHandle::find_by_accessible_label(&ui, "Default (Automatic)")
-                .next()
-                .is_some()
-        );
-        button(&ui, "Automatic").invoke_accessible_default_action();
+        assert_eq!(tile(&ui, "Use default").accessible_checked(), Some(true));
+        assert_eq!(tile(&ui, "Automatic").accessible_checked(), Some(false));
         button(&ui, "Close reader settings").invoke_accessible_default_action();
         settle();
     }

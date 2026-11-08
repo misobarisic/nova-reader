@@ -237,7 +237,7 @@ fn settings_controls_follow_saved_values_after_edit_and_reset() {
         }
     });
     settle();
-    control(&ui, "General", AccessibleRole::Tab).invoke_accessible_default_action();
+    control(&ui, "Display", AccessibleRole::Tab).invoke_accessible_default_action();
     settle();
     for removed in ["Chapter navigator", "Show on the left", "Navigator height"] {
         assert!(
@@ -257,12 +257,12 @@ fn settings_controls_follow_saved_values_after_edit_and_reset() {
         Some(false),
         "switch follows a reset after pointer editing"
     );
-    control(&ui, "Filters", AccessibleRole::Tab).invoke_accessible_default_action();
+    control(&ui, "Color", AccessibleRole::Tab).invoke_accessible_default_action();
     settle();
     control(&ui, "Custom brightness", AccessibleRole::Checkbox).invoke_accessible_default_action();
     settle();
     let slider = control(&ui, "Brightness", AccessibleRole::Slider);
-    control(&ui, "Decrease Brightness", AccessibleRole::Button).invoke_accessible_default_action();
+    slider.invoke_accessible_decrement_action();
     settle();
     assert_eq!(settings.get_brightness(), 99);
     settings.set_brightness(100);
@@ -270,7 +270,7 @@ fn settings_controls_follow_saved_values_after_edit_and_reset() {
     assert_eq!(
         slider.accessible_value().as_deref(),
         Some("100"),
-        "numeric control follows a reset after editing"
+        "slider follows a reset after editing"
     );
 }
 
@@ -333,6 +333,9 @@ fn desktop_webtoon_column_padding_and_mobile_sizing_are_independent_of_zoom() {
     use i_slint_backend_testing::{AccessibleRole, ElementHandle};
     ui.set_section(19);
     settings.set_default_mode(0);
+    // The width slider sits below the mode tiles and tap-zone diagrams; give
+    // the page room so it is not clipped out of the searchable tree.
+    ui.window().set_size(LogicalSize::new(390., 2400.));
     for _ in 0..24 {
         i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(16));
     }

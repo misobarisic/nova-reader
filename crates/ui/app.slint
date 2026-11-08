@@ -1419,6 +1419,7 @@ export component AppWindow inherits Window {
                                 safe-left: root.safe-area-insets.left; safe-right: root.safe-area-insets.right;
                                 mode: root.reader-mode-choice; rotation: root.reader-rotation-choice;
                                 rotation-label: @tr("Orientation"); resolved-mode: root.reader-mode-label; resolved-mode-index: root.reading-mode;
+                                subtitle: root.reader-chapter-title != "" ? root.series-title + " · " + root.reader-chapter-title : root.series-title;
                                 current-tab <=> root.reader-settings-tab;
                                 mode-selected(value) => { root.mode-changed(value); }
                                 rotation-selected(value) => { root.reader-rotation-changed(value); }
