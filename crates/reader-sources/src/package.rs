@@ -102,6 +102,12 @@ impl SourceDescriptor {
         }
     }
 }
+/// A package's configuration for one profile, secrets included ([`SourceRegistry::export_settings`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExportedSettings {
+    pub values: serde_json::Map<String, serde_json::Value>,
+    pub secrets: BTreeMap<String, String>,
+}
 #[derive(Clone, Serialize, Deserialize)]
 struct Installed {
     digest: String,
@@ -551,6 +557,52 @@ impl SourceRegistry {
             }
         }
         Ok(values)
+    }
+    /// The profile's complete configuration for a full backup: public values and
+    /// every non-empty secret in plaintext. Nothing else reads secrets back out.
+    pub fn export_settings(&self, id: &str) -> Result<ExportedSettings> {
+        let source = self.source_unchecked(id)?;
+        let values = source.settings.lock().unwrap();
+        let mut exported = ExportedSettings::default();
+        for field in &source.manifest.configuration {
+            let Some(value) = values.get(&field.key) else {
+                continue;
+            };
+            if field.kind == crate::SettingKind::Secret {
+                if let Some(secret) = value.as_str().filter(|secret| !secret.is_empty()) {
+                    exported
+                        .secrets
+                        .insert(field.key.clone(), secret.to_owned());
+                }
+            } else {
+                exported.values.insert(field.key.clone(), value.clone());
+            }
+        }
+        Ok(exported)
+    }
+    /// Apply configuration from a backup. Unlike [`SourceRegistry::set_settings`]
+    /// it is lenient: a key the installed package no longer declares, or a value
+    /// that its schema rejects, is skipped and counted, and the rest applies.
+    pub fn import_settings(
+        &self,
+        id: &str,
+        values: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<usize> {
+        let fields = self.settings_schema(id)?;
+        let mut patch = serde_json::Map::new();
+        let mut skipped = 0;
+        for (key, value) in values {
+            match fields.iter().find(|field| &field.key == key) {
+                Some(field) if crate::settings::valid_value(field, value) => {
+                    patch.insert(key.clone(), value.clone());
+                }
+                _ => skipped += 1,
+            }
+        }
+        if !patch.is_empty() {
+            self.set_settings(id, serde_json::Value::Object(patch))?;
+        }
+        Ok(skipped)
     }
     pub fn settings_secrets(&self, id: &str) -> Result<BTreeMap<String, bool>> {
         let source = self.source_unchecked(id)?;

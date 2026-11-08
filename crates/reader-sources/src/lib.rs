@@ -6,7 +6,9 @@ mod settings;
 pub use network::{
     CancelToken, HttpRequest, HttpResponse, PageChunkControl, PrefixResponse, SourceTransport,
 };
-pub use package::{CookiePermission, Manifest, Permissions, SourceDescriptor, SourceRegistry};
+pub use package::{
+    CookiePermission, ExportedSettings, Manifest, Permissions, SourceDescriptor, SourceRegistry,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 pub use settings::{SettingField, SettingKind};

@@ -1,4 +1,5 @@
-//! Profile-owned source configuration. Secrets never enter public descriptors/backups.
+//! Profile-owned source configuration. Secrets never enter public descriptors or
+//! sync. A full-device backup carries them in plaintext, on purpose, and says so.
 use crate::{Result, SourceError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -30,7 +31,7 @@ pub struct SettingField {
 fn invalid() -> SourceError {
     SourceError::Package("invalid source settings schema or values".into())
 }
-fn valid_value(field: &SettingField, value: &Value) -> bool {
+pub(crate) fn valid_value(field: &SettingField, value: &Value) -> bool {
     match field.kind {
         SettingKind::Bool => value.is_boolean(),
         SettingKind::Text | SettingKind::Secret => value
