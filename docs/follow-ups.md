@@ -35,3 +35,36 @@ slices of the original's coefficient data.
   x86_64) under the flake.
 - Its license must be compatible with `about.toml`.
 - Output must be verified pixel-identical to decoding the uncut original.
+
+## Chapter cache: clean shutdown and the batched usage index
+
+**Status:** deferred. `chapter_cache::tests::grouped_chapter_eviction_preserves_active_chapter_posters_and_downloads`
+fails since the nova-kit bump to `01de53b` (`df98627`).
+
+**Context:**
+- Kit's image cache now writes its usage index (`.image-usage-v1.json`: cached
+  files, sizes, last-used times) at most every two minutes
+  (`nova_cache::gc::BATCH_INTERVAL`) instead of on every touch. Images and
+  pages are still written immediately.
+- When the cache's `gc::Worker` (held as `ChapterCache::_gc`) is dropped, Kit
+  writes a final index marked `clean_shutdown`. Without that mark the next
+  start rescans the cache directory to rebuild the records.
+- The failing test drops its seeded cache and expects the index on disk, but
+  finds none: the final write did not happen there. Either the test keeps the
+  cache alive (only the test needs updating) or the drop path does not flush.
+
+**Impact today:**
+- Normal quit: nothing lost, if the worker is dropped.
+- Crash or Android kill: up to two minutes of last-used times are lost, and
+  the next start pays for a directory rescan. An image viewed just before the
+  kill can look older and be evicted sooner. Active chapters are unaffected:
+  eviction skips anything used within the last two minutes and active leases.
+- If the app never drops `ChapterCache` on exit, every start pays the rescan.
+  This costs speed, not data.
+
+**What to do:**
+- Confirm whether the app drops the chapter cache (and its `gc::Worker`) on
+  orderly exit on desktop and Android; if not, drop it explicitly before the
+  process ends.
+- Update the test for batched writes: wait for the worker's clean flush on
+  drop, or seed the index through Kit rather than reading the file directly.
