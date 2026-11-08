@@ -208,12 +208,70 @@ fn persist(
     // presentation belong to the profile on screen; an unselected profile only
     // materializes its library state.
     let selected = profile == reader_domain::profile::active();
-    let domain = |kind: &str| domain_for(profile, kind);
     let owner = nova_sync::local_store()?;
     let dev = nova_sync::local_device()?;
     let mut guard = owner.lock().unwrap_or_else(|e| e.into_inner());
     // Failed writes must not expose partially prepared records to the engine.
     let mut records = guard.clone();
+    let projection = kind == UpdateKind::Projection;
+    let Staged {
+        changed,
+        presentation,
+    } = stage(&mut records, dev, profile, before, state, kind, selected)?;
+    nova_sync::publish(&mut guard, records, |staged| staged.save())?;
+    if projection {
+        let digest = guard.digest();
+        let mut owned = vec![
+            crate::profiles::DOMAIN.to_owned(),
+            crate::profiles::DELETIONS_DOMAIN.to_owned(),
+        ];
+        if selected {
+            owned.extend([
+                domain_for(profile, "settings"),
+                domain_for(profile, "presentation"),
+            ]);
+        }
+        for name in owned {
+            if let Some(basis) = digest.get(&name) {
+                guard.mark_projected(&name, basis)?;
+            }
+        }
+        for kind_name in KINDS {
+            let name = domain_for(profile, kind_name);
+            if let Some(basis) = digest.get(&name) {
+                guard.mark_projected(&name, basis)?;
+            }
+        }
+    }
+    drop(guard);
+    crate::content_presentation::publish_projection(presentation);
+    if changed || kind == UpdateKind::ManualProgress {
+        nova_sync::request_local_sync();
+    }
+    Ok(())
+}
+
+/// What staging a state change left for the caller to do after its commit.
+pub(crate) struct Staged {
+    /// Whether any record changed, so peers should be woken.
+    pub changed: bool,
+    /// Presentation cache entries that a projection materialized.
+    pub presentation: Vec<(String, crate::content_presentation::Settings)>,
+}
+
+/// Prepare `state` (the replacement for `before`) in `records`, a copy of the
+/// record owner, without saving. A restore stages several profiles on one copy
+/// and commits them together; [`persist`] does the same for one edit.
+pub(crate) fn stage(
+    records: &mut nova_sync::Store,
+    dev: u64,
+    profile: &str,
+    before: &ReaderState,
+    state: &mut ReaderState,
+    kind: UpdateKind,
+    selected: bool,
+) -> nova_sync::Result<Staged> {
+    let domain = |kind: &str| domain_for(profile, kind);
     let projection = kind == UpdateKind::Projection;
     if kind == UpdateKind::Checkpoint {
         for progress in &mut state.progress {
@@ -238,7 +296,7 @@ fn persist(
         }
     }
     if projection {
-        project(&records, profile, state)?;
+        project(records, profile, state)?;
     }
     if kind == UpdateKind::ManualProgress {
         for progress in &state.progress {
@@ -276,7 +334,7 @@ fn persist(
                 );
             }
         }
-        resolve_actions(&records, profile, state)?;
+        resolve_actions(records, profile, state)?;
         if kind == UpdateKind::Checkpoint {
             // A queued old checkpoint must not undo an explicit history clear.
             // Fresh reading activity after the deletion may create history again.
@@ -306,18 +364,18 @@ fn persist(
     let mut changed = false;
     let mut presentation = Vec::new();
     if selected && projection {
-        crate::sync_settings::apply_remote(&mut records)?;
-        presentation = crate::content_presentation::apply_remote(&mut records)?;
+        crate::sync_settings::apply_remote(records)?;
+        presentation = crate::content_presentation::apply_remote(records)?;
     } else if selected && kind == UpdateKind::Seed {
-        changed |= crate::sync_settings::prepare(&mut records, dev, false, true)?;
-        changed |= crate::content_presentation::seed(&mut records, dev)?;
+        changed |= crate::sync_settings::prepare(records, dev, false, true)?;
+        changed |= crate::content_presentation::seed(records, dev)?;
     }
     for kind_name in KINDS {
         if *kind_name == "read_actions" {
             continue;
         }
         changed |= nova_sync::prepare_snapshot(
-            &mut records,
+            records,
             dev,
             &domain(kind_name),
             &rows[*kind_name],
@@ -329,34 +387,10 @@ fn persist(
     for (key, value) in DomainStore::storage_entries(profile, state)? {
         records.queue_extra(&key, value);
     }
-    nova_sync::publish(&mut guard, records, |staged| staged.save())?;
-    if projection {
-        let digest = guard.digest();
-        let mut owned = vec![
-            crate::profiles::DOMAIN.to_owned(),
-            crate::profiles::DELETIONS_DOMAIN.to_owned(),
-        ];
-        if selected {
-            owned.extend([domain("settings"), domain("presentation")]);
-        }
-        for name in owned {
-            if let Some(basis) = digest.get(&name) {
-                guard.mark_projected(&name, basis)?;
-            }
-        }
-        for kind_name in KINDS {
-            let name = domain(kind_name);
-            if let Some(basis) = digest.get(&name) {
-                guard.mark_projected(&name, basis)?;
-            }
-        }
-    }
-    drop(guard);
-    crate::content_presentation::publish_projection(presentation);
-    if changed || kind == UpdateKind::ManualProgress {
-        nova_sync::request_local_sync();
-    }
-    Ok(())
+    Ok(Staged {
+        changed,
+        presentation,
+    })
 }
 
 pub(crate) fn preserve_fields(old: &str, new: &str) -> nova_sync::Result<String> {
