@@ -99,7 +99,107 @@ fn resume_all_targets(jobs: &[ChapterDownload]) -> Vec<ChapterId> {
         .map(|j| j.chapter.clone())
         .collect()
 }
+/// The open title's unfinished downloads, shown in a card above its chapters.
+pub(super) fn publish_detail_queue(view: &View, ui: &AppWindow) {
+    let series = view.series.as_ref().map(|s| &s.id).filter(|_| view.section == 5);
+    let jobs: Vec<&ChapterDownload> = view
+        .downloads
+        .jobs
+        .iter()
+        .filter(|j| Some(&j.chapter.series) == series)
+        .filter(|j| {
+            matches!(
+                j.status,
+                JobStatus::Queued | JobStatus::Running | JobStatus::Paused | JobStatus::Failed
+            )
+        })
+        .collect();
+    let count = |status: JobStatus| jobs.iter().filter(|j| j.status == status).count();
+    let (queued, paused, failed) = (
+        count(JobStatus::Queued),
+        count(JobStatus::Paused),
+        count(JobStatus::Failed),
+    );
+    let running = jobs.iter().find(|j| j.status == JobStatus::Running);
+    let fraction = running
+        .filter(|j| !j.pages.is_empty())
+        .map(|j| j.completed_pages() as f32 / j.pages.len() as f32)
+        .unwrap_or(0.);
+    let title = match running {
+        Some(job) => {
+            let label = view
+                .rows
+                .iter()
+                .find_map(|row| match row {
+                    Row::Chapter(c) if c.id == job.chapter => {
+                        Some(c.number.clone().unwrap_or_else(|| c.label.clone()))
+                    }
+                    _ => None,
+                })
+                .unwrap_or_default();
+            format!(
+                "{} {label} · {}%",
+                text::tr("Downloading chapter"),
+                (fraction * 100.).round() as u32
+            )
+        }
+        None if queued > 0 => text::tr("Waiting to download"),
+        None if paused > 0 => text::tr("Downloads paused"),
+        None => text::tr("Downloads failed"),
+    };
+    let mut counts = Vec::new();
+    if queued > 0 {
+        counts.push(format!("{queued} {}", text::tr("queued")));
+    }
+    if paused > 0 {
+        counts.push(format!("{paused} {}", text::tr("paused")));
+    }
+    ui.set_detail_queue_visible(!jobs.is_empty());
+    ui.set_detail_queue_title(title.into());
+    ui.set_detail_queue_counts(counts.join(" · ").into());
+    ui.set_detail_queue_failed(if failed > 0 {
+        format!("{failed} {}", text::tr("failed")).into()
+    } else {
+        Default::default()
+    });
+    ui.set_detail_queue_progress(fraction);
+    ui.set_detail_queue_running(running.is_some());
+    // Pause while anything runs or waits; otherwise offer to resume.
+    ui.set_detail_queue_pausable(running.is_some() || queued > 0);
+}
+
 impl Controller {
+    /// Pause or resume only the open title's jobs.
+    pub(super) fn detail_queue_action(self: &Arc<Self>, ui: &AppWindow, action: &str) {
+        let jobs = {
+            let view = self.view();
+            let Some(series) = view.series.as_ref().map(|s| s.id.clone()) else {
+                return;
+            };
+            let jobs: Vec<ChapterDownload> = view
+                .downloads
+                .jobs
+                .iter()
+                .filter(|j| j.chapter.series == series)
+                .cloned()
+                .collect::<Vec<_>>();
+            jobs
+        };
+        if action == "pause" {
+            for job in jobs
+                .iter()
+                .filter(|j| matches!(j.status, JobStatus::Queued | JobStatus::Running))
+            {
+                if let Err(e) = self.services.downloads.pause(&job.chapter) {
+                    ui.set_status(error(e).into());
+                }
+            }
+            self.refresh_download_states(ui);
+        } else if action == "resume" {
+            self.download_many(ui, resume_all_targets(&jobs));
+        }
+    }
+
     pub(super) fn patch_chapter_downloads(&self, ui: &AppWindow) {
         let view = self.view();
         let model = ui.get_items();
@@ -153,6 +253,7 @@ impl Controller {
             }
         }
         super::publish_chapter_filter_counts(ui);
+        publish_detail_queue(&view, ui);
     }
     pub(super) fn publish_downloads(&self, ui: &AppWindow) {
         let mut view = self.view();

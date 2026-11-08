@@ -270,6 +270,15 @@ export component AppWindow inherits Window {
     in property <bool> chapter-selecting;
     in property <int> chapter-selected-count;
     callback chapter-selection(string, int);
+    // The open title's unfinished downloads, as a card above its chapters.
+    in property <bool> detail-queue-visible;
+    in property <string> detail-queue-title;
+    in property <string> detail-queue-counts;
+    in property <string> detail-queue-failed;
+    in property <float> detail-queue-progress;
+    in property <bool> detail-queue-running;
+    in property <bool> detail-queue-pausable;
+    callback detail-queue-action(string);
     in property <string> detail-series-key;
     in-out property <bool> detail-gallery-single;
     in-out property <length> detail-scroll-y: 0px;
@@ -1011,6 +1020,39 @@ export component AppWindow inherits Window {
                                         min-width: 0px;
                                         text: root.chapter-filter == 1 ? @tr("No unread chapters") : root.chapter-filter == 2 ? @tr("No downloaded chapters") : @tr("No bookmarked chapters");
                                         color: Theme.current.text_secondary; wrap: word-wrap;
+                                    }
+                                    if root.detail-queue-visible: detail-queue := Rectangle {
+                                        height: 72px; border-radius: 14px;
+                                        background: Theme.current.card; border-width: 1px; border-color: Theme.current.border_soft;
+                                        accessible-role: groupbox; accessible-label: root.detail-queue-title;
+                                        HorizontalLayout {
+                                            padding-left: 14px; padding-right: 10px; padding-top: 14px; padding-bottom: 14px; spacing: 10px;
+                                            VerticalLayout {
+                                                horizontal-stretch: 1; min-width: 0px; alignment: center; spacing: 2px;
+                                                Text { text: root.detail-queue-title; color: Theme.current.text_bright; font-size: 14px; font-weight: 600; overflow: elide; }
+                                                HorizontalLayout {
+                                                    spacing: 0px;
+                                                    if root.detail-queue-counts != "": Text { text: root.detail-queue-counts; color: Theme.current.text_muted; font-size: 12px; }
+                                                    if root.detail-queue-counts != "" && root.detail-queue-failed != "": Text { text: " · "; color: Theme.current.text_muted; font-size: 12px; }
+                                                    if root.detail-queue-failed != "": Text { text: root.detail-queue-failed; color: Theme.current.text_destructive; font-size: 12px; }
+                                                    Rectangle { horizontal-stretch: 1; }
+                                                }
+                                                if root.detail-queue-running: Rectangle {
+                                                    height: 7px;
+                                                    Rectangle {
+                                                        y: 4px; height: 3px; border-radius: 1.5px; background: Theme.current.progress_track_overlay;
+                                                        accessible-role: progress-indicator; accessible-label: @tr("Download progress");
+                                                        accessible-value: Math.round(root.detail-queue-progress * 100) + "%";
+                                                        Rectangle { x: 0px; height: 100%; border-radius: 1.5px; background: Theme.current.accent_soft; width: parent.width * Math.clamp(root.detail-queue-progress, 0, 1); }
+                                                    }
+                                                }
+                                            }
+                                            ActionButton {
+                                                height: 44px; horizontal-stretch: 0;
+                                                text: root.detail-queue-pausable ? @tr("Pause all") : @tr("Resume");
+                                                clicked => { root.detail-queue-action(root.detail-queue-pausable ? "pause" : "resume"); }
+                                            }
+                                        }
                                     }
                                     // A filtered-out row collapses to height 0 inside a layout without
                                     // spacing (its 4px gap is part of the row), so no gaps remain.

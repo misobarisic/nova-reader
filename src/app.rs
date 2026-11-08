@@ -2147,6 +2147,7 @@ impl Controller {
             view.chapter_selection = None;
         }
         chapter_selection::publish(&view, ui);
+        downloads::publish_detail_queue(&view, ui);
         let clock = crate::timeline::TimelineClock::now();
         view.artwork_rows = view
             .rows
@@ -6405,6 +6406,8 @@ pub fn run(services: Services) -> Result<()> {
             });
     }
     wire!(on_library_sort_changed, |app, ui| app.render(&ui));
+    wire!(on_detail_queue_action, |app, ui, action| app
+        .detail_queue_action(&ui, &action));
     wire!(on_chapter_selection, |app, ui, op, index| app
         .chapter_selection(&ui, &op, index));
     wire!(on_chapter_order_changed, |app, ui, descending| {
