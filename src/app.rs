@@ -6599,13 +6599,7 @@ pub fn run(services: Services) -> Result<()> {
                     return Ok(());
                 }
                 state.categories.push(reader_domain::Category {
-                    id: format!(
-                        "category-{:016x}-{}",
-                        nova_sync::local_device()
-                            .map_err(|e| reader_domain::Error::Invalid(e.to_string()))?,
-                        nova_storage::try_allocate_local_sequence("reader:category", 0)
-                            .map_err(reader_domain::Error::from)?
-                    ),
+                    id: crate::categories::new_id().map_err(reader_domain::Error::Invalid)?,
                     name: name.trim().into(),
                 });
                 Ok(())

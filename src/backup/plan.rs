@@ -367,14 +367,8 @@ fn plan_profile(
         .any(|name| state_names.contains(&name.as_str()) || name == "settings");
     let mut categories: Vec<Category> = state.categories.clone();
     if touches_state {
-        let materialized = components::materialize_state(&state, &plan.after, || {
-            Ok(format!(
-                "category-{:016x}-{}",
-                nova_sync::local_device().map_err(|e| e.to_string())?,
-                nova_storage::try_allocate_local_sequence("reader:category", 1)
-                    .map_err(|e| e.to_string())?
-            ))
-        })?;
+        let materialized =
+            components::materialize_state(&state, &plan.after, crate::categories::new_id)?;
         if materialized.omitted_categories > 0
             && let Some(row) = rows_out
                 .iter_mut()

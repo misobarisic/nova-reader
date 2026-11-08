@@ -14,6 +14,7 @@ mod artwork;
 pub mod backup;
 mod browser;
 pub mod capture_settings;
+pub mod categories;
 pub mod chapter_cache;
 mod chapter_capture;
 mod cli;
