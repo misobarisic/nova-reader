@@ -130,10 +130,12 @@ pub struct DownloadStore {
 fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
-fn chapter_key(chapter: &ChapterId) -> String {
+/// The name of a chapter's directory: a hash of its identity.
+pub fn chapter_key(chapter: &ChapterId) -> String {
     hash(&serde_json::to_vec(chapter).expect("ChapterId serializes"))
 }
-fn page_name(index: usize, id: &str) -> String {
+/// The file a chapter's page `index` is stored in.
+pub fn page_name(index: usize, id: &str) -> String {
     format!("{index:06}-{}.page", hash(id.as_bytes()))
 }
 fn is_job_key(name: &std::ffi::OsStr) -> bool {
@@ -981,6 +983,20 @@ impl DownloadStore {
         if !inner.active.is_empty() {
             return Err(Error::Invalid("cannot recover active downloads".into()));
         }
+        // Imports stage in `<key>.import` and are renamed into place last, so
+        // anything left under that name is an interrupted import.
+        for entry in fs::read_dir(&inner.root)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir()
+                && entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|name| name.strip_suffix(".import"))
+                    .is_some_and(|stem| is_job_key(std::ffi::OsStr::new(stem)))
+            {
+                fs::remove_dir_all(entry.path())?;
+            }
+        }
         let mut highest_order = 0;
         for directory in owned_directories(&inner.root)? {
             let manifest = match load_manifest(&directory.join("manifest.json")) {
@@ -1009,6 +1025,116 @@ impl DownloadStore {
             .checked_add(1)
             .ok_or_else(|| Error::Invalid("download queue sequence exhausted".into()))?;
         Ok(())
+    }
+    /// Add a finished chapter whose pages come from elsewhere (a backup). `job`
+    /// is its manifest with every page verified (`sha256` and `bytes` set) and
+    /// `read` returns the stored bytes of a page, which must match them. Pages
+    /// and manifest are staged in a directory of their own and moved into place
+    /// last, so a chapter either appears complete or not at all. An existing
+    /// chapter is never replaced: that returns `Ok(false)`.
+    pub fn import_complete(
+        &self,
+        mut job: ChapterDownload,
+        mut read: impl FnMut(usize, &DownloadedPage) -> std::result::Result<Vec<u8>, String>,
+    ) -> Result<bool> {
+        let invalid = |message: &str| Error::Invalid(message.into());
+        let mut ids = BTreeSet::new();
+        if job.schema_version != 1
+            || job.pages.is_empty()
+            || job.pages.len() > 10000
+            || job.chapter.local_id.is_empty()
+            || job.chapter.series.local_id.is_empty()
+            || job.chapter.series.source_id.is_empty()
+            || job.pages.iter().enumerate().any(|(i, page)| {
+                page.filename != page_name(i, &page.resource.id)
+                    || page.resource.id.is_empty()
+                    || !ids.insert(&page.resource.id)
+                    || page.sha256.is_none()
+                    || page.bytes == 0
+            })
+        {
+            return Err(invalid("invalid imported chapter"));
+        }
+        let total = job
+            .pages
+            .iter()
+            .try_fold(0u64, |sum, page| sum.checked_add(page.bytes))
+            .ok_or(Error::Quota)?;
+        let key = chapter_key(&job.chapter);
+        let (root, staging, directory) = {
+            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            if inner.active.contains_key(&key) {
+                return Err(invalid("chapter already running"));
+            }
+            let directory = inner.root.join(&key);
+            if fs::symlink_metadata(&directory).is_ok() {
+                return Ok(false);
+            }
+            if usage(&inner.root)?
+                .checked_add(total)
+                .is_none_or(|n| n > inner.quota)
+            {
+                return Err(Error::Quota);
+            }
+            if !self.has_room(&inner.root, total) {
+                return Err(Error::InsufficientSpace);
+            }
+            job.queue_order = inner.next_order;
+            inner.next_order = inner
+                .next_order
+                .checked_add(1)
+                .ok_or_else(|| invalid("download queue sequence exhausted"))?;
+            (
+                inner.root.clone(),
+                inner.root.join(format!("{key}.import")),
+                directory,
+            )
+        };
+        let staged = (|| -> Result<()> {
+            // A leftover from an interrupted import is ours to clear.
+            match fs::remove_dir_all(&staging) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            private_directory(&staging)?;
+            let validator = self
+                .validator
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            for (index, page) in job.pages.iter().enumerate() {
+                let bytes = read(index, page).map_err(Error::Invalid)?;
+                if bytes.len() as u64 != page.bytes || Some(hash(&bytes)) != page.sha256 {
+                    return Err(invalid("imported page does not match its checksum"));
+                }
+                match &validator {
+                    Some(validate) => validate(&bytes).map_err(Error::Invalid)?,
+                    None => {
+                        decode_image(&bytes, reader_engine::current_limits())?;
+                    }
+                }
+                atomic_write(&staging.join(&page.filename), &bytes)?;
+            }
+            job.status = JobStatus::Complete;
+            job.error = None;
+            let manifest = serde_json::to_vec(&job)?;
+            atomic_write(&staging.join("manifest.json"), &manifest)
+        })();
+        let moved = staged.and_then(|()| {
+            let _inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            if fs::symlink_metadata(&directory).is_ok() {
+                return Ok(false);
+            }
+            fs::rename(&staging, &directory)?;
+            #[cfg(unix)]
+            File::open(&root)?.sync_all()?;
+            Ok(true)
+        });
+        if !matches!(moved, Ok(true)) {
+            let _ = fs::remove_dir_all(&staging);
+        }
+        moved
     }
     pub fn import_folder(&self, chapter: ChapterId, folder: impl AsRef<Path>) -> Result<()> {
         reader_engine::with_current_limits(|| {
@@ -1235,6 +1361,101 @@ mod tests {
         store.retry(&chapter).unwrap();
         store.run(&chapter, |_| Ok(b"opaque".to_vec())).unwrap();
         assert_eq!(store.offline(&chapter).unwrap().pages.len(), 3);
+    }
+
+    /// A finished chapter as another device's export describes it.
+    fn finished(chapter: &ChapterId, sources: &[Vec<u8>]) -> ChapterDownload {
+        ChapterDownload {
+            schema_version: 1,
+            queue_order: 0,
+            chapter: chapter.clone(),
+            pages: sources
+                .iter()
+                .enumerate()
+                .map(|(i, bytes)| DownloadedPage {
+                    resource: PageResource {
+                        id: format!("{i}"),
+                        url: String::new(),
+                        headers: BTreeMap::new(),
+                    },
+                    filename: page_name(i, &format!("{i}")),
+                    bytes: bytes.len() as u64,
+                    sha256: Some(hash(bytes)),
+                })
+                .collect(),
+            status: JobStatus::Complete,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn imported_chapters_appear_whole_or_not_at_all_and_never_replace() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DownloadStore::open(directory.path(), 1_000_000).unwrap();
+        let chapter = chapter();
+        let pages: Vec<Vec<u8>> = (0..3u8)
+            .map(|i| {
+                let mut data = std::io::Cursor::new(Vec::new());
+                image::DynamicImage::new_rgba8(2 + u32::from(i), 2)
+                    .write_to(&mut data, image::ImageFormat::Png)
+                    .unwrap();
+                data.into_inner()
+            })
+            .collect();
+        let job = finished(&chapter, &pages);
+        // A page that does not match its recorded checksum leaves nothing behind.
+        let mut damaged = pages.clone();
+        damaged[1][10] ^= 0xFF;
+        let result = store.import_complete(job.clone(), |i, _| Ok(damaged[i].clone()));
+        assert!(result.is_err());
+        assert!(store.job(&chapter).is_err());
+        assert!(fs::read_dir(directory.path()).unwrap().all(|e| {
+            !e.unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".import")
+        }));
+        // A reader that fails midway does too.
+        let result = store.import_complete(job.clone(), |i, _| {
+            if i == 2 {
+                Err("cut off".into())
+            } else {
+                Ok(pages[i].clone())
+            }
+        });
+        assert!(matches!(result, Err(Error::Invalid(m)) if m == "cut off"));
+        assert!(store.job(&chapter).is_err());
+
+        assert!(
+            store
+                .import_complete(job.clone(), |i, _| Ok(pages[i].clone()))
+                .unwrap()
+        );
+        let offline = store.offline(&chapter).unwrap();
+        assert_eq!(offline.pages.len(), 3);
+        // Existing chapters are never replaced, whatever the archive holds.
+        let other = vec![pages[2].clone(), pages[0].clone(), pages[1].clone()];
+        assert!(
+            !store
+                .import_complete(finished(&chapter, &other), |i, _| Ok(other[i].clone()))
+                .unwrap()
+        );
+        assert_eq!(fs::read(&offline.pages[0]).unwrap(), pages[0]);
+        // Stale staging from a killed import is removed by recovery.
+        let stale = directory
+            .path()
+            .join(format!("{}.import", chapter_key(&chapter)));
+        fs::create_dir(&stale).unwrap();
+        fs::write(stale.join("junk.pending"), b"x").unwrap();
+        store.recover().unwrap();
+        assert!(!stale.exists());
+        // The quota still applies.
+        let tiny = tempfile::tempdir().unwrap();
+        let small = DownloadStore::open(tiny.path(), 10).unwrap();
+        assert!(matches!(
+            small.import_complete(job, |i, _| Ok(pages[i].clone())),
+            Err(Error::Quota)
+        ));
     }
 
     #[test]
