@@ -328,55 +328,39 @@ fn chapter_download_delete_actions_follow_saved_remote_jobs() {
     ui.show().unwrap();
     settle();
 
-    for complete in [true, false] {
-        let mut chapter = rows.row_data(1).unwrap();
-        chapter.downloaded = complete;
-        chapter.download_state = if complete { 5 } else { 3 };
-        rows.set_row_data(1, chapter);
-        settle();
-        if complete {
-            button(&ui, "Downloaded chapter options").invoke_accessible_default_action();
-        } else {
-            ElementHandle::find_by_accessible_label(&ui, "Chapter options")
-                .filter(|element| element.accessible_role() == Some(AccessibleRole::Button))
-                .nth(1)
-                .unwrap()
-                .invoke_accessible_default_action();
-        }
-        settle();
-        let asked_before = actions.borrow().len();
-        ElementHandle::find_by_accessible_label(&ui, "Delete download")
-            .find(|element| element.type_name().as_deref() == Some("PillButton"))
-            .unwrap()
-            .invoke_accessible_default_action();
-        settle();
-        // Deleting a download asks first; only the sheet's confirm dispatches.
-        assert_eq!(
-            actions.borrow().len(),
-            asked_before,
-            "delete must not dispatch before confirmation"
-        );
-        button(&ui, "Delete download").invoke_accessible_default_action();
-        settle();
-        assert_eq!(
-            actions.borrow().last().unwrap(),
-            &(1, "delete-download".into())
-        );
+    let menu_item = |label: &str| {
+        ElementHandle::find_by_accessible_label(&ui, label)
+            .find(|element| element.type_name().as_deref() == Some("MenuItem"))
+    };
+    let options = || {
         ElementHandle::find_by_accessible_label(&ui, "Chapter options")
             .filter(|element| element.accessible_role() == Some(AccessibleRole::Button))
             .nth(1)
             .unwrap()
-            .invoke_accessible_default_action();
+    };
+    // A finished download: its ring and its ⋯ both open the menu, and Delete
+    // download asks first; only the sheet's confirm dispatches.
+    let mut chapter = rows.row_data(1).unwrap();
+    chapter.download_state = 5;
+    rows.set_row_data(1, chapter);
+    settle();
+    for open in ["ring", "options"] {
+        if open == "ring" {
+            button(&ui, "Downloaded, chapter options").invoke_accessible_default_action();
+        } else {
+            options().invoke_accessible_default_action();
+        }
         settle();
         let before = actions.borrow().len();
-        // Popup coordinates are local to their own window. Identify the text
-        // action by component instead of comparing it with the trailing icon.
-        ElementHandle::find_by_accessible_label(&ui, "Delete download")
-            .find(|element| element.type_name().as_deref() == Some("PillButton"))
-            .unwrap()
+        menu_item("Delete download")
+            .expect("delete in the chapter menu")
             .invoke_accessible_default_action();
         settle();
-        assert_eq!(actions.borrow().len(), before, "confirmation comes first");
+        assert_eq!(
+            actions.borrow().len(),
+            before,
+            "delete must not dispatch before confirmation"
+        );
         button(&ui, "Delete download").invoke_accessible_default_action();
         settle();
         assert_eq!(actions.borrow().len(), before + 1);
@@ -385,9 +369,25 @@ fn chapter_download_delete_actions_follow_saved_remote_jobs() {
             &(1, "delete-download".into())
         );
     }
+    // A paused download offers Resume and Cancel download instead.
+    let mut chapter = rows.row_data(1).unwrap();
+    chapter.downloaded = false;
+    chapter.download_state = 3;
+    rows.set_row_data(1, chapter);
+    settle();
+    options().invoke_accessible_default_action();
+    settle();
+    assert!(menu_item("Delete download").is_none());
+    assert!(menu_item("Resume").is_some());
+    menu_item("Cancel download")
+        .expect("cancel for a paused job")
+        .invoke_accessible_default_action();
+    settle();
+    assert_eq!(actions.borrow().last().unwrap(), &(1, "cancel".into()));
     let mut chapter = rows.row_data(1).unwrap();
     chapter.has_download = false;
     chapter.downloaded = false;
+    chapter.download_state = 0;
     rows.set_row_data(1, chapter.clone());
     settle();
     assert!(
@@ -599,7 +599,7 @@ fn poster_layout_timelines_chapters_and_reader_controls() {
     );
     button(&ui, "Chapter options").invoke_accessible_default_action();
     settle();
-    ElementHandle::find_by_accessible_label(&ui, "Read / unread")
+    ElementHandle::find_by_accessible_label(&ui, "Mark as read")
         .next()
         .expect("chapter action menu")
         .invoke_accessible_default_action();

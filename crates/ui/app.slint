@@ -426,7 +426,7 @@ export component AppWindow inherits Window {
         if action == "change-status" || action == "categories" || action == "presentation" {
             // The existing pickers handle these, opened at the same spot.
             root.entry-menu-presentation-start = action == "presentation";
-            root.open-entry-menu(key, root.series-title, root.in-library, root.title-menu-right - 288px, root.title-menu-bottom);
+            root.open-entry-menu(key, root.series-title, root.in-library, root.title-menu-right - 44px, root.title-menu-bottom);
             if action != "presentation" { root.entry-menu-picked(action); }
         } else if action == "remove" || action == "mark-all-read" || action == "mark-all-unread" || action == "clear-all-positions" {
             root.confirm-entry-action(key, action);
@@ -1625,7 +1625,9 @@ export component AppWindow inherits Window {
         anchor-right: root.title-menu-right; anchor-bottom: root.title-menu-bottom;
         safe-bottom: root.safe-area-insets.bottom;
         picked(action) => { root.title-menu-picked(action); }
-        closed => { root.title-menu-open = false; keyboard.focus(); }
+        // A picker opened from the menu owns focus; only give it back to the
+        // page when nothing took over.
+        closed => { root.title-menu-open = false; if !root.entry-menu-visible { keyboard.focus(); } }
     }
     if root.entry-menu-visible: EntryMenu {
         width: root.width; height: root.height;

@@ -75,8 +75,9 @@ fn per_title_menu_gestures_and_category_editor_keep_the_full_identity() {
             let ui = weak.unwrap();
             // Destructive actions dispatch after their confirmation sheet, when
             // the menu has already closed.
+            // The detail screen's title menu dispatches as it closes itself.
             assert!(
-                ui.get_entry_menu_visible() || action == "remove",
+                ui.get_entry_menu_visible() || ui.get_title_menu_open() || action == "remove",
                 "dispatch before conditional dismissal"
             );
             actions
@@ -209,15 +210,17 @@ fn per_title_menu_gestures_and_category_editor_keep_the_full_identity() {
         ui.set_series_title("Detail target".into());
         ui.set_in_library(true);
         settle();
+        // The detail screen's ⋯ opens the title menu, not the library sheet.
         button(&ui, "Title options").mock_single_click(PointerEventButton::Left);
         settle();
-        button(&ui, "Refresh details").invoke_accessible_default_action();
+        button(&ui, "Refresh").invoke_accessible_default_action();
         settle();
         assert_eq!(
             actions.borrow().last().unwrap(),
             &(keys[1].clone(), "refresh".into())
         );
         assert!(!ui.get_entry_menu_visible());
+        assert!(!ui.get_title_menu_open());
     }
     ui.set_section(3);
     ui.set_source_catalog_open(true);
@@ -375,6 +378,8 @@ fn detail_series_and_chapter_menus_dispatch_separate_progress_actions() {
     ui.set_items(ModelRc::new(VecModel::from(vec![ItemRow {
         title: "Chapter 2".into(),
         local_import: true,
+        // Clear progress is offered for a partly read chapter.
+        reading_status: "Page 3".into(),
         ..Default::default()
     }])));
     let series_actions = Rc::new(RefCell::new(Vec::new()));
@@ -395,17 +400,21 @@ fn detail_series_and_chapter_menus_dispatch_separate_progress_actions() {
     for width in [390., 1120.] {
         ui.window().set_size(LogicalSize::new(width, 1800.));
         settle();
-        for (label, action) in [
-            ("Mark all read", "mark-all-read"),
-            ("Mark all unread", "mark-all-unread"),
-            ("Clear all chapter positions", "clear-all-positions"),
+        for (label, confirm, action) in [
+            ("Mark all read", "Mark all read", "mark-all-read"),
+            ("Mark all unread", "Mark all unread", "mark-all-unread"),
+            (
+                "Clear all positions",
+                "Clear all chapter positions",
+                "clear-all-positions",
+            ),
         ] {
             button(&ui, "Title options").invoke_accessible_default_action();
             settle();
             button(&ui, label).invoke_accessible_default_action();
             settle();
-            // The confirmation sheet repeats the action label.
-            button(&ui, label).invoke_accessible_default_action();
+            // The confirmation sheet names the action.
+            button(&ui, confirm).invoke_accessible_default_action();
             settle();
             assert_eq!(
                 series_actions.borrow().last(),
