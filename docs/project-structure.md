@@ -7,7 +7,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | Location | Responsibility |
 | --- | --- |
 | `build.rs`, `about.toml` | Nova’s copied current-target license/source catalogue generation, zstd-22 embedding recipe and final Android cdylib 16 KiB ELF alignment |
-| `src/main.rs`, `src/lib.rs` | Desktop entry, Android entry/lifecycle, CLI routing |
+| `src/main.rs`, `src/lib.rs` | Desktop entry (Windows uses the GUI subsystem, so launches open no console window), Android entry/lifecycle, CLI routing |
 | `src/app.rs` | Worker orchestration, navigation, source/settings selection, visible-page loading, display tiles, lifecycle progress flush |
 | `src/reader_open.rs`, `tests/reader_entry.rs` | Immediate chapter route from detail/History, cancellable worker-only resume/metadata/offline preparation, in-reader retry, and first-content motion policy |
 | `src/reader_progressive.rs` | Current-page JPEG XL streaming feed, provisional source geometry/tiles, bounded preview mailbox, EOF validation and nonce-guarded cleanup; final loading/progress/cache remain owned by the ordinary image worker |
