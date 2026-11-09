@@ -218,7 +218,10 @@ fn the_last_profile_cannot_be_deleted() {
     assert!(exists(&ui, "Keep at least one profile."));
     deletes[0].invoke_accessible_default_action();
     settle();
-    assert!(!exists(&ui, "Delete profile"), "no confirmation sheet opens");
+    assert!(
+        !exists(&ui, "Delete profile"),
+        "no confirmation sheet opens"
+    );
     assert!(events.borrow().is_empty());
 }
 
