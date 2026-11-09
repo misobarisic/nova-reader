@@ -265,16 +265,111 @@ impl Controller {
             Err(error) => eprintln!("Nova Reader: could not queue Library location: {error}"),
         }
     }
-    pub(super) fn select_library_category(&self, ui: &AppWindow, index: i32) {
-        if let Ok(snapshot) = self.services.domain.snapshot() {
-            self.view()
-                .library_navigation
-                .select(index.max(0) as usize, &snapshot.categories);
-            self.checkpoint_library();
-            self.render(ui);
+    /// Switch the Library chip. The chip moves at once; the filtered, sorted
+    /// cards are built on a worker from the state the last render drew (a
+    /// category switch changes no data, so the database is not read) and the
+    /// event loop only swaps them in. A newer pick or any full render
+    /// supersedes an unfinished one.
+    pub(super) fn select_library_category(self: &Arc<Self>, ui: &AppWindow, index: i32) {
+        let index = index.max(0) as usize;
+        let rendered = {
+            let view = self.view();
+            view.rendered.clone().filter(|_| view.section == 0)
+        };
+        let Some(snapshot) = rendered else {
+            // Before the first Library render: the plain synchronous path.
+            if let Ok(snapshot) = self.services.domain.snapshot() {
+                self.view()
+                    .library_navigation
+                    .select(index, &snapshot.categories);
+                self.checkpoint_library();
+                self.render(ui);
+            }
+            return;
+        };
+        let (query, download_states, category) = {
+            let mut view = self.view();
+            view.library_navigation.select(index, &snapshot.categories);
+            let category = view.library_navigation.category_index(&snapshot.categories);
+            (
+                view.query.to_lowercase(),
+                view.download_states.clone(),
+                category,
+            )
+        };
+        self.checkpoint_library();
+        ui.set_category_index(category as i32);
+        let (category_id, status) = library_view::filter_for(category, &snapshot.categories);
+        let appearance = ui.global::<Appearance>();
+        let (sort, reversed) = (
+            appearance.get_library_sort(),
+            appearance.get_library_sort_reversed(),
+        );
+        let generation = PROJECTION_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+        let app = self.clone();
+        let weak = ui.as_weak();
+        crate::profiles::spawn(move || {
+            let projection = library_view::project(
+                &snapshot,
+                &query,
+                category_id.as_deref(),
+                status,
+                sort,
+                reversed,
+                &download_states,
+            );
+            let _ = weak.upgrade_in_event_loop(move |ui| {
+                if PROJECTION_GENERATION.load(Ordering::Acquire) == generation {
+                    app.apply_library_projection(&ui, &snapshot, projection);
+                }
+            });
+        });
+    }
+    /// Swap a finished projection in, unless the screen moved on meanwhile.
+    fn apply_library_projection(
+        &self,
+        ui: &AppWindow,
+        snapshot: &Arc<reader_domain::ReaderState>,
+        projection: library_view::Projection,
+    ) {
+        let mut view = self.view();
+        let current = view
+            .rendered
+            .as_ref()
+            .is_some_and(|rendered| Arc::ptr_eq(rendered, snapshot));
+        if view.section != 0 || !current {
+            return;
         }
+        let items: Vec<_> = projection
+            .rows
+            .iter()
+            .zip(projection.items)
+            .map(|(series, fields)| {
+                fields.into_row(self.artwork.cached_image(series).unwrap_or_default())
+            })
+            .collect();
+        view.artwork_rows = projection.rows.iter().cloned().map(Some).collect();
+        view.artwork_seen.clear();
+        view.rows = projection.rows.into_iter().map(Row::Series).collect();
+        ui.set_items(ModelRc::new(VecModel::from(items)));
+        publish_chapter_filter_counts(ui);
+        let position = view.library_navigation.position(&snapshot.categories);
+        let restore = view.rows.iter().position(|row| {
+            matches!(row, Row::Series(series) if !position.series_key.is_empty() && serde_json::to_string(&series.id).ok().as_deref() == Some(position.series_key.as_str()))
+        });
+        ui.set_library_scroll_y(position.scroll_y);
+        ui.set_library_restore_index(
+            restore
+                .and_then(|index| i32::try_from(index).ok())
+                .unwrap_or(-1),
+        );
+        ui.set_library_restore_fraction(position.fraction);
+        ui.set_library_restore_serial(ui.get_library_restore_serial().wrapping_add(1));
     }
 }
+
+/// Which category pick the latest projection belongs to.
+static PROJECTION_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[cfg(test)]
 mod tests {

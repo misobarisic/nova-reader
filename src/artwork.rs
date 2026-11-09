@@ -665,8 +665,19 @@ fn admit(ui: &AppWindow, id: u64, shared: &Shared, key: &str, loaded: Loaded) {
 pub(crate) fn set_timeline_posters(ui: &AppWindow, matches: impl Fn(&str) -> bool, image: &Image) {
     use slint::ComponentHandle;
     let bridge = ui.global::<crate::TimelineBridge>();
-    // The whole list and the window the page renders from it.
-    for entries in [bridge.get_entries(), bridge.get_shown()] {
+    // The whole list (only the rows with a matching key, from the index) and
+    // the window the page renders from it.
+    let all = bridge.get_entries();
+    for index in crate::app::timeline_page::entry_rows_matching(&matches) {
+        if let Some(mut row) = all.row_data(index)
+            && row.poster != *image
+        {
+            row.poster = image.clone();
+            all.set_row_data(index, row);
+        }
+    }
+    {
+        let entries = bridge.get_shown();
         for index in 0..entries.row_count() {
             if let Some(mut row) = entries.row_data(index)
                 && matches(row.artwork_key.as_str())

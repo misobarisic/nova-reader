@@ -38,7 +38,7 @@ pub(crate) use browse_page::set_global_posters;
 #[path = "timeline_groups.rs"]
 mod timeline_groups;
 #[path = "timeline_page.rs"]
-mod timeline_page;
+pub(crate) mod timeline_page;
 
 static LIFECYCLE: OnceLock<Weak<Controller>> = OnceLock::new();
 #[path = "backup_actions.rs"]
@@ -1515,6 +1515,9 @@ struct View {
     catalogue_page_error: String,
     pending: Option<ReadingProgress>,
     library_navigation: library_navigation::State,
+    /// The state the last render drew. Switching Library category changes no
+    /// data, so it re-filters this instead of re-reading the database.
+    rendered: Option<Arc<reader_domain::ReaderState>>,
     settings_package: Option<String>,
     source_filters: crate::source_filters::FilterSet,
     source_browser: crate::source_browser::SourceBrowser,
@@ -1891,15 +1894,15 @@ impl Controller {
         ))
     }
     fn render(&self, ui: &AppWindow) {
+        match self.services.domain.snapshot() {
+            Ok(s) => self.render_snapshot(ui, Arc::new(s)),
+            Err(e) => ui.set_status(error(e).into()),
+        }
+    }
+    fn render_snapshot(&self, ui: &AppWindow, snapshot: Arc<reader_domain::ReaderState>) {
         ui.set_detail_gallery_single(false);
-        let snapshot = match self.services.domain.snapshot() {
-            Ok(s) => s,
-            Err(e) => {
-                ui.set_status(error(e).into());
-                return;
-            }
-        };
         let mut view = self.view();
+        view.rendered = Some(snapshot.clone());
         if !crate::metadata_refresh::surface_allowed(view.section) {
             self.metadata_refresh.pause();
         }
@@ -1939,20 +1942,27 @@ impl Controller {
                 )
                 .collect::<Vec<_>>(),
         )));
+        // Indexes built once: a category switch re-renders everything, so
+        // per-title scans of the chapter/progress lists would be quadratic.
+        let counts = series_chapter_counts(&snapshot.chapters, &snapshot.progress);
+        let buckets = library_view::buckets(&snapshot, &counts);
+        let series_by_id: HashMap<&reader_domain::SeriesId, &Series> =
+            snapshot.series.iter().map(|s| (&s.id, s)).collect();
+        let library_by_id: HashMap<&reader_domain::SeriesId, &reader_domain::LibraryEntry> =
+            snapshot.library.iter().map(|l| (&l.series, l)).collect();
         ui.set_category_counts(ModelRc::new(VecModel::from(library_view::category_counts(
-            &snapshot,
+            &snapshot, &buckets,
         ))));
         ui.set_library_count_label(
             text::titles_label(
                 snapshot
                     .library
                     .iter()
-                    .filter(|entry| snapshot.series.iter().any(|s| s.id == entry.series))
+                    .filter(|entry| series_by_id.contains_key(&entry.series))
                     .count(),
             )
             .into(),
         );
-        let counts = series_chapter_counts(&snapshot.chapters, &snapshot.progress);
         let (heading, caption) = match view.section {
             0 => ("Library", ""),
             1 => ("Updates", ""),
@@ -1987,22 +1997,11 @@ impl Controller {
                         category_id
                             .as_ref()
                             .is_none_or(|id| l.categories.contains(id))
-                            && status_filter.is_none_or(|status| {
-                                reader_domain::library_bucket(
-                                    l,
-                                    &snapshot.chapters,
-                                    &snapshot.progress,
-                                    snapshot
-                                        .series
-                                        .iter()
-                                        .find(|series| series.id == l.series)
-                                        .map(|series| series.publication_status)
-                                        .unwrap_or_default(),
-                                ) == status
-                            })
+                            && status_filter
+                                .is_none_or(|status| buckets.get(&l.series) == Some(&status))
                     })
-                    .filter_map(|l| snapshot.series.iter().find(|s| s.id == l.series))
-                    .filter(|s| s.title.to_lowercase().contains(&query))
+                    .filter_map(|l| series_by_id.get(&l.series).copied())
+                    .filter(|s| query.is_empty() || s.title.to_lowercase().contains(&query))
                     .cloned()
                     .collect();
                 library_view::sort(
@@ -2216,125 +2215,57 @@ impl Controller {
             .iter()
             .map(|row| match row {
                 Row::Series(s) => Some(s.clone()),
-                Row::Chapter(c) => snapshot
-                    .series
-                    .iter()
-                    .find(|s| s.id == c.id.series)
-                    .cloned(),
+                Row::Chapter(c) => series_by_id.get(&c.id.series).map(|s| (*s).clone()),
             })
             .collect();
         view.artwork_seen.clear();
+        let mut downloaded_by_series: HashMap<&reader_domain::SeriesId, usize> = HashMap::new();
+        for (chapter, status) in &view.download_states {
+            if *status == reader_downloads::JobStatus::Complete {
+                *downloaded_by_series.entry(&chapter.series).or_default() += 1;
+            }
+        }
+        let mut chapter_ids_by_series: HashMap<&reader_domain::SeriesId, Vec<&str>> =
+            HashMap::new();
+        if view.section == 0 {
+            for c in &snapshot.chapters {
+                chapter_ids_by_series
+                    .entry(&c.id.series)
+                    .or_default()
+                    .push(c.id.local_id.as_str());
+            }
+        }
+        let progress_by_chapter: HashMap<&ChapterId, &ReadingProgress> =
+            snapshot.progress.iter().map(|p| (&p.chapter, p)).collect();
+        let read_at_by_chapter: HashMap<&ChapterId, i64> = if view.section == 2 {
+            let mut m = HashMap::new();
+            for h in &snapshot.history {
+                m.entry(&h.chapter).or_insert(h.read_at);
+            }
+            m
+        } else {
+            HashMap::new()
+        };
+        let jobs_by_chapter: HashMap<&ChapterId, &reader_downloads::ChapterDownload> = view
+            .downloads
+            .jobs
+            .iter()
+            .map(|j| (&j.chapter, j))
+            .collect();
+        let series_context = library_view::SeriesContext {
+            section: view.section,
+            counts: &counts,
+            buckets: &buckets,
+            library: &library_by_id,
+            downloaded: &downloaded_by_series,
+            chapter_ids: &chapter_ids_by_series,
+        };
         let items: Vec<_> = view
             .rows
             .iter()
             .map(|row| match row {
-                Row::Series(s) => {
-                    let gallery = crate::content_presentation::Settings::load(&s.id)
-                        .unwrap_or_default()
-                        .effective()
-                        == crate::content_presentation::Presentation::Gallery;
-                    let (total, unread) = counts.get(&s.id).copied().unwrap_or_default();
-                    let key = crate::artwork::key(s);
-                    let downloaded = view
-                        .download_states
-                        .iter()
-                        .filter(|(chapter, status)| {
-                            chapter.series == s.id
-                                && **status == reader_downloads::JobStatus::Complete
-                        })
-                        .count();
-                    let status_label = snapshot
-                        .library
-                        .iter()
-                        .find(|entry| entry.series == s.id)
-                        .map(|entry| {
-                            text::tr(
-                                reader_domain::library_bucket(
-                                    entry,
-                                    &snapshot.chapters,
-                                    &snapshot.progress,
-                                    s.publication_status,
-                                )
-                                .label(),
-                            )
-                        })
-                        .unwrap_or_default();
-                    ItemRow {
-                        series_key: serde_json::to_string(&s.id).unwrap_or_default().into(),
-                        title: s.title.clone().into(),
-                        subtitle: snapshot
-                            .library
-                            .iter()
-                            .find(|entry| entry.series == s.id)
-                            .map(|entry| {
-                                format!(
-                                    "{} · {}",
-                                    text::tr(
-                                        reader_domain::library_bucket(
-                                            entry,
-                                            &snapshot.chapters,
-                                            &snapshot.progress,
-                                            s.publication_status
-                                        )
-                                        .label()
-                                    ),
-                                    text::chapter_count(unread, total)
-                                )
-                            })
-                            .unwrap_or_else(|| text::chapter_count(unread, total))
-                            .into(),
-                        badge: s.id.source_id.clone().into(),
-                        bookmarked: snapshot.library.iter().any(|l| l.series == s.id),
-                        new_count: if view.section == 0 {
-                            crate::chapter_news::unseen_count(
-                                &s.id,
-                                snapshot
-                                    .chapters
-                                    .iter()
-                                    .filter(|c| c.id.series == s.id)
-                                    .map(|c| c.id.local_id.as_str()),
-                            ) as i32
-                        } else {
-                            0
-                        },
-                        downloaded_count: if view.section == 0 {
-                            downloaded as i32
-                        } else {
-                            0
-                        },
-                        detail: if view.section == 0 && !gallery {
-                            library_view::grid_detail(total - unread, total, s.publication_status).0
-                        } else if view.section == 3 {
-                            browse_page::catalogue_detail(s.publication_status, total)
-                        } else {
-                            String::new()
-                        }
-                        .into(),
-                        detail_success: view.section == 0
-                            && !gallery
-                            && library_view::grid_detail(
-                                total - unread,
-                                total,
-                                s.publication_status,
-                            )
-                            .1,
-                        list_detail: if view.section == 0 {
-                            library_view::list_detail(&status_label, &s.id.source_id, downloaded)
-                        } else if view.section == 3 {
-                            browse_page::catalogue_detail(s.publication_status, total)
-                        } else {
-                            String::new()
-                        }
-                        .into(),
-                        poster: self.artwork.cached_image(s).unwrap_or_default(),
-                        artwork_key: key.into(),
-                        // A last-viewed gallery image does not imply that all
-                        // preceding images were viewed. Keep manual status intact.
-                        completed: if gallery { 0 } else { (total - unread) as i32 },
-                        total: if gallery { 0 } else { total as i32 },
-                        ..ItemRow::default()
-                    }
-                }
+                Row::Series(s) => library_view::series_fields(&series_context, s)
+                    .into_row(self.artwork.cached_image(s).unwrap_or_default()),
                 Row::Chapter(c) => {
                     let local_import = c.id.series.source_id == "local";
                     let download = if local_import {
@@ -2343,27 +2274,20 @@ impl Controller {
                         view.download_states.get(&c.id)
                     };
                     let downloaded = download == Some(&reader_downloads::JobStatus::Complete);
-                    let series = snapshot.series.iter().find(|s| s.id == c.id.series);
+                    let series = series_by_id.get(&c.id.series).copied();
                     let key = series.map(crate::artwork::key).unwrap_or_default();
-                    let progress = snapshot.progress.iter().find(|p| p.chapter == c.id);
+                    let progress = progress_by_chapter.get(&c.id).copied();
                     let gallery = crate::content_presentation::Settings::load(&c.id.series)
                         .unwrap_or_default()
                         .effective()
                         == crate::content_presentation::Presentation::Gallery;
                     let read = progress.is_some_and(|p| p.completed);
                     let stamp = if view.section == 2 {
-                        clock.history(
-                            snapshot
-                                .history
-                                .iter()
-                                .find(|h| h.chapter == c.id)
-                                .map(|h| h.read_at)
-                                .unwrap_or(0),
-                        )
+                        clock.history(read_at_by_chapter.get(&c.id).copied().unwrap_or(0))
                     } else {
                         clock.release(c.uploaded_at)
                     };
-                    let job = view.downloads.jobs.iter().find(|j| j.chapter == c.id);
+                    let job = jobs_by_chapter.get(&c.id).copied();
                     let download_progress = job
                         .filter(|j| !j.pages.is_empty())
                         .map(|j| j.completed_pages() as f32 / j.pages.len() as f32)

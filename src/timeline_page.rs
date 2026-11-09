@@ -304,6 +304,7 @@ pub(super) fn publish(view: &mut View, snapshot: &ReaderState, ui: &AppWindow, i
     }
     // The whole list stays in `entries` (not rendered); the page renders
     // the window `publish_window` cuts from it.
+    index_entry_keys(&entries);
     bridge.set_entries(ModelRc::new(VecModel::from(entries)));
     bridge.set_days(ModelRc::new(VecModel::from(days)));
     bridge.set_list_top(top);
@@ -334,6 +335,36 @@ pub(super) fn publish(view: &mut View, snapshot: &ReaderState, ui: &AppWindow, i
     // their rows and slide, inserted lines fade in. A different list starts
     // over (the page fades the whole list in).
     publish_window(&mut view.timeline, ui, same_list);
+}
+
+thread_local! {
+    /// Rows of `TimelineBridge.entries` per artwork key. A cover arriving would
+    /// otherwise clone every row of a long list just to find its few lines.
+    static ENTRY_KEYS: std::cell::RefCell<HashMap<String, Vec<usize>>> = Default::default();
+}
+
+fn index_entry_keys(entries: &[TimelineEntry]) {
+    let mut index: HashMap<String, Vec<usize>> = HashMap::new();
+    for (row, entry) in entries.iter().enumerate() {
+        if !entry.artwork_key.is_empty() {
+            index
+                .entry(entry.artwork_key.to_string())
+                .or_default()
+                .push(row);
+        }
+    }
+    ENTRY_KEYS.with(|keys| *keys.borrow_mut() = index);
+}
+
+/// Rows of the full entry list whose artwork key `matches`.
+pub(crate) fn entry_rows_matching(matches: impl Fn(&str) -> bool) -> Vec<usize> {
+    ENTRY_KEYS.with(|keys| {
+        keys.borrow()
+            .iter()
+            .filter(|(key, _)| matches(key))
+            .flat_map(|(_, rows)| rows.iter().copied())
+            .collect()
+    })
 }
 
 /// How far beyond the viewport the window reaches, above and below. The
