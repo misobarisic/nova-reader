@@ -267,6 +267,8 @@ export component MorePage inherits Rectangle {
         if root.section == 4 { root.restore-pending = true; }
         // Opened directly (not from a group row) on the wide index: list every section.
         if root.section == 10 && root.two-pane { root.settings-group = 0; }
+        // Profiles always opens on the picker.
+        if root.section == 24 { ProfilesBridge.managing = false; ProfilesBridge.editor = 0; }
     }
     about-focus := Timer { interval: 1ms; running: false; triggered => {
         self.stop(); if root.section == 13 { about-page.focus_shell(); }
@@ -503,9 +505,14 @@ export component MorePage inherits Rectangle {
                 VerticalLayout {
                     padding: 18px; spacing: 12px; alignment: start;
                     PageHeader {
-                        title: root.child-section == 9 ? @tr("Local chapters") : root.child-section == 24 ? @tr("Profiles") : root.child-section == 10 ? root.group-title(root.settings-group) : @tr("About");
+                        title: root.child-section == 9 ? @tr("Local chapters") : root.child-section == 24 ? (ProfilesBridge.managing ? @tr("Manage profiles") : @tr("Profiles")) : root.child-section == 10 ? root.group-title(root.settings-group) : @tr("About");
                         narrow: root.narrow; show-back: !ProfilesBridge.require-selection || root.child-section != 24;
-                        back => { if root.child-active && !(ProfilesBridge.require-selection && root.child-section == 24) { root.navigate(4); } }
+                        back => {
+                            if !root.child-active { return; }
+                            // Manage profiles and its editors close one level at a time.
+                            if root.child-section == 24 && ProfilesBridge.step-back() { return; }
+                            if !(ProfilesBridge.require-selection && root.child-section == 24) { root.navigate(4); }
+                        }
                     }
                     if root.status != "": Text { min-width: 0px; text: root.status; color: Theme.current.text_settings; wrap: word-wrap; }
                     if root.child-section == 9: VerticalLayout {

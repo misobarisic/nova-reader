@@ -2,8 +2,10 @@
 // version of Nova's picker, built from Reader's MenuLink/SettingsCard styles.
 // The selection belongs to this device; profile contents belong to sync.
 import { Theme, Anim, SettingsStyle } from "@NovaUiShared";
+import { IcAdd, IcCheck, IcSettingsGear } from "@NovaUiBase/icons.slint";
 import { SettingsCard, ToggleSwitch, SectionHeader } from "@NovaUiBase/settings-controls.slint";
 import { ActionButton, ReaderField } from "controls.slint";
+import { PillButton } from "@NovaUiBase/settings-controls.slint";
 
 export struct ProfileRow {
     id: string,
@@ -28,6 +30,18 @@ export global ProfilesBridge {
     callback select-profile(string);
     callback delete-profile(string);
     callback remember-last-changed(bool);
+    // Page state, here so More's header and system Back can step back
+    // through it: Manage profiles, and the create/rename editor
+    // (0 none, 1 create, 2 rename).
+    in-out property <bool> managing: false;
+    in-out property <int> editor: 0;
+    // Back inside the page: editor, then Manage profiles. False when there
+    // is nothing left to close and the page itself should go back.
+    public function step-back() -> bool {
+        if self.editor != 0 { self.editor = 0; self.error = ""; return true; }
+        if self.managing { self.managing = false; self.error = ""; return true; }
+        return false;
+    }
 }
 
 component ProfileAvatar inherits Rectangle {
@@ -79,6 +93,17 @@ component ProfileChoiceRow inherits Rectangle {
             Text { text: root.profile.name; color: Theme.current.text_bright; font-size: 18px; font-weight: 600; wrap: word-wrap; min-width: 0px; }
             if root.profile.active: Text { text: @tr("Current profile"); color: Theme.current.text_secondary; font-size: 14px; }
         }
+        // As in Nova: the current profile carries a filled check.
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 28px; height: 28px; border-radius: 14px;
+                background: root.profile.active ? Theme.current.accent : transparent;
+                border-width: root.profile.active ? 0px : 2px; border-color: Theme.current.border_soft;
+                animate background { duration: Anim.control_state; }
+                if root.profile.active: IcCheck { x: 4px; y: 4px; width: 20px; height: 20px; fill: Theme.current.on_accent; }
+            }
+        }
     }
     forward-focus: row-focus;
     row-focus := FocusScope {
@@ -99,23 +124,83 @@ component ProfileChoiceRow inherits Rectangle {
     }
 }
 
-export component ProfilesPage inherits VerticalLayout {
+// A full-width action row in the picker (Add profile, Manage profiles).
+component ProfileActionRow inherits Rectangle {
+    in property <int> kind; // 1 add, 2 manage
+    in property <string> title;
+    in property <bool> interactive: true;
+    callback picked();
+    accessible-role: button;
+    accessible-label: root.title;
+    accessible-enabled: root.interactive;
+    accessible-action-default => { if root.interactive { root.picked(); } }
+    height: 72px; vertical-stretch: 0;
+    border-radius: 8px;
+    border-width: root.focus-visible ? 2px : 0px;
+    border-color: Theme.current.focus_ring;
+    background: touch.pressed && root.interactive ? Theme.current.settings_control : Theme.current.card;
+    opacity: root.interactive ? 1 : 0.45;
+    private property <bool> focus-visible: root.interactive && SettingsStyle.keyboard-mode && row-focus.has-focus;
+    changed focus-visible => {
+        if root.focus-visible { SettingsStyle.reveal_control(root.absolute-position.y, root.height, true); }
+    }
+    HorizontalLayout {
+        padding: 12px; padding-left: 16px; padding-right: 16px; spacing: 16px;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 48px; height: 48px; border-radius: 24px;
+                background: Theme.current.settings_control;
+                if root.kind == 1: IcAdd { x: 11px; y: 11px; width: 26px; height: 26px; fill: Theme.current.text_secondary; }
+                if root.kind == 2: IcSettingsGear { x: 11px; y: 11px; width: 26px; height: 26px; fill: Theme.current.text_secondary; }
+            }
+        }
+        Text {
+            horizontal-stretch: 1; min-width: 0px; vertical-alignment: center; wrap: word-wrap;
+            text: root.title; color: Theme.current.text_bright; font-size: 16px; font-weight: 600;
+        }
+    }
+    forward-focus: row-focus;
+    row-focus := FocusScope {
+        enabled: root.interactive;
+        key-pressed(e) => {
+            if e.text == Key.Return || e.text == " " {
+                SettingsStyle.keyboard-mode = true;
+                if !e.repeat { root.picked(); }
+                return accept;
+            }
+            return reject;
+        }
+    }
+    touch := TouchArea {
+        enabled: root.interactive; width: 100%; height: 100%;
+        mouse-cursor: pointer;
+        clicked => { SettingsStyle.keyboard-mode = false; row-focus.focus(); root.picked(); }
+    }
+}
+
+// Nova's profile picker and manager: choose who is reading, then Manage
+// profiles for rename/delete, each level pushed with the page motion.
+export component ProfilesPage inherits Rectangle {
     in property <bool> interactive: true;
     // Deletion is confirmed by the host's shared destructive-action sheet.
     callback delete-requested(string, string);
-    // 0 list, 1 create, 2 rename.
-    private property <int> editor: 0;
     private property <string> editing-id;
     private property <string> draft;
     private property <bool> required: ProfilesBridge.require-selection;
     private property <bool> idle: root.interactive && !ProfilesBridge.busy;
-    spacing: 12px; alignment: start;
+    private property <bool> managing: ProfilesBridge.managing && !root.required;
+    private property <int> editor: ProfilesBridge.editor;
+    min-width: 0px;
+    min-height: body.preferred-height;
+    preferred-height: body.preferred-height;
+    vertical-stretch: 0;
 
-    public function reset() { root.editor = 0; root.draft = ""; }
+    public function reset() { ProfilesBridge.editor = 0; root.draft = ""; }
     function begin(kind: int, id: string, name: string) {
         root.editing-id = id;
         root.draft = name;
-        root.editor = kind;
+        ProfilesBridge.editor = kind;
         ProfilesBridge.error = "";
     }
     function submit() {
@@ -126,71 +211,133 @@ export component ProfilesPage inherits VerticalLayout {
         if ProfilesBridge.error == "" { root.reset(); }
     }
 
-    Text {
-        min-width: 0px; wrap: word-wrap; color: Theme.current.text_settings;
-        text: root.required ? @tr("Choose a profile to continue.") : @tr("Each profile keeps its own library, history and reading settings. Profiles sync across your paired devices.");
-    }
-    if ProfilesBridge.error != "": SettingsCard {
-        VerticalLayout { padding: 16px;
-            Text { text: ProfilesBridge.error; color: Theme.current.text_destructive; wrap: word-wrap; min-width: 0px; }
+    // Each level (list → Manage profiles → editor) enters like a page: 48px
+    // from the right going deeper, 24px from the left coming back.
+    private property <int> level: root.editor > 0 ? 2 : root.managing ? 1 : 0;
+    private property <int> shown-level: root.level;
+    private property <bool> motion: Anim.enabled && Anim.transitions;
+    private property <bool> snap: false;
+    private property <float> enter: 1.0;
+    private property <length> enter-from: 48px;
+    animate enter { duration: root.motion && !root.snap ? Anim.transition_slide : 0ms; easing: ease-out; }
+    changed level => {
+        if root.level != root.shown-level && root.motion {
+            root.enter-from = root.level > root.shown-level ? 48px : -24px;
+            root.snap = true;
+            root.enter = 0.0;
+            arm.start();
         }
+        root.shown-level = root.level;
     }
-    if root.editor == 0: VerticalLayout {
+    arm := Timer { interval: 1ms; running: false; triggered => { self.stop(); root.snap = false; root.enter = 1.0; } }
+
+    body := VerticalLayout {
+        x: (1.0 - root.enter) * root.enter-from;
+        width: root.width; height: root.height;
+        opacity: root.enter;
         spacing: 12px; alignment: start;
-        for profile[index] in ProfilesBridge.profiles: VerticalLayout {
-            spacing: 6px;
-            ProfileChoiceRow {
+
+        Text {
+            min-width: 0px; wrap: word-wrap; color: Theme.current.text_settings;
+            text: root.required ? @tr("Choose a profile to continue.")
+                : root.managing ? @tr("Each profile keeps its own library, history and reading settings.")
+                : @tr("Who's reading?");
+        }
+        if ProfilesBridge.error != "": SettingsCard {
+            VerticalLayout { padding: 16px;
+                Text { text: ProfilesBridge.error; color: Theme.current.text_destructive; wrap: word-wrap; min-width: 0px; }
+            }
+        }
+        // Picker: tap a profile to switch to it.
+        if root.editor == 0 && !root.managing: VerticalLayout {
+            spacing: 12px; alignment: start;
+            for profile in ProfilesBridge.profiles: ProfileChoiceRow {
                 profile: profile; interactive: root.idle;
                 picked => { ProfilesBridge.select-profile(profile.id); }
             }
-            if !root.required: HorizontalLayout {
-                spacing: 8px; alignment: end;
-                ActionButton {
-                    text: @tr("Rename"); enabled: root.idle;
-                    clicked => { root.begin(2, profile.id, profile.name); }
-                }
-                ActionButton {
-                    text: @tr("Delete"); enabled: root.idle && ProfilesBridge.profiles.length > 1;
-                    clicked => { root.delete-requested(profile.id, profile.name); }
+            ProfileActionRow {
+                kind: 1; title: @tr("Add profile"); interactive: root.idle;
+                picked => { root.begin(1, "", ""); }
+            }
+            SettingsCard {
+                HorizontalLayout {
+                    padding: 16px; spacing: 12px;
+                    VerticalLayout {
+                        horizontal-stretch: 1; min-width: 0px; spacing: 4px; alignment: center;
+                        Text { min-width: 0px; wrap: word-wrap; text: @tr("Open the last profile on startup"); color: Theme.current.text_settings; }
+                        Text { min-width: 0px; text: @tr("This device"); color: Theme.current.text_muted; font-size: 12px; }
+                    }
+                    ToggleSwitch {
+                        name: @tr("Open the last profile on startup");
+                        enabled: root.idle;
+                        checked: ProfilesBridge.remember-last;
+                        toggled => { ProfilesBridge.remember-last-changed(!ProfilesBridge.remember-last); }
+                        accessible-action-default => { if self.enabled { ProfilesBridge.remember-last-changed(!ProfilesBridge.remember-last); } }
+                    }
                 }
             }
+            if !root.required: ProfileActionRow {
+                kind: 2; title: @tr("Manage profiles"); interactive: root.idle;
+                picked => { ProfilesBridge.error = ""; ProfilesBridge.managing = true; }
+            }
         }
-        ActionButton {
-            text: @tr("Add profile"); accent: true; enabled: root.idle;
-            clicked => { root.begin(1, "", ""); }
+        // Manage profiles: rename and delete, one card per profile.
+        if root.editor == 0 && root.managing: VerticalLayout {
+            spacing: 12px; alignment: start;
+            for profile in ProfilesBridge.profiles: SettingsCard {
+                VerticalLayout {
+                    padding: 16px; spacing: 10px;
+                    HorizontalLayout {
+                        spacing: 16px;
+                        ProfileAvatar { profile: profile; }
+                        VerticalLayout {
+                            horizontal-stretch: 1; min-width: 0px; alignment: center; spacing: 4px;
+                            Text { text: profile.name; color: Theme.current.text_bright; font-size: 18px; font-weight: 600; wrap: word-wrap; min-width: 0px; }
+                            if profile.active: Text { text: @tr("Current profile"); color: Theme.current.text_secondary; wrap: word-wrap; min-width: 0px; }
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 8px; alignment: start;
+                        PillButton {
+                            label: @tr("Rename"); accessible-label: @tr("Rename profile: {}", profile.name);
+                            compact: true; btn_min_width: 88px; enabled: root.idle;
+                            clicked => { root.begin(2, profile.id, profile.name); }
+                        }
+                        PillButton {
+                            label: @tr("Delete"); accessible-label: @tr("Delete profile: {}", profile.name);
+                            compact: true; destructive: true; btn_min_width: 88px;
+                            enabled: root.idle && ProfilesBridge.profiles.length > 1;
+                            clicked => { root.delete-requested(profile.id, profile.name); }
+                        }
+                    }
+                }
+            }
+            if ProfilesBridge.profiles.length == 1: Text { min-width: 0px; wrap: word-wrap; text: @tr("Keep at least one profile."); color: Theme.current.text_muted; }
+            Text { min-width: 0px; wrap: word-wrap; text: @tr("Profiles sync across your paired devices. Each device chooses its own active profile."); color: Theme.current.text_muted; }
+            ProfileActionRow {
+                kind: 1; title: @tr("Add profile"); interactive: root.idle;
+                picked => { root.begin(1, "", ""); }
+            }
+            ActionButton {
+                text: @tr("Done"); enabled: root.interactive;
+                clicked => { ProfilesBridge.managing = false; ProfilesBridge.error = ""; }
+            }
         }
-        SettingsCard {
-            HorizontalLayout {
+        if root.editor != 0: SettingsCard {
+            VerticalLayout {
                 padding: 16px; spacing: 12px;
-                Text {
-                    horizontal-stretch: 1; min-width: 0px; vertical-alignment: center; wrap: word-wrap;
-                    text: @tr("Open the last profile on startup");
-                    color: Theme.current.text_settings;
-                }
-                ToggleSwitch {
-                    name: @tr("Open the last profile on startup");
+                SectionHeader { label: root.editor == 1 ? @tr("New profile") : @tr("Rename profile"); }
+                ReaderField {
                     enabled: root.idle;
-                    checked: ProfilesBridge.remember-last;
-                    toggled => { ProfilesBridge.remember-last-changed(!ProfilesBridge.remember-last); }
-                    accessible-action-default => { if self.enabled { ProfilesBridge.remember-last-changed(!ProfilesBridge.remember-last); } }
+                    text <=> root.draft;
+                    placeholder-text: @tr("Profile name");
+                    accepted(value) => { root.submit(); }
                 }
-            }
-        }
-    }
-    if root.editor != 0: SettingsCard {
-        VerticalLayout {
-            padding: 16px; spacing: 12px;
-            SectionHeader { label: root.editor == 1 ? @tr("New profile") : @tr("Rename profile"); }
-            ReaderField {
-                enabled: root.idle;
-                text <=> root.draft;
-                placeholder-text: @tr("Profile name");
-                accepted(value) => { root.submit(); }
-            }
-            HorizontalLayout {
-                spacing: 8px;
-                ActionButton { text: @tr("Save"); accent: true; enabled: root.idle && root.draft != ""; clicked => { root.submit(); } }
-                ActionButton { text: @tr("Cancel"); enabled: root.idle; clicked => { root.reset(); ProfilesBridge.error = ""; } }
+                HorizontalLayout {
+                    spacing: 8px;
+                    ActionButton { text: @tr("Save"); accent: true; enabled: root.idle && root.draft != ""; clicked => { root.submit(); } }
+                    ActionButton { text: @tr("Cancel"); enabled: root.idle; clicked => { root.reset(); ProfilesBridge.error = ""; } }
+                }
             }
         }
     }

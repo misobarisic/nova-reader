@@ -753,6 +753,7 @@ export component AppWindow inherits Window {
         if root.section == 6 && root.show-reader-options { root.show-reader-options = false; return; }
         if root.section == 6 && root.reader-osd { root.reader-osd = false; return; }
         if root.section == 13 { root.about-back-request += 1; return; }
+        if root.section == 24 && ProfilesBridge.step-back() { return; }
         if root.entry-menu-visible { root.close-entry-menu(); return; }
         if root.section == 23 { root.overview-back(); return; }
         if root.reader-context-visible { root.close-reader-context(); return; }
