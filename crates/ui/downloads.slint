@@ -1,7 +1,7 @@
 import { Theme, SettingsStyle } from "@NovaUiShared";
 import { ScrollView } from "@NovaUiBase/scrollview.slint";
 import { ControlTouchArea } from "@NovaUiBase/control-input.slint";
-import { Segmented } from "@NovaUiBase/settings-controls.slint";
+import { LibraryFilterChip } from "@NovaUiBase/filter-chip.slint";
 import { ActionButton, ReaderField, ReaderSelect } from "controls.slint";
 import { DownloadGlyph, DownloadIconButton } from "download-controls.slint";
 
@@ -12,6 +12,9 @@ export struct DownloadEntry {
     expanded: bool, selected: bool, progress: float,
     done-pages: int, total-pages: int, rate-label: string, error: string,
     local-import: bool,
+    // Saved rows: closes its title's card (the last chapter shown, or a
+    // closed title).
+    last: bool,
 }
 
 component SavedRow inherits Rectangle {
@@ -28,10 +31,16 @@ component SavedRow inherits Rectangle {
         && root.requested-artwork != root.entry.key + root.entry.artwork-key;
     changed needs-artwork => { if root.needs-artwork { root.requested-artwork = root.entry.key + root.entry.artwork-key; root.artwork-requested(root.entry.series-key); } }
     init => { if root.needs-artwork { root.requested-artwork = root.entry.key + root.entry.artwork-key; root.artwork-requested(root.entry.series-key); } }
-    min-width: 0px; height: root.entry.kind == 0 ? 104px : 80px;
-    border-radius: root.entry.kind == 0 ? Theme.card_corner_radius : 0px;
-    background: touch.feedback-active ? Theme.current.control_hover
-        : root.entry.kind == 0 ? Theme.current.card : transparent;
+    // A title and its open chapters draw as one card, like an Updates group:
+    // the title row rounds the top, the row that closes the group the bottom.
+    private property <length> corner: Theme.card_corner_radius + 4px;
+    min-width: 0px; height: root.entry.kind == 0 ? 116px : 72px;
+    border-top-left-radius: root.entry.kind == 0 ? root.corner : 0px;
+    border-top-right-radius: root.entry.kind == 0 ? root.corner : 0px;
+    border-bottom-left-radius: root.entry.last ? root.corner : 0px;
+    border-bottom-right-radius: root.entry.last ? root.corner : 0px;
+    clip: true;
+    background: touch.feedback-active ? Theme.current.control_hover : Theme.current.card;
     accessible-role: button;
     accessible-label: root.entry.kind == 0 ? root.entry.series-title : root.entry.title;
     accessible-action-default => { if !root.busy { root.action(root.entry.kind == 0 ? "toggle-series" : "open"); } }
@@ -51,41 +60,44 @@ component SavedRow inherits Rectangle {
         clicked => { scope.focus(); root.action(root.entry.kind == 0 ? "toggle-series" : "open"); }
     }
     if root.entry.kind == 0: Rectangle {
-        x: 12px; y: 10px; width: 56px; height: 84px; clip: true;
-        border-radius: 6px; background: Theme.current.control_hover;
+        x: 12px; y: 10px; width: 64px; height: 96px; clip: true;
+        border-radius: min(Theme.card_corner_radius, 8px); background: Theme.current.home_artwork_placeholder;
         Image { width: 100%; height: 100%; source: root.entry.poster; image-fit: cover; }
     }
+    // Chapter rows: a hairline from the title text, the select box under
+    // the cover.
+    if root.entry.kind == 1: Rectangle { x: 90px; y: 0px; width: root.width - 90px; height: 1px; background: Theme.current.border_soft; }
     if root.entry.kind == 1: DownloadIconButton {
-        x: 8px; y: 16px; enabled: !root.busy && !root.entry.local-import;
+        x: 20px; y: 12px; enabled: !root.busy && !root.entry.local-import;
         label: root.entry.selected ? @tr("Deselect chapter") : @tr("Select chapter");
         glyph: root.entry.selected ? "selected" : "select"; accent: root.entry.selected;
         clicked => { root.action("select"); }
     }
     VerticalLayout {
-        x: root.entry.kind == 0 ? 82px : 64px; y: root.entry.kind == 0 ? 20px : 14px;
-        width: max(1px, root.width - (root.entry.kind == 0 ? 146px : 128px));
-        height: root.entry.kind == 0 ? 66px : 52px; spacing: 4px; alignment: start;
+        x: 90px; y: 0px;
+        width: max(1px, root.width - 90px - 64px);
+        height: root.height; spacing: 3px; alignment: center;
         Text {
             text: root.entry.kind == 0 ? root.entry.series-title : root.entry.title;
-            font-size: root.entry.kind == 0 ? 17px : 15px; font-weight: root.entry.kind == 0 ? 700 : 400;
+            font-size: root.entry.kind == 0 ? 15px : 14px; font-weight: root.entry.kind == 0 ? 600 : 400;
             color: Theme.current.text_bright; overflow: elide; min-width: 0px;
+            wrap: root.entry.kind == 0 ? word-wrap : no-wrap; max-lines: root.entry.kind == 0 ? 2 : 1;
         }
         if root.entry.kind == 0: Text { text: root.entry.source; font-size: 12px; color: Theme.current.text_secondary; overflow: elide; min-width: 0px; }
         Text { text: root.entry.meta + (root.entry.size-label == "" ? "" : " · " + root.entry.size-label); font-size: 12px; color: Theme.current.text_secondary; overflow: elide; min-width: 0px; }
         if root.entry.kind == 1 && root.entry.read-meta != "": Text { text: root.entry.read-meta; font-size: 11px; color: Theme.current.text_secondary; overflow: elide; min-width: 0px; }
     }
     if root.entry.kind == 0: DownloadIconButton {
-        x: root.width - 56px; y: 28px; enabled: !root.busy;
+        x: root.width - 56px; y: (root.height - self.height) / 2; enabled: !root.busy;
         glyph: root.entry.expanded ? "up" : "down";
         label: root.entry.expanded ? @tr("Collapse chapters") : @tr("Expand chapters");
         clicked => { root.action("toggle-series"); }
     }
     if root.entry.kind == 1 && !root.entry.local-import: DownloadIconButton {
-        x: root.width - 56px; y: 16px; enabled: !root.busy;
+        x: root.width - 56px; y: (root.height - self.height) / 2; enabled: !root.busy;
         glyph: "delete"; label: @tr("Delete download"); clicked => { root.action("delete"); }
     }
-    if root.entry.kind == 1: Rectangle { x: 64px; y: root.height - 1px; width: max(1px, root.width - 76px); height: 1px; background: Theme.current.border_soft; }
-    if scope.has-focus && SettingsStyle.keyboard-mode: Rectangle { width: 100%; height: 100%; border-radius: Theme.card_corner_radius; border-width: 1px; border-color: Theme.current.accent_soft; background: transparent; }
+    if scope.has-focus && SettingsStyle.keyboard-mode: Rectangle { width: 100%; height: 100%; border-radius: root.corner; border-width: 1px; border-color: Theme.current.accent_soft; background: transparent; }
 }
 
 component QueueRow inherits Rectangle {
@@ -117,7 +129,7 @@ component QueueRow inherits Rectangle {
         && root.reorderable && root.drag-y >= root.absolute-position.y && root.drag-y < root.absolute-position.y + root.height;
     changed drop-hover => { if root.drop-hover { root.drag-enter(root.entry.key); } }
     min-width: 0px; height: root.running ? 176px : root.failed ? 128px : 100px;
-    background: Theme.current.card; border-radius: Theme.card_corner_radius;
+    background: Theme.current.card; border-radius: Theme.card_corner_radius + 4px;
     border-width: root.drop-hover || (scope.has-focus && SettingsStyle.keyboard-mode) ? 1px : 0px;
     border-color: Theme.current.accent_soft;
     opacity: root.dragged-key == root.entry.key ? 0.55 : 1;
@@ -213,6 +225,73 @@ component QueueRow inherits Rectangle {
     }
 }
 
+// Downloaded | Queue as chips with their counts (the label keeps "Queue 3").
+component TabChip inherits Rectangle {
+    in property <string> label;
+    in property <int> count;
+    in property <bool> selected;
+    callback picked;
+    height: 34px; width: chip-row.preferred-width + 24px;
+    border-radius: Theme.button_corner_radius + 2px;
+    background: root.selected ? Theme.current.selection_fill : touch.has-hover ? Theme.current.control_hover : Theme.current.card;
+    border-width: 1px; border-color: root.selected ? Theme.current.accent : Theme.current.border_soft;
+    accessible-role: button; accessible-label: root.label + " " + root.count;
+    accessible-item-selected: root.selected;
+    accessible-action-default => { root.picked(); }
+    chip-row := HorizontalLayout {
+        x: 12px; width: self.preferred-width; height: 100%; spacing: 6px;
+        Text { text: root.label; font-size: 13px; font-weight: 600; color: Theme.current.text_bright; vertical-alignment: center; }
+        Text { text: root.count; font-size: 11px; color: Theme.current.text_secondary; vertical-alignment: center; }
+    }
+    touch := ControlTouchArea { mouse-cursor: pointer; clicked => { root.picked(); } }
+}
+
+// The live queue at the top: the chapter downloading now (the queue's
+// first row), overall progress and the bulk controls.
+component QueueCard inherits Rectangle {
+    in property <DownloadEntry> entry;
+    in property <string> summary;
+    in property <bool> busy;
+    callback action(string);
+    height: card.preferred-height;
+    border-radius: Theme.card_corner_radius + 4px;
+    background: Theme.current.card; border-width: 1px; border-color: Theme.current.border_soft;
+    accessible-role: groupbox; accessible-label: @tr("Download queue");
+    card := VerticalLayout {
+        padding: 14px; spacing: 10px;
+        HorizontalLayout {
+            spacing: 12px;
+            Rectangle {
+                width: 40px; height: 60px; clip: true; border-radius: 6px;
+                background: Theme.current.home_artwork_placeholder;
+                Image { width: 100%; height: 100%; source: root.entry.poster; image-fit: cover; }
+            }
+            VerticalLayout {
+                alignment: center; spacing: 2px; horizontal-stretch: 1; min-width: 0px;
+                Text { text: root.entry.series-title; font-size: 14px; font-weight: 600; color: Theme.current.text_bright; overflow: elide; }
+                Text {
+                    text: root.entry.state == 2 ? root.entry.title + " · " + @tr("{} / {} pages", root.entry.done-pages, root.entry.total-pages) : root.entry.title;
+                    font-size: 12px; color: Theme.current.text_secondary; overflow: elide;
+                }
+            }
+            // Bulk controls as icons, so the card stays short on a phone.
+            VerticalLayout { alignment: center; DownloadIconButton {
+                glyph: "pause"; accent: true; label: @tr("Pause all"); enabled: !root.busy;
+                clicked => { root.action("pause-all"); }
+            } }
+            VerticalLayout { alignment: center; DownloadIconButton {
+                glyph: "play"; label: @tr("Resume all"); enabled: !root.busy;
+                clicked => { root.action("resume-all"); }
+            } }
+        }
+        if root.entry.state == 2: Rectangle {
+            height: 4px; border-radius: 2px; background: Theme.current.progress_track_overlay;
+            Rectangle { x: 0px; y: 0px; height: 100%; border-radius: 2px; background: Theme.current.accent; width: parent.width * Math.clamp(root.entry.progress, 0, 1); }
+        }
+        Text { text: root.summary; font-size: 12px; color: Theme.current.text_secondary; wrap: word-wrap; }
+    }
+}
+
 export component DownloadsPanel inherits Rectangle {
     in property <[DownloadEntry]> downloaded;
     in property <[DownloadEntry]> queue;
@@ -238,17 +317,23 @@ export component DownloadsPanel inherits Rectangle {
     private property <length> drag-y: -10000px;
     min-width: 0px;
     VerticalLayout {
-        spacing: 16px;
-        if root.compact: Segmented {
-            labels: [@tr("Downloaded {}", root.downloaded-count), @tr("Queue {}", root.queue-count)];
-            current_index: root.active-tab;
-            picked(i) => { root.active-tab = i; }
+        spacing: 14px;
+        // On a phone the Queue tab lists the same rows, so the card shows
+        // with the downloaded chapters only.
+        if root.queue-count > 0 && root.queue.length > 0 && (!root.compact || root.active-tab == 0): QueueCard {
+            entry: root.queue[0]; summary: root.queue-summary; busy: root.busy;
+            action(which) => { root.action("", which); }
+        }
+        if root.compact: HorizontalLayout {
+            spacing: 6px; alignment: start;
+            TabChip { label: @tr("Downloaded"); count: root.downloaded-count; selected: root.active-tab == 0; picked => { root.active-tab = 0; } }
+            TabChip { label: @tr("Queue"); count: root.queue-count; selected: root.active-tab == 1; picked => { root.active-tab = 1; } }
         }
         HorizontalLayout {
             spacing: root.compact ? 0px : 12px;
             if !root.compact || root.active-tab == 0: VerticalLayout {
                 width: root.compact ? root.width : (root.width - 25px) * 0.64; spacing: 12px;
-                if !root.compact: Text { text: @tr("Downloaded"); font-size: 20px; font-weight: 700; color: Theme.current.text_bright; }
+                if !root.compact: Text { text: @tr("Downloaded"); font-size: 17px; font-weight: 700; color: Theme.current.text_bright; }
                 Text { text: root.summary; font-size: 12px; color: Theme.current.text_secondary; wrap: word-wrap; }
                 ReaderField {
                     text <=> root.query; placeholder-text: @tr("Search titles or chapters");
@@ -257,9 +342,19 @@ export component DownloadsPanel inherits Rectangle {
                 }
                 HorizontalLayout {
                     spacing: 8px;
-                    ActionButton { text: @tr("All"); accent: !root.unread-only; enabled: !root.busy; clicked => { root.unread-only = false; root.filter-changed(false, root.sort); } }
-                    ActionButton { text: @tr("Unread"); accent: root.unread-only; enabled: !root.busy; clicked => { root.unread-only = true; root.filter-changed(true, root.sort); } }
+                    VerticalLayout { alignment: center; LibraryFilterChip {
+                        tonal: true; chip-height: 34px; keyboard-focusable: true; label: @tr("All"); selected: !root.unread-only;
+                        picked => { root.unread-only = false; root.filter-changed(false, root.sort); }
+                        accessible-action-default => { root.unread-only = false; root.filter-changed(false, root.sort); }
+                    } }
+                    VerticalLayout { alignment: center; LibraryFilterChip {
+                        tonal: true; chip-height: 34px; keyboard-focusable: true; label: @tr("Unread"); selected: root.unread-only;
+                        picked => { root.unread-only = true; root.filter-changed(true, root.sort); }
+                        accessible-action-default => { root.unread-only = true; root.filter-changed(true, root.sort); }
+                    } }
+                    Rectangle { horizontal-stretch: 1; }
                     ReaderSelect {
+                        width: 150px; horizontal-stretch: 0;
                         model: [@tr("By title"), @tr("By size")];
                         current-index <=> root.sort; placeholder-text: @tr("Sort downloads");
                         selected(value) => { root.filter-changed(root.unread-only, self.current-index); }
@@ -269,16 +364,20 @@ export component DownloadsPanel inherits Rectangle {
                     min-height: 80px; vertical-stretch: 1; content-width: self.visible-width;
                     mouse-drag-pan-enabled: true;
                     VerticalLayout {
-                        spacing: 4px; padding-bottom: 12px; alignment: start;
+                        spacing: 0px; padding-bottom: 12px; alignment: start;
                         if root.downloaded.length == 0: Text {
                             text: root.busy ? @tr("Updating downloads…") : root.query != "" || root.unread-only ? @tr("No matching chapters. Try another search or show all chapters.") : @tr("Your saved chapters will appear here. Download a chapter from its series page to read offline.");
                             wrap: word-wrap; color: Theme.current.text_secondary; font-size: 14px;
                         }
-                        for entry in root.downloaded: SavedRow {
-                            entry: entry; busy: root.busy;
-                            viewport-top: saved-scroll.absolute-position.y; viewport-height: saved-scroll.height;
-                            action(which) => { root.action(entry.key, which); }
-                            artwork-requested(key) => { root.artwork-requested(key); }
+                        // Cards sit 8px apart; a title's chapters join its card.
+                        for entry[index] in root.downloaded: VerticalLayout {
+                            padding-top: entry.kind == 0 && index > 0 ? 8px : 0px;
+                            SavedRow {
+                                entry: entry; busy: root.busy;
+                                viewport-top: saved-scroll.absolute-position.y; viewport-height: saved-scroll.height;
+                                action(which) => { root.action(entry.key, which); }
+                                artwork-requested(key) => { root.artwork-requested(key); }
+                            }
                         }
                     }
                 }
@@ -302,7 +401,7 @@ export component DownloadsPanel inherits Rectangle {
             if !root.compact: Rectangle { width: 1px; background: Theme.current.border_soft; }
             if !root.compact || root.active-tab == 1: VerticalLayout {
                 width: root.compact ? root.width : max(280px, (root.width - 25px) * 0.36); spacing: 12px;
-                if !root.compact: Text { text: @tr("Queue {}", root.queue-count); font-size: 20px; font-weight: 700; color: Theme.current.text_bright; }
+                if !root.compact: Text { text: @tr("Queue {}", root.queue-count); font-size: 17px; font-weight: 700; color: Theme.current.text_bright; }
                 Text { text: root.queue-summary; font-size: 12px; color: Theme.current.text_secondary; wrap: word-wrap; }
                 queue-scroll := ScrollView {
                     min-height: 80px; vertical-stretch: 1; content-width: self.visible-width;
@@ -332,11 +431,6 @@ export component DownloadsPanel inherits Rectangle {
                             if root.dragged-key != "": Text { text: @tr("Move to end"); color: Theme.current.text_secondary; horizontal-alignment: center; vertical-alignment: center; }
                         }
                     }
-                }
-                if root.queue-count > 0: HorizontalLayout {
-                    spacing: 8px;
-                    ActionButton { text: @tr("Pause all"); enabled: !root.busy; clicked => { root.action("", "pause-all"); } }
-                    ActionButton { text: @tr("Resume all"); enabled: !root.busy; clicked => { root.action("", "resume-all"); } }
                 }
             }
         }

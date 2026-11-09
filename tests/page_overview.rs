@@ -96,14 +96,17 @@ fn long_inventory_virtualizes_rows_and_mirrors_columns_without_reindexing() {
         for label in [
             "Back",
             "Current page",
-            "Smaller thumbnails",
-            "Larger thumbnails",
+            "Small thumbnails",
+            "Medium thumbnails",
+            "Large thumbnails",
             "Overview options",
         ] {
             let control = ElementHandle::find_by_accessible_label(&ui, label)
                 .next()
                 .unwrap();
-            assert!(control.size().height >= 48., "{label}");
+            // The shared header's 44px buttons; the chip and the size switch
+            // are the app's 34px filter-chip height or more.
+            assert!(control.size().height >= 34., "{label}");
             let position = control.absolute_position();
             assert!(
                 position.x >= 0. && position.x + control.size().width <= width + 0.5,
@@ -171,11 +174,11 @@ fn keyboard_selection_density_current_and_back_use_shared_callbacks() {
         let density = density.clone();
         move |value| density.borrow_mut().push(value)
     });
-    ElementHandle::find_by_accessible_label(&ui, "Smaller thumbnails")
+    ElementHandle::find_by_accessible_label(&ui, "Small thumbnails")
         .next()
         .unwrap()
         .invoke_accessible_default_action();
-    ElementHandle::find_by_accessible_label(&ui, "Larger thumbnails")
+    ElementHandle::find_by_accessible_label(&ui, "Large thumbnails")
         .next()
         .unwrap()
         .invoke_accessible_default_action();

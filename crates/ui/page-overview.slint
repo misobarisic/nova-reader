@@ -1,8 +1,40 @@
 import { Spinner } from "std-widgets.slint";
 import { Theme, SettingsStyle, Anim } from "@NovaUiShared";
-import { ActionButton, IconAction, BackButton, ReaderSelect } from "controls.slint";
+import { ActionButton, ReaderSelect } from "controls.slint";
 import { OverviewTile, PageThumbnail } from "page-thumbnail.slint";
 import { ReaderZoomGesture } from "reader-zoom.slint";
+import { LibraryFilterChip } from "@NovaUiBase/filter-chip.slint";
+import { PageHeader } from "page-header.slint";
+import { HeaderIcon, PageMetrics } from "page-menu.slint";
+
+// Thumbnail size as one three-step switch (small, medium, large tiles).
+component SizeSwitch inherits Rectangle {
+    in-out property <int> value;
+    callback picked(int);
+    width: 3 * 40px + 6px; height: 44px;
+    border-radius: Theme.button_corner_radius + 3px; background: Theme.current.hover_subtle;
+    accessible-role: tab-list; accessible-label: @tr("Thumbnail size");
+    Rectangle {
+        x: 3px + root.value * 40px; y: 3px; width: 40px; height: 38px;
+        border-radius: Theme.button_corner_radius; background: Theme.current.selection_fill;
+        animate x { duration: Anim.enabled ? Anim.player_fast : 0ms; easing: ease-out; }
+    }
+    for choice[index] in [
+        { label: @tr("Small thumbnails"), icon: "M4 4h16v16H4zM4 9.33h16M4 14.67h16M9.33 4v16M14.67 4v16" },
+        { label: @tr("Medium thumbnails"), icon: "M4 4h16v16H4zM4 12h16M12 4v16" },
+        { label: @tr("Large thumbnails"), icon: "M4 4h16v16H4z" },
+    ]: Rectangle {
+        x: 3px + index * 40px; y: 3px; width: 40px; height: 38px;
+        accessible-role: tab; accessible-label: choice.label; accessible-item-selected: root.value == index;
+        accessible-action-default => { root.picked(index); }
+        Path {
+            x: 11px; y: 10px; width: 18px; height: 18px; viewbox-width: 24; viewbox-height: 24;
+            fill: transparent; stroke-width: 1.8px; commands: choice.icon;
+            stroke: root.value == index ? Theme.current.accent_vivid : Theme.current.text_muted;
+        }
+        TouchArea { mouse-cursor: pointer; clicked => { root.picked(index); } }
+    }
+}
 export { OverviewTile } from "page-thumbnail.slint";
 
 // Round 48px touch target with a 40px translucent disc. The disc and white
@@ -188,13 +220,15 @@ component GalleryHeader inherits Rectangle {
     height: stack.preferred-height;
     Rectangle {
         y: 0px; width: 100%; height: parent.height + 28px;
-        background: @linear-gradient(180deg, #000000e0 0%, #000000a8 55%, #00000000 100%);
+        background: @linear-gradient(180deg, Theme.current.artwork_canvas.with-alpha(0.94) 0%, Theme.current.artwork_canvas.with-alpha(0.72) 55%, Theme.current.artwork_canvas.with-alpha(0) 100%);
     }
     // Header chrome swallows taps so they never open the image underneath.
     TouchArea { }
     stack := VerticalLayout {
+        // Compact (it floats over the photos and hides on scroll), on the
+        // shared 18px inset with the back glyph on it.
         padding-top: root.safe-top + 4px; padding-bottom: 8px;
-        padding-left: root.safe-left + 8px; padding-right: root.safe-right + 8px;
+        padding-left: root.safe-left + PageMetrics.side - 11px; padding-right: root.safe-right + PageMetrics.side - 11px;
         spacing: 4px;
         HorizontalLayout {
             height: 48px; spacing: 4px;
@@ -204,8 +238,8 @@ component GalleryHeader inherits Rectangle {
             }
             VerticalLayout {
                 min-width: 0px; horizontal-stretch: 1; alignment: center; spacing: 1px;
-                Text { text: root.title; font-size: 17px; font-weight: 700; color: #ffffff; overflow: elide; min-width: 0px; }
-                Text { text: root.count; font-size: 12px; color: #ffffffcc; overflow: elide; min-width: 0px; }
+                Text { text: root.title; font-size: 22px; font-weight: 700; color: Theme.current.text_bright; overflow: elide; min-width: 0px; }
+                Text { text: root.count; font-size: 12px; color: Theme.current.text_secondary; overflow: elide; min-width: 0px; }
             }
             OverlayPill {
                 max-width: 150px; text: @tr("Current image"); enabled: root.current-enabled;
@@ -319,9 +353,14 @@ export component PageOverview inherits Rectangle {
     callback menu();
     callback group-selected(int);
     callback retry();
-    background: root.collection ? #000000 : Theme.current.artwork_canvas;
+    background: Theme.current.artwork_canvas;
     forward-focus: keyboard;
 
+    function show-current() {
+        root.focus-index = root.current-index;
+        root.keyboard-active = false;
+        keyboard.focus(); root.reveal(root.current-index); root.current();
+    }
     function columns-for-density(value: int) -> int {
         if root.collection {
             return max(2, min(12, grid.width < 700px ? 4 - value : round(grid.width / 390px * (4 - value))));
@@ -504,43 +543,46 @@ export component PageOverview inherits Rectangle {
         VerticalLayout {
             padding: root.collection ? 0px : 18px; spacing: root.collection ? 0px : 14px;
             if !root.collection: VerticalLayout {
-                spacing: 14px; vertical-stretch: 0;
-                HorizontalLayout {
-                    spacing: 12px; height: 48px;
-                    BackButton { width: 48px; height: 48px; clicked => { root.back(); } }
-                    VerticalLayout {
-                        min-width: 0px; spacing: 2px;
-                        Text { text: root.title; font-size: root.width < 700px ? 24px : 28px; font-weight: 700; color: Theme.current.text_bright; overflow: elide; min-width: 0px; }
-                        if root.subtitle != "": Text { text: root.subtitle; font-size: 12px; color: Theme.current.text_secondary; overflow: elide; min-width: 0px; }
+                spacing: 10px; vertical-stretch: 0;
+                // The shared page header (title wraps rather than elides on a
+                // phone), with the options button on the right edge.
+                Rectangle {
+                    height: page-header.height;
+                    page-header := PageHeader {
+                        x: 0px; y: 0px; width: parent.width - (root.show-menu ? 48px : 0px);
+                        title: root.title; subtitle: root.subtitle; narrow: root.width < 700px; show-back: true;
+                        back => { root.back(); }
                     }
-                    if root.show-menu: IconAction {
-                        width: 48px; height: 48px; text: @tr("Overview options");
-                        icon: @image-url("../../assets/icons/navigation/more.svg"); clicked => { root.menu(); }
+                    if root.show-menu: HeaderIcon {
+                        x: parent.width - self.width; y: (PageMetrics.row - self.height) / 2;
+                        label: @tr("Overview options"); icon: @image-url("../../assets/icons/navigation/more.svg");
+                        clicked => { root.menu(); }
                     }
                 }
+                // One slim row: the count, a chip back to the page being read,
+                // and the thumbnail size.
                 HorizontalLayout {
-                    height: 48px; spacing: 8px;
+                    height: 44px; spacing: 8px;
                     Text {
                         text: root.tiles.length == 0 && (root.busy || root.status != "") ? "" : @tr("{n} page" | "{n} pages" % root.tiles.length);
                         font-size: 13px; color: Theme.current.text_secondary; vertical-alignment: center; min-width: 0px;
                     }
-                    ActionButton {
-                        height: 48px; max-width: 180px;
-                        text: @tr("Current page");
-                        enabled: root.current-index >= 0 && root.current-index < root.tiles.length;
-                        clicked => {
-                            root.focus-index = root.current-index;
-                            root.keyboard-active = false;
-                            keyboard.focus(); root.reveal(root.current-index); root.current();
+                    if root.current-index >= 0 && root.current-index < root.tiles.length: VerticalLayout {
+                        alignment: center;
+                        LibraryFilterChip {
+                            tonal: true; chip-height: 34px; keyboard-focusable: true;
+                            label: @tr("Current page");
+                            picked => { root.show-current(); }
+                            accessible-action-default => { root.show-current(); }
                         }
                     }
-                    IconAction {
-                        width: 48px; height: 48px; text: @tr("Smaller thumbnails"); enabled: root.density > 0;
-                        icon: @image-url("../../assets/icons/navigation/minus.svg"); clicked => { root.density-changed(root.density - 1); }
-                    }
-                    IconAction {
-                        width: 48px; height: 48px; text: @tr("Larger thumbnails"); enabled: root.density < 2;
-                        icon: @image-url("../../assets/icons/navigation/plus.svg"); clicked => { root.density-changed(root.density + 1); }
+                    Rectangle { horizontal-stretch: 1; }
+                    VerticalLayout {
+                        alignment: center;
+                        SizeSwitch {
+                            value: root.density;
+                            picked(value) => { if value != root.density { root.density-changed(value); } }
+                        }
                     }
                 }
                 if root.groups.length > 1: HorizontalLayout {

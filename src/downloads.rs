@@ -425,6 +425,11 @@ impl Controller {
                 });
             }
         }
+        // A title and its open chapters draw as one card: the row before the
+        // next title (or the end) closes it.
+        for i in 0..rows.len() {
+            rows[i].last = rows.get(i + 1).is_none_or(|next| next.kind == 0);
+        }
         // Count, size and bulk delete must describe only what the reader can see.
         DownloadView::trim_selection(&mut downloads.selected, &downloads.eligible);
         let mut queued: Vec<_> = downloads

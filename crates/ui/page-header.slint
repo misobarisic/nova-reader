@@ -1,1 +1,51 @@
-export { PageHeader } from "@NovaUiBase/page-header.slint";
+// The page header shared with Library, Updates, History and Browse
+// (`PageMetrics`): a 52px title row, the title at 32px (28px on phones), and a
+// plain back arrow whose glyph sits on the host's 18px inset with the title
+// beside it. Same properties as Kit's PageHeader, which Reader used before, so
+// More, Settings, Downloads and source settings move over unchanged. The host
+// keeps its gutter and safe areas.
+import { InterfaceStyle, Theme, SettingsStyle } from "@NovaUiShared";
+import { HeaderIcon, PageMetrics } from "page-menu.slint";
+
+export component PageHeader inherits Rectangle {
+    in property <string> title;
+    in property <string> subtitle;
+    in property <bool> narrow;
+    in property <bool> show-back: root.narrow;
+    // Keyboard selection from the host (More's landing list).
+    in property <bool> back-focused;
+    callback back();
+    vertical-stretch: 0;
+    height: heading.height + (root.subtitle != "" ? 4px + description.preferred-height : 0px);
+    heading := Rectangle {
+        x: 0px; y: 0px; width: 100%;
+        height: Math.max(PageMetrics.row, title-text.preferred-height);
+        // The 44px button's 22px glyph starts 11px in: pull it out so the
+        // arrow lines up with the content below.
+        if root.show-back: back-button := HeaderIcon {
+            x: -11px; y: (heading.height - self.height) / 2;
+            label: @tr("Back"); icon: @image-url("../../assets/icons/navigation/back.svg");
+            clicked => { root.back(); }
+        }
+        if root.show-back && root.back-focused && SettingsStyle.keyboard-mode: Rectangle {
+            x: -11px; y: (heading.height - 44px) / 2; width: 44px; height: 44px;
+            border-radius: 22px; border-width: 2px; border-color: Theme.current.focus_ring;
+        }
+        title-text := Text {
+            x: root.show-back ? 37px : 0px; y: 0px;
+            width: parent.width - self.x; height: parent.height;
+            text: root.title;
+            font-size: InterfaceStyle.tv ? 42px : PageMetrics.title-size(root.narrow); font-weight: 700;
+            color: Theme.current.text_bright;
+            vertical-alignment: center; wrap: word-wrap;
+            accessible-role: text;
+        }
+    }
+    description := Text {
+        x: 0px; y: heading.height + 4px; width: 100%;
+        height: root.subtitle != "" ? self.preferred-height : 0px;
+        visible: root.subtitle != "";
+        text: root.subtitle; font-size: InterfaceStyle.tv ? 18px : 13px;
+        color: Theme.current.text_secondary; wrap: word-wrap;
+    }
+}

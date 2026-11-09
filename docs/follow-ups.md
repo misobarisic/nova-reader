@@ -107,3 +107,17 @@ history.
 - Pages: `src/timeline_page.rs` builds History facts from visits rather than
   from the chapter's single `read_at`; the detail screen can show "first read
   3 Nov · read 3×".
+
+## Reader handoff tests are timing-sensitive under full-suite load
+
+**Status:** deferred. The live image-worker tests in
+`src/reader_handoff_tests.rs` (for example
+`live_worker_large_reverse_and_forward_gestures_preserve_covered_anchor` and
+`live_image_worker_resumes_midchapter_and_crosses_two_reverse_boundaries`)
+occasionally fail in `cargo test --workspace` and pass when run alone. They
+drive a real worker thread in a subprocess and wait on decode progress, so a
+busy machine can change what has been decoded when an assertion runs.
+
+**What to do:** wait on the condition each assertion depends on (decoded rows
+or the anchor) instead of a fixed number of pumps, or give these tests a
+dedicated serial runner.
