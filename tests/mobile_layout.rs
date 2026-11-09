@@ -206,25 +206,48 @@ fn nova_navigation_more_and_responsive_controls() {
             tap(&ui, "Back");
             assert_eq!(ui.get_section(), 4);
         }
-        // More uses Nova's settings cards and pushes child pages while retaining
-        // the wide rail. The narrow bottom bar belongs to the landing only.
-        tap(&ui, "Settings");
-        assert_eq!(ui.get_section(), 10);
-        assert_eq!(ui.get_bottom_navigation_height(), 0.);
-        tap(&ui, "Categories");
-        assert_eq!(ui.get_section(), 11);
-        tap(&ui, "Back");
-        assert_eq!(ui.get_section(), 10);
-        tap(&ui, "Theme");
-        assert_eq!(ui.get_section(), 14);
-        tap(&ui, "Back");
-        assert_eq!(ui.get_section(), 10);
-        tap(&ui, "Look and feel");
-        assert_eq!(ui.get_section(), 15);
-        tap(&ui, "Back");
-        assert_eq!(ui.get_section(), 10);
-        tap(&ui, "Back");
-        assert_eq!(ui.get_section(), 4);
+        // More is a grouped settings index. Wide windows show every section
+        // beside a fixed index and Back returns to the index; otherwise the
+        // groups open their own page first. The narrow bottom bar belongs to
+        // the landing only.
+        let two_pane = !narrow && width >= 760.;
+        if two_pane {
+            tap(&ui, "Categories");
+            assert_eq!(ui.get_section(), 11);
+            assert_eq!(ui.get_bottom_navigation_height(), 0.);
+            tap(&ui, "Back");
+            assert_eq!(ui.get_section(), 4);
+            tap(&ui, "Theme");
+            assert_eq!(ui.get_section(), 14);
+            tap(&ui, "Back");
+            assert_eq!(ui.get_section(), 4);
+            tap(&ui, "Look and feel");
+            assert_eq!(ui.get_section(), 15);
+            tap(&ui, "Back");
+            assert_eq!(ui.get_section(), 4);
+        } else {
+            tap(&ui, "Library and sources");
+            assert_eq!(ui.get_section(), 10);
+            assert_eq!(ui.get_bottom_navigation_height(), 0.);
+            tap(&ui, "Categories");
+            assert_eq!(ui.get_section(), 11);
+            tap(&ui, "Back");
+            assert_eq!(ui.get_section(), 10);
+            tap(&ui, "Back");
+            assert_eq!(ui.get_section(), 4);
+            tap(&ui, "Experience");
+            assert_eq!(ui.get_section(), 10);
+            tap(&ui, "Theme");
+            assert_eq!(ui.get_section(), 14);
+            tap(&ui, "Back");
+            assert_eq!(ui.get_section(), 10);
+            tap(&ui, "Look and feel");
+            assert_eq!(ui.get_section(), 15);
+            tap(&ui, "Back");
+            assert_eq!(ui.get_section(), 10);
+            tap(&ui, "Back");
+            assert_eq!(ui.get_section(), 4);
+        }
         for origin in [0, 1, 2, 3, 7] {
             ui.set_detail_origin(origin);
             ui.set_section(5);
@@ -382,6 +405,8 @@ fn nova_navigation_more_and_responsive_controls() {
     );
 
     // Pop restores the More keyboard host after the landing is interactive.
+    // The narrow index starts its keyboard choice on Downloads, so one step
+    // down opens Local chapters.
     ui.window().dispatch_event(WindowEvent::KeyPressed {
         text: slint::platform::Key::DownArrow.into(),
     });
@@ -391,7 +416,7 @@ fn nova_navigation_more_and_responsive_controls() {
     settle();
     assert_eq!(
         ui.get_section(),
-        13,
+        9,
         "More keyboard navigation must work after child return"
     );
     back(&ui);
@@ -477,9 +502,13 @@ fn nova_navigation_more_and_responsive_controls() {
     settle();
     ui.global::<Anim>().set_enabled(true);
 
-    // Settings has its own retained offset, independent of More's scroller.
+    // A settings group page has its own retained offset, independent of
+    // More's scroller.
     ui.window().set_size(LogicalSize::new(390., 300.));
+    ui.set_section(4);
     settle();
+    tap(&ui, "Storage and data");
+    assert_eq!(ui.get_section(), 10);
     let settings_scroll = ElementHandle::find_by_element_id(&ui, "MorePage::child-scroll")
         .next()
         .unwrap();
