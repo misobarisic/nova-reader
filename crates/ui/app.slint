@@ -698,6 +698,8 @@ export component AppWindow inherits Window {
     callback chapter-order-changed(bool);
     callback adult-visibility-changed(bool);
     callback navigate(int);
+    // More's index search: whether a destination's words match the query.
+    pure callback more-search-matches(string, string) -> bool;
     callback return-to-catalogue;
     callback open-item(int);
     callback open-series(int);
@@ -760,7 +762,7 @@ export component AppWindow inherits Window {
         if root.section == 3 && root.source-catalog-open { root.source-catalog-open = false; root.navigate(3); return; }
         // Back from results across sources returns to the source list.
         if root.section == 3 && BrowseBridge.global-query != "" { BrowseBridge.global-search(""); return; }
-        root.navigate(root.section == 6 ? (root.reader-opening || root.reader-collection ? root.reader-return-section : 5) : root.section == 8 ? 3 : root.section == 11 || root.section == 12 || root.section == 14 || root.section == 15 || root.section == 16 || root.section == 17 || root.section == 18 || root.section == 19 || root.section == 20 || root.section == 21 || root.section == 22 ? 10 : root.section >= 9 || root.section == 7 ? 4 : root.section == 5 ? root.detail-origin : 0);
+        root.navigate(root.section == 6 ? (root.reader-opening || root.reader-collection ? root.reader-return-section : 5) : root.section == 8 ? 3 : root.section == 11 || root.section == 12 || root.section == 14 || root.section == 15 || root.section == 16 || root.section == 17 || root.section == 18 || root.section == 19 || root.section == 20 || root.section == 21 || root.section == 22 ? (more-page.two-pane ? 4 : 10) : root.section >= 9 || root.section == 7 ? 4 : root.section == 5 ? root.detail-origin : 0);
     }
 
     changed section => {
@@ -1431,6 +1433,7 @@ export component AppWindow inherits Window {
                             image-cache-refresh => { root.image-cache-refresh(); }
                             image-cache-clear => { root.image-cache-clear(); }
                             navigate(section) => { root.navigate(section); }
+                            search-matches(text, query) => { return root.more-search-matches(text, query); }
                             install-addon => { root.install-addon(); }
                             local-import(folder) => { root.local-import(folder); }
                             add-category(name) => { root.add-category(name); }

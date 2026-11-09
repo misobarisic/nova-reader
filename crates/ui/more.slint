@@ -11,6 +11,7 @@ import { AboutPage } from "about.slint";
 import { ProfilesPage, ProfilesBridge } from "profiles.slint";
 import { LicenseSource } from "about-models.slint";
 import { MenuLink, ActionButton, ReaderField } from "controls.slint";
+import { IndexRow, IndexGroupLabel, IndexGroup } from "more-index.slint";
 
 export component MorePage inherits Rectangle {
     in property <int> section;
@@ -38,16 +39,175 @@ export component MorePage inherits Rectangle {
     callback local-import(bool);
     callback add-category(string);
     callback check-update;
+    // Case-insensitive search over a destination's title and keywords.
+    pure callback search-matches(string, string) -> bool;
     background: Theme.current.artwork_canvas;
     clip: true;
-    private property <int> choice: root.narrow ? 1 : 2;
+
+    // ---- Unified More/Settings index (Nova's design A) ----
+    // Wide windows keep the index as a fixed column and show the picked
+    // destination beside it; the right side stays empty until something is
+    // picked. Narrow windows go index → settings group → section, each a
+    // pushed page with Back.
+    out property <bool> two-pane: !root.narrow && root.width >= 760px;
+    private property <length> index-width: 336px; // 300px of rows plus gutters
+    private property <length> pane-x: root.two-pane ? root.index-width + 1px : 0px;
+    private property <string> query;
+    // The settings group page opened from a narrow index (0 = all sections).
+    private property <int> settings-group: 0;
+    // Keyboard choice: a destination section, or 101-103 for group rows.
+    private property <int> choice: root.narrow ? 7 : 9;
+    // Visual order on both layouts; labels (200+) only appear on the wide index.
+    private property <[int]> wide-order: [201, 9, 24, 202, 19, 14, 16, 15, 203, 20, 21, 3, 11, 204, 18, 12, 22, 17, 205, 13];
+    private property <[int]> narrow-order: [7, 9, 24, 101, 102, 103, 19, 14, 16, 15, 20, 21, 3, 11, 18, 12, 22, 17, 13];
+    private property <[int]> key-order: root.two-pane ? root.wide-order : root.narrow-order;
+    pure function group-of(id: int) -> int {
+        return id == 19 || id == 14 || id == 16 || id == 15 ? 1
+            : id == 3 || id == 11 || id == 20 || id == 21 ? 2
+            : id == 17 || id == 22 || id == 18 || id == 12 ? 3 : 0;
+    }
+    pure function group-title(group: int) -> string {
+        return group == 1 ? @tr("Experience") : group == 2 ? @tr("Library and sources")
+            : group == 3 ? @tr("Storage and data") : @tr("Settings");
+    }
+    pure function title(id: int) -> string {
+        return id == 7 ? @tr("Downloads") : id == 9 ? @tr("Local chapters") : id == 24 ? @tr("Profiles")
+            : id == 19 ? @tr("Reader") : id == 14 ? @tr("Theme") : id == 16 ? @tr("Display")
+            : id == 15 ? @tr("Look and feel") : id == 3 ? @tr("Sources") : id == 11 ? @tr("Categories")
+            : id == 20 ? @tr("Sync") : id == 21 ? @tr("Downloads") : id == 17 ? @tr("Cache")
+            : id == 22 ? @tr("Image limits") : id == 18 ? @tr("Screenshots & saved images")
+            : id == 12 ? @tr("Data") : id == 13 ? @tr("About")
+            : id == 101 ? @tr("Experience") : id == 102 ? @tr("Library and sources")
+            : id == 103 ? @tr("Storage and data") : id == 201 ? @tr("YOUR READING")
+            : id == 202 ? @tr("EXPERIENCE") : id == 203 ? @tr("LIBRARY AND SOURCES")
+            : id == 204 ? @tr("STORAGE AND DATA") : id == 205 ? @tr("NOVA READER") : "";
+    }
+    // Searchable words beyond the title, matching each section's contents.
+    pure function keywords(id: int) -> string {
+        return id == 7 ? @tr("Read your saved chapters") : id == 9 ? @tr("Import chapter archives and image folders")
+            : id == 24 ? @tr("Separate libraries, history and settings")
+            : id == 19 ? @tr("Reading defaults, navigation and image adjustments")
+            : id == 14 ? @tr("Accent color, backgrounds and card styling") : id == 16 ? @tr("Library and browse layouts")
+            : id == 15 ? @tr("Animations and motion options") : id == 3 ? @tr("Install, browse and configure source addons")
+            : id == 11 ? @tr("Organize your library") : id == 20 ? @tr("Paired devices, reading progress and shared settings")
+            : id == 21 ? @tr("Auto-delete read chapters and excluded categories")
+            : id == 17 ? @tr("Chapter pages, artwork and storage limits")
+            : id == 22 ? @tr("File size, dimensions and decoder memory")
+            : id == 18 ? @tr("Saved image source, image format, quality and save folders")
+            : id == 12 ? @tr("Backup and import") : id == 13 ? @tr("Information about Nova Reader") : "";
+    }
+    pure function kit-icon(id: int) -> int {
+        return id == 7 ? 17 : id == 14 ? 14 : id == 16 ? 3 : id == 15 ? 6 : id == 3 ? 0 : id == 11 ? 1
+            : id == 20 ? 7 : id == 21 ? 8 : id == 17 ? 2 : id == 13 ? 15
+            : id == 101 ? 6 : id == 102 ? 1 : id == 103 ? 4 : -1;
+    }
+    pure function own-icon(id: int) -> image {
+        return id == 9 ? @image-url("../../assets/icons/settings/folder.svg")
+            : id == 24 ? @image-url("../../assets/icons/settings/profiles.svg")
+            : id == 19 ? @image-url("../../assets/icons/settings/reader.svg")
+            : id == 22 ? @image-url("../../assets/icons/settings/image-limits.svg")
+            : id == 18 ? @image-url("../../assets/icons/settings/screenshots.svg")
+            : @image-url("../../assets/icons/settings/backup.svg");
+    }
+    pure function in-group(id: int) -> bool { return root.settings-group == 0 || root.group-of(id) == root.settings-group; }
+    pure function hit(id: int) -> bool {
+        return root.query == "" || root.search-matches(root.title(id) + " " + root.keywords(id), root.query);
+    }
+    // Whether a row (or a wide-index label) is listed right now.
+    pure function shown(id: int) -> bool {
+        if id >= 200 { return root.two-pane && root.query == ""; }
+        if id >= 101 && id <= 103 { return !root.two-pane && root.query == ""; }
+        if id == 7 { return root.narrow && root.hit(id); }
+        // Narrow layouts list settings sections on their group pages, except
+        // while searching, when matches are listed directly.
+        if root.group-of(id) > 0 && !root.two-pane && root.query == "" { return false; }
+        return root.hit(id);
+    }
+    pure function selectable(id: int) -> bool { return id < 200 && root.shown(id); }
+    function pick(id: int) {
+        root.choice = id;
+        if id >= 101 && id <= 103 {
+            root.settings-group = id - 100;
+            root.navigate(10);
+            return;
+        }
+        // Back from a section returns to its group page on narrow layouts.
+        if root.group-of(id) > 0 { root.settings-group = root.group-of(id); }
+        root.navigate(id);
+        if id == 17 { root.image-cache-refresh(); }
+    }
+    // Keyboard steps skip rows hidden by the layout or the search.
+    pure function key-index(id: int) -> int {
+        return root.key-order[0] == id ? 0 : root.key-order[1] == id ? 1 : root.key-order[2] == id ? 2
+            : root.key-order[3] == id ? 3 : root.key-order[4] == id ? 4 : root.key-order[5] == id ? 5
+            : root.key-order[6] == id ? 6 : root.key-order[7] == id ? 7 : root.key-order[8] == id ? 8
+            : root.key-order[9] == id ? 9 : root.key-order[10] == id ? 10 : root.key-order[11] == id ? 11
+            : root.key-order[12] == id ? 12 : root.key-order[13] == id ? 13 : root.key-order[14] == id ? 14
+            : root.key-order[15] == id ? 15 : root.key-order[16] == id ? 16 : root.key-order[17] == id ? 17
+            : root.key-order[18] == id ? 18 : root.key-order[19] == id ? 19 : -1;
+    }
+    pure function key-step(index: int, direction: int) -> int {
+        let last = root.key-order.length - 1;
+        let i1 = clamp(index + direction, 0, last);
+        if root.selectable(root.key-order[i1]) { return i1; }
+        let i2 = clamp(i1 + direction, 0, last);
+        if root.selectable(root.key-order[i2]) { return i2; }
+        let i3 = clamp(i2 + direction, 0, last);
+        if root.selectable(root.key-order[i3]) { return i3; }
+        let i4 = clamp(i3 + direction, 0, last);
+        if root.selectable(root.key-order[i4]) { return i4; }
+        let i5 = clamp(i4 + direction, 0, last);
+        if root.selectable(root.key-order[i5]) { return i5; }
+        let i6 = clamp(i5 + direction, 0, last);
+        if root.selectable(root.key-order[i6]) { return i6; }
+        let i7 = clamp(i6 + direction, 0, last);
+        if root.selectable(root.key-order[i7]) { return i7; }
+        let i8 = clamp(i7 + direction, 0, last);
+        if root.selectable(root.key-order[i8]) { return i8; }
+        let i9 = clamp(i8 + direction, 0, last);
+        if root.selectable(root.key-order[i9]) { return i9; }
+        let i10 = clamp(i9 + direction, 0, last);
+        if root.selectable(root.key-order[i10]) { return i10; }
+        let i11 = clamp(i10 + direction, 0, last);
+        if root.selectable(root.key-order[i11]) { return i11; }
+        let i12 = clamp(i11 + direction, 0, last);
+        if root.selectable(root.key-order[i12]) { return i12; }
+        let i13 = clamp(i12 + direction, 0, last);
+        if root.selectable(root.key-order[i13]) { return i13; }
+        let i14 = clamp(i13 + direction, 0, last);
+        if root.selectable(root.key-order[i14]) { return i14; }
+        let i15 = clamp(i14 + direction, 0, last);
+        if root.selectable(root.key-order[i15]) { return i15; }
+        let i16 = clamp(i15 + direction, 0, last);
+        if root.selectable(root.key-order[i16]) { return i16; }
+        let i17 = clamp(i16 + direction, 0, last);
+        if root.selectable(root.key-order[i17]) { return i17; }
+        let i18 = clamp(i17 + direction, 0, last);
+        if root.selectable(root.key-order[i18]) { return i18; }
+        let i19 = clamp(i18 + direction, 0, last);
+        return root.selectable(root.key-order[i19]) ? i19 : index;
+    }
+    function move-choice(direction: int) {
+        let index = root.key-index(root.choice);
+        // A choice hidden by search or layout restarts from the first row.
+        if index < 0 || !root.selectable(root.choice) {
+            root.choice = root.key-order[root.key-step(-1, 1)];
+        } else {
+            root.choice = root.key-order[root.key-step(index, direction)];
+        }
+    }
+    function reveal-row(y: length, h: length) {
+        let top = y - landing-scroll.absolute-position.y;
+        if top < 0px { landing-scroll.content-y -= top; }
+        else if top + h > landing-scroll.visible-height { landing-scroll.content-y -= top + h - landing-scroll.visible-height; }
+    }
     public function focus_shell() {
         if root.section == 4 { nav-scope.focus(); }
         else if root.section == 13 { about-page.focus_shell(); about-focus.start(); }
         else if root.detail-open { detail-scope.focus(); }
         else { child-scope.focus(); }
     }
-    changed narrow => { root.choice = max(root.narrow ? 1 : 2, root.choice); }
+    changed narrow => { if !root.selectable(root.choice) { root.move-choice(1); } }
     private property <bool> local-open: (root.section >= 9 && root.section <= 22) || root.section == 24;
     private property <bool> detail-open: root.section == 11 || root.section == 12 || root.section == 14 || root.section == 15 || root.section == 16 || root.section == 17 || root.section == 18 || root.section == 19 || root.section == 20 || root.section == 21 || root.section == 22;
     private property <int> child-section: 9;
@@ -105,6 +265,8 @@ export component MorePage inherits Rectangle {
         if root.section == 13 { about-focus.start(); }
         if root.detail-open { root.child-section = 10; root.detail-section = root.section; detail-scroll.content-y = 0px; }
         if root.section == 4 { root.restore-pending = true; }
+        // Opened directly (not from a group row) on the wide index: list every section.
+        if root.section == 10 && root.two-pane { root.settings-group = 0; }
     }
     about-focus := Timer { interval: 1ms; running: false; triggered => {
         self.stop(); if root.section == 13 { about-page.focus_shell(); }
@@ -166,22 +328,24 @@ export component MorePage inherits Rectangle {
     // This scroller remains mounted while its children own input. Returning
     // restores the same cards and position, just like Nova's More page.
     landing := Rectangle {
-        width: root.width; height: max(0px, root.height - (root.narrow && !Theme.transparent_navbar ? 68px : 0px));
-        visible: !root.local-open || root.slide < 1 || root.alpha < 1;
-        // Pages enter like a Browse catalogue: a short slide and fade, the
-        // page behind nudging aside.
-        x: -24px * root.slide; opacity: 1 - root.alpha;
+        width: root.two-pane ? root.index-width : root.width;
+        height: max(0px, root.height - (root.narrow && !Theme.transparent_navbar ? 68px : 0px));
+        visible: root.two-pane || !root.local-open || root.slide < 1 || root.alpha < 1;
+        // Narrow pages enter like a Browse catalogue: a short slide and fade,
+        // the page behind nudging aside. The wide index never moves.
+        x: root.two-pane ? 0px : -24px * root.slide;
+        opacity: root.two-pane ? 1 : 1 - root.alpha;
         nav-scope := FocusScope {
-            width: parent.width; height: parent.height; enabled: root.landing-active;
+            width: parent.width; height: parent.height; enabled: root.landing-active || root.two-pane;
             key-pressed(e) => {
                 if e.text == Key.UpArrow || e.text == Key.DownArrow {
                     SettingsStyle.keyboard-mode = true;
-                    root.choice = clamp(root.choice + (e.text == Key.UpArrow ? -1 : 1), root.narrow ? 1 : 2, 5);
+                    root.move-choice(e.text == Key.UpArrow ? -1 : 1);
                     self.focus();
                     return accept;
                 }
                 if e.text == Key.Return || e.text == " " {
-                    if !e.repeat { root.navigate(root.choice == 1 ? 7 : root.choice == 2 ? 9 : root.choice == 3 ? 24 : root.choice == 4 ? 10 : 13); }
+                    if !e.repeat && root.selectable(root.choice) { root.pick(root.choice); }
                     return accept;
                 }
                 return reject;
@@ -194,45 +358,141 @@ export component MorePage inherits Rectangle {
                 mouse-drag-pan-enabled: true;
                 content-width: self.visible-width;
                 VerticalLayout {
-                    padding: 18px; padding-bottom: 18px + (root.narrow && Theme.transparent_navbar ? 68px : 0px); spacing: 12px; alignment: start;
+                    padding: 18px; padding-bottom: 18px + (root.narrow && Theme.transparent_navbar ? 68px : 0px);
+                    spacing: root.two-pane ? 8px : 12px; alignment: start;
                     PageHeader { title: @tr("More"); narrow: root.narrow; show-back: root.narrow; back => { root.navigate(0); } }
-                    if root.narrow: SettingsCard { MenuLink {
-                        focused: SettingsStyle.keyboard-mode && root.choice == 1;
-                        interactive: root.landing-active; title: @tr("Downloads"); subtitle: @tr("Read your saved chapters");
-                        destination-id: "more:downloads"; icon-kind: 17; picked => { root.choice = 1; root.navigate(7); }
-                    } }
-                    SettingsCard { MenuLink {
-                        focused: SettingsStyle.keyboard-mode && root.choice == 2;
-                        interactive: root.landing-active; title: @tr("Local chapters"); subtitle: @tr("Import chapter archives and image folders");
-                        destination-id: "more:local"; icon: @image-url("../../assets/icons/settings/folder.svg"); picked => { root.choice = 2; root.navigate(9); }
-                    } }
-                    SettingsCard { MenuLink {
-                        focused: SettingsStyle.keyboard-mode && root.choice == 3;
-                        interactive: root.landing-active; title: @tr("Profiles");
-                        subtitle: ProfilesBridge.active-name != "" ? ProfilesBridge.active-name : @tr("Separate libraries, history and settings");
-                        destination-id: "more:profiles"; icon: @image-url("../../assets/icons/settings/profiles.svg"); picked => { root.choice = 3; root.navigate(24); }
-                    } }
-                    SettingsCard { MenuLink {
-                        focused: SettingsStyle.keyboard-mode && root.choice == 4;
-                        interactive: root.landing-active; title: @tr("Settings"); subtitle: @tr("Make Nova Reader yours");
-                        destination-id: "more:settings"; icon-kind: 10; picked => { root.choice = 4; root.navigate(10); }
-                    } }
-                    SettingsCard { MenuLink {
-                        focused: SettingsStyle.keyboard-mode && root.choice == 5;
-                        interactive: root.landing-active; title: @tr("About"); subtitle: @tr("Information about Nova Reader");
-                        destination-id: "more:about"; icon-kind: 15; picked => { root.choice = 5; root.navigate(13); }
-                    } }
+                    // The active profile, with a quick way to switch.
+                    for profile in ProfilesBridge.profiles: Rectangle {
+                        visible: profile.active;
+                        height: profile.active ? 64px : 0px;
+                        background: Theme.current.card; border-radius: Theme.card_corner_radius;
+                        border-width: 1px; border-color: Theme.current.border_soft;
+                        if profile.active: HorizontalLayout {
+                            padding: 12px; spacing: 12px;
+                            VerticalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: 40px; height: 40px; border-radius: 20px;
+                                    background: profile.avatar-background;
+                                    Text { text: profile.initial; color: profile.avatar-foreground; font-size: 18px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                                }
+                            }
+                            VerticalLayout {
+                                alignment: center; spacing: 2px; horizontal-stretch: 1; min-width: 0px;
+                                Text { text: profile.name; color: Theme.current.text_bright; font-size: 15px; font-weight: 600; overflow: elide; }
+                                Text { text: @tr("Current profile"); color: Theme.current.text_muted; font-size: 12px; overflow: elide; }
+                            }
+                            ActionButton {
+                                text: @tr("Switch"); enabled: root.landing-active || root.two-pane;
+                                clicked => { root.pick(24); }
+                            }
+                        }
+                    }
+                    ReaderField {
+                        placeholder-text: @tr("Search settings");
+                        search-icon: true;
+                        enabled: root.landing-active || root.two-pane;
+                        edited(value) => {
+                            root.query = value;
+                            if !root.selectable(root.choice) { root.move-choice(1); }
+                        }
+                    }
+                    if root.two-pane: IndexGroup {
+                        card: false;
+                        for id in root.wide-order: Rectangle {
+                            height: root.shown(id) ? (id >= 200 ? label.height : row.height) : 0px;
+                            visible: root.shown(id);
+                            label := IndexGroupLabel {
+                                width: parent.width; visible: id >= 200;
+                                text: root.title(id);
+                            }
+                            row := IndexRow {
+                                width: parent.width; visible: id < 200;
+                                title: root.title(id); icon-kind: root.kit-icon(id);
+                                icon: root.own-icon(id);
+                                destination-id: "more:" + id;
+                                selected: root.section == id;
+                                focused: SettingsStyle.keyboard-mode && root.choice == id && nav-scope.has-focus;
+                                interactive: root.two-pane;
+                                reveal(y, h) => { root.reveal-row(y, h); }
+                                picked => { root.pick(id); }
+                            }
+                        }
+                    }
+                    if !root.two-pane: VerticalLayout {
+                        spacing: 12px;
+                        if root.shown(7) || root.shown(9) || root.shown(24): IndexGroup {
+                            for id in [7, 9, 24]: IndexRow {
+                                height: root.shown(id) ? 44px : 0px; visible: root.shown(id);
+                                title: root.title(id); icon-kind: root.kit-icon(id);
+                                icon: root.own-icon(id);
+                                destination-id: id == 7 ? "more:downloads" : id == 9 ? "more:local" : "more:profiles";
+                                focused: SettingsStyle.keyboard-mode && root.choice == id;
+                                interactive: root.landing-active;
+                                reveal(y, h) => { root.reveal-row(y, h); }
+                                picked => { root.pick(id); }
+                            }
+                        }
+                        if root.query == "": IndexGroup {
+                            for group in [101, 102, 103]: IndexRow {
+                                title: root.title(group); icon-kind: root.kit-icon(group); chevron: true;
+                                destination-id: "more:settings:" + (group - 100);
+                                focused: SettingsStyle.keyboard-mode && root.choice == group;
+                                interactive: root.landing-active;
+                                reveal(y, h) => { root.reveal-row(y, h); }
+                                picked => { root.pick(group); }
+                            }
+                        }
+                        if root.query != "": IndexGroup {
+                            for id in [19, 14, 16, 15, 20, 21, 3, 11, 18, 12, 22, 17]: IndexRow {
+                                height: root.shown(id) ? 44px : 0px; visible: root.shown(id);
+                                title: root.title(id); icon-kind: root.kit-icon(id);
+                                icon: root.own-icon(id);
+                                trailing: root.group-title(root.group-of(id));
+                                destination-id: "more:" + id;
+                                focused: SettingsStyle.keyboard-mode && root.choice == id;
+                                interactive: root.landing-active;
+                                reveal(y, h) => { root.reveal-row(y, h); }
+                                picked => { root.pick(id); }
+                            }
+                        }
+                        if root.shown(13): IndexGroup {
+                            IndexRow {
+                                title: root.title(13); icon-kind: 15;
+                                destination-id: "more:about";
+                                focused: SettingsStyle.keyboard-mode && root.choice == 13;
+                                interactive: root.landing-active;
+                                reveal(y, h) => { root.reveal-row(y, h); }
+                                picked => { root.pick(13); }
+                            }
+                        }
+                    }
+                    if root.query != "" && !root.shown(9) && !root.shown(24) && !root.shown(13) && !root.shown(7)
+                        && !root.shown(19) && !root.shown(14) && !root.shown(16) && !root.shown(15) && !root.shown(3)
+                        && !root.shown(11) && !root.shown(20) && !root.shown(21) && !root.shown(17) && !root.shown(22)
+                        && !root.shown(18) && !root.shown(12): Text {
+                        text: @tr("Nothing found"); color: Theme.current.text_muted; horizontal-alignment: center;
+                    }
                 }
             }
         }
     }
+    // The wide index's edge; the right side is empty until something is picked.
+    if root.two-pane: Rectangle {
+        x: root.index-width; width: 1px; height: root.height;
+        background: Theme.current.border_soft;
+    }
     // Settings landing stays mounted beneath its selected leaf. Back reveals
     // the same scroll/focus state instead of replacing a shared child body.
+    // On the wide index, child and detail pages fill the pane beside it.
     child := Rectangle {
-        width: root.width; height: root.height;
-        visible: (root.local-open || root.slide > 0 || root.alpha > 0) && (!root.detail-open || root.sub-slide < 1 || root.sub-alpha < 1);
-        x: 48px * (1 - root.slide) - 24px * root.sub-slide;
-        opacity: root.alpha * (1 - root.sub-alpha);
+        width: root.width - root.pane-x; height: root.height;
+        // Beside the index a section replaces a page instead of covering it.
+        visible: (root.local-open || root.slide > 0 || root.alpha > 0) && (root.two-pane
+            ? !root.detail-open && root.sub-slide <= 0 && root.sub-alpha <= 0
+            : (!root.detail-open || root.sub-slide < 1 || root.sub-alpha < 1));
+        x: root.pane-x + 48px * (1 - root.slide) - (root.two-pane ? 0px : 24px * root.sub-slide);
+        opacity: root.two-pane ? root.alpha : root.alpha * (1 - root.sub-alpha);
         child-scope := FocusScope {
             width: parent.width; height: parent.height; enabled: root.child-active && root.child-section != 13;
             child-scroll := ScrollView {
@@ -243,7 +503,7 @@ export component MorePage inherits Rectangle {
                 VerticalLayout {
                     padding: 18px; spacing: 12px; alignment: start;
                     PageHeader {
-                        title: root.child-section == 9 ? @tr("Local chapters") : root.child-section == 24 ? @tr("Profiles") : root.child-section == 10 ? @tr("Settings") : @tr("About");
+                        title: root.child-section == 9 ? @tr("Local chapters") : root.child-section == 24 ? @tr("Profiles") : root.child-section == 10 ? root.group-title(root.settings-group) : @tr("About");
                         narrow: root.narrow; show-back: !ProfilesBridge.require-selection || root.child-section != 24;
                         back => { if root.child-active && !(ProfilesBridge.require-selection && root.child-section == 24) { root.navigate(4); } }
                     }
@@ -265,53 +525,53 @@ export component MorePage inherits Rectangle {
                     }
                     if root.child-section == 10: VerticalLayout {
                         spacing: 12px; alignment: start;
-                        SettingsCard { MenuLink {
+                        if root.in-group(20): SettingsCard { MenuLink {
                             interactive: root.child-active; title: @tr("Sync"); subtitle: @tr("Paired devices, reading progress and shared settings"); icon-kind: 7;
-                            destination-id: "settings:sync"; picked => { root.navigate(20); }
+                            destination-id: "settings:sync"; picked => { root.pick(20); }
                         } }
-                        SettingsCard { MenuLink {
+                        if root.in-group(21): SettingsCard { MenuLink {
                             interactive: root.child-active; title: @tr("Downloads"); subtitle: @tr("Auto-delete read chapters and excluded categories"); icon-kind: 8;
-                            picked => { root.navigate(21); }
+                            picked => { root.pick(21); }
                         } }
-                        SettingsCard { MenuLink {
+                        if root.in-group(19): SettingsCard { MenuLink {
                             interactive: root.child-active; title: @tr("Reader"); subtitle: @tr("Reading defaults, navigation and image adjustments"); icon: @image-url("../../assets/icons/settings/reader.svg");
-                            picked => { root.navigate(19); }
+                            picked => { root.pick(19); }
                         } }
-                        SettingsCard { MenuLink {
+                        if root.in-group(14): SettingsCard { MenuLink {
                             interactive: root.child-active; title: @tr("Theme"); subtitle: @tr("Accent color, backgrounds and card styling"); icon-kind: 14;
-                            picked => { root.navigate(14); }
+                            picked => { root.pick(14); }
                         } }
-                        SettingsCard { MenuLink {
+                        if root.in-group(16): SettingsCard { MenuLink {
                             interactive: root.child-active; title: @tr("Display"); subtitle: @tr("Library and browse layouts"); icon-kind: 3;
-                            picked => { root.navigate(16); }
+                            picked => { root.pick(16); }
                         } }
-                        SettingsCard { MenuLink {
+                        if root.in-group(18): SettingsCard { MenuLink {
                             interactive: root.child-active; title: @tr("Screenshots & saved images"); subtitle: @tr("Saved image source, image format, quality and save folders"); icon: @image-url("../../assets/icons/settings/screenshots.svg");
-                            picked => { root.navigate(18); }
+                            picked => { root.pick(18); }
                         } }
-                        SettingsCard { MenuLink {
+                        if root.in-group(15): SettingsCard { MenuLink {
                             interactive: root.child-active; title: @tr("Look and feel"); subtitle: @tr("Animations and motion options"); icon-kind: 6;
-                            picked => { root.navigate(15); }
+                            picked => { root.pick(15); }
                         } }
-                        SettingsCard { MenuLink {
+                        if root.in-group(3): SettingsCard { MenuLink {
                             interactive: root.child-active; title: @tr("Sources"); subtitle: @tr("Install, browse and configure source addons"); icon-kind: 0;
-                            picked => { root.navigate(3); }
+                            picked => { root.pick(3); }
                         } }
-                        SettingsCard { MenuLink {
+                        if root.in-group(11): SettingsCard { MenuLink {
                             interactive: root.child-active; title: @tr("Categories"); subtitle: @tr("Organize your library"); icon-kind: 1;
-                            picked => { root.navigate(11); }
+                            picked => { root.pick(11); }
                         } }
-                        SettingsCard { MenuLink {
+                        if root.in-group(12): SettingsCard { MenuLink {
                             interactive: root.child-active; title: @tr("Data"); subtitle: @tr("Backup and import"); icon: @image-url("../../assets/icons/settings/backup.svg");
-                            picked => { root.navigate(12); }
+                            picked => { root.pick(12); }
                         } }
-                        SettingsCard { MenuLink {
+                        if root.in-group(22): SettingsCard { MenuLink {
                             interactive: root.child-active; title: @tr("Image limits"); subtitle: @tr("File size, dimensions and decoder memory"); icon: @image-url("../../assets/icons/settings/image-limits.svg");
-                            picked => { root.navigate(22); }
+                            picked => { root.pick(22); }
                         } }
-                        SettingsCard { MenuLink {
+                        if root.in-group(17): SettingsCard { MenuLink {
                             interactive: root.child-active; title: @tr("Cache"); subtitle: @tr("Chapter pages, artwork and storage limits"); icon-kind: 2;
-                            picked => { root.navigate(17); root.image-cache-refresh(); }
+                            picked => { root.pick(17); }
                         } }
                     }
 
@@ -324,7 +584,7 @@ export component MorePage inherits Rectangle {
             active: root.child-active && root.section == 13;
             external_navigation: true;
             narrow: root.narrow;
-            nav-viewport-width: root.width;
+            nav-viewport-width: root.width - root.pane-x;
             app_version: root.app-version;
             license_text_chunks: root.license-text-chunks;
             license_sources: root.license-sources;
@@ -341,15 +601,15 @@ export component MorePage inherits Rectangle {
         }
     }
     detail := Rectangle {
-        width: root.width; height: root.height;
+        width: root.width - root.pane-x; height: root.height;
         visible: (root.local-open || root.slide > 0 || root.alpha > 0) && (root.detail-open || root.sub-slide > 0 || root.sub-alpha > 0);
-        x: 48px * (1 - root.sub-slide);
+        x: root.pane-x + 48px * (1 - root.sub-slide);
         opacity: root.alpha * root.sub-alpha;
         detail-scope := FocusScope {
             width: parent.width; height: parent.height; enabled: root.detail-active;
             if root.detail-section == 19: VerticalLayout {
                 padding: 18px; spacing: 12px;
-                PageHeader { title: @tr("Reader"); narrow: root.narrow; show-back: true; back => { if root.detail-active { root.navigate(10); } } }
+                PageHeader { title: @tr("Reader"); narrow: root.narrow; show-back: true; back => { if root.detail-active { root.navigate(root.two-pane ? 4 : 10); } } }
                 if root.status != "": Text { text: root.status; color: Theme.current.text_settings; wrap: word-wrap; }
                 reader-defaults := ReaderSettingsForm { global-settings: true; interactive: root.detail-active; min-height: 0px; vertical-stretch: 1; }
             }
@@ -367,7 +627,7 @@ export component MorePage inherits Rectangle {
                     padding: 18px; spacing: 16px; alignment: start;
                     PageHeader {
                         title: root.detail-section == 22 ? @tr("Image limits") : root.detail-section == 21 ? @tr("Downloads") : root.detail-section == 20 ? @tr("Sync") : root.detail-section == 11 ? @tr("Categories") : root.detail-section == 12 ? @tr("Data") : root.detail-section == 14 ? @tr("Theme") : root.detail-section == 16 ? @tr("Display") : root.detail-section == 17 ? @tr("Cache") : root.detail-section == 18 ? @tr("Screenshots & saved images") : @tr("Look and feel");
-                        narrow: root.narrow; show-back: true; back => { if root.detail-active { root.navigate(10); } }
+                        narrow: root.narrow; show-back: true; back => { if root.detail-active { root.navigate(root.two-pane ? 4 : 10); } }
                     }
                     if root.status != "": Text { min-width: 0px; text: root.status; color: Theme.current.text_settings; wrap: word-wrap; }
                     // Sub-pages compiled in their own crates (`crates/ui-settings-*`).

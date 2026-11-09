@@ -1641,6 +1641,16 @@ struct Controller {
     continuation_work: reader_continuity::ContinuationWork,
     metadata_refresh: Arc<crate::metadata_refresh::Scheduler>,
 }
+
+/// More's index search: every query word must appear in the destination's
+/// title or keywords, ignoring case.
+fn more_search_matches(text: &str, query: &str) -> bool {
+    let text = text.to_lowercase();
+    query
+        .split_whitespace()
+        .all(|word| text.contains(&word.to_lowercase()))
+}
+
 impl Controller {
     fn refresh_synced(self: &Arc<Self>, ui: &AppWindow) {
         self.reconcile_profiles(ui);
@@ -6621,6 +6631,7 @@ pub fn run(services: Services) -> Result<()> {
         }
     });
     wire!(on_navigate, |app, ui, section| app.navigate(&ui, section));
+    ui.on_more_search_matches(|text, query| more_search_matches(&text, &query));
     wire!(on_return_to_catalogue, |app, ui| app
         .return_to_catalogue(&ui));
     wire!(on_open_item, |app, ui, index| {

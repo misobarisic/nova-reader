@@ -1,0 +1,111 @@
+// Rows for the unified More/Settings index, ported from Nova's
+// `more-index.slint`. A leading icon, a label and an optional trailing hint.
+// `selected` marks the destination shown beside the index on wide layouts:
+// the row is tinted with an accent edge and accent text. `focused` is
+// keyboard selection owned by the page.
+import { Theme, Anim, InterfaceStyle, SettingsStyle } from "@NovaUiShared";
+import { SettingsLink } from "@NovaUiBase/settings-controls.slint";
+import { ControlTouchArea } from "@NovaUiBase/control-input.slint";
+import { IcChevronRight } from "@NovaUiBase/icons.slint";
+
+export component IndexRow inherits Rectangle {
+    // Kit settings icon kinds (as on `SettingsLink`); -1 uses `icon`.
+    in property <int> icon-kind: -1;
+    in property <image> icon;
+    in property <string> title;
+    // A count, a group summary or similar at the trailing edge.
+    in property <string> trailing;
+    in property <bool> chevron: false;
+    in property <string> destination-id;
+    in property <bool> selected;
+    in property <bool> focused;
+    // False while another layer owns input: blocks taps that would fall
+    // through (Slint hit-tests TouchAreas regardless of z-order).
+    in property <bool> interactive: true;
+    callback picked();
+    // Emitted with the row's absolute top and height whenever keyboard
+    // selection lands on it, so the host can scroll it into view.
+    callback reveal(length, length);
+    changed focused => { if root.focused { root.reveal(root.absolute-position.y, root.height); } }
+
+    // The kit owns the menu artwork; borrow it through an unshown link.
+    icon-source := SettingsLink { icon-kind: max(0, root.icon-kind); visible: false; width: 0px; height: 0px; }
+    private property <image> shown-icon: root.icon-kind >= 0 ? icon-source.icon : root.icon;
+
+    height: InterfaceStyle.tv ? 56px : 44px;
+    border-radius: 10px;
+    background: root.selected ? Theme.current.selection_wash
+        : (touch.has-hover || touch.feedback-active) && root.interactive ? Theme.current.control_hover : transparent;
+    animate background { duration: Anim.hover_fast; }
+    border-width: SettingsStyle.keyboard-mode && root.focused ? 2px : 0px;
+    border-color: Theme.current.focus_ring;
+    accessible-role: button;
+    accessible-id: root.destination-id;
+    accessible-label: root.title;
+    accessible-description: root.trailing;
+    accessible-action-default => { if root.interactive { root.picked(); } }
+
+    HorizontalLayout {
+        padding-left: 12px; padding-right: 12px; spacing: 12px;
+        Rectangle {
+            width: 20px;
+            if root.shown-icon.width > 0: Image {
+                width: 20px; height: 20px; y: (parent.height - self.height) / 2;
+                source: root.shown-icon; image-fit: contain;
+                colorize: root.selected ? Theme.current.accent_soft : Theme.current.text_secondary;
+                accessible-role: none;
+            }
+        }
+        Text {
+            horizontal-stretch: 1; min-width: 0px;
+            text: root.title; overflow: elide; vertical-alignment: center;
+            font-size: InterfaceStyle.tv ? 20px : 14px;
+            font-weight: root.selected ? 600 : 500;
+            color: root.selected ? Theme.current.accent_soft : Theme.current.text_bright;
+            accessible-role: none;
+        }
+        if root.trailing != "": Text {
+            horizontal-stretch: 0;
+            text: root.trailing; overflow: elide; vertical-alignment: center; horizontal-alignment: right;
+            font-size: InterfaceStyle.tv ? 16px : 12px;
+            color: Theme.current.text_muted;
+            accessible-role: none;
+        }
+        if root.chevron: Rectangle {
+            width: 16px;
+            IcChevronRight { width: 16px; height: 16px; y: (parent.height - self.height) / 2; fill: Theme.current.text_muted; }
+        }
+    }
+    if root.selected: Rectangle {
+        x: 0px; y: 10px; width: 3px; height: parent.height - 20px; border-radius: 2px;
+        background: Theme.current.accent_soft;
+    }
+    touch := ControlTouchArea {
+        width: 100%; height: 100%;
+        enabled: root.interactive; mouse-cursor: pointer;
+        clicked => { SettingsStyle.keyboard-mode = false; root.picked(); }
+    }
+}
+
+// Small caption above a group of rows.
+export component IndexGroupLabel inherits Text {
+    font-size: InterfaceStyle.tv ? 16px : 11px;
+    font-weight: 600;
+    color: Theme.current.text_muted;
+    min-width: 0px;
+    overflow: elide;
+    height: self.preferred-height + 12px;
+    vertical-alignment: bottom;
+}
+
+// Holds a group's rows: a card on narrow layouts, a plain column inside the
+// wide index. Zero spacing keeps hidden rows (height 0) from leaving gaps.
+export component IndexGroup inherits Rectangle {
+    in property <bool> card: true;
+    background: root.card ? Theme.current.card : transparent;
+    border-radius: root.card ? Theme.card_corner_radius : 0px;
+    border-width: root.card ? 1px : 0px;
+    border-color: Theme.current.border_soft;
+    clip: root.card;
+    VerticalLayout { padding: root.card ? 4px : 0px; spacing: 0px; @children }
+}
