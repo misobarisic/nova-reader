@@ -146,11 +146,12 @@ fn creating_and_renaming_validate_nothing_locally_and_report_the_name() {
     tap(&ui, "Save");
     assert_eq!(events.borrow().as_slice(), ["create:  Sam "]);
     assert!(!exists(&ui, "Profile name"), "the editor closes after Save");
-    // Rename starts from the current name.
-    let renames = buttons(&ui, "Rename");
-    assert_eq!(renames.len(), 2);
-    renames[1].invoke_accessible_default_action();
-    settle();
+    // Rename lives on the Manage profiles level and starts from the current
+    // name.
+    assert!(!exists(&ui, "Rename profile: Kid"));
+    tap(&ui, "Manage profiles");
+    assert_eq!(buttons(&ui, "Rename profile: Mina").len(), 1);
+    tap(&ui, "Rename profile: Kid");
     assert_eq!(
         find(&ui, "Profile name")
             .accessible_value()
@@ -161,31 +162,43 @@ fn creating_and_renaming_validate_nothing_locally_and_report_the_name() {
     find(&ui, "Profile name").set_accessible_value("Kiddo");
     tap(&ui, "Save");
     assert_eq!(events.borrow().last().unwrap(), "rename:p1_1:Kiddo");
+    assert!(
+        exists(&ui, "Rename profile: Kid"),
+        "Save returns to Manage profiles"
+    );
     // Cancel discards.
     tap(&ui, "Add profile");
     tap(&ui, "Cancel");
     assert!(!exists(&ui, "Profile name"));
+    // Done (and Back) leave Manage profiles for the picker.
+    tap(&ui, "Done");
+    assert!(!exists(&ui, "Rename profile: Kid"));
+    assert!(exists(&ui, "Manage profiles"));
+    tap(&ui, "Manage profiles");
+    ui.invoke_go_back();
+    settle();
+    assert_eq!(ui.get_section(), 24, "Back first closes Manage profiles");
+    assert!(exists(&ui, "Manage profiles"));
 }
 
 #[test]
 fn deleting_a_profile_waits_for_confirmation() {
     let Page { ui, events, .. } = page(false);
     ui.set_section(24);
-    let deletes = buttons(&ui, "Delete");
-    assert_eq!(deletes.len(), 2);
-    deletes[1].invoke_accessible_default_action();
-    settle();
+    assert!(!exists(&ui, "Delete profile: Kid"));
+    tap(&ui, "Manage profiles");
+    assert_eq!(buttons(&ui, "Delete profile: Kid").len(), 1);
+    tap(&ui, "Delete profile: Kid");
     assert!(
         events.borrow().is_empty(),
         "nothing is deleted before confirming"
     );
-    // Back dismisses the sheet without deleting.
+    // Back dismisses the sheet without deleting and stays on Manage profiles.
     ui.invoke_go_back();
     settle();
     assert!(events.borrow().is_empty());
-    let deletes = buttons(&ui, "Delete");
-    deletes[1].invoke_accessible_default_action();
-    settle();
+    assert!(!exists(&ui, "Delete profile"));
+    tap(&ui, "Delete profile: Kid");
     tap(&ui, "Delete profile");
     assert_eq!(events.borrow().as_slice(), ["delete:p1_1"]);
 }
@@ -198,12 +211,14 @@ fn the_last_profile_cannot_be_deleted() {
             "reader", "Mina", true,
         )])));
     ui.set_section(24);
+    tap(&ui, "Manage profiles");
+    let deletes = buttons(&ui, "Delete profile: Mina");
+    assert_eq!(deletes.len(), 1, "the row keeps its Delete button");
+    assert_eq!(deletes[0].accessible_enabled(), Some(false));
+    assert!(exists(&ui, "Keep at least one profile."));
+    deletes[0].invoke_accessible_default_action();
     settle();
-    for delete in buttons(&ui, "Delete") {
-        delete.invoke_accessible_default_action();
-    }
-    settle();
-    assert!(!exists(&ui, "Delete profile"));
+    assert!(!exists(&ui, "Delete profile"), "no confirmation sheet opens");
     assert!(events.borrow().is_empty());
 }
 
@@ -214,7 +229,7 @@ fn the_startup_picker_cannot_be_dismissed_without_a_choice() {
     settle();
     assert!(exists(&ui, "Use profile: Kid"));
     assert!(
-        !exists(&ui, "Rename"),
+        !exists(&ui, "Manage profiles"),
         "management waits until a profile is chosen"
     );
     ui.invoke_go_back();
