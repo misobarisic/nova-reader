@@ -302,12 +302,15 @@ export component ProfilesPage inherits Rectangle {
                             label: @tr("Rename"); accessible-label: @tr("Rename profile: {}", profile.name);
                             compact: true; btn_min_width: 88px; enabled: root.idle;
                             clicked => { root.begin(2, profile.id, profile.name); }
+                            // Kit's PillButton exposes no default action itself.
+                            accessible-action-default => { if self.enabled { self.clicked(); } }
                         }
                         PillButton {
                             label: @tr("Delete"); accessible-label: @tr("Delete profile: {}", profile.name);
                             compact: true; destructive: true; btn_min_width: 88px;
                             enabled: root.idle && ProfilesBridge.profiles.length > 1;
                             clicked => { root.delete-requested(profile.id, profile.name); }
+                            accessible-action-default => { if self.enabled { self.clicked(); } }
                         }
                     }
                 }
