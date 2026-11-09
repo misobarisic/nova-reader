@@ -19,12 +19,12 @@ pub(crate) fn install(app: &crate::generated::AppWindow) {
         on_checkpoint => invoke_library_checkpoint(),
     );
     // A hold or right-click opens the same title menu as the detail
-    // screen's ⋯, its corner at the pointer (the menu is 288px wide and
-    // kept on screen).
+    // screen's ⋯, its top-left corner at the pointer (the menu is 288px
+    // wide and kept on screen) and growing from the pointer.
     let weak = app.as_weak();
     bridge.on_context_requested(move |key, title, in_library, x, y| {
         if let Some(app) = weak.upgrade() {
-            app.invoke_open_title_menu(key, title, in_library, x + 288., y);
+            app.invoke_open_title_menu(key, title, in_library, x + 288., y, x);
         }
     });
     let weak = app.as_weak();

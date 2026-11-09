@@ -32,6 +32,40 @@ export global SaveOutputFormats {
     }
 }
 
+// One captioned row of format chips; scrolls sideways when it does not fit.
+component FormatRow inherits VerticalLayout {
+    in property <string> caption;
+    in property <[SaveFormatChip]> chips;
+    in property <int> format-index;
+    in property <[string]> blocked;
+    in property <bool> enabled: true;
+    callback picked(int);
+    spacing: 6px;
+    Text {
+        text: root.caption; color: Theme.current.text_muted;
+        font-size: 11px; font-weight: 700; accessible-role: none;
+    }
+    chip-scroll := Flickable {
+        height: InterfaceStyle.tv ? 56px : 40px;
+        content-width: chip-row.preferred-width; content-height: self.height;
+        interactive: self.content-width > self.width;
+        accessible-role: list; accessible-label: root.caption;
+        chip-row := HorizontalLayout {
+            spacing: 8px; height: parent.height;
+            for chip in root.chips: LibraryFilterChip {
+                label: chip.label; selected: root.format-index == chip.format;
+                keyboard-focusable: root.enabled;
+                opacity: root.blocked.length > chip.format && root.blocked[chip.format] != "" ? 0.45 : 1;
+                picked => { if root.enabled { root.picked(chip.format); } }
+                reveal(left, w) => {
+                    if left + chip-scroll.content-x < 0px { chip-scroll.content-x = -left; }
+                    else if left + w + chip-scroll.content-x > chip-scroll.width { chip-scroll.content-x = chip-scroll.width - left - w; }
+                }
+            }
+        }
+    }
+}
+
 export component SaveOutputPanel inherits VerticalLayout {
     // Save image… offers Keep file as is; screencaps are always pixels.
     in property <bool> show-keep: true;
@@ -45,16 +79,20 @@ export component SaveOutputPanel inherits VerticalLayout {
     in property <bool> enabled: true;
     private property <string> blocked-reason: root.format-index >= 0 && root.format-index < root.blocked.length ? root.blocked[root.format-index] : "";
     out property <bool> valid: (root.show-keep && root.keep) || root.blocked-reason == "";
-    private property <[SaveFormatChip]> chips: [
+    private property <bool> converting: !root.show-keep || !root.keep;
+    // Formats grouped by what they trade: exact pixels, or smaller files.
+    private property <[SaveFormatChip]> lossless: [
         { label: "PNG", format: 0 },
-        { label: "JPEG", format: 1 },
-        { label: "WebP", format: 3 },
         { label: @tr("WebP lossless"), format: 2 },
-        { label: "AVIF", format: 4 },
-        { label: "JPEG XL", format: 6 },
         { label: @tr("JPEG XL lossless"), format: 5 },
     ];
-    spacing: 10px;
+    private property <[SaveFormatChip]> lossy: [
+        { label: "JPEG", format: 1 },
+        { label: "WebP", format: 3 },
+        { label: "AVIF", format: 4 },
+        { label: "JPEG XL", format: 6 },
+    ];
+    spacing: 12px;
     if root.show-keep: Segmented {
         labels: [@tr("Keep file as is"), @tr("Convert")];
         current-index: root.keep ? 0 : 1;
@@ -62,32 +100,18 @@ export component SaveOutputPanel inherits VerticalLayout {
         enabled: root.enabled;
         picked(i) => { root.keep = i == 0; }
     }
-    if !root.show-keep || !root.keep: chip-scroll := Flickable {
-        height: InterfaceStyle.tv ? 56px : 40px;
-        content-width: chip-row.preferred-width; content-height: self.height;
-        interactive: self.content-width > self.width;
-        accessible-role: list; accessible-label: @tr("Output format");
-        chip-row := HorizontalLayout {
-            spacing: 8px; height: parent.height;
-            for chip in root.chips: LibraryFilterChip {
-                label: chip.label; selected: root.format-index == chip.format;
-                keyboard-focusable: root.enabled;
-                opacity: root.blocked.length > chip.format && root.blocked[chip.format] != "" ? 0.45 : 1;
-                picked => {
-                    if root.enabled {
-                        root.format-index = chip.format;
-                        root.quality = SaveOutputFormats.quality(chip.format);
-                    }
-                }
-                reveal(left, w) => {
-                    if left + chip-scroll.content-x < 0px { chip-scroll.content-x = -left; }
-                    else if left + w + chip-scroll.content-x > chip-scroll.width { chip-scroll.content-x = chip-scroll.width - left - w; }
-                }
-            }
-        }
+    if root.converting: FormatRow {
+        caption: @tr("EXACT PIXELS");
+        chips: root.lossless; format-index: root.format-index; blocked: root.blocked; enabled: root.enabled;
+        picked(format) => { root.format-index = format; root.quality = SaveOutputFormats.quality(format); }
     }
-    if (!root.show-keep || !root.keep) && SaveOutputFormats.lossy(root.format-index): HorizontalLayout {
-        spacing: 12px;
+    if root.converting: FormatRow {
+        caption: @tr("SMALLER FILES");
+        chips: root.lossy; format-index: root.format-index; blocked: root.blocked; enabled: root.enabled;
+        picked(format) => { root.format-index = format; root.quality = SaveOutputFormats.quality(format); }
+    }
+    if root.converting && SaveOutputFormats.lossy(root.format-index): HorizontalLayout {
+        spacing: 12px; height: 36px;
         Text {
             text: @tr("Quality"); color: Theme.current.text_settings;
             font-size: InterfaceStyle.tv ? 18px : 14px; vertical-alignment: center;
@@ -97,15 +121,29 @@ export component SaveOutputPanel inherits VerticalLayout {
             name: @tr("Output quality"); enabled: root.enabled;
             value <=> root.quality; minimum: 1; maximum: 100; step: 1;
         }
-        Text {
-            min-width: 32px; text: Math.round(root.quality); color: Theme.current.text_bright;
-            font-size: InterfaceStyle.tv ? 18px : 14px;
-            horizontal-alignment: right; vertical-alignment: center;
+        Rectangle {
+            width: 44px; height: 28px; y: (parent.height - self.height) / 2;
+            border-radius: 8px; background: Theme.current.control_hover;
+            Text {
+                width: 100%; height: 100%; text: Math.round(root.quality);
+                color: Theme.current.text_bright; font-size: InterfaceStyle.tv ? 18px : 14px; font-weight: 600;
+                horizontal-alignment: center; vertical-alignment: center;
+            }
         }
     }
-    if (!root.show-keep || !root.keep) && root.blocked-reason != "": Text {
-        text: root.blocked-reason; wrap: word-wrap;
-        color: Theme.current.text_destructive; font-size: 13px;
-        accessible-role: text; accessible-label: root.blocked-reason;
+    if root.converting && root.blocked-reason != "": HorizontalLayout {
+        spacing: 8px;
+        Path {
+            y: 2px; width: 16px; height: 16px; viewbox-width: 24; viewbox-height: 24; fill: transparent;
+            stroke: Theme.current.text_destructive; stroke-width: 2px;
+            commands: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM12 8v5M12 16v.01";
+            accessible-role: none;
+        }
+        Text {
+            horizontal-stretch: 1; min-width: 0px;
+            text: root.blocked-reason; wrap: word-wrap;
+            color: Theme.current.text_destructive; font-size: 13px;
+            accessible-role: text; accessible-label: root.blocked-reason;
+        }
     }
 }

@@ -432,9 +432,11 @@ export component AppWindow inherits Window {
     in property <int> title-menu-status;
     private property <length> title-menu-right;
     private property <length> title-menu-bottom;
+    private property <length> title-menu-origin;
     callback title-menu-requested(string);
-    public function open-title-menu(key: string, title: string, in-library: bool, right: length, bottom: length) {
+    public function open-title-menu(key: string, title: string, in-library: bool, right: length, bottom: length, origin-x: length) {
         if key == "" { return; }
+        root.title-menu-origin = origin-x;
         root.title-menu-key = key; root.title-menu-title = title; root.title-menu-library = in-library;
         root.title-menu-right = right; root.title-menu-bottom = bottom;
         root.title-menu-requested(key);
@@ -632,7 +634,9 @@ export component AppWindow inherits Window {
     }
     // Cap the reading column before padding: otherwise wide desktop windows
     // swallow padding edits until the padded viewport drops below the cap.
-    private property <length> reader-column-limit: root.reading-mode == 0 && !root.reader-platform-android ? ReaderSettings.desktop-webtoon-width * 1px : 1100px;
+    // Paged modes fit the whole viewport (a landscape page must fill its height
+    // on a wide window); only the webtoon strip keeps a readable column.
+    private property <length> reader-column-limit: root.reading-mode != 0 ? 100000px : !root.reader-platform-android ? ReaderSettings.desktop-webtoon-width * 1px : 1100px;
     out property <length> reader-fit-width: max(1px, min(root.reader-column-limit, root.reader-frame-width) * (1 - root.reader-side-padding / 50.0));
     out property <length> reader-width: root.reader-fit-width * root.zoom;
     private property <float> reader-paged-ratio: max(0.001, root.pages[root.current-page].ratio / (root.reader-split-page ? 2 : 1));
@@ -1376,7 +1380,7 @@ export component AppWindow inherits Window {
                                 Rectangle { horizontal-stretch: 1; }
                                 IconAction { width: 44px; text: @tr("Title options"); icon: @image-url("../../assets/icons/navigation/more.svg"); clicked => {
                                     if root.section == 5 {
-                                        root.open-title-menu(root.detail-series-key, root.series-title, root.in-library, self.absolute-position.x + self.width, self.absolute-position.y + self.height);
+                                        root.open-title-menu(root.detail-series-key, root.series-title, root.in-library, self.absolute-position.x + self.width, self.absolute-position.y + self.height, self.absolute-position.x + self.width);
                                     } else { root.open-entry-menu(root.detail-series-key,root.series-title,root.in-library,self.absolute-position.x,self.absolute-position.y + self.height); }
                                 } }
                             }
@@ -1552,7 +1556,7 @@ export component AppWindow inherits Window {
         width: root.width; height: root.height;
         title: root.title-menu-title; summary: root.detail-menu-summary; in-library: root.title-menu-library;
         unread-to-download: root.detail-unread-to-download; all-to-download: root.detail-all-to-download;
-        anchor-right: root.title-menu-right; anchor-bottom: root.title-menu-bottom;
+        anchor-right: root.title-menu-right; anchor-bottom: root.title-menu-bottom; origin-x: root.title-menu-origin;
         safe-bottom: root.safe-area-insets.bottom;
         status: root.title-menu-status; presentation: root.entry-menu-presentation;
         categories: root.entry-categories;

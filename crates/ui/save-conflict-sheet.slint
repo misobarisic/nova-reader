@@ -1,22 +1,11 @@
-// Nova's shared action sheet keeps pointer, keyboard, Cancel and outside-tap
-// behavior identical to Reader's other menus. Preparing bytes never chooses a
-// destructive destination: only these explicit actions reach the export worker.
-import { MenuSheet } from "@NovaUiBase/menusheet.slint";
+// The file-exists question when saving: Overwrite, Add number or cancel (2).
+// Preparing bytes never chooses a destructive destination: only these explicit
+// actions reach the export worker.
+import { ChoiceDialog } from "@NovaUiBase/choice-dialog.slint";
 
-export component SaveConflictSheet inherits MenuSheet {
+export component SaveConflictSheet inherits ChoiceDialog {
     in property <string> file-name;
-    in property <length> safe-top;
-    callback choice(int);
-    keyboard_navigation: true;
-    sheet_title: @tr("File already exists: {}", root.file-name);
-    accessible-role: groupbox;
-    accessible-label: @tr("File already exists: {}", root.file-name);
-    accessible-enabled: root.open;
-    max_h: max(0px, min(root.height * 0.85, root.height - root.safe-top));
-    items: [
-        { label: @tr("Overwrite"), enabled: true },
-        { label: @tr("Add number"), enabled: true },
-    ];
-    picked(index) => { if root.open { root.choice(index); } }
-    closed => { if root.open { root.choice(2); } }
+    prompt: @tr("File already exists: {}", root.file-name);
+    labels: [@tr("Overwrite"), @tr("Add number")];
+    danger-count: 1;
 }

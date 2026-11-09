@@ -109,13 +109,15 @@ export component MorePage inherits Rectangle {
     about-focus := Timer { interval: 1ms; running: false; triggered => {
         self.stop(); if root.section == 13 { about-page.focus_shell(); }
     } }
+    // The list is hidden while a sub-page covers it and loses its offset, so
+    // the saved position is applied from the moment it shows again (not after
+    // the slide-back ends) and re-applied until the page is active.
     child-restore := Timer {
         interval: 16ms; running: root.child-restore-pending && root.local-open;
         triggered => {
-            if root.child-active {
-                child-scroll.content-y = root.child-scroll-y;
-                root.child-restore-pending = false;
-                child-scope.focus();
+            if !root.detail-open {
+                if abs(child-scroll.content-y - root.child-scroll-y) > 0.5px { child-scroll.content-y = root.child-scroll-y; }
+                if root.child-active { root.child-restore-pending = false; child-scope.focus(); }
             }
         }
     }
@@ -125,10 +127,9 @@ export component MorePage inherits Rectangle {
         interval: 16ms;
         running: root.section == 4 && root.restore-pending;
         triggered => {
-            if root.landing-active {
-                landing-scroll.content-y = root.landing-scroll-y;
-                root.restore-pending = false;
-                nav-scope.focus();
+            if root.section == 4 {
+                if abs(landing-scroll.content-y - root.landing-scroll-y) > 0.5px { landing-scroll.content-y = root.landing-scroll-y; }
+                if root.landing-active { root.restore-pending = false; nav-scope.focus(); }
             }
         }
     }
@@ -167,7 +168,9 @@ export component MorePage inherits Rectangle {
     landing := Rectangle {
         width: root.width; height: max(0px, root.height - (root.narrow && !Theme.transparent_navbar ? 68px : 0px));
         visible: !root.local-open || root.slide < 1 || root.alpha < 1;
-        x: -0.28 * root.width * root.slide; opacity: 1 - root.alpha;
+        // Pages enter like a Browse catalogue: a short slide and fade, the
+        // page behind nudging aside.
+        x: -24px * root.slide; opacity: 1 - root.alpha;
         nav-scope := FocusScope {
             width: parent.width; height: parent.height; enabled: root.landing-active;
             key-pressed(e) => {
@@ -228,7 +231,7 @@ export component MorePage inherits Rectangle {
     child := Rectangle {
         width: root.width; height: root.height;
         visible: (root.local-open || root.slide > 0 || root.alpha > 0) && (!root.detail-open || root.sub-slide < 1 || root.sub-alpha < 1);
-        x: root.width * (1 - root.slide) - 0.28 * root.width * root.sub-slide;
+        x: 48px * (1 - root.slide) - 24px * root.sub-slide;
         opacity: root.alpha * (1 - root.sub-alpha);
         child-scope := FocusScope {
             width: parent.width; height: parent.height; enabled: root.child-active && root.child-section != 13;
@@ -340,7 +343,7 @@ export component MorePage inherits Rectangle {
     detail := Rectangle {
         width: root.width; height: root.height;
         visible: (root.local-open || root.slide > 0 || root.alpha > 0) && (root.detail-open || root.sub-slide > 0 || root.sub-alpha > 0);
-        x: root.width * (1 - root.slide) + root.width * (1 - root.sub-slide);
+        x: 48px * (1 - root.sub-slide);
         opacity: root.alpha * root.sub-alpha;
         detail-scope := FocusScope {
             width: parent.width; height: parent.height; enabled: root.detail-active;

@@ -235,28 +235,30 @@ component FilterSheet inherits Rectangle {
     in property <bool> open;
     in property <length> safe-bottom;
     callback close;
-    private property <bool> motion: Anim.enabled && Anim.transitions;
+    private property <bool> motion: Anim.enabled && Anim.player;
     private property <float> shown: root.open ? 1 : 0;
-    animate shown { duration: root.motion ? Anim.transition_slide : 0ms; easing: ease-out; }
+    animate shown { duration: root.motion ? (root.open ? Anim.player_slide : Anim.player_fast) : 0ms; easing: ease-out; }
     visible: self.shown > 0;
     scrim := TouchArea {
         clicked => { root.close(); }
         Rectangle { background: Theme.current.scrim_settings; opacity: root.shown; }
     }
     panel := Rectangle {
-        private property <length> full: min(root.height * 0.78, body.preferred-height + 140px);
-        x: max(0px, (root.width - min(root.width, 640px)) / 2); width: min(root.width, 640px);
-        height: self.full; y: root.height - self.full * root.shown;
+        private property <length> full: min(root.height - root.safe-bottom - 32px, body.preferred-height + 140px);
+        x: max(0px, (root.width - min(root.width - 32px, 520px)) / 2); width: min(root.width - 32px, 520px);
+        height: self.full; y: max(16px, (root.height - root.safe-bottom - self.full) / 2);
         background: Theme.current.popup;
-        border-top-left-radius: 22px; border-top-right-radius: 22px;
-        border-width: 1px; border-color: Theme.current.border_overlay;
-        drop-shadow-offset-y: -14px; drop-shadow-blur: 40px; drop-shadow-color: Theme.current.scrim_shadow;
+        border-radius: 14px;
+        border-width: 1px; border-color: Theme.current.border_soft;
+        drop-shadow-offset-y: 8px; drop-shadow-blur: 24px; drop-shadow-color: #00000070;
+        clip: true;
+        opacity: root.shown;
+        transform-scale: 0.92 + 0.08 * root.shown;
         accessible-role: groupbox; accessible-label: @tr("Filters");
         TouchArea {}
         FocusScope {
             key-pressed(e) => { if e.text == Key.Escape || e.text == Key.Back { root.close(); return accept; } return reject; }
         }
-        Rectangle { x: (parent.width - 40px) / 2; y: 8px; width: 40px; height: 4px; border-radius: 2px; background: Theme.current.text_muted; }
         HorizontalLayout {
             x: 16px; y: 16px; width: parent.width - 32px; height: 40px;
             Text { text: @tr("Filters"); font-size: 17px; font-weight: 700; color: Theme.current.text_bright; vertical-alignment: center; horizontal-stretch: 1; }

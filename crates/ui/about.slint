@@ -41,7 +41,7 @@ export component AboutPage inherits Rectangle {
     in-out property <bool> licenses_open: false;
     // Keep both scroll models alive through the reverse transition as well.
     private property <float> licenses_progress: root.licenses_open ? 1.0 : 0.0;
-    animate licenses_progress { duration: Anim.transition_slide; easing: ease-out; }
+    animate licenses_progress { duration: Anim.enabled && Anim.transitions ? Anim.transition_slide : 0ms; easing: ease-in-out; }
     in-out property <length> scroll_y: 0px;
     in-out property <length> licenses_scroll_y: 0px;
     in-out property <bool> kb_active: false;
@@ -207,7 +207,7 @@ export component AboutPage inherits Rectangle {
           about_scroll := ListView {
             visible: root.licenses_open || root.licenses_progress > 0;
             enabled: root.active && root.licenses_open;
-            x: body.width * (1.0 - root.licenses_progress);
+            x: 48px * (1.0 - root.licenses_progress);
             opacity: root.licenses_progress;
             width: 100%; height: 100%;
             mouse-drag-pan-enabled: root.active && root.licenses_open;
@@ -307,7 +307,7 @@ export component AboutPage inherits Rectangle {
           about_info_scroll := ScrollView {
             visible: !root.licenses_open || root.licenses_progress < 1;
             enabled: root.active && !root.licenses_open;
-            x: -0.28 * body.width * root.licenses_progress;
+            x: -24px * root.licenses_progress;
             opacity: 1.0 - root.licenses_progress;
             width: 100%; height: 100%;
             mouse-drag-pan-enabled: root.active && !root.licenses_open;
@@ -321,21 +321,64 @@ export component AboutPage inherits Rectangle {
                         // distributing it between their text and controls.
                         width: 100%; height: self.preferred-height;
                         alignment: start; spacing: 16px;
-                    SectionHeader { label: @tr("App information"); }
-                    SettingsCard { VerticalLayout { padding: 16px; spacing: 16px;
+                    // Identity card: a mark, the name, a version chip and what the app is.
+                    Rectangle {
+                        width: 100%; height: about_hero.preferred-height;
+                        background: Theme.current.card; border-radius: Theme.card_corner_radius;
+                        border-width: 1px; border-color: Theme.current.border_soft;
+                        about_hero := VerticalLayout {
+                            padding: 28px; padding-left: 20px; padding-right: 20px; spacing: 10px; alignment: center;
+                            HorizontalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: 72px; height: 72px; border-radius: 20px;
+                                    background: Theme.current.accent;
+                                    drop-shadow-offset-y: 6px; drop-shadow-blur: 18px; drop-shadow-color: Theme.current.accent.transparentize(0.65);
+                                    Path {
+                                        x: 18px; y: 18px; width: 36px; height: 36px;
+                                        viewbox-width: 24; viewbox-height: 24; fill: transparent; stroke-width: 1.8px;
+                                        stroke: Theme.current.on_accent; commands: "M5 4h10a3 3 0 0 1 3 3v13H8a3 3 0 0 1-3-3zM5 17a3 3 0 0 1 3-3h10";
+                                        accessible-role: none;
+                                    }
+                                    accessible-role: none;
+                                }
+                            }
+                            Text {
+                                text: @tr("Nova Reader"); horizontal-alignment: center;
+                                font-size: InterfaceStyle.tv ? 30px : 24px; font-weight: 700; color: Theme.current.text_bright;
+                            }
+                            HorizontalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    height: 26px; width: app_version_label.preferred-width + 24px;
+                                    border-radius: 13px; background: Theme.current.control_hover;
+                                    app_version_label := Text {
+                                        x: 12px; width: parent.width - 24px; height: 100%;
+                                        text: @tr("Version") + " " + root.app_version;
+                                        accessible-id: "about-version";
+                                        horizontal-alignment: center; vertical-alignment: center;
+                                        font-size: InterfaceStyle.tv ? 18px : 13px;
+                                        color: Theme.current.text_secondary;
+                                    }
+                                }
+                            }
                             Text {
                                 width: 100%;
                                 text: @tr("Nova Reader is a source-based manga and webtoon reader.");
+                                horizontal-alignment: center;
                                 font-size: InterfaceStyle.tv ? 20px : 14px;
                                 color: Theme.current.text_settings;
                                 wrap: word-wrap;
                             }
-
-                            app_version_label := Text {
-                                text: @tr("Version") + " " + root.app_version;
-                                accessible-id: "about-version";
+                        }
+                    }
+                    SectionHeader { label: @tr("Open source"); }
+                    SettingsCard { VerticalLayout { padding: 16px; spacing: 16px;
+                            Text {
+                                width: 100%;
+                                text: @tr("Built on open-source Rust crates and components. Browse their sources and license texts.");
                                 font-size: InterfaceStyle.tv ? 20px : 14px;
-                                color: Theme.current.text_secondary;
+                                color: Theme.current.text_settings;
                                 wrap: word-wrap;
                             }
                             about_licenses_button := PillButton {

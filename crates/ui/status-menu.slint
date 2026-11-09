@@ -1,14 +1,14 @@
-import { MenuSheet } from "@NovaUiBase/menusheet.slint";
-export component StatusMenu inherits MenuSheet {
-    keyboard_navigation: true;
-    sheet_title: @tr("Change status");
-    items: [
-        { label: @tr("Mark as reading"), enabled: true },
-        { label: @tr("Mark as Plan to read"), enabled: true },
-        { label: @tr("Mark as completed"), enabled: true },
-        { label: @tr("Mark on hold"), enabled: true },
-        { label: @tr("Mark dropped"), enabled: true },
-        { label: @tr("Back to automatic"), enabled: true },
+import { ActionDialog } from "@NovaUiBase/action-dialog.slint";
+// Change a title's reading status; `status-picked` reports the action code.
+export component StatusMenu inherits ActionDialog {
+    title: @tr("Change status");
+    rows: [
+        { label: @tr("Mark as reading"), enabled: true, icon: "M5 4h10a3 3 0 0 1 3 3v13H8a3 3 0 0 1-3-3zM5 17a3 3 0 0 1 3-3h10" },
+        { label: @tr("Mark as Plan to read"), enabled: true, icon: "M6 3h12v18l-6-4-6 4z" },
+        { label: @tr("Mark as completed"), enabled: true, icon: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM8 12l3 3 5-6" },
+        { label: @tr("Mark on hold"), enabled: true, icon: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM10 9v6M14 9v6" },
+        { label: @tr("Mark dropped"), enabled: true, icon: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM9 9l6 6M15 9l-6 6" },
+        { label: @tr("Back to automatic"), enabled: true, icon: "M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7" },
     ];
     private property <[int]> codes: [6, 5, 7, 1, 2, 0];
     callback status-picked(int);

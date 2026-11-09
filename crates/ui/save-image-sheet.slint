@@ -1,9 +1,9 @@
 // Save image…: pick where the page's bytes come from, then keep that file or
 // convert it. The backend probes the sources on disk only (Original is never
 // fetched to fill this sheet) and supplies them as rows; the sheet owns the
-// draft choices until Save or Cancel. A bottom sheet on phones, centred and
-// width-capped on wide windows, like the other Reader sheets.
-import { Theme, InterfaceStyle, SettingsStyle } from "@NovaUiShared";
+// draft choices until Save or Cancel. A centred, width-capped panel in the
+// menus' popup style that grows in and fades like them.
+import { Theme, InterfaceStyle, SettingsStyle, Anim } from "@NovaUiShared";
 import { ControlTouchArea } from "@NovaUiBase/control-input.slint";
 import { PillButton, ToggleSwitch } from "@NovaUiBase/settings-controls.slint";
 import { ScrollView } from "@NovaUiBase/scrollview.slint";
@@ -30,7 +30,7 @@ component SourceRow inherits Rectangle {
     in property <bool> selected;
     callback picked;
     min-height: InterfaceStyle.tv ? 72px : 60px;
-    border-radius: 12px;
+    border-radius: 10px;
     border-width: 1px;
     border-color: root.selected ? Theme.current.accent : Theme.current.border_soft;
     background: root.selected ? Theme.current.settings_selected_wash
@@ -91,7 +91,10 @@ export component SaveImageSheet inherits Rectangle {
     in property <length> safe-right;
     callback save;
     callback cancel;
-    visible: root.open;
+    private property <bool> motion: Anim.enabled && Anim.player;
+    private property <float> progress: root.open ? 1 : 0;
+    animate progress { duration: root.motion ? (root.open ? Anim.player_slide : Anim.player_fast) : 0ms; easing: ease-out; }
+    visible: root.open || root.progress > 0;
     private property <SaveImageSource> current: root.source-index >= 0 && root.source-index < root.sources.length ? root.sources[root.source-index] : { title: "", detail: "", enabled: false, keepable: true, width: 0, height: 0, format: "", size: "", blocked: [] };
     private property <bool> keeping: root.keep && root.current.keepable;
     private property <string> dimensions: root.current.width > 0 ? root.current.width + " × " + root.current.height + " · " : "";
@@ -101,25 +104,25 @@ export component SaveImageSheet inherits Rectangle {
     private property <bool> can-save: !root.loading && !root.busy && root.current.enabled && output.valid;
     changed source-index => { if !root.current.keepable { root.keep = false; } }
     // The dim backdrop swallows outside taps and cancels.
-    Rectangle { background: Theme.current.scrim_shadow; }
-    TouchArea { clicked => { if !root.busy { root.cancel(); } } }
+    Rectangle { background: Theme.current.scrim_shadow; opacity: root.progress; }
+    TouchArea { enabled: root.open; clicked => { if !root.busy { root.cancel(); } } }
     panel := Rectangle {
         width: min(InterfaceStyle.tv ? 720px : 560px, max(1px, root.width - root.safe-left - root.safe-right - 24px));
         height: min(content.preferred-height + 2px, max(1px, root.height - root.safe-top - root.safe-bottom - 24px));
         x: root.safe-left + (root.width - root.safe-left - root.safe-right - self.width) / 2;
-        y: root.height - root.safe-bottom - self.height - 12px;
+        y: root.safe-top + max(12px, (root.height - root.safe-top - root.safe-bottom - self.height) / 2);
         background: Theme.current.popup;
-        border-radius: 16px; clip: true;
+        border-radius: 14px; border-width: 1px; border-color: Theme.current.border_soft;
+        drop-shadow-offset-y: 8px; drop-shadow-blur: 24px; drop-shadow-color: #00000070;
+        clip: true;
+        opacity: root.progress;
+        transform-scale: 0.92 + 0.08 * root.progress;
         accessible-role: groupbox; accessible-label: @tr("Save image");
         TouchArea { }
         ScrollView {
             mouse-drag-pan-enabled: true;
             content := VerticalLayout {
                 width: panel.width; padding: 18px; spacing: 12px;
-                Rectangle {
-                    height: 4px;
-                    Rectangle { width: 36px; height: 4px; border-radius: 2px; background: Theme.current.border_medium; }
-                }
                 VerticalLayout {
                     spacing: 2px;
                     Text { text: @tr("Save image"); color: Theme.current.text_bright; font-size: InterfaceStyle.tv ? 24px : 19px; font-weight: 600; }
@@ -148,15 +151,20 @@ export component SaveImageSheet inherits Rectangle {
                 if !root.loading: Text {
                     text: @tr("OUTPUT"); color: Theme.current.text_muted; font-size: 12px; font-weight: 700;
                 }
-                output := SaveOutputPanel {
+                Rectangle {
                     visible: !root.loading;
-                    height: root.loading ? 0px : self.preferred-height;
-                    enabled: !root.busy;
-                    keep-enabled: root.current.keepable;
-                    keep <=> root.keep;
-                    format-index <=> root.format-index;
-                    quality <=> root.quality;
-                    blocked: root.current.blocked;
+                    height: root.loading ? 0px : output.preferred-height + 24px;
+                    background: Theme.current.card; border-radius: 12px;
+                    border-width: 1px; border-color: Theme.current.border_soft;
+                    output := SaveOutputPanel {
+                        x: 12px; y: 12px; width: parent.width - 24px; height: self.preferred-height;
+                        enabled: !root.busy;
+                        keep-enabled: root.current.keepable;
+                        keep <=> root.keep;
+                        format-index <=> root.format-index;
+                        quality <=> root.quality;
+                        blocked: root.current.blocked;
+                    }
                 }
                 if !root.loading: Text {
                     text: root.summary; color: Theme.current.text_secondary; font-size: 13px; overflow: elide;

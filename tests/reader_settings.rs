@@ -308,8 +308,8 @@ fn desktop_webtoon_column_padding_and_mobile_sizing_are_independent_of_zoom() {
     ui.set_reading_mode(1);
     assert_eq!(
         ui.get_reader_fit_width(),
-        1100.,
-        "paged layout retains its own cap"
+        2560.,
+        "paged layout fits the whole viewport so landscape pages fill it"
     );
     ui.set_reading_mode(0);
     ui.set_reader_platform_android(true);
