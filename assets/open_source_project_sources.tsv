@@ -1,22 +1,22 @@
 Nova Reader application	GPL-3.0-or-later	https://github.com/misobarisic/nova-reader
 Nova application/build/UI foundation (b69a1e5765ecc65ac3b00acdfe2f16e2f46a5dda)	GPL-3.0-or-later	https://github.com/misobarisic/nova/tree/b69a1e5765ecc65ac3b00acdfe2f16e2f46a5dda
-Nova shared storage (01de53be55b7f99f0bb57f93195607a521feed1c)	GPL-3.0-or-later	https://github.com/misobarisic/nova-kit/tree/01de53be55b7f99f0bb57f93195607a521feed1c/crates/storage
-Nova shared network policy (01de53be55b7f99f0bb57f93195607a521feed1c)	GPL-3.0-or-later	https://github.com/misobarisic/nova-kit/tree/01de53be55b7f99f0bb57f93195607a521feed1c/crates/net
-Nova shared UI sources (01de53be55b7f99f0bb57f93195607a521feed1c)	GPL-3.0-or-later	https://github.com/misobarisic/nova-kit/tree/01de53be55b7f99f0bb57f93195607a521feed1c/crates/ui-base
-Nova shared sync (01de53be55b7f99f0bb57f93195607a521feed1c)	GPL-3.0-or-later	https://github.com/misobarisic/nova-kit/tree/01de53be55b7f99f0bb57f93195607a521feed1c/crates/sync
-Nova shared backup container (01de53be55b7f99f0bb57f93195607a521feed1c)	GPL-3.0-or-later	https://github.com/misobarisic/nova-kit/tree/01de53be55b7f99f0bb57f93195607a521feed1c/crates/backup
-Nova shared Android glue (01de53be55b7f99f0bb57f93195607a521feed1c)	GPL-3.0-or-later	https://github.com/misobarisic/nova-kit/tree/01de53be55b7f99f0bb57f93195607a521feed1c/crates/android
+Nova shared storage (19e7ff83a210d064f4cb65783a640f08c042663f)	GPL-3.0-or-later	https://github.com/misobarisic/nova-kit/tree/19e7ff83a210d064f4cb65783a640f08c042663f/crates/storage
+Nova shared network policy (19e7ff83a210d064f4cb65783a640f08c042663f)	GPL-3.0-or-later	https://github.com/misobarisic/nova-kit/tree/19e7ff83a210d064f4cb65783a640f08c042663f/crates/net
+Nova shared UI sources (19e7ff83a210d064f4cb65783a640f08c042663f)	GPL-3.0-or-later	https://github.com/misobarisic/nova-kit/tree/19e7ff83a210d064f4cb65783a640f08c042663f/crates/ui-base
+Nova shared sync (19e7ff83a210d064f4cb65783a640f08c042663f)	GPL-3.0-or-later	https://github.com/misobarisic/nova-kit/tree/19e7ff83a210d064f4cb65783a640f08c042663f/crates/sync
+Nova shared backup container (19e7ff83a210d064f4cb65783a640f08c042663f)	GPL-3.0-or-later	https://github.com/misobarisic/nova-kit/tree/19e7ff83a210d064f4cb65783a640f08c042663f/crates/backup
+Nova shared Android glue (19e7ff83a210d064f4cb65783a640f08c042663f)	GPL-3.0-or-later	https://github.com/misobarisic/nova-kit/tree/19e7ff83a210d064f4cb65783a640f08c042663f/crates/android
 Reader domain, sources, engine, downloads and catalogue crates	GPL-3.0-or-later	https://github.com/misobarisic/nova-reader/tree/main/crates
 Roboto Regular/Bold (38062f4b4a0be4346d07a928408da21602545e9e)	Apache-2.0	https://github.com/googlefonts/roboto-2/tree/38062f4b4a0be4346d07a928408da21602545e9e
 AVIF adapter and independent fixture (avif-decode 3.0.0)	BSD-3-Clause	https://github.com/kornelski/avif-decode
-Kit ferri-pdf-rav1d 1.1.2, portable scalar predicates	BSD-2-Clause	https://github.com/misobarisic/nova-kit/tree/01de53be55b7f99f0bb57f93195607a521feed1c/vendor/ferri-pdf-rav1d
+Kit ferri-pdf-rav1d 1.1.2, portable scalar predicates	BSD-2-Clause	https://github.com/misobarisic/nova-kit/tree/19e7ff83a210d064f4cb65783a640f08c042663f/vendor/ferri-pdf-rav1d
 Ferri PDF published rav1d fork (a3f6972aa5663772da254ff5abfc802e6b2e13cb)	BSD-2-Clause	https://github.com/apollohg/ferri-pdf/tree/a3f6972aa5663772da254ff5abfc802e6b2e13cb/vendor/rav1d
 Rav1d upstream (782dab2135ea64a057c097088a13eb8ed3cc3320)	BSD-2-Clause	https://github.com/memorysafety/rav1d/tree/782dab2135ea64a057c097088a13eb8ed3cc3320
 TachiyomiJ2K automatic reader-mode rules (b83defe42b2ac9f460667bda3a42fdd9d12e767e)	Apache-2.0	https://github.com/Jays2Kings/tachiyomiJ2K/tree/b83defe42b2ac9f460667bda3a42fdd9d12e767e
 Keiyoushi catalogue schema provenance (0d83f6be79e12b0a8b6c6f20a500c0e9456c222a)	Apache-2.0	https://github.com/keiyoushi/extensions-source/tree/0d83f6be79e12b0a8b6c6f20a500c0e9456c222a
 Neutral reference addon and geometric fixtures	CC0-1.0	https://github.com/misobarisic/nova-reader/tree/main/examples/addons/neutral-fixture
-Nova shared cache (01de53be55b7f99f0bb57f93195607a521feed1c)	GPL-3.0-or-later	https://github.com/misobarisic/nova-kit/tree/01de53be55b7f99f0bb57f93195607a521feed1c/crates/cache
-Nova shared image codecs (01de53be55b7f99f0bb57f93195607a521feed1c)	GPL-3.0-or-later	https://github.com/misobarisic/nova-kit/tree/01de53be55b7f99f0bb57f93195607a521feed1c/crates/image
+Nova shared cache (19e7ff83a210d064f4cb65783a640f08c042663f)	GPL-3.0-or-later	https://github.com/misobarisic/nova-kit/tree/19e7ff83a210d064f4cb65783a640f08c042663f/crates/cache
+Nova shared image codecs (19e7ff83a210d064f4cb65783a640f08c042663f)	GPL-3.0-or-later	https://github.com/misobarisic/nova-kit/tree/19e7ff83a210d064f4cb65783a640f08c042663f/crates/image
 JPEG XL decoder jxl-oxide 0.12.6	MIT OR Apache-2.0	https://github.com/tirr-c/jxl-oxide
 Mihon tap navigation maps (feadad5e1e2bf638be6e2ca317d11657b09d4596)	Apache-2.0	https://github.com/mihonapp/mihon/tree/feadad5e1e2bf638be6e2ca317d11657b09d4596/app/src/main/java/eu/kanade/tachiyomi/ui/reader/viewer
 Nova player OSD and idle worker (ac1c981955b812e4766202646aa45bb61321aaf4)	GPL-3.0-or-later	https://github.com/misobarisic/nova/tree/ac1c981955b812e4766202646aa45bb61321aaf4
