@@ -64,11 +64,16 @@ export component ChapterMenu inherits Rectangle {
         }
         panel := Rectangle {
             width: min(264px, max(1px, root.width - 16px));
-            height: content.preferred-height;
-            private property <bool> room-below: root.row-top + root.row-height - 4px + self.height <= root.height - root.safe-bottom - 8px;
+            // Opens below the row, above it near the bottom, and is always
+            // clamped inside the safe area so no part runs off screen. Only a
+            // panel taller than the window scrolls.
+            private property <length> top-limit: root.safe-top + 8px;
+            private property <length> bottom-limit: max(self.top-limit + 1px, root.height - root.safe-bottom - 8px);
+            height: min(content.preferred-height, self.bottom-limit - self.top-limit);
+            private property <bool> room-below: root.row-top + root.row-height - 4px + self.height <= self.bottom-limit;
             x: Math.clamp(root.row-left + root.row-width - self.width, 8px, max(8px, root.width - self.width - 8px));
-            y: self.room-below ? root.row-top + root.row-height - 4px
-                : max(root.safe-top + 8px, root.row-top - self.height + 4px);
+            y: Math.clamp(self.room-below ? root.row-top + root.row-height - 4px : root.row-top - self.height + 4px,
+                self.top-limit, max(self.top-limit, self.bottom-limit - self.height));
             background: Theme.current.popup;
             border-radius: 14px; border-width: 1px; border-color: Theme.current.border_soft;
             drop-shadow-offset-y: 8px; drop-shadow-blur: 24px; drop-shadow-color: #00000070;
@@ -81,107 +86,114 @@ export component ChapterMenu inherits Rectangle {
             };
             accessible-role: groupbox; accessible-label: @tr("Chapter options");
             TouchArea { enabled: root.shown; }
-            content := VerticalLayout {
-                padding: 6px; spacing: 0px;
-                VerticalLayout {
-                    padding-left: 10px; padding-right: 10px; padding-top: 6px; padding-bottom: 8px; spacing: 2px;
-                    Text { text: root.chapter.title; color: Theme.current.text_bright; font-size: 14px; font-weight: 600; overflow: elide; }
-                    Text {
-                        text: root.chapter.read ? @tr("Read") : root.chapter.reading-status != "" ? root.chapter.reading-status : @tr("Unread");
-                        color: Theme.current.text_muted; font-size: 12px; overflow: elide;
-                    }
-                }
-                first := MenuItem {
-                    live: root.shown;
-                    label: root.chapter.read ? @tr("Mark as unread") : @tr("Mark as read");
-                    icon: root.chapter.read ? "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0" : "M21 12a9 9 0 1 1-3-6.7M7 12l3 3 9-10";
-                    activated => { root.dismiss("read"); }
-                }
-                MenuItem {
-                    live: root.shown; label: @tr("Mark previous as read");
-                    icon: "M3 7l3 3 5-6M3 16l3 3 5-6M15 8h6M15 17h6";
-                    activated => { root.dismiss("read-previous"); }
-                }
-                MenuItem {
-                    live: root.shown;
-                    label: root.chapter.bookmarked ? @tr("Remove bookmark") : @tr("Bookmark");
-                    icon: "M6 3h12v19l-6-4-6 4z";
-                    activated => { root.dismiss("bookmark"); }
-                }
-                if root.partly-read: MenuItem {
-                    live: root.shown; label: @tr("Clear progress");
-                    icon: "M3 12a9 9 0 1 0 3-6.7M3 4v5h5";
-                    activated => { root.dismiss("clear-progress"); }
-                }
-                if !root.chapter.local-import: Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.current.border_soft; } }
-                if !root.chapter.local-import: Text {
-                    text: @tr("DOWNLOAD"); color: Theme.current.text_muted; font-size: 11px; font-weight: 700;
-                    height: 24px; vertical-alignment: center;
-                }
-                // While a job exists: what it is doing and how far it got.
-                if !root.chapter.local-import && root.in-progress: Rectangle {
-                    height: 58px;
-                    Rectangle {
-                        x: 4px; y: 2px; width: parent.width - 8px; height: 52px; border-radius: 10px;
-                        background: Theme.current.settings_control;
+            Flickable {
+                width: 100%; height: 100%;
+                content-width: self.width;
+                content-height: content.preferred-height;
+                interactive: content.preferred-height > self.height;
+                content := VerticalLayout {
+                    width: parent.width; height: self.preferred-height;
+                    padding: 6px; spacing: 0px;
+                    VerticalLayout {
+                        padding-left: 10px; padding-right: 10px; padding-top: 6px; padding-bottom: 8px; spacing: 2px;
+                        Text { text: root.chapter.title; color: Theme.current.text_bright; font-size: 14px; font-weight: 600; overflow: elide; }
                         Text {
-                            x: 10px; y: 8px; width: parent.width - 20px;
-                            text: (root.state == 1 ? @tr("Queued") : root.state == 2 ? @tr("Downloading") : root.state == 3 ? @tr("Paused") : @tr("Failed"))
-                                + " · " + root.percent + "%";
-                            color: root.state == 4 ? Theme.current.text_destructive : Theme.current.text_bright; font-size: 13px;
+                            text: root.chapter.read ? @tr("Read") : root.chapter.reading-status != "" ? root.chapter.reading-status : @tr("Unread");
+                            color: Theme.current.text_muted; font-size: 12px; overflow: elide;
                         }
+                    }
+                    first := MenuItem {
+                        live: root.shown;
+                        label: root.chapter.read ? @tr("Mark as unread") : @tr("Mark as read");
+                        icon: root.chapter.read ? "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0" : "M21 12a9 9 0 1 1-3-6.7M7 12l3 3 9-10";
+                        activated => { root.dismiss("read"); }
+                    }
+                    MenuItem {
+                        live: root.shown; label: @tr("Mark previous as read");
+                        icon: "M3 7l3 3 5-6M3 16l3 3 5-6M15 8h6M15 17h6";
+                        activated => { root.dismiss("read-previous"); }
+                    }
+                    MenuItem {
+                        live: root.shown;
+                        label: root.chapter.bookmarked ? @tr("Remove bookmark") : @tr("Bookmark");
+                        icon: "M6 3h12v19l-6-4-6 4z";
+                        activated => { root.dismiss("bookmark"); }
+                    }
+                    if root.partly-read: MenuItem {
+                        live: root.shown; label: @tr("Clear progress");
+                        icon: "M3 12a9 9 0 1 0 3-6.7M3 4v5h5";
+                        activated => { root.dismiss("clear-progress"); }
+                    }
+                    if !root.chapter.local-import: Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.current.border_soft; } }
+                    if !root.chapter.local-import: Text {
+                        text: @tr("DOWNLOAD"); color: Theme.current.text_muted; font-size: 11px; font-weight: 700;
+                        height: 24px; vertical-alignment: center;
+                    }
+                    // While a job exists: what it is doing and how far it got.
+                    if !root.chapter.local-import && root.in-progress: Rectangle {
+                        height: 58px;
                         Rectangle {
-                            x: 10px; y: 36px; width: parent.width - 20px; height: 4px; border-radius: 2px;
-                            background: Theme.current.progress_track_overlay;
-                            accessible-role: progress-indicator; accessible-label: @tr("Download progress");
-                            accessible-value: root.percent + "%";
+                            x: 4px; y: 2px; width: parent.width - 8px; height: 52px; border-radius: 10px;
+                            background: Theme.current.settings_control;
+                            Text {
+                                x: 10px; y: 8px; width: parent.width - 20px;
+                                text: (root.state == 1 ? @tr("Queued") : root.state == 2 ? @tr("Downloading") : root.state == 3 ? @tr("Paused") : @tr("Failed"))
+                                    + " · " + root.percent + "%";
+                                color: root.state == 4 ? Theme.current.text_destructive : Theme.current.text_bright; font-size: 13px;
+                            }
                             Rectangle {
-                                x: 0px; height: 100%; border-radius: 2px;
-                                width: parent.width * Math.clamp(root.chapter.download-progress, 0, 1);
-                                background: root.state == 4 ? Theme.current.text_destructive : Theme.current.accent_soft;
+                                x: 10px; y: 36px; width: parent.width - 20px; height: 4px; border-radius: 2px;
+                                background: Theme.current.progress_track_overlay;
+                                accessible-role: progress-indicator; accessible-label: @tr("Download progress");
+                                accessible-value: root.percent + "%";
+                                Rectangle {
+                                    x: 0px; height: 100%; border-radius: 2px;
+                                    width: parent.width * Math.clamp(root.chapter.download-progress, 0, 1);
+                                    background: root.state == 4 ? Theme.current.text_destructive : Theme.current.accent_soft;
+                                }
                             }
                         }
                     }
-                }
-                if !root.chapter.local-import && (root.state == 0 || root.state == 6): MenuItem {
-                    live: root.shown; label: @tr("Download");
-                    icon: "M12 3v12M7 10l5 5 5-5M5 16v5h14v-5";
-                    activated => { root.dismiss("download"); }
-                }
-                if !root.chapter.local-import && (root.state == 0 || root.state == 6): MenuItem {
-                    live: root.shown; label: @tr("Download next 5");
-                    icon: "M12 3v9M8 8l4 4 4-4M5 16h14M5 20h14";
-                    activated => { root.dismiss("download-next-5"); }
-                }
-                if !root.chapter.local-import && (root.state == 1 || root.state == 2): MenuItem {
-                    live: root.shown; label: @tr("Pause");
-                    icon: "M8 5v14M16 5v14";
-                    activated => { root.dismiss("pause"); }
-                }
-                if !root.chapter.local-import && root.state == 3: MenuItem {
-                    live: root.shown; label: @tr("Resume");
-                    icon: "M8 5l11 7-11 7z";
-                    activated => { root.dismiss("resume"); }
-                }
-                if !root.chapter.local-import && root.state == 4: MenuItem {
-                    live: root.shown; label: @tr("Retry");
-                    icon: "M20 10a8 8 0 1 0-1 8M20 4v6h-6";
-                    activated => { root.dismiss("retry"); }
-                }
-                if !root.chapter.local-import && root.state >= 1 && root.state <= 3: MenuItem {
-                    live: root.shown; label: @tr("Cancel download"); danger: true;
-                    icon: "M6 6l12 12M18 6L6 18";
-                    activated => { root.dismiss("cancel"); }
-                }
-                if !root.chapter.local-import && root.state == 4: MenuItem {
-                    live: root.shown; label: @tr("Discard"); danger: true;
-                    icon: "M4 6h16M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7M14 10v7";
-                    activated => { root.dismiss("delete-download"); }
-                }
-                if !root.chapter.local-import && root.state == 5: MenuItem {
-                    live: root.shown; label: @tr("Delete download"); danger: true;
-                    icon: "M4 6h16M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7M14 10v7";
-                    activated => { root.dismiss("delete-download"); }
+                    if !root.chapter.local-import && (root.state == 0 || root.state == 6): MenuItem {
+                        live: root.shown; label: @tr("Download");
+                        icon: "M12 3v12M7 10l5 5 5-5M5 16v5h14v-5";
+                        activated => { root.dismiss("download"); }
+                    }
+                    if !root.chapter.local-import && (root.state == 0 || root.state == 6): MenuItem {
+                        live: root.shown; label: @tr("Download next 5");
+                        icon: "M12 3v9M8 8l4 4 4-4M5 16h14M5 20h14";
+                        activated => { root.dismiss("download-next-5"); }
+                    }
+                    if !root.chapter.local-import && (root.state == 1 || root.state == 2): MenuItem {
+                        live: root.shown; label: @tr("Pause");
+                        icon: "M8 5v14M16 5v14";
+                        activated => { root.dismiss("pause"); }
+                    }
+                    if !root.chapter.local-import && root.state == 3: MenuItem {
+                        live: root.shown; label: @tr("Resume");
+                        icon: "M8 5l11 7-11 7z";
+                        activated => { root.dismiss("resume"); }
+                    }
+                    if !root.chapter.local-import && root.state == 4: MenuItem {
+                        live: root.shown; label: @tr("Retry");
+                        icon: "M20 10a8 8 0 1 0-1 8M20 4v6h-6";
+                        activated => { root.dismiss("retry"); }
+                    }
+                    if !root.chapter.local-import && root.state >= 1 && root.state <= 3: MenuItem {
+                        live: root.shown; label: @tr("Cancel download"); danger: true;
+                        icon: "M6 6l12 12M18 6L6 18";
+                        activated => { root.dismiss("cancel"); }
+                    }
+                    if !root.chapter.local-import && root.state == 4: MenuItem {
+                        live: root.shown; label: @tr("Discard"); danger: true;
+                        icon: "M4 6h16M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7M14 10v7";
+                        activated => { root.dismiss("delete-download"); }
+                    }
+                    if !root.chapter.local-import && root.state == 5: MenuItem {
+                        live: root.shown; label: @tr("Delete download"); danger: true;
+                        icon: "M4 6h16M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7M14 10v7";
+                        activated => { root.dismiss("delete-download"); }
+                    }
                 }
             }
         }

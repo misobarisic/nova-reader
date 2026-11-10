@@ -64,6 +64,7 @@ export component TitleMenu inherits Rectangle {
     // Window x the panel grows from (the pointer for a right-click, else the
     // button's right edge).
     in property <length> origin-x;
+    in property <length> safe-top;
     in property <length> safe-bottom;
     callback picked(string);
     // Category ticks keep the menu open for more.
@@ -119,183 +120,201 @@ export component TitleMenu inherits Rectangle {
         TouchArea { enabled: root.shown; clicked => { root.dismiss(""); } }
         panel := Rectangle {
             width: min(288px, max(1px, root.width - 16px));
-            private property <length> target-height: min(content.preferred-height, max(1px, root.height - root.anchor-bottom - root.safe-bottom - 12px));
+            // The whole panel always stays on screen. A hold low on the page
+            // opens it upward, and when neither side has room it slides over
+            // the anchor instead of shrinking or running off the bottom. Only
+            // a panel taller than the whole window scrolls.
+            private property <length> top-limit: root.safe-top + 8px;
+            private property <length> bottom-limit: max(self.top-limit + 1px, root.height - root.safe-bottom - 8px);
+            private property <length> anchor-y: Math.clamp(root.anchor-bottom, self.top-limit, self.bottom-limit);
+            private property <length> room-below: self.bottom-limit - self.anchor-y - 4px;
+            private property <length> room-above: self.anchor-y - 4px - self.top-limit;
+            private property <bool> upward: content.preferred-height > self.room-below && self.room-above > self.room-below;
+            private property <length> target-height: min(content.preferred-height, self.bottom-limit - self.top-limit);
             height: self.target-height;
             animate height { duration: root.motion ? Anim.player_slide : 0ms; easing: ease-out; }
             x: Math.clamp(root.anchor-right - self.width, 8px, max(8px, root.width - self.width - 8px));
-            y: root.anchor-bottom + 4px;
+            y: Math.clamp(self.upward ? self.anchor-y - 4px - self.target-height : self.anchor-y + 4px,
+                self.top-limit, max(self.top-limit, self.bottom-limit - self.target-height));
             background: Theme.current.popup;
             border-radius: 14px; border-width: 1px; border-color: Theme.current.border_soft;
             drop-shadow-offset-y: 8px; drop-shadow-blur: 24px; drop-shadow-color: #00000070;
             clip: true;
             opacity: root.fade-progress;
             transform-scale: 0.86 + 0.14 * root.scale-progress;
-            transform-origin: { x: Math.clamp(root.origin-x - self.x, 0px, self.width), y: 0px };
+            transform-origin: { x: Math.clamp(root.origin-x - self.x, 0px, self.width), y: Math.clamp(self.anchor-y - self.y, 0px, self.target-height) };
             accessible-role: groupbox; accessible-label: @tr("Title options");
             TouchArea { enabled: root.shown; }
-            content := VerticalLayout {
-                padding: 6px; spacing: 0px;
-                opacity: root.content-fade;
-                if root.page == 0: VerticalLayout {
-                    padding-left: 10px; padding-right: 10px; padding-top: 6px; padding-bottom: 6px; spacing: 2px;
-                    Text { text: root.title; color: Theme.current.text_bright; font-size: 14px; font-weight: 600; overflow: elide; }
-                    if root.summary != "": Text { text: root.summary; color: Theme.current.text_muted; font-size: 12px; overflow: elide; }
-                }
-                if root.page == 0: HorizontalLayout {
-                    spacing: 4px; padding-bottom: 4px;
-                    IconTile {
-                        live: root.shown; label: @tr("Refresh"); icon: "M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7";
-                        activated => { root.dismiss("refresh"); }
+            Flickable {
+                width: 100%; height: 100%;
+                content-width: self.width;
+                content-height: content.preferred-height;
+                interactive: content.preferred-height > self.height;
+                content := VerticalLayout {
+                    width: parent.width; height: self.preferred-height;
+                    padding: 6px; spacing: 0px;
+                    opacity: root.content-fade;
+                    if root.page == 0: VerticalLayout {
+                        padding-left: 10px; padding-right: 10px; padding-top: 6px; padding-bottom: 6px; spacing: 2px;
+                        Text { text: root.title; color: Theme.current.text_bright; font-size: 14px; font-weight: 600; overflow: elide; }
+                        if root.summary != "": Text { text: root.summary; color: Theme.current.text_muted; font-size: 12px; overflow: elide; }
                     }
-                    if root.in-library: IconTile {
-                        live: root.shown; label: @tr("Status"); icon: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM8 12l3 3 5-6";
-                        activated => { root.go(2); }
-                    }
-                    if root.in-library: IconTile {
-                        live: root.shown; label: @tr("Categories"); icon: "M4 6h7v5H4zM13 6h7v5h-7zM4 13h7v5H4zM13 13h7v5h-7z";
-                        activated => { root.go(3); }
-                    }
-                    IconTile {
-                        live: root.shown; label: @tr("Layout"); icon: "M4 4h7v16H4zM13 4h7v16h-7z";
-                        activated => { root.go(4); }
-                    }
-                }
-                if root.page == 0: MenuItem {
-                    live: root.shown; label: @tr("Download"); trailing: "›";
-                    icon: "M12 3v12M7 10l5 5 5-5M5 16v5h14v-5";
-                    activated => { root.go(1); }
-                }
-                if root.page == 0: MenuItem {
-                    live: root.shown; label: @tr("Delete read downloads"); danger: true;
-                    icon: "M4 6h16M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7M14 10v7";
-                    activated => { root.dismiss("delete-read-downloads"); }
-                }
-                if root.page == 0: Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.current.border_soft; } }
-                if root.page == 0: MenuItem {
-                    live: root.shown; label: @tr("Mark all read");
-                    icon: "M21 12a9 9 0 1 1-3-6.7M7 12l3 3 9-10";
-                    activated => { root.dismiss("mark-all-read"); }
-                }
-                if root.page == 0: MenuItem {
-                    live: root.shown; label: @tr("Mark all unread");
-                    icon: "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0";
-                    activated => { root.dismiss("mark-all-unread"); }
-                }
-                if root.page == 0: MenuItem {
-                    live: root.shown; label: @tr("Clear all positions");
-                    icon: "M3 12a9 9 0 1 0 3-6.7M3 4v5h5";
-                    activated => { root.dismiss("clear-all-positions"); }
-                }
-                if root.page == 0: Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.current.border_soft; } }
-                if root.page == 0: MenuItem {
-                    live: root.shown;
-                    label: root.in-library ? @tr("Remove from library") : @tr("Add to library");
-                    danger: root.in-library;
-                    icon: root.in-library ? "M5 12h14" : "M12 5v14M5 12h14";
-                    activated => { root.dismiss(root.in-library ? "remove" : "add"); }
-                }
-                // Download sub-page. "Next" means the first unread chapters in
-                // reading order that are not downloaded yet.
-                if root.page == 1: MenuItem {
-                    live: root.shown; label: @tr("Download"); icon: "M15 18l-6-6 6-6";
-                    activated => { root.go(0); }
-                }
-                if root.page == 1: MenuItem {
-                    live: root.shown; label: @tr("Next chapter");
-                    icon: "M12 3v12M7 10l5 5 5-5M5 16v5h14v-5";
-                    activated => { root.dismiss("download-next:1"); }
-                }
-                if root.page == 1: MenuItem {
-                    live: root.shown; label: @tr("Next 5 chapters");
-                    icon: "M12 3v9M8 8l4 4 4-4M5 16h14M5 20h14";
-                    activated => { root.dismiss("download-next:5"); }
-                }
-                if root.page == 1: MenuItem {
-                    live: root.shown; label: @tr("All unread"); trailing: root.unread-to-download;
-                    icon: "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0M12 8v6M9 11l3 3 3-3";
-                    activated => { root.dismiss("download-unread"); }
-                }
-                if root.page == 1: MenuItem {
-                    live: root.shown; label: @tr("Everything"); trailing: root.all-to-download;
-                    icon: "M4 4h16v16H4zM12 8v6M9 11l3 3 3-3";
-                    activated => { root.dismiss("download-all"); }
-                }
-                // Status: the manual statuses, then back to automatic.
-                if root.page == 2: MenuItem {
-                    live: root.shown; label: @tr("Status"); icon: "M15 18l-6-6 6-6";
-                    activated => { root.go(0); }
-                }
-                for choice in [
-                    { label: @tr("Reading"), code: 6, icon: "M5 4h10a3 3 0 0 1 3 3v13H8a3 3 0 0 1-3-3zM5 17a3 3 0 0 1 3-3h10" },
-                    { label: @tr("Plan to read"), code: 5, icon: "M6 3h12v18l-6-4-6 4z" },
-                    { label: @tr("Completed"), code: 7, icon: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM8 12l3 3 5-6" },
-                    { label: @tr("On hold"), code: 1, icon: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM10 9v6M14 9v6" },
-                    { label: @tr("Dropped"), code: 2, icon: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM9 9l6 6M15 9l-6 6" },
-                    { label: @tr("Automatic"), code: 0, icon: "M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7" },
-                ]: MenuItem {
-                    visible: root.page == 2; height: root.page == 2 ? 44px : 0px;
-                    live: root.shown && root.page == 2; label: choice.label;
-                    selected: root.status == choice.code;
-                    icon: choice.icon;
-                    activated => { root.dismiss("status:" + choice.code); }
-                }
-                // Categories: tick as many as wanted; the menu stays open.
-                if root.page == 3: MenuItem {
-                    live: root.shown; label: @tr("Categories"); icon: "M15 18l-6-6 6-6";
-                    activated => { root.go(0); }
-                }
-                if root.page == 3 && root.categories.length == 0: Text {
-                    height: 52px; text: @tr("Create categories in More → Categories.");
-                    color: Theme.current.text_muted; font-size: 13px; wrap: word-wrap;
-                    vertical-alignment: center; horizontal-alignment: center;
-                }
-                if root.page == 3 && root.categories.length > 0: ScrollView {
-                    height: min(root.categories.length * 44px, 264px);
-                    content-height: root.categories.length * 44px;
-                    for category[index] in root.categories: Rectangle {
-                        y: index * 44px; width: parent.width; height: 44px; border-radius: 10px;
-                        background: category-touch.has-hover || category-key.has-focus ? Theme.current.control_hover : category.checked ? Theme.current.selection_wash : transparent;
-                        border-width: category-key.has-focus && SettingsStyle.keyboard-mode ? 2px : 0px;
-                        border-color: Theme.current.focus_ring;
-                        accessible-role: checkbox; accessible-label: category.label;
-                        accessible-checkable: true; accessible-checked: category.checked;
-                        accessible-action-default => { root.category-toggled(category.id); }
-                        Rectangle {
-                            x: 12px; y: 12px; width: 20px; height: 20px; border-radius: 5px;
-                            border-width: 2px; border-color: category.checked ? Theme.current.accent : Theme.current.border_strong;
-                            background: category.checked ? Theme.current.accent : transparent;
-                            if category.checked: Path {
-                                x: 3px; y: 3px; width: 14px; height: 14px; viewbox-width: 24; viewbox-height: 24;
-                                fill: transparent; stroke: Theme.current.on_accent; stroke-width: 3px; commands: "M5 12l5 5 9-10";
-                            }
+                    if root.page == 0: HorizontalLayout {
+                        spacing: 4px; padding-bottom: 4px;
+                        IconTile {
+                            live: root.shown; label: @tr("Refresh"); icon: "M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7";
+                            activated => { root.dismiss("refresh"); }
                         }
-                        Text { x: 44px; width: parent.width - 56px; height: 100%; text: category.label; color: Theme.current.text_bright; font-size: 14px; vertical-alignment: center; overflow: elide; }
-                        // Tab moves between rows; Return or Space ticks one.
-                        category-key := FocusScope {
-                            enabled: root.shown;
-                            key-pressed(e) => {
-                                if (e.text == Key.Return || e.text == " ") && !e.repeat { root.category-toggled(category.id); return accept; }
-                                return reject;
-                            }
+                        if root.in-library: IconTile {
+                            live: root.shown; label: @tr("Status"); icon: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM8 12l3 3 5-6";
+                            activated => { root.go(2); }
                         }
-                        category-touch := ControlTouchArea { enabled: root.shown; mouse-cursor: pointer; clicked => { root.category-toggled(category.id); } }
+                        if root.in-library: IconTile {
+                            live: root.shown; label: @tr("Categories"); icon: "M4 6h7v5H4zM13 6h7v5h-7zM4 13h7v5H4zM13 13h7v5h-7z";
+                            activated => { root.go(3); }
+                        }
+                        IconTile {
+                            live: root.shown; label: @tr("Layout"); icon: "M4 4h7v16H4zM13 4h7v16h-7z";
+                            activated => { root.go(4); }
+                        }
                     }
-                }
-                // Layout: how this title opens.
-                if root.page == 4: MenuItem {
-                    live: root.shown; label: @tr("Layout"); icon: "M15 18l-6-6 6-6";
-                    activated => { root.go(0); }
-                }
-                for choice[index] in [
-                    { label: @tr("Default"), action: "presentation-default", icon: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18M12 8v4l3 2" },
-                    { label: @tr("Reader"), action: "presentation-reader", icon: "M12 6.5C10.5 5 8 4.5 3 4.5v14c5 0 7.5.5 9 2 1.5-1.5 4-2 9-2v-14c-5 0-7.5.5-9 2zM12 6.5v14" },
-                    { label: @tr("Gallery"), action: "presentation-gallery", icon: "M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z" },
-                ]: MenuItem {
-                    visible: root.page == 4; height: root.page == 4 ? 44px : 0px;
-                    live: root.shown && root.page == 4; label: choice.label;
-                    selected: root.presentation == index;
-                    icon: choice.icon;
-                    activated => { root.dismiss(choice.action); }
+                    if root.page == 0: MenuItem {
+                        live: root.shown; label: @tr("Download"); trailing: "›";
+                        icon: "M12 3v12M7 10l5 5 5-5M5 16v5h14v-5";
+                        activated => { root.go(1); }
+                    }
+                    if root.page == 0: MenuItem {
+                        live: root.shown; label: @tr("Delete read downloads"); danger: true;
+                        icon: "M4 6h16M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7M14 10v7";
+                        activated => { root.dismiss("delete-read-downloads"); }
+                    }
+                    if root.page == 0: Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.current.border_soft; } }
+                    if root.page == 0: MenuItem {
+                        live: root.shown; label: @tr("Mark all read");
+                        icon: "M21 12a9 9 0 1 1-3-6.7M7 12l3 3 9-10";
+                        activated => { root.dismiss("mark-all-read"); }
+                    }
+                    if root.page == 0: MenuItem {
+                        live: root.shown; label: @tr("Mark all unread");
+                        icon: "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0";
+                        activated => { root.dismiss("mark-all-unread"); }
+                    }
+                    if root.page == 0: MenuItem {
+                        live: root.shown; label: @tr("Clear all positions");
+                        icon: "M3 12a9 9 0 1 0 3-6.7M3 4v5h5";
+                        activated => { root.dismiss("clear-all-positions"); }
+                    }
+                    if root.page == 0: Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.current.border_soft; } }
+                    if root.page == 0: MenuItem {
+                        live: root.shown;
+                        label: root.in-library ? @tr("Remove from library") : @tr("Add to library");
+                        danger: root.in-library;
+                        icon: root.in-library ? "M5 12h14" : "M12 5v14M5 12h14";
+                        activated => { root.dismiss(root.in-library ? "remove" : "add"); }
+                    }
+                    // Download sub-page. "Next" means the first unread chapters in
+                    // reading order that are not downloaded yet.
+                    if root.page == 1: MenuItem {
+                        live: root.shown; label: @tr("Download"); icon: "M15 18l-6-6 6-6";
+                        activated => { root.go(0); }
+                    }
+                    if root.page == 1: MenuItem {
+                        live: root.shown; label: @tr("Next chapter");
+                        icon: "M12 3v12M7 10l5 5 5-5M5 16v5h14v-5";
+                        activated => { root.dismiss("download-next:1"); }
+                    }
+                    if root.page == 1: MenuItem {
+                        live: root.shown; label: @tr("Next 5 chapters");
+                        icon: "M12 3v9M8 8l4 4 4-4M5 16h14M5 20h14";
+                        activated => { root.dismiss("download-next:5"); }
+                    }
+                    if root.page == 1: MenuItem {
+                        live: root.shown; label: @tr("All unread"); trailing: root.unread-to-download;
+                        icon: "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0M12 8v6M9 11l3 3 3-3";
+                        activated => { root.dismiss("download-unread"); }
+                    }
+                    if root.page == 1: MenuItem {
+                        live: root.shown; label: @tr("Everything"); trailing: root.all-to-download;
+                        icon: "M4 4h16v16H4zM12 8v6M9 11l3 3 3-3";
+                        activated => { root.dismiss("download-all"); }
+                    }
+                    // Status: the manual statuses, then back to automatic.
+                    if root.page == 2: MenuItem {
+                        live: root.shown; label: @tr("Status"); icon: "M15 18l-6-6 6-6";
+                        activated => { root.go(0); }
+                    }
+                    for choice in [
+                        { label: @tr("Reading"), code: 6, icon: "M5 4h10a3 3 0 0 1 3 3v13H8a3 3 0 0 1-3-3zM5 17a3 3 0 0 1 3-3h10" },
+                        { label: @tr("Plan to read"), code: 5, icon: "M6 3h12v18l-6-4-6 4z" },
+                        { label: @tr("Completed"), code: 7, icon: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM8 12l3 3 5-6" },
+                        { label: @tr("On hold"), code: 1, icon: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM10 9v6M14 9v6" },
+                        { label: @tr("Dropped"), code: 2, icon: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM9 9l6 6M15 9l-6 6" },
+                        { label: @tr("Automatic"), code: 0, icon: "M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7" },
+                    ]: MenuItem {
+                        visible: root.page == 2; height: root.page == 2 ? 44px : 0px;
+                        live: root.shown && root.page == 2; label: choice.label;
+                        selected: root.status == choice.code;
+                        icon: choice.icon;
+                        activated => { root.dismiss("status:" + choice.code); }
+                    }
+                    // Categories: tick as many as wanted; the menu stays open.
+                    if root.page == 3: MenuItem {
+                        live: root.shown; label: @tr("Categories"); icon: "M15 18l-6-6 6-6";
+                        activated => { root.go(0); }
+                    }
+                    if root.page == 3 && root.categories.length == 0: Text {
+                        height: 52px; text: @tr("Create categories in More → Categories.");
+                        color: Theme.current.text_muted; font-size: 13px; wrap: word-wrap;
+                        vertical-alignment: center; horizontal-alignment: center;
+                    }
+                    if root.page == 3 && root.categories.length > 0: ScrollView {
+                        height: min(root.categories.length * 44px, 264px);
+                        content-height: root.categories.length * 44px;
+                        for category[index] in root.categories: Rectangle {
+                            y: index * 44px; width: parent.width; height: 44px; border-radius: 10px;
+                            background: category-touch.has-hover || category-key.has-focus ? Theme.current.control_hover : category.checked ? Theme.current.selection_wash : transparent;
+                            border-width: category-key.has-focus && SettingsStyle.keyboard-mode ? 2px : 0px;
+                            border-color: Theme.current.focus_ring;
+                            accessible-role: checkbox; accessible-label: category.label;
+                            accessible-checkable: true; accessible-checked: category.checked;
+                            accessible-action-default => { root.category-toggled(category.id); }
+                            Rectangle {
+                                x: 12px; y: 12px; width: 20px; height: 20px; border-radius: 5px;
+                                border-width: 2px; border-color: category.checked ? Theme.current.accent : Theme.current.border_strong;
+                                background: category.checked ? Theme.current.accent : transparent;
+                                if category.checked: Path {
+                                    x: 3px; y: 3px; width: 14px; height: 14px; viewbox-width: 24; viewbox-height: 24;
+                                    fill: transparent; stroke: Theme.current.on_accent; stroke-width: 3px; commands: "M5 12l5 5 9-10";
+                                }
+                            }
+                            Text { x: 44px; width: parent.width - 56px; height: 100%; text: category.label; color: Theme.current.text_bright; font-size: 14px; vertical-alignment: center; overflow: elide; }
+                            // Tab moves between rows; Return or Space ticks one.
+                            category-key := FocusScope {
+                                enabled: root.shown;
+                                key-pressed(e) => {
+                                    if (e.text == Key.Return || e.text == " ") && !e.repeat { root.category-toggled(category.id); return accept; }
+                                    return reject;
+                                }
+                            }
+                            category-touch := ControlTouchArea { enabled: root.shown; mouse-cursor: pointer; clicked => { root.category-toggled(category.id); } }
+                        }
+                    }
+                    // Layout: how this title opens.
+                    if root.page == 4: MenuItem {
+                        live: root.shown; label: @tr("Layout"); icon: "M15 18l-6-6 6-6";
+                        activated => { root.go(0); }
+                    }
+                    for choice[index] in [
+                        { label: @tr("Default"), action: "presentation-default", icon: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18M12 8v4l3 2" },
+                        { label: @tr("Reader"), action: "presentation-reader", icon: "M12 6.5C10.5 5 8 4.5 3 4.5v14c5 0 7.5.5 9 2 1.5-1.5 4-2 9-2v-14c-5 0-7.5.5-9 2zM12 6.5v14" },
+                        { label: @tr("Gallery"), action: "presentation-gallery", icon: "M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z" },
+                    ]: MenuItem {
+                        visible: root.page == 4; height: root.page == 4 ? 44px : 0px;
+                        live: root.shown && root.page == 4; label: choice.label;
+                        selected: root.presentation == index;
+                        icon: choice.icon;
+                        activated => { root.dismiss(choice.action); }
+                    }
                 }
             }
         }

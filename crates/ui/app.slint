@@ -1561,7 +1561,7 @@ export component AppWindow inherits Window {
         title: root.title-menu-title; summary: root.detail-menu-summary; in-library: root.title-menu-library;
         unread-to-download: root.detail-unread-to-download; all-to-download: root.detail-all-to-download;
         anchor-right: root.title-menu-right; anchor-bottom: root.title-menu-bottom; origin-x: root.title-menu-origin;
-        safe-bottom: root.safe-area-insets.bottom;
+        safe-top: root.safe-area-insets.top; safe-bottom: root.safe-area-insets.bottom;
         status: root.title-menu-status; presentation: root.entry-menu-presentation;
         categories: root.entry-categories;
         picked(action) => { root.title-menu-picked(action); }
