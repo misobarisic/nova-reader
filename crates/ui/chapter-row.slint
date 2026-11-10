@@ -133,8 +133,6 @@ export component ChapterRow inherits Rectangle {
             chapter: root.chapter;
             anchor-x: root.absolute-position.x + root.press-x;
             anchor-y: root.absolute-position.y + root.press-y;
-            row-left: root.absolute-position.x; row-top: root.absolute-position.y;
-            row-width: root.width; row-height: root.height;
             safe-top: root.safe-top; safe-bottom: root.safe-bottom;
             picked(action) => { root.action(action); }
             closed => { actions.close(); }

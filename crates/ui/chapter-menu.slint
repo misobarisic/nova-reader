@@ -1,6 +1,6 @@
-// The chapter ⋯ menu: a compact icon menu that grows from where it was opened
-// (the ⋯ button, a hold or a right-click), sits under its row or flips above it
-// when there is no room, and updates live with the row's download state. It
+// The chapter ⋯ menu: a compact icon menu that opens at, and grows from, where
+// it was requested (a hold, a right-click or the Menu key), flips to the other
+// side when there is no room, and updates live with the row's download state. It
 // covers the window so it can animate out itself and own outside taps and
 // Escape, like the reader's image menu.
 import { Theme, SettingsStyle, Anim } from "@NovaUiShared";
@@ -12,13 +12,9 @@ export { MenuItem } from "@NovaUiBase/menu-item.slint";
 
 export component ChapterMenu inherits Rectangle {
     in property <ItemRow> chapter;
-    // Window coordinates of the press point and of the row it belongs to.
+    // Window coordinates of the press point.
     in property <length> anchor-x;
     in property <length> anchor-y;
-    in property <length> row-left;
-    in property <length> row-top;
-    in property <length> row-width;
-    in property <length> row-height;
     in property <length> safe-top;
     in property <length> safe-bottom;
     callback picked(string);
@@ -27,7 +23,9 @@ export component ChapterMenu inherits Rectangle {
     private property <bool> motion: Anim.enabled && Anim.player;
     private property <float> scale-progress: 0;
     private property <float> fade-progress: 0;
-    animate scale-progress { duration: root.motion ? (root.shown ? Anim.player_slide : Anim.player_fast) : 0ms; easing: ease-out; }
+    // Grows well out of its origin (the finger, pointer or button) and settles
+    // softly; closing collapses back into it faster.
+    animate scale-progress { duration: root.motion ? (root.shown ? Anim.player_fade : Anim.player_fast) : 0ms; easing: cubic-bezier(0.2, 0.85, 0.3, 1); }
     animate fade-progress { duration: root.motion ? Anim.player_fast : 0ms; easing: ease-out; }
     changed motion => { root.scale-progress = root.shown ? 1 : 0; root.fade-progress = root.shown ? 1 : 0; }
     // Mounted with the popup: reveal on the next frame so the growth animates.
@@ -64,22 +62,27 @@ export component ChapterMenu inherits Rectangle {
         }
         panel := Rectangle {
             width: min(264px, max(1px, root.width - 16px));
-            // Opens below the row, above it near the bottom, and is always
-            // clamped inside the safe area so no part runs off screen. Only a
-            // panel taller than the window scrolls.
+            // Opens with a corner at the press point: to its right and below
+            // while there is room, flipped to the left or above otherwise, so
+            // it visibly grows out of the finger or pointer. It is always
+            // clamped inside the safe area; only a panel taller than the
+            // window scrolls.
             private property <length> top-limit: root.safe-top + 8px;
             private property <length> bottom-limit: max(self.top-limit + 1px, root.height - root.safe-bottom - 8px);
+            private property <length> press-y: Math.clamp(root.anchor-y, self.top-limit, self.bottom-limit);
             height: min(content.preferred-height, self.bottom-limit - self.top-limit);
-            private property <bool> room-below: root.row-top + root.row-height - 4px + self.height <= self.bottom-limit;
-            x: Math.clamp(root.row-left + root.row-width - self.width, 8px, max(8px, root.width - self.width - 8px));
-            y: Math.clamp(self.room-below ? root.row-top + root.row-height - 4px : root.row-top - self.height + 4px,
+            private property <bool> leftward: root.anchor-x + self.width > root.width - 8px && root.anchor-x - self.width >= 8px;
+            private property <bool> upward: self.press-y + 4px + self.height > self.bottom-limit
+                && self.press-y - self.top-limit > self.bottom-limit - self.press-y;
+            x: Math.clamp(self.leftward ? root.anchor-x - self.width : root.anchor-x, 8px, max(8px, root.width - self.width - 8px));
+            y: Math.clamp(self.upward ? self.press-y - 4px - self.height : self.press-y + 4px,
                 self.top-limit, max(self.top-limit, self.bottom-limit - self.height));
             background: Theme.current.popup;
             border-radius: 14px; border-width: 1px; border-color: Theme.current.border_soft;
             drop-shadow-offset-y: 8px; drop-shadow-blur: 24px; drop-shadow-color: #00000070;
             clip: true;
             opacity: root.fade-progress;
-            transform-scale: 0.86 + 0.14 * root.scale-progress;
+            transform-scale: 0.4 + 0.6 * root.scale-progress;
             transform-origin: {
                 x: Math.clamp(root.anchor-x - self.x, 0px, self.width),
                 y: Math.clamp(root.anchor-y - self.y, 0px, self.height),

@@ -39,7 +39,7 @@ export component EntryMenu inherits Rectangle {
     // sheet rises; both match the title, chapter and page menus.
     private property <bool> motion: Anim.enabled && Anim.player;
     private property <float> progress: 0;
-    animate progress { duration: root.motion ? Anim.player_slide : 0ms; easing: ease-out; }
+    animate progress { duration: root.motion ? Anim.player_fade : 0ms; easing: cubic-bezier(0.2, 0.85, 0.3, 1); }
     reveal := Timer { interval: 1ms; running: true; triggered => { self.stop(); root.progress = 1; } }
     private property <[EntryAction]> main-actions: [
         { label: @tr("Change status"), id: "change-status", enabled: root.in-library },
@@ -155,7 +155,7 @@ export component EntryMenu inherits Rectangle {
             drop-shadow-offset-y: root.narrow ? 0px : 8px; drop-shadow-blur: root.narrow ? 0px : 24px; drop-shadow-color: #00000070;
             clip: true;
             opacity: root.motion ? root.progress : 1;
-            transform-scale: root.narrow || !root.motion ? 1 : 0.86 + 0.14 * root.progress;
+            transform-scale: root.narrow || !root.motion ? 1 : 0.4 + 0.6 * root.progress;
             transform-origin: { x: Math.clamp(root.anchor-x - self.x, 0px, self.width), y: Math.clamp(root.anchor-y - self.y, 0px, self.height) };
             accessible-role: groupbox; accessible-label: root.presentation-editing ? @tr("Choose presentation") : root.editing ? @tr("Edit categories") : @tr("Title actions");
             TouchArea { width: 100%; height: 100%; }
