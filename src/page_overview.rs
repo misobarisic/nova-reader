@@ -551,7 +551,10 @@ impl Controller {
     }
     pub(super) fn overview_check_current(self: &Arc<Self>, ui: &AppWindow) {
         if self.view().section != 23 {
-            self.clear_overview_images(ui);
+            // Nothing to clear once the overview is gone.
+            if self.view().overview.is_some() {
+                self.clear_overview_images(ui);
+            }
             return;
         }
         let invalid = self.view().overview.as_ref().is_some_and(|o| {

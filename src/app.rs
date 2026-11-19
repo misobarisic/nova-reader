@@ -2678,6 +2678,11 @@ impl Controller {
         }
         self.clear_overview_images(ui);
         self.view().overview = None;
+        if section != 23 {
+            // Drop the tiles too: the overview timer would otherwise keep
+            // rewriting every row of a large gallery for the whole session.
+            ui.set_overview_tiles(ModelRc::default());
+        }
         if section == 22 {
             crate::image_limits_ui::refresh(ui);
         }
