@@ -14,6 +14,9 @@ const INTERVALS: &[u64] = &[30, 60, 300, 900];
 static REQUEST_GENERATION: AtomicU64 = AtomicU64::new(0);
 type Refresh = Arc<dyn Fn(&AppWindow) + Send + Sync>;
 
+const PROJECT_RETRY_MIN: std::time::Duration = std::time::Duration::from_secs(5);
+const PROJECT_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
 pub(crate) struct SyncController {
     services: Services,
     ui: slint::Weak<AppWindow>,
@@ -27,6 +30,10 @@ pub(crate) struct SyncController {
     addon_cancel: std::sync::Mutex<Arc<AtomicBool>>,
     addon_status: std::sync::Mutex<crate::sync_addons::Status>,
     addon_check: AtomicU64,
+    /// After a failed projection: when the tick may try again, and the delay
+    /// to use after the next failure. Without it a persistent failure is
+    /// retried (re-reading the whole state) every 600 ms tick.
+    project_backoff: std::sync::Mutex<(Option<std::time::Instant>, std::time::Duration)>,
     /// Id of the invite whose ticket/QR are on screen, so unrelated cancels
     /// and refreshes cannot clear it and an expired one cannot linger.
     shown_invite: std::sync::Mutex<Option<String>>,
@@ -52,6 +59,7 @@ impl SyncController {
             addon_cancel: std::sync::Mutex::new(Arc::new(AtomicBool::new(false))),
             addon_status: std::sync::Mutex::default(),
             addon_check: AtomicU64::new(0),
+            project_backoff: std::sync::Mutex::new((None, PROJECT_RETRY_MIN)),
             shown_invite: std::sync::Mutex::default(),
         });
         let settings = ui.global::<ReaderSyncSettings>();
@@ -409,7 +417,13 @@ impl SyncController {
                 .iter()
                 .any(|domain| crate::sync::handles_projection_domain(domain))
         });
-        if pending {
+        let waiting = self
+            .project_backoff
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .0
+            .is_some_and(|retry_at| retry_at > std::time::Instant::now());
+        if pending && !waiting {
             self.project();
         }
         let now = crate::services::now().max(0) as u64;
@@ -448,6 +462,22 @@ impl SyncController {
                     }
                     return;
                 }
+                let failed = result.is_err();
+                {
+                    let mut backoff = next
+                        .project_backoff
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    *backoff = if failed {
+                        let delay = backoff.1;
+                        (
+                            Some(std::time::Instant::now() + delay),
+                            (delay * 2).min(PROJECT_RETRY_MAX),
+                        )
+                    } else {
+                        (None, PROJECT_RETRY_MIN)
+                    };
+                }
                 match result {
                     Ok(()) => {
                         if let Err(error) = crate::sync_settings::refresh_ui(&ui) {
@@ -461,7 +491,8 @@ impl SyncController {
                     }
                 }
                 next.refresh_status(&ui);
-                if next.pending.load(Ordering::Acquire) {
+                // After a failure the tick retries once the backoff expires.
+                if !failed && next.pending.load(Ordering::Acquire) {
                     next.project();
                 }
             });

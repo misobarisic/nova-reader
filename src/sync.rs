@@ -474,8 +474,27 @@ fn project(
     state.history = values(store, profile, "history")?;
     state.bookmarks = values(store, profile, "bookmarks")?;
     resolve_actions(store, profile, state)?;
+    park_dangling(state);
     state.validate()?;
     Ok(())
+}
+
+/// Domains arrive separately, so a row can come before (or without) the series
+/// or chapter it refers to: an exchange cut off between domains, or a record a
+/// peer's policy rejected. Such rows are left out of this projection instead of
+/// failing it for the whole profile; they stay in the store and appear once
+/// their metadata arrives. They never enter the projected baseline, so later
+/// local commits do not delete them.
+fn park_dangling(state: &mut ReaderState) {
+    let series: std::collections::BTreeSet<_> =
+        state.series.iter().map(|s| s.id.clone()).collect();
+    state.chapters.retain(|c| series.contains(&c.id.series));
+    state.library.retain(|l| series.contains(&l.series));
+    let chapters: std::collections::BTreeSet<_> =
+        state.chapters.iter().map(|c| c.id.clone()).collect();
+    state.progress.retain(|p| chapters.contains(&p.chapter));
+    state.bookmarks.retain(|b| chapters.contains(&b.chapter));
+    state.history.retain(|h| chapters.contains(&h.chapter));
 }
 
 // Unknown future object fields remain in Store records while typed projections
