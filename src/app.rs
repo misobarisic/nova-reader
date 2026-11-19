@@ -5732,8 +5732,10 @@ pub(crate) static DEVICE_SNAPSHOTS: std::sync::atomic::AtomicUsize =
 fn capture_reader(ui: &AppWindow) -> Result<ReaderScreencap> {
     #[cfg(test)]
     DEVICE_SNAPSHOTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // The image limit applies to the cropped artwork below. A 4K window alone
+    // exceeds it, so the window itself only gets a loose bound (8K fits).
     let size = ui.window().size();
-    if u64::from(size.width) * u64::from(size.height) > 8_000_000 {
+    if u64::from(size.width) * u64::from(size.height) > 40_000_000 {
         return Err(text::tr("Reader screencap exceeds the image size limit"));
     }
     // Called before the context menu becomes visible. FemtoVG renders the
@@ -5780,6 +5782,9 @@ fn capture_reader(ui: &AppWindow) -> Result<ReaderScreencap> {
     let height = bottom - top;
     if width == 0 || height == 0 {
         return Err(text::tr("Reader screencap is unavailable"));
+    }
+    if u64::from(width) * u64::from(height) > 8_000_000 {
+        return Err(text::tr("Reader screencap exceeds the image size limit"));
     }
     let mut pixels = Vec::with_capacity(width as usize * height as usize * 4);
     for row in top..bottom {
