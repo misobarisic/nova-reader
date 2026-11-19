@@ -1223,8 +1223,7 @@ impl DownloadStore {
                     headers: BTreeMap::new(),
                 })
                 .collect();
-            self.enqueue(chapter.clone(), pages)?;
-            self.run(&chapter, |resource| {
+            self.import_job(&chapter, pages, |resource| {
                 let index = resource
                     .id
                     .strip_prefix("local-")
@@ -1238,6 +1237,28 @@ impl DownloadStore {
                 .map_err(|e| e.to_string())
             })
         })
+    }
+    /// Copies an import's pages. Local jobs are hidden from the Downloads lists
+    /// and cannot be removed there, and the caller records the series only on
+    /// success, so a failed import must not leave its job or copied pages.
+    fn import_job(
+        &self,
+        chapter: &ChapterId,
+        pages: Vec<PageResource>,
+        fetch: impl FnMut(&PageResource) -> std::result::Result<Vec<u8>, String>,
+    ) -> Result<()> {
+        self.enqueue(chapter.clone(), pages)?;
+        let result = self.run(chapter, fetch).and_then(|()| {
+            let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            match load(&inner.root, chapter)?.status {
+                JobStatus::Complete => Ok(()),
+                _ => Err(Error::Invalid("local import did not complete".into())),
+            }
+        });
+        if result.is_err() {
+            let _ = self.remove(chapter);
+        }
+        result
     }
     pub fn import_cbz(&self, chapter: ChapterId, path: impl AsRef<Path>) -> Result<()> {
         reader_engine::with_current_limits(|| {
@@ -1279,8 +1300,16 @@ impl DownloadStore {
                     entries.push((name, entry.index));
                 }
             }
-            if total > self.inner.lock().unwrap_or_else(|e| e.into_inner()).quota {
-                return Err(Error::Quota);
+            {
+                // Pages already stored count too, so an import that cannot fit
+                // fails before copying anything.
+                let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+                if usage(&inner.root)?
+                    .checked_add(total)
+                    .is_none_or(|needed| needed > inner.quota)
+                {
+                    return Err(Error::Quota);
+                }
             }
             entries.sort_by(|a, b| natural_cmp(&a.0.to_string_lossy(), &b.0.to_string_lossy()));
             let pages = entries
@@ -1292,8 +1321,7 @@ impl DownloadStore {
                     headers: BTreeMap::new(),
                 })
                 .collect();
-            self.enqueue(chapter.clone(), pages)?;
-            self.run(&chapter, |resource| {
+            self.import_job(&chapter, pages, |resource| {
                 let index = resource
                     .id
                     .strip_prefix("archive-")
