@@ -111,7 +111,23 @@ pub fn load(
         .ok()
         .map(Arc::new);
     let pages = match services.downloads.page_inventory(chapter) {
-        Ok(stored) => stored
+        Ok(stored) => {
+            // A paused, cancelled or failed job keeps the page URLs from when it
+            // was queued, and sources may sign them with an expiry. Ask the
+            // source for current pages and keep stored URLs only as a fallback.
+            let mut fresh = match &source {
+                Some(_) if stored.iter().any(|page| page.sha256.is_none()) => services
+                    .pages(chapter, cancel)
+                    .map(|(_, pages)| {
+                        pages
+                            .into_iter()
+                            .map(|page| (page.id.clone(), page))
+                            .collect::<std::collections::HashMap<_, _>>()
+                    })
+                    .unwrap_or_default(),
+                _ => Default::default(),
+            };
+            stored
             .into_iter()
             .map(|stored| {
                 let id = stored.resource.id.clone();
@@ -124,13 +140,13 @@ pub fn load(
                     None => match &source {
                         Some(source) => ResourceKind::Remote {
                             source: source.clone(),
-                            page: Page {
+                            page: fresh.remove(&id).unwrap_or_else(|| Page {
                                 id: id.clone(),
                                 url: stored.resource.url,
                                 headers: stored.resource.headers,
                                 width: None,
                                 height: None,
-                            },
+                            }),
                         },
                         None => ResourceKind::Unavailable {
                             message: nova_reader_ui::backend_text::tr(
@@ -145,7 +161,8 @@ pub fn load(
                     kind,
                 }
             })
-            .collect::<Vec<_>>(),
+            .collect::<Vec<_>>()
+        }
         Err(_) => {
             let (source, pages) = services.pages(chapter, cancel)?;
             let source = Arc::new(source);
