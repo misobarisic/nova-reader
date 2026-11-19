@@ -307,6 +307,10 @@ fn stage_profile(
             .read(target)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
         let mut next = next.clone();
+        // The installed-source list is device-wide and staged with every state.
+        // A plan for a new profile starts from an empty list, and an existing
+        // target's copy dates from the preview: neither may replace it.
+        next.sources = before.sources.clone();
         crate::sync::stage(
             staged,
             dev,
