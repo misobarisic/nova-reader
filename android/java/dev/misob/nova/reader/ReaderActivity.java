@@ -612,7 +612,11 @@ public final class ReaderActivity extends NativeActivity {
             if (destination==null) throw new IOException("Unable to create saved image");
             if (!request.store.tree) {
                 ImageTarget actual=request.store.stat(destination);
-                if (actual==null || !request.targetName.equals(actual.name)) throw new IOException("Image provider changed the requested filename");
+                if (actual==null) throw new IOException("Unable to create saved image");
+                // A file this install cannot see (left by an earlier install or
+                // another app) holds the name, so MediaStore numbered ours.
+                // Keep its name; the result reports what was saved.
+                request.targetName=actual.name;
             }
             copyImageBytes(request,request.store.resolver,original,destination,true);
             synchronized (LOCK) {
