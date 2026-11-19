@@ -252,9 +252,9 @@ impl Controller {
                 })
                 .filter(|index| *index < view.chapters.len());
             let chapter = next.map(|index| view.chapters[index].id.clone());
-            let collection_group = reader
-                .collection
-                .then(|| next.and_then(|index| i32::try_from(index).ok()));
+            // The gallery's groups follow source order, not this reading order,
+            // so the route takes the chapter identity rather than an index.
+            let collection_group = reader.collection.then(|| chapter.clone());
             self.continuation_work.cancel();
             let reader = view.reader.as_mut().unwrap();
             reader.preloading = None;
@@ -271,7 +271,7 @@ impl Controller {
             if let Some(group) = group
                 && self.gallery_return(ui)
             {
-                self.gallery_group(ui, group);
+                self.gallery_chapter(ui, &group);
             }
             return;
         }

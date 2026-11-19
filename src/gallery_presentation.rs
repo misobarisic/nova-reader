@@ -277,6 +277,19 @@ impl Controller {
         };
         self.reload_gallery(ui, selected.0, Some(selected.1), false);
     }
+    /// Opens the group with this chapter identity.
+    pub(super) fn gallery_chapter(self: &Arc<Self>, ui: &AppWindow, chapter: &ChapterId) {
+        let index = self
+            .view()
+            .overview
+            .as_ref()
+            .and_then(|o| o.groups.as_ref())
+            .and_then(|groups| groups.iter().position(|group| group.id == *chapter))
+            .and_then(|index| i32::try_from(index).ok());
+        if let Some(index) = index {
+            self.gallery_group(ui, index);
+        }
+    }
     pub(super) fn gallery_retry(self: &Arc<Self>, ui: &AppWindow) {
         let selected = self
             .view()
