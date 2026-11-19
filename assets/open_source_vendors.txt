@@ -6,7 +6,7 @@ reader-downloads, reader-catalogue, reader-capture and UI crates are GPL-3.0-or-
 Application/build/UI foundations derive from Nova revision
 b69a1e5765ecc65ac3b00acdfe2f16e2f46a5dda. nova-storage, nova-ui-base,
 nova-cache, nova-image, nova-sync and nova-backup are
-consumed from nova-kit revision 7a6c49a36d09d5f52b6333826458009eca279ca8.
+consumed from nova-kit revision 9f5ff602a6f1fb08629147c34f5a50b723939d62.
 The generated Cargo catalog lists runtime crates for the actual target and
 features; the complete project license and third-party notices follow.
 

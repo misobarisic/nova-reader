@@ -37,8 +37,20 @@ public class ReaderBackgroundService extends Service {
 
     private PowerManager.WakeLock wakeLock;
 
+    /**
+     * Whether the running instance has called startForeground. Android crashes
+     * the app when a service started with startForegroundService is stopped
+     * before it gets there, and Rust may stop it one tick after starting it.
+     */
+    private static boolean promoted;
+    /** A stop that arrived before promotion; the service stops itself after. */
+    private static boolean stopRequested;
+
     /** Start (or bring up) the download foreground service. */
     public static void start(Context context) {
+        synchronized (ReaderBackgroundService.class) {
+            stopRequested = false;
+        }
         ReaderActivity.requestNotificationPermission(0x53);
         Intent intent = new Intent(context, ReaderBackgroundService.class);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -50,6 +62,12 @@ public class ReaderBackgroundService extends Service {
 
     /** Stop the service (no active transfers). Safe to call when not running. */
     public static void stop(Context context) {
+        synchronized (ReaderBackgroundService.class) {
+            if (!promoted) {
+                stopRequested = true;
+                return;
+            }
+        }
         context.stopService(new Intent(context, ReaderBackgroundService.class));
     }
 
@@ -91,6 +109,13 @@ public class ReaderBackgroundService extends Service {
         } else {
             startForeground(NOTIFICATION_ID, notification);
         }
+        synchronized (ReaderBackgroundService.class) {
+            promoted = true;
+            if (stopRequested) {
+                stopRequested = false;
+                stopSelf();
+            }
+        }
         // Do not restart on its own: a restarted service with no Activity has no
         // transfer threads to keep alive, and downloads resume when the app is
         // next opened (persisted queue + `.part`/Range).
@@ -105,6 +130,9 @@ public class ReaderBackgroundService extends Service {
 
     @Override
     public void onDestroy() {
+        synchronized (ReaderBackgroundService.class) {
+            promoted = false;
+        }
         instance = new WeakReference<>(null);
         if (wakeLock != null && wakeLock.isHeld()) {
             wakeLock.release();
