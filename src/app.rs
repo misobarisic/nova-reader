@@ -451,12 +451,18 @@ impl Reader {
             && !self.chapter_finished()
     }
     fn activate_page(&mut self, index: usize) -> Option<ReadingProgress> {
+        self.activate_page_by(index, false)
+    }
+    /// `explicit`: the Previous/Next chapter buttons. Jumping away is not
+    /// finishing: the departing chapter keeps its own completion state and,
+    /// unless that rule was met, its real reading position.
+    fn activate_page_by(&mut self, index: usize, explicit: bool) -> Option<ReadingProgress> {
         let owner = self.owner(index).clone();
         if self.chapter == owner {
             return None;
         }
         let mut old = self.progress_record();
-        if index > self.anchor.page_index {
+        if index > self.anchor.page_index && !explicit {
             // Finishing a chapter keeps its read flag but drops the resume page.
             old.completed = true;
             old.anchor = ResumeAnchor::cleared();

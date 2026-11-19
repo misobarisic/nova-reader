@@ -116,7 +116,9 @@ Chapter buttons preserve the current mode and start the destination at **1×**.
 the last image (the last spread half when split), or the exact trailing chapter
 viewport in Webtoon; **Next chapter** enters the first image/start. They prepare
 the destination in the existing reader and wait for real geometry/pixels before
-entering it. Opening through Detail or History still resumes the
+entering it. Leaving through these buttons does not finish the chapter left
+behind: it keeps its own read state and, unless already finished, its position.
+Opening through Detail or History still resumes the
 chapter's saved position.
 An active zoom settles the old source position, then returns to 1× before chapter
 positioning. Opening Pages cancels a pending chapter change and reconciles the

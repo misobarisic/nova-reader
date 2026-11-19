@@ -1576,6 +1576,18 @@ mod tests {
         );
     }
     #[test]
+    fn next_chapter_button_keeps_the_departing_chapter_unread_and_in_place() {
+        let mut reader = reader();
+        reader.chapter = reader.segments[0].chapter.clone();
+        reader.anchor = ResumeAnchor::new(reader.page_id(0), 0, 0.25).unwrap();
+        reader.completed = false;
+        let previous = reader.activate_page_by(2, true).unwrap();
+        assert_eq!(previous.chapter, reader.segments[0].chapter);
+        assert!(!previous.completed);
+        assert_eq!(previous.anchor.page_index, 0);
+        assert_eq!(previous.anchor.offset(), 0.25);
+    }
+    #[test]
     fn prepending_preserves_source_anchor_tiles_and_bounds_reverse_retention() {
         let mut reader = reader();
         reader.chapter = reader.segments[0].chapter.clone();

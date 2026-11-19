@@ -388,7 +388,7 @@ impl Controller {
             }
             let layout = layout.unwrap();
             let (index, offset) = layout.anchor.unwrap();
-            if let Some(previous) = reader.activate_page(index) {
+            if let Some(previous) = reader.activate_page_by(index, true) {
                 let _ = self.progress_checkpoint.enqueue(previous);
             }
             reader.anchor =
