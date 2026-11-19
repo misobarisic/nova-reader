@@ -264,6 +264,28 @@ struct Field {
 fn text() -> String {
     "text".into()
 }
+/// Nodes `select_html` may visit for field lookups across one call.
+const SELECT_HTML_NODE_BUDGET: usize = 2_000_000;
+
+/// The first element under `root` (not `root` itself) matching `selector`, in
+/// document order. Every visited node is charged to `budget`; `Err` means the
+/// budget ran out before a match.
+fn first_match<'a>(
+    root: scraper::ElementRef<'a>,
+    selector: &Selector,
+    budget: &mut usize,
+) -> std::result::Result<Option<scraper::ElementRef<'a>>, ()> {
+    for node in root.descendants().skip(1) {
+        *budget = budget.checked_sub(1).ok_or(())?;
+        if let Some(element) = scraper::ElementRef::wrap(node)
+            && selector.matches_with_scope(&element, Some(root))
+        {
+            return Ok(Some(element));
+        }
+    }
+    Ok(None)
+}
+
 fn select_html(raw: String, query: String, fields: String) -> String {
     if raw.len() > MAX || query.len() > 4096 || fields.len() > 16384 {
         return "[]".into();
@@ -279,17 +301,31 @@ fn select_html(raw: String, query: String, fields: String) -> String {
         return "[]".into();
     };
     let document = Html::parse_document(&raw);
+    // Parse each field selector once. An unparsable selector matches nothing.
+    let fields: Vec<(String, Field, Option<Option<Selector>>)> = fields
+        .into_iter()
+        .map(|(name, spec)| {
+            let selector =
+                (!spec.selector.is_empty()).then(|| Selector::parse(&spec.selector).ok());
+            (name, spec, selector)
+        })
+        .collect();
+    // Field lookups rescan each row's subtree; with nested rows that is
+    // quadratic in the document, and this native work is outside the script's
+    // CPU budget and cancellation. Bound the total nodes visited instead.
+    let mut budget = SELECT_HTML_NODE_BUDGET;
     let mut rows = Vec::new();
     let mut total = 0;
     for element in document.select(&query).take(4096) {
         let mut row = BTreeMap::new();
-        for (name, spec) in &fields {
-            let found = if spec.selector.is_empty() {
-                Some(element)
-            } else {
-                Selector::parse(&spec.selector)
-                    .ok()
-                    .and_then(|s| element.select(&s).next())
+        for (name, spec, selector) in &fields {
+            let found = match selector {
+                None => Some(element),
+                Some(None) => None,
+                Some(Some(selector)) => match first_match(element, selector, &mut budget) {
+                    Ok(found) => found,
+                    Err(()) => return "[]".into(),
+                },
             };
             let value = found
                 .map(|e| match spec.value.as_str() {
@@ -454,3 +490,39 @@ const BOUNDED_ENCODER: &str = r#"(() => {
   });
  };
 })()"#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nested_rows_with_unmatched_fields_stop_at_the_node_budget() {
+        // Every row rescans its subtree for a field that never matches:
+        // about 3 million visits, over the budget.
+        let nested = format!("{}{}", "<div>".repeat(2500), "</div>".repeat(2500));
+        let started = Instant::now();
+        assert_eq!(
+            select_html(
+                nested,
+                "div".into(),
+                r#"{"t":{"selector":"span","value":"text"}}"#.into()
+            ),
+            "[]"
+        );
+        assert!(started.elapsed() < Duration::from_secs(20));
+        // The same shape within budget still answers.
+        let small = format!(
+            "{}<span>x</span>{}",
+            "<div>".repeat(20),
+            "</div>".repeat(20)
+        );
+        let rows: serde_json::Value = serde_json::from_str(&select_html(
+            small,
+            "div".into(),
+            r#"{"t":{"selector":"span","value":"text"}}"#.into(),
+        ))
+        .unwrap();
+        assert_eq!(rows.as_array().unwrap().len(), 20);
+        assert!(rows.as_array().unwrap().iter().all(|row| row["t"] == "x"));
+    }
+}

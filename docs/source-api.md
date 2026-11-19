@@ -89,6 +89,8 @@ Host capabilities (all synchronous):
 - `nova.html.select(html, css, fieldsJson)` returns JSON-string rows. Field specs
   use `{selector:"a",value:"href"}`. Empty selector means the matched element;
   value defaults to text, with `ownText`, `html` and attribute names supported.
+  Field lookups may visit at most 2,000,000 nodes per call (this native work is
+  outside the script's time limit); a call that exceeds it returns `[]`.
 - `nova.url.resolve(relative, base)` resolves against the final response URL.
 - Reader 0.1.26 adds `nova.cookies.set(origin, name, value)`, returning a JSON
   **string** `{ok:true}` or `{error:{code,message}}`. It requires an optional
