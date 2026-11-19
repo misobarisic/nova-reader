@@ -196,6 +196,20 @@ impl Controller {
         let cancel = CancelToken::default();
         *app.active_image.lock().unwrap_or_else(|e| e.into_inner()) =
             Some((FETCH_AHEAD_SLOT, cancel.clone()));
+        // A visible request queued between the idle check and publishing the
+        // slot above found nothing to cancel; it must not wait for this fetch.
+        if !app
+            .view()
+            .reader
+            .as_ref()
+            .is_some_and(|reader| reader.idle_for_read_ahead())
+        {
+            app.active_image
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take();
+            return false;
+        }
         let outcome = (|| -> Result<()> {
             match &input {
                 PageInput::Remote(page) => {
@@ -250,8 +264,9 @@ impl Controller {
         if app.generation.load(Ordering::Acquire) != epoch {
             return false;
         }
-        if outcome.is_err() {
+        if outcome.is_err() && !cancel.is_cancelled() {
             // The page's own task fetches it again and reports what failed.
+            // A fetch cancelled by scrolling did not fail and may run again.
             encoded.skip(epoch, index);
         }
         !cancel.is_cancelled()
