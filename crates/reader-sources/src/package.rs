@@ -484,9 +484,18 @@ impl SourceRegistry {
             .keys()
             .cloned()
             .collect();
-        ids.iter()
-            .map(|id| self.source_unchecked(id).map(|s| s.descriptor()))
-            .collect()
+        // One package damaged after startup must not fail Browse, addon sync,
+        // backup and the removal of every other source.
+        Ok(ids
+            .iter()
+            .filter_map(|id| match self.source_unchecked(id) {
+                Ok(source) => Some(source.descriptor()),
+                Err(error) => {
+                    eprintln!("nova-reader: installed source {id} is unusable: {error}");
+                    None
+                }
+            })
+            .collect())
     }
     /// Validate an archive without installing or granting its permissions.
     pub fn inspect_archive(bytes: &[u8]) -> Result<(SourceDescriptor, String)> {

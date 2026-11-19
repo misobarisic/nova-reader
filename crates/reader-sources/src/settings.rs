@@ -90,7 +90,23 @@ struct StoredSettings {
     kinds: std::collections::BTreeMap<String, SettingKind>,
 }
 pub(crate) fn load(path: &Path, fields: &[SettingField]) -> Result<Value> {
-    let persisted = if path.exists() {
+    // An unreadable document reads as the defaults: failing here would make
+    // the source, the whole source list, addon sync, backup and even removal
+    // of that addon fail. The next save replaces the damaged file.
+    let persisted = match read_stored(path) {
+        Ok(stored) => stored,
+        Err(error) => {
+            eprintln!(
+                "nova-reader: source settings {} are unreadable ({error}); using defaults",
+                path.display()
+            );
+            None
+        }
+    };
+    values_for(persisted, fields)
+}
+fn read_stored(path: &Path) -> Result<Option<StoredSettings>> {
+    Ok(if path.exists() {
         let file = std::fs::File::open(path)?;
         if file.metadata()?.len() > MAX_SETTINGS as u64 {
             return Err(invalid());
@@ -107,7 +123,9 @@ pub(crate) fn load(path: &Path, fields: &[SettingField]) -> Result<Value> {
         Some(stored)
     } else {
         None
-    };
+    })
+}
+fn values_for(persisted: Option<StoredSettings>, fields: &[SettingField]) -> Result<Value> {
     // Preserve compatible values across schema upgrades, including secrecy type.
     // A previous secret must never become public when a field changes to text.
     let values = fields
