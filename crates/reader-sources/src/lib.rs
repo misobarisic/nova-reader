@@ -232,6 +232,7 @@ impl Source {
                     &HttpRequest {
                         url: url.into(),
                         headers: headers.clone(),
+                        page: true,
                         ..Default::default()
                     },
                     max_bytes,
@@ -359,6 +360,7 @@ impl Source {
         let request = HttpRequest {
             url: url.into(),
             headers: headers.clone(),
+            page: true,
             ..Default::default()
         };
         let response = if let Some(observer) = on_chunk.as_mut() {

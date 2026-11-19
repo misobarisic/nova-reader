@@ -48,6 +48,10 @@ pub struct HttpRequest {
     pub headers: BTreeMap<String, String>,
     #[serde(default)]
     pub body: Option<String>,
+    /// A page image transfer. It gets a longer whole-transfer budget than
+    /// metadata calls; scripts cannot set it.
+    #[serde(skip)]
+    pub page: bool,
 }
 fn get_method() -> String {
     "GET".into()
@@ -571,7 +575,11 @@ impl NetworkTransport {
                     || s.eq_ignore_ascii_case("x-integrity-token")
             });
         let started = Instant::now();
-        let deadline = Duration::from_secs(15);
+        // reqwest's request timeout covers connect through the end of the body,
+        // and the blocking client has no idle-read timeout. Metadata keeps 15 s;
+        // a page image (up to 32 MiB, often several MB) needs far longer on a slow
+        // link, and cancellation is still checked between body chunks.
+        let deadline = Duration::from_secs(if input.page { 180 } else { 15 });
         for hop in 0..=5 {
             cancel.check()?;
             checked_url(url.as_str(), &self.permissions)?;
