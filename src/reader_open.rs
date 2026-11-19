@@ -160,6 +160,7 @@ fn prepare_inventory(
         completed,
         collection,
         completion_eligible: false,
+        anchor_gap: None,
     };
     let ids = (0..reader.pages.len())
         .map(|i| reader.page_id(i))

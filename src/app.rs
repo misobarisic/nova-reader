@@ -346,6 +346,11 @@ struct Reader {
     /// Only a real reader selection may infer completion or replace progress.
     /// Neutral Pages settlement keeps this false across checkpoints and exit.
     completion_eligible: bool,
+    /// How far (in width units) the viewport top sits past the end of the
+    /// anchored image, inside the gap below it, and for which page. A
+    /// `ResumeAnchor` cannot encode a gap, so `restore_position` adds this
+    /// back; otherwise every geometry update snaps the canvas to the image end.
+    anchor_gap: Option<(String, f32)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -3044,8 +3049,16 @@ impl Controller {
             // coordinates belong only to the scrolling Webtoon canvas.
             return;
         }
-        let offset =
-            reader.page_position(index) + reader.ratios[index] * reader.anchor.offset() as f32;
+        let gap = reader
+            .anchor_gap
+            .as_ref()
+            .filter(|(page, _)| {
+                reader.anchor.offset() >= 1.0 && *page == reader.anchor.page_id
+            })
+            .map_or(0., |(_, gap)| gap.min(reader.gap_after(index) / ui.get_reader_width()));
+        let offset = reader.page_position(index)
+            + reader.ratios[index] * reader.anchor.offset() as f32
+            + gap;
         ui.set_scroll_y(-offset * ui.get_reader_width());
     }
     fn choose_reader_mode(
@@ -3284,6 +3297,7 @@ impl Controller {
         }
         reader.anchor = ResumeAnchor::new(reader.page_id(index), index, f64::from(fraction))
             .unwrap_or_default();
+        reader.anchor_gap = (into_gap > 0.).then(|| (reader.anchor.page_id.clone(), into_gap));
         if reader.reverse_demand.is_some() && reader.reverse_target().is_none() {
             reader.reverse_demand = None;
         }
@@ -3312,10 +3326,8 @@ impl Controller {
             ui.invoke_cancel_reader_zoom();
             ui.set_zoom(1.);
             ui.set_scroll_x(0.);
+            // `restore_position` keeps the viewport inside the gap itself.
             self.restore_position(ui);
-            if into_gap > 0. {
-                ui.set_scroll_y(ui.get_scroll_y() - into_gap * ui.get_reader_width());
-            }
         }
         ui.set_current_page(index as i32);
         self.publish_reader_controls(ui);
@@ -7817,6 +7829,7 @@ mod tests {
             collection: false,
             completed: false,
             completion_eligible: true,
+            anchor_gap: None,
         }
     }
     #[test]
@@ -9577,6 +9590,7 @@ mod tests {
             collection: false,
             completed: false,
             completion_eligible: false,
+            anchor_gap: None,
         };
         let services = Services::open(&dir.path().join("data")).unwrap();
         let app = Arc::new(Controller {
