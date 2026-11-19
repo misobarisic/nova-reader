@@ -56,12 +56,14 @@ impl Host for ReaderDirectory {
         id == scope::selected()
     }
     fn remove_local_data(&self, id: &str) -> Result<(), String> {
-        remove_registry_settings(id)
+        remove_registry_settings(id)?;
+        crate::backup::apply::forget_profile_recovery(id)
     }
     fn deleted(&self, id: &str) {
         // The deletion is durable already; a failure here is retried by the
         // cleanup that every `list` runs for a retired profile.
         let _ = remove_registry_settings(id);
+        let _ = crate::backup::apply::forget_profile_recovery(id);
     }
     #[cfg(test)]
     fn checkpoint(&self, stage: directory::Stage) -> Result<(), String> {

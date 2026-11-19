@@ -132,7 +132,8 @@ new records stay (enable **Use backup for conflicts** to force them). It creates
 compensating edits at new versions, leaves installed packages and created
 profiles in place and removes only chapters that import copied in. Three receipts
 are kept; **Delete recovery copies** lists them and asks first. Receipts are
-local plaintext, like the exports.
+local plaintext, like the exports. Deleting a profile drops its parts from every
+receipt (a receipt left with nothing is removed).
 
 ## Platforms
 

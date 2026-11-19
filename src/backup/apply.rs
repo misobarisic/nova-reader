@@ -449,6 +449,34 @@ fn after_commit(services: &Services, preview: &Preview, applied: &mut Applied) {
 
 // ---------------------------------------------------------------- recovery
 
+/// A deleted profile's data (library, history, addon credentials) must not
+/// live on in recovery copies. Its components and choices are dropped; a copy
+/// left with nothing to restore is removed.
+pub(crate) fn forget_profile_recovery(id: &str) -> Result<(), String> {
+    let mut edits = Vec::new();
+    for (key, raw) in recovery_inventory()? {
+        let Ok(mut receipt) = serde_json::from_str::<Receipt>(&raw) else {
+            continue;
+        };
+        let before = receipt.components.len() + receipt.choices.len();
+        receipt.components.retain(|component| component.target != id);
+        receipt.choices.retain(|choice| choice.target != id);
+        if receipt.components.len() + receipt.choices.len() == before {
+            continue;
+        }
+        let value = if receipt.components.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&receipt).map_err(|e| e.to_string())?)
+        };
+        edits.push((key, value));
+    }
+    if edits.is_empty() {
+        return Ok(());
+    }
+    nova_storage::try_write_batch(&edits).map_err(|e| e.to_string())
+}
+
 pub(crate) fn recovery_inventory() -> Result<Vec<(String, String)>, String> {
     let mut rows = nova_storage::try_scan_prefix(RECOVERY_PREFIX).map_err(|e| e.to_string())?;
     rows.sort_by_key(|(key, _)| sequence(key));
