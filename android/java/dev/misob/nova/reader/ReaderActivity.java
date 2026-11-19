@@ -631,6 +631,12 @@ public final class ReaderActivity extends NativeActivity {
         if (current==null || request.target==null || !current.uri.toString().equals(request.target.uri.toString())) throw new IOException("Existing image changed; save again to choose its replacement");
         if (current.size>PAGE_LIMIT || DocumentsContract.Document.MIME_TYPE_DIR.equals(current.mime)) throw new IOException("Existing image cannot be safely replaced");
         if (request.store.tree && !request.mime.equals(current.mime)) throw new IOException("Existing document has a different image type; choose Add number");
+        // A retained copy (failed recovery, or the process killed mid-replace)
+        // blocks automatic overwrite while it may still matter. Nothing restores
+        // it later, so after a day it is discarded instead of blocking forever.
+        long expired=System.currentTimeMillis()-24L*60*60*1000;
+        File[] stale=request.cache.listFiles(file -> file.getName().startsWith("reader-image-old-") && file.getName().endsWith(".bak") && file.lastModified()<expired);
+        if (stale!=null) for (File file : stale) file.delete();
         File[] recovery=request.cache.listFiles(file -> file.getName().startsWith("reader-image-old-") && file.getName().endsWith(".bak"));
         if (recovery==null || recovery.length>0) throw new IOException("A previous image recovery is retained in the app cache; automatic overwrite is unavailable");
         File backup=File.createTempFile("reader-image-old-",".bak",request.cache);
