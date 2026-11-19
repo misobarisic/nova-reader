@@ -13,6 +13,47 @@ use std::{
 
 static SERIAL: Mutex<()> = Mutex::new(());
 static RECONCILE: Mutex<()> = Mutex::new(());
+/// Desired packages that recently failed, by `(id, sha256)`. Reconcile runs
+/// every minute; without this a package this build rejects, or one whose peer
+/// is unreachable, would be fetched (up to 8 MiB) on every pass.
+static FAILED: Mutex<std::collections::BTreeMap<(String, String), Failure>> =
+    Mutex::new(std::collections::BTreeMap::new());
+
+struct Failure {
+    retry_at: std::time::Instant,
+    delay: std::time::Duration,
+}
+
+/// Verification and install failures do not change until the descriptor or
+/// this build does. Transport failures back off from one minute to an hour.
+fn record_failure(id: &str, sha256: &str, permanent: bool) {
+    use std::time::{Duration, Instant};
+    let mut failed = FAILED.lock().unwrap_or_else(|e| e.into_inner());
+    let key = (id.to_owned(), sha256.to_owned());
+    let delay = if permanent {
+        Duration::from_secs(24 * 60 * 60)
+    } else {
+        failed
+            .get(&key)
+            .map_or(Duration::from_secs(60), |old| old.delay * 2)
+            .min(Duration::from_secs(60 * 60))
+    };
+    failed.insert(
+        key,
+        Failure {
+            retry_at: Instant::now() + delay,
+            delay,
+        },
+    );
+}
+
+fn failure_pending(id: &str, sha256: &str) -> bool {
+    FAILED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&(id.to_owned(), sha256.to_owned()))
+        .is_some_and(|failure| failure.retry_at > std::time::Instant::now())
+}
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Descriptor {
@@ -380,16 +421,37 @@ pub fn reconcile(services: &Services, cancel: Arc<AtomicBool>) -> Result<Status,
             let Some(engine) = nova_sync::engine() else {
                 continue;
             };
-            let receipt = engine
-                .fetch_package(&row.sha256, cancel.clone())
-                .map_err(|e| e.to_string())
-                .and_then(|bytes| {
-                    install_receipt(services, row, &bytes, &cancel, previous_archive.as_deref())
-                });
-            if receipt.is_err() {
+            if failure_pending(&row.id, &row.sha256) {
                 status.failed += 1;
                 continue;
             }
+            let bytes = match engine.fetch_package(&row.sha256, cancel.clone()) {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    if !cancel.load(Ordering::Acquire) {
+                        record_failure(&row.id, &row.sha256, false);
+                    }
+                    status.failed += 1;
+                    continue;
+                }
+            };
+            let receipt =
+                install_receipt(services, row, &bytes, &cancel, previous_archive.as_deref());
+            if let Err(permanence) = receipt {
+                if !cancel.load(Ordering::Acquire) {
+                    record_failure(
+                        &row.id,
+                        &row.sha256,
+                        matches!(permanence, Permanence::Permanent),
+                    );
+                }
+                status.failed += 1;
+                continue;
+            }
+            FAILED
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&(row.id.clone(), row.sha256.clone()));
             status.pending -= 1;
         }
         let _mutation = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
@@ -486,16 +548,16 @@ fn install_receipt(
     bytes: &[u8],
     cancel: &AtomicBool,
     previous_archive: Option<&str>,
-) -> Result<(), String> {
+) -> Result<(), Permanence> {
     if cancel.load(Ordering::Acquire) || !nova_sync::read_settings().enabled {
-        return Err("package transfer cancelled".into());
+        return Err(Permanence::Transient);
     }
-    verify_receipt(row, bytes)?;
+    verify_receipt(row, bytes).map_err(|_| Permanence::Permanent)?;
     let _mutation = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     if cancel.load(Ordering::Acquire) || !nova_sync::read_settings().enabled {
-        return Err("package transfer cancelled".into());
+        return Err(Permanence::Transient);
     }
-    let owner = nova_sync::local_store().map_err(|e| e.to_string())?;
+    let owner = nova_sync::local_store().map_err(|_| Permanence::Transient)?;
     let current = owner
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -503,16 +565,20 @@ fn install_receipt(
         .and_then(|record| record.value.as_deref())
         .and_then(|raw| serde_json::from_str::<Descriptor>(raw).ok());
     if current.as_ref() != Some(row) {
-        return Err("addon desired state changed during transfer".into());
+        // Desired state changed during transfer.
+        return Err(Permanence::Transient);
     }
     let current_archive = services.sources.archive(&row.id).ok().map(|(hash, _)| hash);
     if current_archive.as_deref() != previous_archive {
-        return Err("local addon changed during transfer".into());
+        // The local addon changed during transfer.
+        return Err(Permanence::Transient);
     }
     let source = services
         .sources
         .install_zip(bytes)
-        .map_err(|e| e.to_string())?;
+        // This build rejects the package (API range, manifest, or different
+        // bytes under an installed id and version) until either changes.
+        .map_err(|_| Permanence::Permanent)?;
     services
         .domain
         .update(|state| {
@@ -526,10 +592,24 @@ fn install_receipt(
             });
             Ok(())
         })
-        .map_err(|e| e.to_string())?;
-    commit_locked(&snapshot(services)?, true, false)?;
+        .map_err(|_| Permanence::Transient)?;
+    commit_locked(
+        &snapshot(services).map_err(|_| Permanence::Transient)?,
+        true,
+        false,
+    )
+    .map_err(|_| Permanence::Transient)?;
     Ok(())
 }
+
+/// Whether a failed package install can succeed without a new descriptor.
+#[derive(Clone, Copy)]
+enum Permanence {
+    Transient,
+    Permanent,
+}
+
+
 
 fn verify_receipt(row: &Descriptor, bytes: &[u8]) -> Result<(), String> {
     if bytes.len() > nova_sync::MAX_PACKAGE_BYTES
