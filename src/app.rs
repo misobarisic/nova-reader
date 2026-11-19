@@ -7166,12 +7166,12 @@ pub fn run(services: Services) -> Result<()> {
     if app.profile_selection_required(&ui) {
         app.navigate(&ui, 24);
     }
-    // Recovery verifies persisted payloads; keep that potentially large scan
-    // off the event loop as well as the lightweight list-status refresh.
+    // Recovery already reset interrupted jobs; resume the queue from the
+    // manifests without hashing stored pages (workers verify as they go).
     let startup = app.clone();
     let startup_ui = ui.as_weak();
     crate::profiles::spawn(move || {
-        let queued = startup.services.downloads.jobs().map(|jobs| {
+        let queued = startup.services.downloads.snapshot().map(|jobs| {
             jobs.into_iter()
                 .filter(|job| job.status == reader_downloads::JobStatus::Queued)
                 .map(|job| job.chapter)

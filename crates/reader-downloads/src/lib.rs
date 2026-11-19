@@ -220,32 +220,62 @@ fn private_directory(path: &Path) -> Result<()> {
 }
 /// Existing manifests can contain signed URLs and source authorization headers.
 /// Repair old permissive stores before reading any manifests or creating files.
-fn protect_existing_tree(root: &Path) -> Result<()> {
-    let mut directories = vec![root.to_path_buf()];
-    while let Some(directory) = directories.pop() {
-        for entry in fs::read_dir(directory)? {
-            let entry = entry?;
-            let kind = entry.file_type()?;
-            if kind.is_symlink() {
-                return Err(Error::Invalid(
-                    "download storage cannot contain symlinks".into(),
-                ));
-            }
-            if kind.is_dir() {
+/// Returns the top-level entries holding a symlink or a non-regular file; the
+/// store never follows those, and `open` moves them aside (`quarantine`).
+fn protect_existing_tree(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut damaged = Vec::new();
+    'top: for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        if is_quarantined(&entry.file_name()) {
+            continue;
+        }
+        let mut pending = vec![(entry.path(), entry.file_type()?)];
+        while let Some((path, kind)) = pending.pop() {
+            if kind.is_dir() && !kind.is_symlink() {
                 #[cfg(unix)]
-                fs::set_permissions(entry.path(), fs::Permissions::from_mode(0o700))?;
-                directories.push(entry.path());
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
+                for child in fs::read_dir(&path)? {
+                    let child = child?;
+                    pending.push((child.path(), child.file_type()?));
+                }
             } else if kind.is_file() {
                 #[cfg(unix)]
-                fs::set_permissions(entry.path(), fs::Permissions::from_mode(0o600))?;
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
             } else {
-                return Err(Error::Invalid(
-                    "download storage contains a non-regular file".into(),
-                ));
+                damaged.push(entry.path());
+                continue 'top;
             }
         }
     }
-    Ok(())
+    Ok(damaged)
+}
+fn is_quarantined(name: &std::ffi::OsStr) -> bool {
+    name.to_str().is_some_and(|name| name.contains(".damaged"))
+}
+/// Move a damaged entry aside under a name the store never reads, so one bad
+/// chapter cannot keep the store (and the app) from opening. Nothing is
+/// deleted or followed: a symlink moves as a link.
+fn quarantine(path: &Path) -> Result<()> {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    for attempt in 0u32.. {
+        let target = path.with_file_name(match attempt {
+            0 => format!("{name}.damaged"),
+            n => format!("{name}.damaged{n}"),
+        });
+        match fs::symlink_metadata(&target) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("nova-reader: download entry {name} is damaged; moved aside");
+                fs::rename(path, target)?;
+                return Ok(());
+            }
+            Err(error) => return Err(error.into()),
+            Ok(_) => {}
+        }
+    }
+    unreachable!("an unused quarantine name exists")
 }
 /// Page and manifest writes stage at a fixed `.pending` sibling, because
 /// `recover` recognizes exactly those generated names after a killed writer.
@@ -346,13 +376,33 @@ fn verify(path: &Path, page: &DownloadedPage) -> Result<bool> {
     }
     Ok(format!("{:x}", digest.finalize()) == *expected)
 }
+/// Cheap recovery check: a committed page whose file is a regular file of the
+/// recorded size. Hashing waits for `offline` and `run_pages`, which verify
+/// every page they hand out or skip.
+fn present(path: &Path, page: &DownloadedPage) -> Result<bool> {
+    if page.sha256.is_none() {
+        return Ok(false);
+    }
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(metadata.is_file() && metadata.len() == page.bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
 fn checked_job(root: &Path, chapter: &ChapterId) -> Result<ChapterDownload> {
+    repaired_job(root, chapter, verify)
+}
+fn repaired_job(
+    root: &Path,
+    chapter: &ChapterId,
+    check: fn(&Path, &DownloadedPage) -> Result<bool>,
+) -> Result<ChapterDownload> {
     let mut job = load(root, chapter)?;
     let mut changed = false;
     let directory = root.join(chapter_key(chapter));
     let mut retained = BTreeSet::new();
     for page in &mut job.pages {
-        if verify(&directory.join(&page.filename), page)? {
+        if check(&directory.join(&page.filename), page)? {
             retained.insert(page.filename.clone());
         } else if page.sha256.is_some() || page.bytes != 0 {
             page.sha256 = None;
@@ -453,7 +503,9 @@ impl DownloadStore {
     pub fn open(root: impl AsRef<Path>, quota: u64) -> Result<Self> {
         private_directory(root.as_ref())?;
         let root = fs::canonicalize(root)?;
-        protect_existing_tree(&root)?;
+        for damaged in protect_existing_tree(&root)? {
+            quarantine(&damaged)?;
+        }
         let mut options = File::options();
         options.read(true).write(true).create(true).truncate(false);
         #[cfg(unix)]
@@ -951,6 +1003,8 @@ impl DownloadStore {
         for page in &job.pages {
             let path = inner.root.join(chapter_key(chapter)).join(&page.filename);
             if !verify(&path, page)? {
+                // Recovery checks sizes only; requeue the damaged pages now.
+                checked_job(&inner.root, chapter)?;
                 return Err(Error::Incomplete);
             }
             pages.push(path);
@@ -999,26 +1053,37 @@ impl DownloadStore {
         }
         let mut highest_order = 0;
         for directory in owned_directories(&inner.root)? {
-            let manifest = match load_manifest(&directory.join("manifest.json")) {
-                Ok(job) => job,
-                Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                    // An initial enqueue may have died before its first atomic
-                    // manifest publication. No committed pages exist to retain.
-                    clean_uncommitted_directory(&directory)?;
-                    continue;
+            let recovered = (|| -> Result<Option<u64>> {
+                let manifest = match load_manifest(&directory.join("manifest.json")) {
+                    Ok(job) => job,
+                    Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                        // An initial enqueue may have died before its first atomic
+                        // manifest publication. No committed pages exist to retain.
+                        clean_uncommitted_directory(&directory)?;
+                        return Ok(None);
+                    }
+                    Err(error) => return Err(error),
+                };
+                if directory.file_name()
+                    != Some(std::ffi::OsStr::new(&chapter_key(&manifest.chapter)))
+                {
+                    return Err(Error::Invalid("invalid download directory identity".into()));
                 }
-                Err(error) => return Err(error),
-            };
-            if directory.file_name() != Some(std::ffi::OsStr::new(&chapter_key(&manifest.chapter)))
-            {
-                return Err(Error::Invalid("invalid download directory identity".into()));
-            }
-            let mut job = checked_job(&inner.root, &manifest.chapter)?;
-            highest_order = highest_order.max(job.queue_order);
-            if job.status == JobStatus::Running {
-                job.status = JobStatus::Queued;
-                job.error = None;
-                save(&inner.root, &job)?;
+                // Startup must not read every stored byte: a few GiB of pages
+                // meant seconds of hashing before the first frame (or an ANR,
+                // or a background sync window spent hashing).
+                let mut job = repaired_job(&inner.root, &manifest.chapter, present)?;
+                if job.status == JobStatus::Running {
+                    job.status = JobStatus::Queued;
+                    job.error = None;
+                    save(&inner.root, &job)?;
+                }
+                Ok(Some(job.queue_order))
+            })();
+            match recovered {
+                Ok(order) => highest_order = highest_order.max(order.unwrap_or(0)),
+                // One unreadable chapter must not stop the store from opening.
+                Err(_) => quarantine(&directory)?,
             }
         }
         inner.next_order = highest_order
@@ -1621,6 +1686,33 @@ mod tests {
         assert!(store.offline(&chapter).is_ok());
     }
     #[test]
+    fn startup_checks_sizes_and_opening_requeues_same_size_damage() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DownloadStore::open(directory.path(), 1_000_000).unwrap();
+        let chapter = chapter();
+        store.enqueue(chapter.clone(), pages()).unwrap();
+        store.run(&chapter, |_| Ok(png())).unwrap();
+        let job = store.job(&chapter).unwrap();
+        let page = directory
+            .path()
+            .join(chapter_key(&chapter))
+            .join(&job.pages[0].filename);
+        let mut damaged = fs::read(&page).unwrap();
+        damaged[0] ^= 0xff;
+        fs::write(&page, &damaged).unwrap();
+        drop(store);
+        // Reopening does not hash payloads, so equal-size damage survives it.
+        let store = DownloadStore::open(directory.path(), 1_000_000).unwrap();
+        assert_eq!(store.snapshot().unwrap()[0].status, JobStatus::Complete);
+        assert!(page.exists());
+        // Opening the chapter verifies it and requeues the damaged page.
+        assert!(matches!(store.offline(&chapter), Err(Error::Incomplete)));
+        let job = store.snapshot().unwrap().remove(0);
+        assert_eq!(job.status, JobStatus::Queued);
+        assert_eq!(job.completed_pages(), job.pages.len() - 1);
+        assert!(!page.exists());
+    }
+    #[test]
     fn recovery_removes_only_generated_uncommitted_or_corrupt_bytes_and_frees_quota() {
         let directory = tempfile::tempdir().unwrap();
         let bytes = png();
@@ -2091,17 +2183,46 @@ mod tests {
             .join(chapter_key(&chapter))
             .join(page_name(0, "0"));
         symlink(&target, &link).unwrap();
-        assert!(store.recover().is_err());
+        // The chapter is moved aside as it is; the link is never followed.
+        store.recover().unwrap();
         assert_eq!(fs::read(&target).unwrap(), b"unrelated bytes");
+        let moved = directory
+            .path()
+            .join(format!("{}.damaged", chapter_key(&chapter)))
+            .join(page_name(0, "0"));
         assert!(
-            fs::symlink_metadata(&link)
+            fs::symlink_metadata(&moved)
                 .unwrap()
                 .file_type()
                 .is_symlink()
         );
+        assert!(store.snapshot().unwrap().is_empty());
+        // A symlink found while opening is set aside the same way.
+        store.enqueue(chapter.clone(), pages()).unwrap();
+        symlink(&target, &link).unwrap();
         drop(store);
-        assert!(DownloadStore::open(directory.path(), 1_000_000).is_err());
+        let store = DownloadStore::open(directory.path(), 1_000_000).unwrap();
+        assert!(store.snapshot().unwrap().is_empty());
+        assert!(
+            directory
+                .path()
+                .join(format!("{}.damaged1", chapter_key(&chapter)))
+                .exists()
+        );
         assert_eq!(fs::read(&target).unwrap(), b"unrelated bytes");
+        // A corrupt manifest no longer stops the store from opening either.
+        store.enqueue(chapter.clone(), pages()).unwrap();
+        fs::write(
+            directory
+                .path()
+                .join(chapter_key(&chapter))
+                .join("manifest.json"),
+            b"{truncated",
+        )
+        .unwrap();
+        drop(store);
+        let store = DownloadStore::open(directory.path(), 1_000_000).unwrap();
+        assert!(store.snapshot().unwrap().is_empty());
     }
     #[test]
     #[ignore = "invoked only by killed_writer_recovery via a subprocess"]
