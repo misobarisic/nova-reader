@@ -50,6 +50,8 @@ pub const SCOPED_PREFIXES: &[&str] = &[
     "reader:mode-choice:",
     "reader:content-presentation:",
     "reader:disabled-catalogs:",
+    // "New chapters" marks: what one profile has seen says nothing about another.
+    "reader:seen-chapters:",
 ];
 
 pub fn scoped_key(key: &str) -> bool {
@@ -260,7 +262,7 @@ mod tests {
         ] {
             assert!(!scoped_key(global), "{global} must stay device-global");
         }
-        assert_eq!(SCOPED_EXACT_KEYS.len() + SCOPED_PREFIXES.len(), 15);
+        assert_eq!(SCOPED_EXACT_KEYS.len() + SCOPED_PREFIXES.len(), 16);
     }
 
     #[test]

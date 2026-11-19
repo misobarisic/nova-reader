@@ -7,8 +7,9 @@
 //! it read does not clear it), and chapters that arrive with a refresh during
 //! the visit join it. Everything shown is added to the record, so the next
 //! visit starts clean. The first visit of a title has no record and marks
-//! nothing. The record is a device-local convenience: not synced, not backed
-//! up, and existing data needs no migration.
+//! nothing. The record is a device-local convenience, scoped to the profile:
+//! not synced and not backed up. Rows from before scoping move to the default
+//! profile with the other legacy personal keys.
 use reader_domain::SeriesId;
 use std::collections::BTreeSet;
 

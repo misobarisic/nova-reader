@@ -40,7 +40,7 @@ personal keys live at `profile:{id}:{key}`, everything else passes through.
 
 | Personal (per profile) | Device-global |
 | --- | --- |
-| `reader:state`, `reader:show-adult`, `reader:chapter-order:`, `reader:reader-settings`, `reader:reader-settings-series:`, `reader:mode-choice:`, `reader:content-presentation:`, `reader:source-browser`, `reader:library-navigation:v1`, `reader:last-update`, `reader:disabled-catalogs:`, `reader:appearance`, `reader:sync-settings-baseline`, `reader:sync-settings-overrides`, `reader:download-cleanup` (category ids) | image storage/limits, captures, source compression, metadata-refresh deadlines, category sequence, cache GC, `sync:*`, `profiles:device:v1`, installed addon packages, downloaded chapter files, `reader:installed-sources:v1` |
+| `reader:state`, `reader:show-adult`, `reader:chapter-order:`, `reader:reader-settings`, `reader:reader-settings-series:`, `reader:mode-choice:`, `reader:content-presentation:`, `reader:source-browser`, `reader:library-navigation:v1`, `reader:last-update`, `reader:disabled-catalogs:`, `reader:seen-chapters:`, `reader:appearance`, `reader:sync-settings-baseline`, `reader:sync-settings-overrides`, `reader:download-cleanup` (category ids) | image storage/limits, captures, source compression, metadata-refresh deadlines, category sequence, cache GC, `sync:*`, `profiles:device:v1`, installed addon packages, downloaded chapter files, `reader:installed-sources:v1` |
 
 `personal_and_device_global_keys_are_pinned` fixes the split. Scoping is off until
 `DomainStore::open` enables it, so bare-`nova_storage` code keeps the old layout.
