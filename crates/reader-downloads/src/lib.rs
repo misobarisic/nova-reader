@@ -423,6 +423,10 @@ fn repaired_job(
     }
     Ok(job)
 }
+/// Pages a download run may commit against one usage scan. Concurrent runs
+/// can overshoot the quota by at most this window; free space is still
+/// checked for every page.
+const USAGE_RESCAN_PAGES: usize = 32;
 fn usage(root: &Path) -> Result<u64> {
     let mut bytes = 0u64;
     for directory in owned_directories(root)? {
@@ -927,6 +931,10 @@ impl DownloadStore {
         fetch: &mut impl FnMut(&PageResource) -> std::result::Result<Vec<u8>, String>,
     ) -> Result<()> {
         let count = self.job(chapter)?.pages.len();
+        // Store usage as of the last scan plus this run's own writes. A scan
+        // stats every page file of every chapter, so it runs once per
+        // USAGE_RESCAN_PAGES pages instead of for every page.
+        let mut measured: Option<(u64, usize)> = None;
         for index in 0..count {
             let resource = {
                 let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -952,14 +960,11 @@ impl DownloadStore {
                 job.pages[index].resource.clone()
             };
             let bytes = fetch(&resource).map_err(Error::Invalid)?;
-            let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            let mut job = load(&inner.root, chapter)?;
-            if !matches!(job.status, JobStatus::Running | JobStatus::Queued) {
-                return Ok(());
-            }
             // Decode validation rejects truncated streams, not merely forged
             // headers. The engine checks dimensions before allocation. The app
             // may install a validator that understands its own page layouts.
+            // It runs before taking the store lock: a full decode must not
+            // stall every other store call.
             let validator = self
                 .validator
                 .read()
@@ -971,20 +976,39 @@ impl DownloadStore {
                     decode_image(&bytes, reader_engine::current_limits())?;
                 }
             }
+            let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let mut job = load(&inner.root, chapter)?;
+            if !matches!(job.status, JobStatus::Running | JobStatus::Queued) {
+                return Ok(());
+            }
             let path = inner
                 .root
                 .join(chapter_key(chapter))
                 .join(&job.pages[index].filename);
-            if usage(&inner.root)?
-                .checked_add(bytes.len() as u64)
-                .is_none_or(|n| n > inner.quota)
-            {
-                return Err(Error::Quota);
+            let over = |used: u64| {
+                used.checked_add(bytes.len() as u64)
+                    .is_none_or(|n| n > inner.quota)
+            };
+            let cached = measured
+                .filter(|(_, pages)| *pages < USAGE_RESCAN_PAGES)
+                .map(|(used, _)| used);
+            // A cached figure may predate a removal elsewhere: re-measure
+            // before refusing.
+            if cached.is_none_or(over) {
+                let used = usage(&inner.root)?;
+                measured = Some((used, 0));
+                if over(used) {
+                    return Err(Error::Quota);
+                }
             }
             if !self.has_room(&inner.root, bytes.len() as u64) {
                 return Err(Error::InsufficientSpace);
             }
             atomic_write(&path, &bytes)?;
+            if let Some((used, pages)) = &mut measured {
+                *used = used.saturating_add(bytes.len() as u64);
+                *pages += 1;
+            }
             job.pages[index].bytes = bytes.len() as u64;
             job.pages[index].sha256 = Some(hash(&bytes));
             save(&inner.root, &job)?;
