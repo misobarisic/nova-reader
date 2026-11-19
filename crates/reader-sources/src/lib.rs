@@ -98,7 +98,19 @@ impl PageAccess {
         let Some(partition) = self.transport.page_cache_partition(url) else {
             return Ok(None);
         };
-        let material = serde_json::to_vec(&(&*self.manifest, &*settings, url, headers, partition))
+        // The query and fragment are left out: signed image URLs rotate their
+        // token there per request, which would give every reopen a new key and
+        // never a hit. Origin and path still tell different images apart.
+        let stable_url = url::Url::parse(url).map_or_else(
+            |_| url.to_owned(),
+            |mut parsed| {
+                parsed.set_query(None);
+                parsed.set_fragment(None);
+                parsed.to_string()
+            },
+        );
+        let material =
+            serde_json::to_vec(&(&*self.manifest, &*settings, stable_url, headers, partition))
             .map_err(|e| SourceError::Script(e.to_string()))?;
         Ok(Some(format!("{:x}", Sha256::digest(material))))
     }
@@ -584,6 +596,22 @@ mod cache_tests {
             "lightweight request proofs cannot retain the ZIP"
         );
         let first = source.page_cache_scope(url, &headers).unwrap().unwrap();
+        assert_eq!(
+            source
+                .page_cache_scope("https://example.com/page.png?token=rotated", &headers)
+                .unwrap()
+                .as_ref(),
+            Some(&first),
+            "a rotating signed query keeps the cache entry reachable"
+        );
+        assert_ne!(
+            source
+                .page_cache_scope("https://example.com/other.png", &headers)
+                .unwrap()
+                .as_ref(),
+            Some(&first),
+            "a different image path is a different entry"
+        );
         assert_eq!(
             retained.page_cache_scope(url, &headers).unwrap().as_ref(),
             Some(&first)
