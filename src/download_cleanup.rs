@@ -46,6 +46,47 @@ impl Settings {
     }
 }
 
+/// Whether a profile follows this chapter's series without having finished it.
+fn still_unread(state: &ReaderState, chapter: &ChapterId) -> bool {
+    state
+        .library
+        .iter()
+        .any(|entry| entry.series == chapter.series)
+        && !state
+            .progress
+            .iter()
+            .any(|p| p.chapter == *chapter && p.completed)
+}
+
+/// After a profile is deleted, remove downloads of the series it knew that no
+/// remaining profile knows. Each profile lists only downloads of series in its
+/// own state, so these would stay hidden on disk and count against the quota.
+pub(crate) fn remove_orphans(
+    domain: &DomainStore,
+    downloads: &DownloadStore,
+    deleted: &BTreeSet<reader_domain::SeriesId>,
+) {
+    let result = (|| {
+        let mut known = BTreeSet::new();
+        for profile in crate::profiles::list()? {
+            let state = domain
+                .snapshot_profile(&profile.id)
+                .map_err(|e| e.to_string())?;
+            known.extend(state.series.into_iter().map(|series| series.id));
+        }
+        for job in downloads.snapshot().map_err(|e| e.to_string())? {
+            if deleted.contains(&job.chapter.series) && !known.contains(&job.chapter.series) {
+                // A running job refuses removal and stays.
+                let _ = downloads.remove(&job.chapter);
+            }
+        }
+        Ok::<_, String>(())
+    })();
+    if let Err(error) = result {
+        eprintln!("Nova Reader: removing downloads of deleted profiles failed: {error}");
+    }
+}
+
 pub(crate) fn refresh(ui: &AppWindow, state: &ReaderState) {
     let settings = Settings::load().unwrap_or_default();
     let global = ui.global::<DownloadCleanupSettings>();
@@ -114,8 +155,24 @@ pub(crate) fn after_read(domain: &DomainStore, downloads: &DownloadStore, chapte
             return Ok(());
         }
         let state = domain.snapshot().map_err(|e| e.to_string())?;
+        // Chapter files are shared by every profile on this device. Another
+        // profile that follows the series and has not finished the chapter
+        // still needs them, whatever this profile's policy says.
+        let active = domain.active_profile();
+        let mut others = Vec::new();
+        for profile in crate::profiles::list()? {
+            if profile.id != active {
+                others.push(
+                    domain
+                        .snapshot_profile(&profile.id)
+                        .map_err(|e| e.to_string())?,
+                );
+            }
+        }
         for chapter in chapters {
-            if settings.allows(&state, chapter) {
+            if settings.allows(&state, chapter)
+                && !others.iter().any(|other| still_unread(other, chapter))
+            {
                 downloads
                     .remove_completed_remote(chapter)
                     .map_err(|e| e.to_string())?;

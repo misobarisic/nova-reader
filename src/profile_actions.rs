@@ -199,8 +199,25 @@ impl Controller {
             // The user is looking at the picker's page again afterwards.
             self.navigate(ui, 24);
         }
+        // Its series, read before its state goes, decide which downloads may
+        // have become unreachable.
+        let deleted_series = self
+            .services
+            .domain
+            .snapshot_profile(id)
+            .map(|state| state.series.into_iter().map(|series| series.id).collect())
+            .unwrap_or_default();
         if let Err(error) = profiles::delete(id) {
             bridge.set_error(text::tr(&error).into());
+        } else {
+            let services = self.services.clone();
+            crate::profiles::spawn(move || {
+                crate::download_cleanup::remove_orphans(
+                    &services.domain,
+                    &services.downloads,
+                    &deleted_series,
+                );
+            });
         }
         self.publish_profiles(ui);
     }
