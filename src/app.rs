@@ -127,6 +127,9 @@ enum Row {
 /// Counts scroll frames that reached the reader, so a frame deferred by view
 /// contention is replayed only if nothing newer has been applied since.
 static POSITION_FRAME: AtomicU64 = AtomicU64::new(0);
+/// A reflow lost to view-lock contention. The next scroll frame replays it;
+/// otherwise the stale width would make every later frame bail out.
+static REFLOW_PENDING: AtomicBool = AtomicBool::new(false);
 #[derive(Clone)]
 enum PageInput {
     Verified(Box<crate::page_inventory::Resource>),
@@ -3097,8 +3100,10 @@ impl Controller {
             return;
         }
         let Ok(mut view) = self.view.try_lock() else {
+            REFLOW_PENDING.store(true, Ordering::Release);
             return;
         };
+        REFLOW_PENDING.store(false, Ordering::Release);
         if view.section != 6 {
             return;
         }
@@ -3145,6 +3150,9 @@ impl Controller {
     ) {
         if width <= 0.0 || !offset.is_finite() || !width.is_finite() {
             return;
+        }
+        if REFLOW_PENDING.load(Ordering::Acquire) {
+            self.reflow(ui, ui.get_reader_width(), ui.get_reader_viewport_height());
         }
         let Ok(mut view) = self.view.try_lock() else {
             // Another thread (the sync persistence barrier) owns the view. Do
