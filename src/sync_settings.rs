@@ -3,7 +3,7 @@
 //! through the sync store transaction and never pass through the local publisher.
 use serde_json::Value;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, LazyLock, Mutex},
 };
 
@@ -67,9 +67,11 @@ where
             }
             let merged = merge_editor(&mut store, key, &previous, &next_value)?;
             let effective = serde_json::from_value(merged)?;
-            let mut documents = documents(&store)?;
+            let (mut documents, mut invalid) = documents_checked(&store)?;
             documents.insert(key.into(), serde_json::to_value(&effective)?);
-            prepare_documents(&mut store, dev, false, false, documents)?;
+            // The edited document is replaced by a valid one.
+            invalid.remove(key);
+            prepare_documents(&mut store, dev, false, false, documents, &invalid)?;
             store.save()?;
             Ok(effective)
         })();
@@ -337,6 +339,15 @@ fn typed(key: &str, value: Value) -> serde_json::Result<Value> {
     }
 }
 fn documents(store: &nova_sync::Store) -> nova_sync::Result<BTreeMap<String, Value>> {
+    documents_checked(store).map(|(documents, _)| documents)
+}
+/// Every settings document, with the stored ones that no longer parse or
+/// validate (a downgrade, a narrowed range, damage) read as their defaults,
+/// as the setting modules themselves do. The second set names them, so
+/// `prepare_documents` does not publish those defaults as local edits.
+fn documents_checked(
+    store: &nova_sync::Store,
+) -> nova_sync::Result<(BTreeMap<String, Value>, BTreeSet<String>)> {
     let mut documents = templates();
     // Include legacy local decisions and remote identities not opened here yet.
     for (key, _) in
@@ -370,20 +381,27 @@ fn documents(store: &nova_sync::Store) -> nova_sync::Result<BTreeMap<String, Val
             documents.insert(storage.into(), value);
         }
     }
+    let mut invalid = BTreeSet::new();
     for (key, template) in &mut documents {
         if let Some(raw) = store.extra_value(&kv(key))? {
-            let value = unpack_document(key, serde_json::from_str(&raw)?);
             // Deserialize and reserialize through each module's defaults so
             // preferences introduced after the last local edit participate.
-            let normalized = typed(key, value)?;
-            let normalized = normalize_document(key, normalized)?;
-            if !validate(key, &normalized) {
-                return Err(std::io::Error::other("invalid saved Reader preferences").into());
+            let normalized = serde_json::from_str(&raw)
+                .map(|value| unpack_document(key, value))
+                .and_then(|value| typed(key, value))
+                .and_then(|value| normalize_document(key, value))
+                .ok()
+                .filter(|value| validate(key, value));
+            match normalized {
+                Some(normalized) => *template = normalized,
+                None => {
+                    eprintln!("nova-reader: saved preferences {key} are invalid; using defaults");
+                    invalid.insert(key.clone());
+                }
             }
-            *template = normalized;
         }
     }
-    Ok(documents)
+    Ok((documents, invalid))
 }
 fn fields(documents: &BTreeMap<String, Value>) -> Fields {
     let mut result = Fields::new();
@@ -499,16 +517,27 @@ pub fn prepare(
     projection: bool,
     seed: bool,
 ) -> nova_sync::Result<bool> {
-    let documents = documents(store)?;
-    prepare_documents(store, dev, projection, seed, documents)
+    let (documents, invalid) = documents_checked(store)?;
+    prepare_documents(store, dev, projection, seed, documents, &invalid)
 }
 fn prepare_documents(
     store: &mut nova_sync::Store,
     dev: u64,
     projection: bool,
     seed: bool,
-    documents: BTreeMap<String, Value>,
+    mut documents: BTreeMap<String, Value>,
+    invalid: &BTreeSet<String>,
 ) -> nova_sync::Result<bool> {
+    // Fields of a document that reads as defaults only because its stored copy
+    // is invalid are neither published nor moved into the baseline.
+    let unreadable = fields(
+        &documents
+            .iter()
+            .filter(|(storage, _)| invalid.contains(*storage))
+            .map(|(storage, value)| (storage.clone(), value.clone()))
+            .collect(),
+    );
+    documents.retain(|storage, _| !invalid.contains(storage));
     let current = fields(&documents);
     // A document created by projection or serde defaults is not evidence of a
     // user edit. Bootstrap only persisted legacy choices that differ from the
@@ -545,7 +574,13 @@ fn prepare_documents(
             changed |= store.set(&domain(), key, Some(serde_json::to_string(value)?), 0, dev);
         }
     }
-    store.queue_extra(&kv(BASELINE), Some(serde_json::to_string(&current)?));
+    let mut next = current;
+    for key in unreadable.keys() {
+        if let Some(value) = baseline.get(key) {
+            next.insert(key.clone(), value.clone());
+        }
+    }
+    store.queue_extra(&kv(BASELINE), Some(serde_json::to_string(&next)?));
     Ok(changed)
 }
 fn project(documents: &mut BTreeMap<String, Value>, account: &Fields, overrides: &mut Fields) {
@@ -1183,6 +1218,45 @@ mod tests {
         assert!(!prepare(&mut store, 1, false, true).unwrap());
         store.save().unwrap();
     }
+    #[test]
+    fn invalid_saved_document_reads_as_defaults_without_publishing_them() {
+        const CHILD: &str = "READER_SETTINGS_INVALID_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            assert!(std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "sync_settings::tests::invalid_saved_document_reads_as_defaults_without_publishing_them", "--nocapture"])
+                .env(CHILD,"1").env("READER_SETTINGS_INVALID_DIR",directory.path()).status().unwrap().success());
+            return;
+        }
+        nova_storage::init_at(std::path::Path::new(
+            &std::env::var("READER_SETTINGS_INVALID_DIR").unwrap(),
+        ));
+        nova_sync::configure_protocol(nova_sync::ProtocolConfig::reader()).unwrap();
+        let mut store = nova_sync::Store::default();
+        for key in templates().keys() {
+            store.queue_extra(key, None);
+        }
+        store.queue_extra(BASELINE, None);
+        store.queue_extra(OVERRIDES, None);
+        let key = "reader:appearance/accent_color";
+        let mut choices = templates();
+        choices.get_mut("reader:appearance").unwrap()["accent_color"] = Value::from(3);
+        queue_documents(&mut store, &choices).unwrap();
+        assert!(prepare(&mut store, 1, false, false).unwrap());
+        let published = store.record(&domain(), key).unwrap().clone();
+        // A downgrade or damage leaves a document this build cannot read.
+        store.queue_extra(
+            &kv("reader:appearance"),
+            Some(r#"{"accent_color":"not a colour"}"#.into()),
+        );
+        let (read, invalid) = documents_checked(&store).unwrap();
+        assert!(invalid.contains("reader:appearance"));
+        assert_eq!(read["reader:appearance"], templates()["reader:appearance"]);
+        assert!(!prepare(&mut store, 1, false, false).unwrap());
+        assert_eq!(store.record(&domain(), key), Some(&published));
+        assert_eq!(read_map(&store, BASELINE).unwrap()[key], Value::from(3));
+    }
+
     #[test]
     fn fresh_pairing_defaults_have_no_authority_but_explicit_resets_do() {
         const CHILD: &str = "READER_SETTINGS_BOOTSTRAP_CHILD";

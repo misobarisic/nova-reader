@@ -390,7 +390,9 @@ chapter download nor marks it offline or read.
 
 `addons/` contains registry state, immutable content-addressed packages and its
 writer lock. Package version history rejects changed bytes at the same identity
-and version. Packages are app-wide; source HTTP sessions are in-memory and
+and version. Opening never fails on one bad artefact: an installed package whose
+archive is missing, mismatched or no longer valid is left out of the session, and
+a corrupt `registry.json` is renamed to `registry.json.corrupt`. Packages are app-wide; source HTTP sessions are in-memory and
 source/profile scoped. Profile switching must cancel old work. Typed settings
 live under `addons/settings/<profile-sha256>/<addon-id>.json`, separately from
 the sync store. Boolean/text/select/secret values are schema-validated; on Unix
@@ -426,9 +428,12 @@ on the next active update. Android 15's data-sync timeout remains in force;
 force-stop/process death still requires reopening Reader to resume the queue.
 
 Recovery removes only generated pending/uncommitted/corrupt page names inside
-owned hash-named job directories. It preserves verified resumable pages and
-unrelated files, rejects symlink trees, and keeps quota accounting aligned with
-remaining payloads. Interrupted initial-manifest publication and page-rename /
+owned hash-named job directories. It checks committed pages by size only (no
+hashing at startup); `offline` and workers verify hashes and requeue damage. It
+preserves verified resumable pages and unrelated files, and keeps quota
+accounting aligned with remaining payloads. A chapter directory with a corrupt
+manifest, a symlink or a non-regular file is renamed to `<key>.damaged[N]`
+without following or deleting anything, so the store still opens. Interrupted initial-manifest publication and page-rename /
 manifest-commit crash windows are covered by real killed-process tests.
 `DownloadStore::progress` reads bounded atomic manifests without hashing pages.
 `DownloadStore::snapshot` supplies lightweight job metadata to the Downloads page.
@@ -449,7 +454,7 @@ Nova provenance and required manifest permissions without an Android SDK.
 Workers fetch metadata and images and decode admitted images. Only the Slint
 event loop updates UI models. Download status hints come from bounded manifests
 on a coalesced worker and are cached in the view; rendering never hashes page
-payloads. Opening offline chapters and recovery still verify stored bytes. Navigation work uses cancellation/generation checks.
+payloads. Opening offline chapters still verifies stored bytes. Navigation work uses cancellation/generation checks.
 The reader covers the complete visible page window plus one prefetch page on
 each side and cancels obsolete fetches. A blocked reverse gesture keeps a stable
 chapter/page demand separate from the admitted resume anchor. While it waits,

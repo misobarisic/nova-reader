@@ -319,6 +319,21 @@ pub(crate) fn validate(bytes: &[u8]) -> Result<(Manifest, String)> {
     }
     Ok((m, script))
 }
+/// Check an installed archive against its registry row.
+fn installed_package(root: &Path, id: &str, digest_hex: &str) -> Result<()> {
+    if digest_hex.len() != 64 || !digest_hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(invalid("invalid registry digest"));
+    }
+    let data = fs::read(root.join("packages").join(format!("{digest_hex}.zip")))?;
+    if digest(&data) != digest_hex {
+        return Err(invalid("installed package digest mismatch"));
+    }
+    let (m, _) = validate(&data)?;
+    if m.id != id {
+        return Err(invalid("installed identity mismatch"));
+    }
+    Ok(())
+}
 impl SourceRegistry {
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
         fs::create_dir_all(root.as_ref().join("packages"))?;
@@ -331,31 +346,34 @@ impl SourceRegistry {
         lock.try_lock()
             .map_err(|_| invalid("source registry is already open in another instance"))?;
         let path = root.as_ref().join("registry.json");
-        let state = if path.exists() {
-            serde_json::from_slice::<State>(&fs::read(path)?)
-                .map_err(|_| invalid("corrupt registry"))?
+        // One damaged artefact must not keep the app from starting: a corrupt
+        // registry is set aside and a broken package is left out of this
+        // session (its archive stays on disk; reinstalling or a peer repairs it).
+        let mut state = if path.exists() {
+            match serde_json::from_slice::<State>(&fs::read(&path)?) {
+                Ok(state) => state,
+                Err(_) => {
+                    eprintln!("nova-reader: source registry is corrupt; setting it aside");
+                    fs::rename(&path, path.with_extension("json.corrupt"))?;
+                    State::default()
+                }
+            }
         } else {
             State::default()
         };
         let mut active = BTreeMap::new();
-        for (id, row) in &state.installed {
-            if row.digest.len() != 64 || !row.digest.bytes().all(|b| b.is_ascii_hexdigit()) {
-                return Err(invalid("invalid registry digest"));
-            }
-            let data = fs::read(
-                root.as_ref()
-                    .join("packages")
-                    .join(format!("{}.zip", row.digest)),
-            )?;
-            if digest(&data) != row.digest {
-                return Err(invalid("installed package digest mismatch"));
-            }
-            let (m, _) = validate(&data)?;
-            if m.id != *id {
-                return Err(invalid("installed identity mismatch"));
-            }
-            active.insert(id.clone(), Arc::new(AtomicBool::new(row.enabled)));
-        }
+        state.installed.retain(
+            |id, row| match installed_package(root.as_ref(), id, &row.digest) {
+                Ok(()) => {
+                    active.insert(id.clone(), Arc::new(AtomicBool::new(row.enabled)));
+                    true
+                }
+                Err(error) => {
+                    eprintln!("nova-reader: installed source {id} is unusable: {error}");
+                    false
+                }
+            },
+        );
         Ok(Self {
             inner: Arc::new(Mutex::new(Inner {
                 root: root.as_ref().into(),

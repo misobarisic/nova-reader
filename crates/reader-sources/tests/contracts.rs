@@ -175,6 +175,40 @@ fn archive_contract_rejects_unsafe_or_incompatible_packages() {
     assert!(registry.install_zip(&bytes).is_err());
 }
 #[test]
+fn one_broken_artefact_does_not_keep_the_registry_from_opening() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = SourceRegistry::open(dir.path()).unwrap();
+    registry
+        .install_zip(&package(&manifest(), "void 0;"))
+        .unwrap();
+    let mut other = manifest();
+    other["id"] = json!("other");
+    registry.install_zip(&package(&other, "void 0;")).unwrap();
+    drop(registry);
+    // A deleted archive leaves only that source out.
+    let packages = dir.path().join("packages");
+    let zips: Vec<_> = std::fs::read_dir(&packages)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(zips.len(), 2);
+    let registry = SourceRegistry::open(dir.path()).unwrap();
+    let id = registry.list().unwrap().remove(0).id;
+    let (digest, _) = registry.archive(&id).unwrap();
+    drop(registry);
+    std::fs::remove_file(packages.join(format!("{digest}.zip"))).unwrap();
+    let registry = SourceRegistry::open(dir.path()).unwrap();
+    let left: Vec<_> = registry.list().unwrap().into_iter().map(|s| s.id).collect();
+    assert_eq!(left.len(), 1);
+    assert!(!left.contains(&id));
+    drop(registry);
+    // A corrupt registry is set aside rather than failing every launch.
+    std::fs::write(dir.path().join("registry.json"), b"{truncated").unwrap();
+    let registry = SourceRegistry::open(dir.path()).unwrap();
+    assert!(registry.list().unwrap().is_empty());
+    assert!(dir.path().join("registry.json.corrupt").exists());
+}
+#[test]
 fn registry_holds_exclusive_process_lock() {
     let dir = tempfile::tempdir().unwrap();
     let registry = SourceRegistry::open(dir.path()).unwrap();
