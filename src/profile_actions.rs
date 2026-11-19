@@ -105,6 +105,9 @@ impl Controller {
         // Persist reading state and stop everything started for the old profile.
         self.flush();
         self.invalidate();
+        if let Some(refresh) = self.view().timeline.refresh_cancel.take() {
+            refresh.cancel();
+        }
         if id != current
             && let Err(error) = profiles::activate(&self.services.domain, id)
         {

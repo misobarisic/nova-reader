@@ -48,6 +48,9 @@ pub(super) struct State {
     viewport: Option<(f32, f32)>,
     /// A running library refresh: (done, total).
     pub(super) refresh: Option<(usize, usize)>,
+    /// Cancels that refresh. It runs apart from navigation tasks, so only a
+    /// profile switch (which replaces this state) stops it.
+    pub(super) refresh_cancel: Option<reader_sources::CancelToken>,
 }
 
 /// The page's chapter rows. Section 1 times are uploads, section 2 reads.

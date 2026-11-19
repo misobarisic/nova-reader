@@ -270,6 +270,13 @@ fn download_retry_delay(message: &str, attempt: usize) -> Option<std::time::Dura
     Some(std::time::Duration::from_millis(millis))
 }
 /// Sleep in bounded slices so pause/cancel/shutdown release the queue quickly.
+/// Whether `token` belongs to the library refresh this view still shows.
+fn refresh_is_current(view: &View, token: &CancelToken) -> bool {
+    view.timeline
+        .refresh_cancel
+        .as_ref()
+        .is_some_and(|running| running.same(token))
+}
 fn sleep_cancellable(cancel: &CancelToken, delay: std::time::Duration) -> bool {
     let step = std::time::Duration::from_millis(100);
     let mut remaining = delay;
@@ -6786,12 +6793,27 @@ pub fn run(services: Services) -> Result<()> {
     wire!(on_browse, |app, ui, kind| {
         let section = app.view().section;
         if kind == "refresh" {
-            app.view().timeline.refresh = Some((0, 0));
-            timeline_page::publish_refresh(&app.view().timeline, &ui);
+            // Its own worker and cancel token: opening a chapter to read while
+            // titles refresh must not abort the refresh or strand its progress.
+            let token = {
+                let mut view = app.view();
+                if view.timeline.refresh_cancel.is_some() {
+                    return;
+                }
+                let token = CancelToken::default();
+                view.timeline.refresh_cancel = Some(token.clone());
+                view.timeline.refresh = Some((0, 0));
+                timeline_page::publish_refresh(&view.timeline, &ui);
+                token
+            };
             let progress = ui.as_weak();
-            app.task(
-                &ui,
-                move |app, cancel| {
+            let finished = ui.as_weak();
+            let worker = app.clone();
+            crate::profiles::spawn(move || {
+                let app = &worker;
+                let cancel = &token;
+                let current = |view: &View| refresh_is_current(view, cancel);
+                let result = (|| -> Result<usize> {
                     let state = app.services.domain.snapshot().map_err(error)?;
                     let disabled = app
                         .services
@@ -6821,16 +6843,33 @@ pub fn run(services: Services) -> Result<()> {
                         report(done + 1);
                     }
                     Ok(failed)
-                },
-                |app, ui, failed| {
-                    app.view().timeline.refresh = None;
+                })();
+                if result.is_ok() {
                     reader_domain::profile::kv::set_str("reader:last-update", &now().to_string());
-                    app.render(ui);
-                    if failed > 0 {
-                        ui.set_status(text::library_refresh_failed(failed).into());
+                }
+                let app = worker.clone();
+                let token = token.clone();
+                let _ = finished.upgrade_in_event_loop(move |ui| {
+                    {
+                        let mut view = app.view();
+                        if !refresh_is_current(&view, &token) {
+                            return;
+                        }
+                        // Cleared on every exit, so the header never stays "12 / 300".
+                        view.timeline.refresh_cancel = None;
+                        view.timeline.refresh = None;
+                        timeline_page::publish_refresh(&view.timeline, &ui);
                     }
-                },
-            );
+                    app.render(&ui);
+                    match result {
+                        Ok(0) => {}
+                        Ok(failed) => {
+                            ui.set_status(text::library_refresh_failed(failed).into());
+                        }
+                        Err(error) => ui.set_status(text::tr(&error).into()),
+                    }
+                });
+            });
         } else if section == 5 {
             let series = { app.view().series.clone() };
             if let Some(series) = series {

@@ -55,7 +55,7 @@ and UI utilities without introducing reader-domain dependencies into kit.
 | `src/reader_modes.rs`, `docs/reader-modes.md` | Pinned TachiyomiJ2K classification, Default/global inheritance, explicit Automatic/manual/gapped selection, and durable per-series mode overrides |
 | `src/timeline.rs`, `src/source_filters.rs`, `src/source_browser.rs` | Local date groups and day keys/provider date parsing; bounded typed filter values plus the filter sheet's groups, active count and Reset to the source's defaults; persistent source pins, last used (with `last_used_at`) and the language chip, split by `sections()` into Last used, Pinned and All sources |
 | `src/updates.rs` | Optional reader application release discovery |
-| `src/metadata_refresh.rs` | Nova-derived foreground metadata/chapter scheduler, bounded fair batches, persisted per-series deadlines and stale-result admission |
+| `src/metadata_refresh.rs` | Nova-derived foreground metadata/chapter scheduler, bounded fair batches, persisted per-series deadlines and stale-result admission. The manual Updates refresh runs on its own worker (`timeline_page::State.refresh_cancel`); only a profile switch cancels it |
 | `src/about.rs` | Nova’s exact-size catalogue decompression, bounded text chunks and source-row ordering/fallbacks; publishes About models from a worker |
 | `src/browser.rs` | Nova’s desktop browser launching and Reader Android intent adapter for About source links |
 | `src/sync_settings.rs` | Field-level global/per-series portable settings records, atomic persistence, durable device override baselines, actual Nova scope indicators/modal data and effective reader reapply |
