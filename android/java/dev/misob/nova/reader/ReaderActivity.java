@@ -788,7 +788,10 @@ public final class ReaderActivity extends NativeActivity {
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         if(foreground.get()==this)foreground=new WeakReference<>(null);
         Request request; synchronized(LOCK){request=active;}
-        if(request!=null && request.activity.get()==this && !isChangingConfigurations())cancelDocument(request.id);
+        // Only a finishing Activity abandons its request. Android may destroy a
+        // stopped one behind the system picker; the recreated Activity takes
+        // the request over and receives the picker's result.
+        if(request!=null && request.activity.get()==this && isFinishing())cancelDocument(request.id);
         super.onDestroy();
     }
 }
