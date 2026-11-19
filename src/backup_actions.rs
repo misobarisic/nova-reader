@@ -42,6 +42,10 @@ struct State {
     undo: bool,
     /// The recovery copies listed in the open deletion confirmation.
     reviewing: Vec<(String, String)>,
+    /// Whether a recovery copy exists. Reading the copies loads every import's
+    /// full before and after payloads, so it is not repeated on each toggle;
+    /// opening the page, a finished task and a deletion clear it.
+    can_undo: std::cell::Cell<Option<bool>>,
 }
 
 fn option(id: &str, label: &str, detail: &str, checked: bool) -> BackupOption {
@@ -168,7 +172,12 @@ fn publish(ui: &AppWindow, state: &State) {
     };
     bridge.set_export_components(model(rows(Scope::Profile, &state.export_components)));
     bridge.set_export_device(model(rows(Scope::Device, &state.export_device)));
-    bridge.set_can_undo(apply::recovery_inventory().is_ok_and(|rows| !rows.is_empty()));
+    let can_undo = state.can_undo.get().unwrap_or_else(|| {
+        let can_undo = apply::recovery_inventory().is_ok_and(|rows| !rows.is_empty());
+        state.can_undo.set(Some(can_undo));
+        can_undo
+    });
+    bridge.set_can_undo(can_undo);
     bridge.set_importing(state.opened.is_some());
     bridge.set_replace(state.replace);
     bridge.set_undoing(state.undo);
@@ -307,6 +316,7 @@ fn run<T: Send + 'static>(
             let bridge = ui.global::<BackupBridge>();
             bridge.set_busy(false);
             let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
+            guard.can_undo.set(None);
             match result {
                 Ok(value) => done(&app, &ui, &mut guard, value),
                 Err(error) if text::is_user_cancel(&error) => {}
@@ -523,6 +533,7 @@ pub(super) fn wire(app: &Arc<Controller>, ui: &AppWindow) {
     }
     wire!(on_opened, |_app, ui, state| {
         let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
+        guard.can_undo.set(None);
         guard.refresh_export();
         publish(&ui, &guard);
     });
@@ -773,7 +784,9 @@ pub(super) fn wire(app: &Arc<Controller>, ui: &AppWindow) {
                     Ok(()) => bridge.set_status(text::tr("Recovery copies deleted.").into()),
                     Err(error) => bridge.set_status(text::error(&error).into()),
                 }
-                publish(&ui, &state.lock().unwrap_or_else(|e| e.into_inner()));
+                let guard = state.lock().unwrap_or_else(|e| e.into_inner());
+                guard.can_undo.set(None);
+                publish(&ui, &guard);
             }
             _ => {}
         }

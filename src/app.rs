@@ -2524,29 +2524,35 @@ impl Controller {
             );
             return;
         }
-        let current = self
-            .services
-            .sources
-            .list()
-            .ok()
-            .and_then(|items| items.into_iter().find(|e| e.id == package));
-        let Some(current) = current else {
-            ui.set_status(text::tr("Source unavailable").into());
+        if !matches!(action, "remove" | "toggle") {
+            ui.set_status(text::tr("Unknown source action").into());
             return;
-        };
-        let result = crate::sync_addons::local_change(&self.services, || {
-            match action {
-                "remove" => self.services.sources.remove(package),
-                "toggle" => self.services.sources.set_enabled(package, !current.enabled),
-                _ => return Err(text::tr("Unknown source action")),
-            }
-            .map_err(error)
-        });
-        if let Err(e) = result {
-            ui.set_status(error(e).into());
-        } else {
-            self.navigate(ui, 3);
         }
+        // Listing and the addon snapshot re-read and re-validate every
+        // installed package, so this runs on a worker.
+        let package = package.to_owned();
+        let action = action.to_owned();
+        self.task(
+            ui,
+            move |app, _| {
+                let current = app
+                    .services
+                    .sources
+                    .list()
+                    .ok()
+                    .and_then(|items| items.into_iter().find(|e| e.id == package))
+                    .ok_or_else(|| text::tr("Source unavailable"))?;
+                crate::sync_addons::local_change(&app.services, || {
+                    if action == "remove" {
+                        app.services.sources.remove(&package)
+                    } else {
+                        app.services.sources.set_enabled(&package, !current.enabled)
+                    }
+                    .map_err(error)
+                })
+            },
+            |app, ui, ()| app.navigate(ui, 3),
+        );
     }
     fn select_source(self: &Arc<Self>, ui: &AppWindow, index: i32, kind: &str) {
         self.select_source_with(ui, index, kind, String::new());
@@ -6828,7 +6834,13 @@ pub fn run(services: Services) -> Result<()> {
                     let series = refreshable_series(&state, &disabled);
                     // "Checking N titles… done / N" in the Updates header.
                     let report = |done: usize| {
-                        app.view().timeline.refresh = Some((done, series.len()));
+                        {
+                            let mut view = app.view();
+                            if !current(&view) {
+                                return;
+                            }
+                            view.timeline.refresh = Some((done, series.len()));
+                        }
                         let app = app.clone();
                         let _ = progress.upgrade_in_event_loop(move |ui| {
                             timeline_page::publish_refresh(&app.view().timeline, &ui);

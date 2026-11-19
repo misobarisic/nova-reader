@@ -769,7 +769,14 @@ impl DownloadStore {
     }
     fn status(&self, chapter: &ChapterId, status: JobStatus) -> Result<()> {
         let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let mut job = checked_job(&inner.root, chapter)?;
+        // Stopping a job changes only its manifest; hashing every committed
+        // page first would hold the store lock (and the caller) for as long as
+        // that takes. Re-queueing still verifies.
+        let mut job = if matches!(status, JobStatus::Paused | JobStatus::Cancelled) {
+            load(&inner.root, chapter)?
+        } else {
+            checked_job(&inner.root, chapter)?
+        };
         if job.status == JobStatus::Complete {
             return Err(Error::Invalid("chapter already complete".into()));
         }

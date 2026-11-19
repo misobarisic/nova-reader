@@ -190,15 +190,28 @@ impl Controller {
             jobs
         };
         if action == "pause" {
-            for job in jobs
+            let chapters: Vec<ChapterId> = jobs
                 .iter()
                 .filter(|j| matches!(j.status, JobStatus::Queued | JobStatus::Running))
-            {
-                if let Err(e) = self.services.downloads.pause(&job.chapter) {
-                    ui.set_status(error(e).into());
-                }
-            }
-            self.refresh_download_states(ui);
+                .map(|j| j.chapter.clone())
+                .collect();
+            // Store work stays off the event loop: the store lock is held by
+            // the download worker while it decodes a page.
+            let app = self.clone();
+            let weak = ui.as_weak();
+            crate::profiles::spawn(move || {
+                let failure = chapters
+                    .iter()
+                    .filter_map(|chapter| app.services.downloads.pause(chapter).err())
+                    .last()
+                    .map(error);
+                let _ = weak.upgrade_in_event_loop(move |ui| {
+                    if let Some(failure) = failure {
+                        ui.set_status(failure.into());
+                    }
+                    app.refresh_download_states(&ui);
+                });
+            });
         } else if action == "resume" {
             self.download_many(ui, resume_all_targets(&jobs));
         }
