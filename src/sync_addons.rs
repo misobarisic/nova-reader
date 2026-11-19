@@ -609,8 +609,6 @@ enum Permanence {
     Permanent,
 }
 
-
-
 fn verify_receipt(row: &Descriptor, bytes: &[u8]) -> Result<(), String> {
     if bytes.len() > nova_sync::MAX_PACKAGE_BYTES
         || format!("{:x}", Sha256::digest(bytes)) != row.sha256

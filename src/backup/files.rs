@@ -263,7 +263,10 @@ impl Outcome {
     pub(crate) fn discard(&self, services: &Services) {
         for chapter in &self.created {
             if let Err(error) = services.downloads.remove(chapter) {
-                eprintln!("Nova Reader restore: could not discard {}: {error}", chapter.local_id);
+                eprintln!(
+                    "Nova Reader restore: could not discard {}: {error}",
+                    chapter.local_id
+                );
             }
         }
     }

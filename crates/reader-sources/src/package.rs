@@ -746,7 +746,10 @@ impl SourceRegistry {
                 let _ = fs::remove_file(profile.path().join(format!("{id}.json")));
             }
         }
-        let _ = fs::remove_file(root.join("packages").join(format!("{}.zip", removed.digest)));
+        let _ = fs::remove_file(
+            root.join("packages")
+                .join(format!("{}.zip", removed.digest)),
+        );
         Ok(())
     }
 }

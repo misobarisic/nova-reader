@@ -486,8 +486,7 @@ fn project(
 /// their metadata arrives. They never enter the projected baseline, so later
 /// local commits do not delete them.
 fn park_dangling(state: &mut ReaderState) {
-    let series: std::collections::BTreeSet<_> =
-        state.series.iter().map(|s| s.id.clone()).collect();
+    let series: std::collections::BTreeSet<_> = state.series.iter().map(|s| s.id.clone()).collect();
     state.chapters.retain(|c| series.contains(&c.id.series));
     state.library.retain(|l| series.contains(&l.series));
     let chapters: std::collections::BTreeSet<_> =

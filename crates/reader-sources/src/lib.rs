@@ -111,7 +111,7 @@ impl PageAccess {
         );
         let material =
             serde_json::to_vec(&(&*self.manifest, &*settings, stable_url, headers, partition))
-            .map_err(|e| SourceError::Script(e.to_string()))?;
+                .map_err(|e| SourceError::Script(e.to_string()))?;
         Ok(Some(format!("{:x}", Sha256::digest(material))))
     }
 }

@@ -200,10 +200,12 @@ impl Controller {
             let app = self.clone();
             let weak = ui.as_weak();
             crate::profiles::spawn(move || {
+                // Pause every chapter; report the last failure, if any.
                 let failure = chapters
                     .iter()
-                    .filter_map(|chapter| app.services.downloads.pause(chapter).err())
-                    .last()
+                    .fold(None, |last, chapter| {
+                        app.services.downloads.pause(chapter).err().or(last)
+                    })
                     .map(error);
                 let _ = weak.upgrade_in_event_loop(move |ui| {
                     if let Some(failure) = failure {

@@ -459,7 +459,9 @@ pub(crate) fn forget_profile_recovery(id: &str) -> Result<(), String> {
             continue;
         };
         let before = receipt.components.len() + receipt.choices.len();
-        receipt.components.retain(|component| component.target != id);
+        receipt
+            .components
+            .retain(|component| component.target != id);
         receipt.choices.retain(|choice| choice.target != id);
         if receipt.components.len() + receipt.choices.len() == before {
             continue;

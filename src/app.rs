@@ -3063,10 +3063,10 @@ impl Controller {
         let gap = reader
             .anchor_gap
             .as_ref()
-            .filter(|(page, _)| {
-                reader.anchor.offset() >= 1.0 && *page == reader.anchor.page_id
-            })
-            .map_or(0., |(_, gap)| gap.min(reader.gap_after(index) / ui.get_reader_width()));
+            .filter(|(page, _)| reader.anchor.offset() >= 1.0 && *page == reader.anchor.page_id)
+            .map_or(0., |(_, gap)| {
+                gap.min(reader.gap_after(index) / ui.get_reader_width())
+            });
         let offset = reader.page_position(index)
             + reader.ratios[index] * reader.anchor.offset() as f32
             + gap;

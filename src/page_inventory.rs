@@ -128,40 +128,40 @@ pub fn load(
                 _ => Default::default(),
             };
             stored
-            .into_iter()
-            .map(|stored| {
-                let id = stored.resource.id.clone();
-                let kind = match stored.sha256 {
-                    Some(sha256) => ResourceKind::Local {
-                        path: stored.path,
-                        expected_bytes: stored.bytes,
-                        sha256,
-                    },
-                    None => match &source {
-                        Some(source) => ResourceKind::Remote {
-                            source: source.clone(),
-                            page: fresh.remove(&id).unwrap_or_else(|| Page {
-                                id: id.clone(),
-                                url: stored.resource.url,
-                                headers: stored.resource.headers,
-                                width: None,
-                                height: None,
-                            }),
+                .into_iter()
+                .map(|stored| {
+                    let id = stored.resource.id.clone();
+                    let kind = match stored.sha256 {
+                        Some(sha256) => ResourceKind::Local {
+                            path: stored.path,
+                            expected_bytes: stored.bytes,
+                            sha256,
                         },
-                        None => ResourceKind::Unavailable {
-                            message: nova_reader_ui::backend_text::tr(
-                                "Full-resolution image is unavailable offline",
-                            ),
+                        None => match &source {
+                            Some(source) => ResourceKind::Remote {
+                                source: source.clone(),
+                                page: fresh.remove(&id).unwrap_or_else(|| Page {
+                                    id: id.clone(),
+                                    url: stored.resource.url,
+                                    headers: stored.resource.headers,
+                                    width: None,
+                                    height: None,
+                                }),
+                            },
+                            None => ResourceKind::Unavailable {
+                                message: nova_reader_ui::backend_text::tr(
+                                    "Full-resolution image is unavailable offline",
+                                ),
+                            },
                         },
-                    },
-                };
-                Resource {
-                    chapter: chapter.clone(),
-                    id,
-                    kind,
-                }
-            })
-            .collect::<Vec<_>>()
+                    };
+                    Resource {
+                        chapter: chapter.clone(),
+                        id,
+                        kind,
+                    }
+                })
+                .collect::<Vec<_>>()
         }
         Err(_) => {
             let (source, pages) = services.pages(chapter, cancel)?;

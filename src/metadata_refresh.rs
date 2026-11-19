@@ -229,12 +229,21 @@ mod tests {
         }
         let downloaded = ChapterId::new(SeriesId::new("refresh-fixture", "cached-1"), "1");
         crate::services::prune_cache(&mut state, |id| *id == downloaded);
-        let ids: Vec<_> = state.series.iter().map(|s| s.id.local_id.as_str()).collect();
+        let ids: Vec<_> = state
+            .series
+            .iter()
+            .map(|s| s.id.local_id.as_str())
+            .collect();
         // The library title stays, cached-0 and cached-2 (the oldest) go, and
         // cached-1 stays for its download.
         assert_eq!(ids.len(), 102);
         assert_eq!(&ids[..3], ["kept", "cached-1", "cached-3"]);
-        assert!(state.chapters.iter().all(|c| c.id.series.local_id != "cached-0"));
+        assert!(
+            state
+                .chapters
+                .iter()
+                .all(|c| c.id.series.local_id != "cached-0")
+        );
         state.validate().unwrap();
     }
 
@@ -255,7 +264,11 @@ mod tests {
         crate::services::merge_listing(&mut state, series.clone(), vec![chapter("new")], |id| {
             *id == downloaded
         });
-        let mut ids: Vec<_> = state.chapters.iter().map(|c| c.id.local_id.as_str()).collect();
+        let mut ids: Vec<_> = state
+            .chapters
+            .iter()
+            .map(|c| c.id.local_id.as_str())
+            .collect();
         ids.sort_unstable();
         assert_eq!(ids, ["1", "new", "old"]);
         state.validate().unwrap();
@@ -616,16 +629,15 @@ impl Scheduler {
             let mut published = false;
             let result = services.domain.update(|state| {
                 if self.current(cancel) && owner.is_available() {
-                    published =
-                        publish_if_current(
-                            state,
-                            series,
-                            &chapters,
-                            fresh,
-                            fresh_chapters,
-                            now(),
-                            |chapter| services.downloads.has_bundle(chapter),
-                        );
+                    published = publish_if_current(
+                        state,
+                        series,
+                        &chapters,
+                        fresh,
+                        fresh_chapters,
+                        now(),
+                        |chapter| services.downloads.has_bundle(chapter),
+                    );
                 }
                 Ok(())
             });
