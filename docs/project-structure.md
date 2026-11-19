@@ -177,6 +177,14 @@ remote bundles, under the download transfer lock. Any excluded membership keeps
 the chapter; local imports are always kept. Enabling the switch, restarting and
 incoming sync never sweep historical downloads. Deleted category IDs are pruned
 on the next deliberate policy edit. Cleanup never changes progress or History.
+Bundles are device-wide, so a chapter stays while another profile follows its
+series without having finished it; deleting a profile removes the bundles of
+series that no remaining profile knows.
+
+Cached series and chapter metadata is bounded: a full chapter listing drops
+chapters the source no longer lists unless progress, History, a bookmark or a
+download refers to them, and `services::prune_cache` keeps at most the 100 most
+recently saved series that nothing refers to.
 The duplicate dropdown stores Ask (default), Overwrite or Do nothing. Ask opens
 a nonblocking Overwrite/Add number/Cancel sheet, guarded by the current reader
 generation. Clipboard actions bypass naming and duplicate handling. Desktop PNG

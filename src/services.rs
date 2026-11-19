@@ -91,6 +91,92 @@ pub(crate) fn merge_details(
     }
 }
 
+/// A full chapter listing from the source. Chapters it no longer lists are
+/// dropped unless reading progress, history, a bookmark or a download refers
+/// to them; otherwise re-issued chapter IDs would show every chapter twice,
+/// the old copies unopenable and the new ones unread.
+pub(crate) fn merge_listing(
+    state: &mut reader_domain::ReaderState,
+    series: Series,
+    chapters: Vec<Chapter>,
+    downloaded: impl Fn(&ChapterId) -> bool,
+) {
+    if chapters.is_empty() {
+        // An empty answer is more likely a source fault than a wiped title.
+        merge_details(state, series, chapters);
+        return;
+    }
+    let series_id = series.id.clone();
+    let listed: std::collections::BTreeSet<ChapterId> =
+        chapters.iter().map(|chapter| chapter.id.clone()).collect();
+    merge_details(state, series, chapters);
+    let used: std::collections::BTreeSet<ChapterId> = state
+        .progress
+        .iter()
+        .map(|p| p.chapter.clone())
+        .chain(state.history.iter().map(|h| h.chapter.clone()))
+        .chain(state.bookmarks.iter().map(|b| b.chapter.clone()))
+        .filter(|chapter| chapter.series == series_id)
+        .collect();
+    state.chapters.retain(|chapter| {
+        chapter.id.series != series_id
+            || listed.contains(&chapter.id)
+            || used.contains(&chapter.id)
+            || downloaded(&chapter.id)
+    });
+}
+
+/// Series kept as a cache although nothing refers to them (titles opened from
+/// Browse), most recently saved first.
+const CACHED_UNREFERENCED_SERIES: usize = 100;
+
+/// Drop the oldest cached series (and their chapters) that no library entry,
+/// progress, history, bookmark or download refers to, beyond the newest
+/// [`CACHED_UNREFERENCED_SERIES`]. The state is one bounded document: without
+/// this every title ever opened stays in it until every update fails at the
+/// size limit. `merge_details` moves a saved series to the end, so the front
+/// holds the least recently saved.
+pub(crate) fn prune_cache(
+    state: &mut reader_domain::ReaderState,
+    downloaded: impl Fn(&ChapterId) -> bool,
+) {
+    let referenced: std::collections::BTreeSet<SeriesId> = state
+        .library
+        .iter()
+        .map(|entry| entry.series.clone())
+        .chain(state.progress.iter().map(|p| p.chapter.series.clone()))
+        .chain(state.history.iter().map(|h| h.chapter.series.clone()))
+        .chain(state.bookmarks.iter().map(|b| b.chapter.series.clone()))
+        .collect();
+    let unreferenced: Vec<SeriesId> = state
+        .series
+        .iter()
+        .filter(|series| !referenced.contains(&series.id))
+        .map(|series| series.id.clone())
+        .collect();
+    let Some(excess) = unreferenced
+        .len()
+        .checked_sub(CACHED_UNREFERENCED_SERIES)
+        .filter(|excess| *excess > 0)
+    else {
+        return;
+    };
+    let dropped: std::collections::BTreeSet<SeriesId> = unreferenced
+        .into_iter()
+        .take(excess)
+        .filter(|id| {
+            !state
+                .chapters
+                .iter()
+                .any(|chapter| chapter.id.series == *id && downloaded(&chapter.id))
+        })
+        .collect();
+    state.series.retain(|series| !dropped.contains(&series.id));
+    state
+        .chapters
+        .retain(|chapter| !dropped.contains(&chapter.id.series));
+}
+
 #[derive(Clone)]
 pub struct Services {
     pub domain: DomainStore,
@@ -224,6 +310,7 @@ impl Services {
         self.domain
             .update(|state| {
                 merge_details(state, series, chapters);
+                prune_cache(state, |chapter| self.downloads.has_bundle(chapter));
                 Ok(())
             })
             .map_err(error)
@@ -231,7 +318,14 @@ impl Services {
     pub fn details(&self, series: &Series, cancel: &CancelToken) -> Result<(Series, Vec<Chapter>)> {
         let source = self.source(&series.id.source_id)?;
         let (series, chapters) = self.fetch_details_from(&source, series, cancel)?;
-        self.save_details(series.clone(), chapters.clone())?;
+        self.domain
+            .update(|state| {
+                let downloaded = |chapter: &ChapterId| self.downloads.has_bundle(chapter);
+                merge_listing(state, series.clone(), chapters.clone(), downloaded);
+                prune_cache(state, downloaded);
+                Ok(())
+            })
+            .map_err(error)?;
         crate::metadata_refresh::note_manual_success(self, &series.id);
         Ok((series, chapters))
     }

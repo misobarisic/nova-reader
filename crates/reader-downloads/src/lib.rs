@@ -608,6 +608,12 @@ impl DownloadStore {
         inner.next_order = next;
         Ok(())
     }
+    /// Whether a bundle (any job status) exists for the chapter. Cheap: it
+    /// reads no manifest and hashes no page.
+    pub fn has_bundle(&self, chapter: &ChapterId) -> bool {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.root.join(chapter_key(chapter)).exists()
+    }
     pub fn job(&self, chapter: &ChapterId) -> Result<ChapterDownload> {
         let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         checked_job(&inner.root, chapter)

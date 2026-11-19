@@ -151,7 +151,8 @@ mod tests {
             &chapters,
             fresh.clone(),
             vec![],
-            2
+            2,
+            |_| false
         ));
         assert_eq!(state, baseline);
         state.series[0].title = "Newer foreground result".into();
@@ -161,7 +162,8 @@ mod tests {
             &chapters,
             fresh.clone(),
             vec![new.clone()],
-            2
+            2,
+            |_| false
         ));
         state = baseline.clone();
         state.chapters.push(new.clone());
@@ -171,7 +173,8 @@ mod tests {
             &chapters,
             fresh.clone(),
             vec![new.clone()],
-            2
+            2,
+            |_| false
         ));
         state = baseline.clone();
         state.library.clear();
@@ -181,7 +184,8 @@ mod tests {
             &chapters,
             fresh.clone(),
             vec![new.clone()],
-            2
+            2,
+            |_| false
         ));
         state = baseline.clone();
         state.library[0].reading_status = ReadingStatus::OnHold;
@@ -191,7 +195,8 @@ mod tests {
             &chapters,
             fresh.clone(),
             vec![new.clone()],
-            2
+            2,
+            |_| false
         ));
         state = baseline.clone();
         // Progress and library status remain untouched by successful publication.
@@ -201,7 +206,8 @@ mod tests {
             &chapters,
             fresh,
             vec![new],
-            2
+            2,
+            |_| false
         ));
         assert_eq!(state.progress, baseline.progress);
         assert_eq!(state.history, baseline.history);
@@ -211,6 +217,52 @@ mod tests {
             2,
             "vanished chapters remain available offline"
         );
+    }
+
+    #[test]
+    fn the_cache_keeps_a_hundred_unreferenced_series_and_everything_referenced() {
+        let mut state = fixture("kept", 1);
+        for index in 0..103 {
+            let other = fixture(&format!("cached-{index}"), 1);
+            state.series.extend(other.series);
+            state.chapters.extend(other.chapters);
+        }
+        let downloaded = ChapterId::new(SeriesId::new("refresh-fixture", "cached-1"), "1");
+        crate::services::prune_cache(&mut state, |id| *id == downloaded);
+        let ids: Vec<_> = state.series.iter().map(|s| s.id.local_id.as_str()).collect();
+        // The library title stays, cached-0 and cached-2 (the oldest) go, and
+        // cached-1 stays for its download.
+        assert_eq!(ids.len(), 102);
+        assert_eq!(&ids[..3], ["kept", "cached-1", "cached-3"]);
+        assert!(state.chapters.iter().all(|c| c.id.series.local_id != "cached-0"));
+        state.validate().unwrap();
+    }
+
+    #[test]
+    fn a_full_listing_drops_vanished_chapters_nothing_refers_to() {
+        let baseline = fixture("prune", 1);
+        let series = baseline.series[0].clone();
+        let chapter = |local: &str| {
+            let mut chapter = baseline.chapters[0].clone();
+            chapter.id.local_id = local.into();
+            chapter
+        };
+        let mut state = baseline.clone();
+        // "1" has progress, "old" only a download, "gone" nothing at all.
+        state.chapters.push(chapter("old"));
+        state.chapters.push(chapter("gone"));
+        let downloaded = chapter("old").id;
+        crate::services::merge_listing(&mut state, series.clone(), vec![chapter("new")], |id| {
+            *id == downloaded
+        });
+        let mut ids: Vec<_> = state.chapters.iter().map(|c| c.id.local_id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["1", "new", "old"]);
+        state.validate().unwrap();
+        // An empty answer keeps everything.
+        let before = state.clone();
+        crate::services::merge_listing(&mut state, series, vec![], |_| false);
+        assert_eq!(state.chapters, before.chapters);
     }
 
     #[test]
@@ -435,6 +487,7 @@ fn publish_if_current(
     fresh: Series,
     fresh_chapters: Vec<Chapter>,
     wall_now: i64,
+    downloaded: impl Fn(&reader_domain::ChapterId) -> bool,
 ) -> bool {
     if fresh_chapters.is_empty()
         || fresh.id != baseline.id
@@ -448,7 +501,7 @@ fn publish_if_current(
     {
         return false;
     }
-    crate::services::merge_details(state, fresh, fresh_chapters);
+    crate::services::merge_listing(state, fresh, fresh_chapters, downloaded);
     true
 }
 
@@ -564,7 +617,15 @@ impl Scheduler {
             let result = services.domain.update(|state| {
                 if self.current(cancel) && owner.is_available() {
                     published =
-                        publish_if_current(state, series, &chapters, fresh, fresh_chapters, now());
+                        publish_if_current(
+                            state,
+                            series,
+                            &chapters,
+                            fresh,
+                            fresh_chapters,
+                            now(),
+                            |chapter| services.downloads.has_bundle(chapter),
+                        );
                 }
                 Ok(())
             });
