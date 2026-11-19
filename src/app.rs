@@ -4459,7 +4459,6 @@ impl Controller {
                 }
                 let owner = app.clone();
                 let _ = weak.upgrade_in_event_loop(move |ui| owner.refresh_download_states(&ui));
-                let mut download_attempts: BTreeMap<ChapterId, u8> = BTreeMap::new();
                 loop {
                     let before = app
                         .services
@@ -4481,24 +4480,36 @@ impl Controller {
                             // failed job still moves on instead of blocking.
                             if let Some(chapter) = before.clone()
                                 && transient_image_error(&failure)
-                                && let Some(delay) = download_retry_delay(
-                                    &failure,
-                                    usize::from(*download_attempts.get(&chapter).unwrap_or(&0)),
-                                )
                             {
-                                *download_attempts.entry(chapter.clone()).or_insert(0) += 1;
-                                // The reader may cancel or pause during the backoff;
-                                // only a job still Failed is re-queued.
-                                if sleep_cancellable(&cancel, delay)
-                                    && let Ok(true) = app
-                                        .services
-                                        .downloads
-                                        .resume_if_failed(&chapter)
-                                        .map_err(error)
-                                    && let Ok(()) =
-                                        app.services.run_queued_download(&chapter, &cancel)
-                                {
-                                    download_attempts.remove(&chapter);
+                                // Walk the whole delay budget: each in-place
+                                // attempt that fails transiently backs off again.
+                                let mut last = failure.to_string();
+                                let mut attempt = 0;
+                                let mut recovered = false;
+                                while let Some(delay) = download_retry_delay(&last, attempt) {
+                                    attempt += 1;
+                                    // The reader may cancel or pause during the
+                                    // backoff; only a job still Failed is re-queued.
+                                    if !sleep_cancellable(&cancel, delay)
+                                        || !matches!(
+                                            app.services
+                                                .downloads
+                                                .resume_if_failed(&chapter)
+                                                .map_err(error),
+                                            Ok(true)
+                                        )
+                                    {
+                                        break;
+                                    }
+                                    match app.services.run_queued_download(&chapter, &cancel) {
+                                        Ok(()) => {
+                                            recovered = true;
+                                            break;
+                                        }
+                                        Err(next) => last = next.to_string(),
+                                    }
+                                }
+                                if recovered {
                                     continue;
                                 }
                             }
