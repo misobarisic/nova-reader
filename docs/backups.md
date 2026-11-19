@@ -123,7 +123,8 @@ A failure at any point drops the copy: the live store, rows and receipts are
 unchanged. After the commit, packages are installed (disabled), addon settings
 and credentials are written through the registry and each target's addon
 descriptors are published; failures there are reported and do not undo the
-commit. Chapter files are copied before the commit and are individually whole.
+commit. Chapter files are copied before the commit and are individually whole;
+if the commit then fails, the chapters it copied in are removed again.
 
 **Undo last import** builds a fresh review from the newest recovery receipt:
 records that still equal what the import wrote revert, later edits and unrelated

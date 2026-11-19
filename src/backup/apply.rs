@@ -99,7 +99,7 @@ pub fn apply(services: &Services, preview: &Preview) -> Result<Applied, String> 
         files = files::import(services, &preview.opened.path, &plan.files)?;
     }
 
-    services
+    let committed = services
         .domain
         .exclusive(|domain| {
             let mut live = handle.lock().unwrap_or_else(|e| e.into_inner());
@@ -273,7 +273,11 @@ pub fn apply(services: &Services, preview: &Preview) -> Result<Applied, String> 
             nova_sync::publish(&mut live, staged, |staged| staged.save()).map_err(invalid)?;
             Ok(())
         })
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string());
+    if let Err(error) = committed {
+        files.discard(services);
+        return Err(error);
+    }
 
     nova_sync::request_local_sync();
     crate::content_presentation::reset();

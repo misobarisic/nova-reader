@@ -252,7 +252,21 @@ pub(crate) fn plan(
 pub(crate) struct Outcome {
     /// Record identities (per component) that now exist on this device.
     pub added: BTreeMap<String, BTreeSet<String>>,
+    /// Chapters this import created, so a failed commit can take them back.
+    pub created: Vec<ChapterId>,
     pub failures: Vec<String>,
+}
+
+impl Outcome {
+    /// The commit that would have recorded these chapters failed: without a
+    /// receipt nothing could undo them, and local imports would be invisible.
+    pub(crate) fn discard(&self, services: &Services) {
+        for chapter in &self.created {
+            if let Err(error) = services.downloads.remove(chapter) {
+                eprintln!("Nova Reader restore: could not discard {}: {error}", chapter.local_id);
+            }
+        }
+    }
 }
 
 /// Copy the planned chapters from the archive file into the download store. A
@@ -300,6 +314,7 @@ pub(crate) fn import(services: &Services, archive: &Path, plan: &Plan) -> Result
             });
         match result {
             Ok(true) => {
+                outcome.created.push(record.chapter.clone());
                 outcome
                     .added
                     .entry(name.clone())
