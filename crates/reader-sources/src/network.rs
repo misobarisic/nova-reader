@@ -552,11 +552,14 @@ impl NetworkTransport {
         let session = self.session.lock().unwrap().clone();
         cancel.check()?;
         validate_headers(&input.headers, &self.permissions)?;
-        let method = if input.method.is_empty() {
+        let mut method = if input.method.is_empty() {
             "GET"
         } else {
             input.method.as_str()
         };
+        // A redirect may turn the request into a body-less GET (303, or a
+        // 301/302 answering a POST), as browsers do.
+        let mut body = input.body.clone();
         if method != "GET" && !(method == "POST" && self.permissions.http_post) {
             return Err(network("HTTP method not permitted"));
         }
@@ -629,7 +632,7 @@ impl NetworkTransport {
             for (k, v) in &input.headers {
                 request = request.header(k, v);
             }
-            if let Some(body) = &input.body {
+            if let Some(body) = &body {
                 request = request.body(body.clone())
             }
             let mut response = request
@@ -640,7 +643,9 @@ impl NetworkTransport {
             let set_cookie = response.headers().get_all(reqwest::header::SET_COOKIE);
             hop_cookies.set_cookies(&mut set_cookie.iter(), &hop_cookies.url);
             cancel.check()?;
-            if response.status().is_redirection() {
+            // 300 and 304 are ordinary answers, not something to follow.
+            let redirect = response.status().as_u16();
+            if matches!(redirect, 301 | 302 | 303 | 307 | 308) {
                 if hop == 5 {
                     return Err(network("redirect limit"));
                 }
@@ -660,6 +665,10 @@ impl NetworkTransport {
                     hop_cookies.has_outgoing_cookies() || session.jar.cookies(&url).is_some(),
                 )?;
                 url = next;
+                if redirect == 303 || (matches!(redirect, 301 | 302) && method == "POST") {
+                    method = "GET";
+                    body = None;
+                }
                 continue;
             }
             if response
