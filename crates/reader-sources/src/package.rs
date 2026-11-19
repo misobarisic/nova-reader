@@ -436,6 +436,11 @@ impl SourceRegistry {
             return Err(invalid("changed bytes at unchanged source ID/version"));
         }
         let mut enabled = state.installed.get(&m.id).is_some_and(|row| row.enabled);
+        let superseded = state
+            .installed
+            .get(&m.id)
+            .map(|row| row.digest.clone())
+            .filter(|previous| previous != &hash);
         if let Some(previous) = state.installed.get(&m.id) {
             let old_bytes = fs::read(
                 inner
@@ -472,6 +477,10 @@ impl SourceRegistry {
         inner.sessions.retain(|(_, id), _| id != &m.id);
         inner.settings.retain(|(_, id), _| id != &m.id);
         inner.state = state;
+        // The update is committed; the old package is no longer referenced.
+        if let Some(previous) = superseded {
+            let _ = fs::remove_file(inner.root.join("packages").join(format!("{previous}.zip")));
+        }
         Ok(SourceDescriptor::new(&m, enabled))
     }
     pub fn list(&self) -> Result<Vec<SourceDescriptor>> {
@@ -714,7 +723,9 @@ impl SourceRegistry {
     pub fn remove(&self, id: &str) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
         let mut state = inner.state.clone();
-        state.installed.remove(id).ok_or(SourceError::Unavailable)?;
+        // Version pins stay: changed bytes under an already seen version are
+        // refused even after removal.
+        let removed = state.installed.remove(id).ok_or(SourceError::Unavailable)?;
         atomic_write(
             &inner.root.join("registry.json"),
             &serde_json::to_vec(&state).unwrap(),
@@ -724,6 +735,18 @@ impl SourceRegistry {
             active.store(false, Ordering::Release)
         }
         inner.sessions.retain(|(_, source), _| source != id);
+        inner.settings.retain(|(_, source), _| source != id);
+        // Removing an addon is how a user revokes what it stored: delete every
+        // profile's settings (secrets included) and the package itself. The
+        // registry no longer refers to them, so a failure only leaves litter.
+        let root = inner.root.clone();
+        drop(inner);
+        if let Ok(profiles) = fs::read_dir(root.join("settings")) {
+            for profile in profiles.flatten() {
+                let _ = fs::remove_file(profile.path().join(format!("{id}.json")));
+            }
+        }
+        let _ = fs::remove_file(root.join("packages").join(format!("{}.zip", removed.digest)));
         Ok(())
     }
 }
